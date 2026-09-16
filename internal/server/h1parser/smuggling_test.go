@@ -112,7 +112,7 @@ func TestSmugglingHookCalled(t *testing.T) {
 
 	// parseRequest should detect smuggling, call the hook, and fall
 	// through with the parsed request so net/http can return 400.
-	req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, &scratch)
+	req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, 0, &scratch)
 	require.NoError(t, err, "parseRequest returned error")
 	assert.True(t, fallThrough)
 	assert.NotNil(t, req)

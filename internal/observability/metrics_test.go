@@ -173,3 +173,64 @@ func TestCFPurgeSkippedCount_Nil(t *testing.T) {
 	var m *DataPlaneMetrics
 	assert.Equal(t, int64(0), m.CFPurgeSkippedCount())
 }
+
+// TestDataPlaneMetrics_ReactorTelemetry verifies the api.ReactorMetrics
+// capability: the five H1 reactor counters are registered on the
+// registry, increments flow through, and the handoff reason label
+// carries the closed api.ReactorHandoff* set.
+func TestDataPlaneMetrics_ReactorTelemetry(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	var rm api.ReactorMetrics = m
+
+	rm.IncrementReactorConnRegistered()
+	rm.IncrementReactorHit()
+	for _, reason := range []string{
+		api.ReactorHandoffMiss, api.ReactorHandoffDisqualified,
+		api.ReactorHandoffMalformed, api.ReactorHandoffOversize,
+		api.ReactorHandoffOverflow, api.ReactorHandoffCap,
+	} {
+		rm.IncrementReactorHandoff(reason)
+	}
+	rm.IncrementReactorReturn()
+	rm.IncrementReactorDrop()
+
+	got, err := reg.Gather()
+	require.NoError(t, err, "gather")
+
+	sums := map[string]float64{}
+	handoffs := map[string]float64{}
+	for _, mf := range got {
+		var sum float64
+		for _, metric := range mf.GetMetric() {
+			sum += metric.GetCounter().GetValue()
+			if mf.GetName() == "bouine_h1_reactor_handoffs_total" {
+				for _, lp := range metric.GetLabel() {
+					if lp.GetName() == "reason" {
+						handoffs[lp.GetValue()] = metric.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+		sums[mf.GetName()] = sum
+	}
+
+	for name, want := range map[string]float64{
+		"bouine_h1_reactor_conns_registered_total": 1,
+		"bouine_h1_reactor_hits_total":             1,
+		"bouine_h1_reactor_returns_total":          1,
+		"bouine_h1_reactor_conns_dropped_total":    1,
+		"bouine_h1_reactor_handoffs_total":         6,
+	} {
+		require.Equal(t, want, sums[name], "counter %s", name)
+	}
+	require.Equal(t, map[string]float64{
+		"miss":         1,
+		"disqualified": 1,
+		"malformed":    1,
+		"oversize":     1,
+		"overflow":     1,
+		"cap":          1,
+	}, handoffs, "the closed handoff reason set must each appear once")
+}

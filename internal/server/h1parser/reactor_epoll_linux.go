@@ -29,6 +29,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/bouine-cache/bouine/pkg/api"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -208,6 +210,11 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		p.metricsRing = ring
 		r.metricsDrainer = &metricsDrainer{ring: ring, hook: p.metricsHook}
 	}
+	// Return-to-reactor hook: the blocking parser calls this after
+	// finishing a request instead of parking on the next keep-alive
+	// read, so a miss no longer strands the connection on the blocking
+	// path for its lifetime (see returnFromBlocking).
+	p.reactorReturn = r.returnFromBlocking
 	// The spawner goroutine starts here, not in run(): acceptLoop can
 	// enqueue handoffs (pending-queue overflow) the moment Run is
 	// called, and a handoff arriving before run()'s body executes
@@ -230,6 +237,10 @@ func (r *reactorEpoll) run() {
 	// wg.Wait against the spawner's in-flight wg.Add for queued jobs —
 	// a data race the storm-shutdown test catches under -race.
 	defer close(r.handoffsDone)
+	// Apply the batched hit counter before the loop exits: shutdown must
+	// not drop up to a second's worth of counted hits (the sweep flush
+	// would have been the next guaranteed flush point).
+	defer r.p.flushReactorHits()
 	defer r.cleanup()
 	if r.metricsDrainer != nil {
 		// metricsDone closes when the drainer's final drain completes;
@@ -242,7 +253,7 @@ func (r *reactorEpoll) run() {
 	r.acceptStarted.Store(true)
 
 	// Adaptive busy-poll: after serving a batch, poll readiness with a
-	// zero timeout for up to reactorSpinBudget before parking in the
+	// zero timeout for up to the spin budget before parking in the
 	// timed wait. Why: parking the locked OS thread and re-acquiring a
 	// P through the scheduler costs tens of microseconds (futex wake,
 	// findRunnable) — paid per *request* at low concurrency, where
@@ -253,8 +264,15 @@ func (r *reactorEpoll) run() {
 	// serves back-to-back requests on the same connection without the
 	// park/wake; the budget only spends while traffic keeps arriving,
 	// so true idle parks after one spin window — the loop does not
-	// become a busy loop. Sustained high load never parks regardless
-	// (batches keep arriving), so the spin is free where it matters.
+	// become a busy loop.
+	//
+	// The budget scales down with the loop's tracked-connection count
+	// (spinBudgetFor): at low concurrency the spin is the RTT win; at
+	// saturation the same spin is pure CPU burn — batches arrive
+	// continuously, the park/wake is never on the request path, and
+	// every spun core is stolen from fetch goroutines on the same
+	// machine. Sustained high load therefore parks immediately.
+	budget := spinBudgetFor(r.ntracked)
 	spin := 0
 	for {
 		select {
@@ -263,7 +281,7 @@ func (r *reactorEpoll) run() {
 		default:
 		}
 		var timeout int
-		if spin < reactorSpinBudget {
+		if spin < budget {
 			timeout = 0 // non-blocking poll while spin budget remains
 			spin++
 		} else {
@@ -281,6 +299,15 @@ func (r *reactorEpoll) run() {
 			// poll (spin++ above), so an idle window simply runs out
 			// and the next iteration parks. Sustained traffic keeps
 			// returning batches, which reset the budget.
+			//
+			// The timed park that follows is the batched hit counter's
+			// guaranteed flush tick: a parked loop serves no hits, so a
+			// pending batch can only age here (or at the threshold under
+			// load). Flushing on the wake keeps staleness bounded by the
+			// 1 s timeout even when no further traffic ever arrives.
+			if spin >= budget {
+				r.p.flushReactorHits()
+			}
 			continue
 		}
 		spin = 0
@@ -288,6 +315,11 @@ func (r *reactorEpoll) run() {
 		if now.Sub(r.lastSweep) >= reactorSweepInterval {
 			r.lastSweep = now
 			r.sweepIdle(now)
+			// Telemetry staleness bound: the sweep tick is the second
+			// flush point, for loops whose traffic arrives in batches more
+			// often than once per second (never parking long enough for
+			// the wake-path flush to fire).
+			r.p.flushReactorHits()
 		}
 		for i := range n {
 			ev := &r.events[i]
@@ -314,6 +346,38 @@ func (r *reactorEpoll) run() {
 // would rather pay the park/wake (and for the spin-vs-no-spin A/B in
 // the RTT benchmarks): 0 disables the busy-poll entirely.
 var reactorSpinBudget = spinBudgetFromEnv()
+
+// spinBudgetFor scales the loop's busy-poll budget by its tracked
+// connection count. Few connections ⇒ the spin pays for itself (the
+// park/wake is per-request latency); many connections ⇒ batches are
+// already continuous and every spun poll steals a core from
+// origin/peer fetch goroutines on the same machine, so the loop parks
+// immediately. The full budget is kept while ntracked is small enough
+// that one loop's spin cannot crowd out the rest of the process.
+func spinBudgetFor(ntracked int) int {
+	if ntracked <= spinBudgetFullConns {
+		return reactorSpinBudget
+	}
+	if ntracked >= spinBudgetZeroConns {
+		return 0
+	}
+	// Linear taper between the two anchors: more connections, less
+	// spin. Integer math; the taper's exact shape is unobservable.
+	ratio := (spinBudgetZeroConns - ntracked) * reactorSpinBudget /
+		(spinBudgetZeroConns - spinBudgetFullConns)
+	return ratio
+}
+
+// spinBudgetFullConns is the tracked-connection count at (and below)
+// which the loop keeps its full spin budget: at this concurrency the
+// spin is the keep-alive RTT win measured in
+// BenchmarkSingle_Reactor_KeepAliveRTT.
+const spinBudgetFullConns = 16
+
+// spinBudgetZeroConns is the tracked-connection count at (and above)
+// which the loop never spins: batches are continuous, the park/wake
+// is amortized, and a spun core is a core stolen from fetches.
+const spinBudgetZeroConns = 256
 
 func spinBudgetFromEnv() int {
 	if v := os.Getenv("BOUINE_REACTOR_SPIN_BUDGET"); v != "" {
@@ -367,6 +431,9 @@ func (r *reactorEpoll) sweepIdle(now time.Time) {
 		r.connDel(fd)
 		rc.release()
 		_ = rc.conn.Close()
+		if m := r.p.reactorMetrics; m != nil {
+			m.IncrementReactorDrop()
+		}
 	})
 }
 
@@ -456,17 +523,25 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 	r.connDel(fd)
 	rc.release()
 	_ = rc.conn.Close()
+	if m := r.p.reactorMetrics; m != nil {
+		m.IncrementReactorDrop()
+	}
 }
 
 // handoff releases a connection from the reactor and queues it for
-// the blocking parser goroutine. The prefixConn replay is built here;
-// ownership of the net.Conn transfers to that goroutine (which closes
-// it on exit). Tracked by the handoff tracker so Close drains
-// in-flight handed-off requests, then force-closes keep-alive parkers.
+// the blocking worker. The prefixConn replay is built here (carrying
+// the rc for reuse); ownership of the net.Conn transfers to the worker
+// (which closes it on exit). Tracked by the handoff tracker so Close
+// drains in-flight handed-off requests, then force-closes keep-alive
+// parkers.
 func (r *reactorEpoll) handoff(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
 	r.connDel(fd)
+	// release() returns the write buffer to the pool; the worker that
+	// owns this rc re-fetches one on its first miss-side write. The rc
+	// itself travels with the conn (prefixConn.rc) for return-reuse or
+	// worker-side recycling — never a fresh allocation per miss.
 	rc.release()
 	rc.handoff(&r.handoffs)
 }
@@ -547,25 +622,99 @@ func (r *reactorEpoll) acceptLoop() {
 		default:
 			// Pending queue full: don't hold the connection hostage —
 			// the blocking parser serves it.
+			r.p.noteReactorHandoff(api.ReactorHandoffOverflow)
 			rc.handoff(&r.handoffs)
 		}
 	}
 }
 
-// drainPending registers connections parked by the accept goroutine.
-// Runs on the loop goroutine only.
+// returnFromBlocking takes a keep-alive connection back from the
+// blocking parser after it finished a request, re-registering it with
+// the reactor's epoll set. Called from the worker goroutine via
+// Parser.reactorReturn (Serve hands over ownership on a true return —
+// the worker then skips the conn close).
+//
+// rc is the pooled reactorConn the reactor handed off with this conn
+// (nil for conns that never came from a reactor handoff — the plain
+// blocking path). Reuse is the point: reset + re-arm the SAME struct
+// instead of building a fresh ~20 KiB one per miss round-trip. The fd
+// is already non-blocking (set at accept) and registered with the Go
+// runtime poller; the reactor's epoll registration is additive. The
+// blocking parser's OS read deadline is cleared — the reactor governs
+// idleness with its own sweep, and a stale poller timer would
+// otherwise poison a later re-handoff's first conn.Read.
+//
+// Pushing onto the accept path's pending queue means the loop
+// goroutine alone registers epoll/map state. Failure (queue full,
+// unextractable fd) returns false and the blocking parser simply
+// continues serving the connection itself — a missed return costs
+// scheduling efficiency, never correctness.
+//
+// Shutdown safety: every pusher is a worker owned by the handoff
+// tracker, and Close's final pending drain runs only after all of
+// them have exited (workers' wg), so a pushed connection is always
+// closed by exactly one of: the loop's cleanup drain, or Close's
+// final drain.
+func (r *reactorEpoll) returnFromBlocking(conn net.Conn, rc *reactorConn) bool {
+	fd := connFD(conn)
+	if fd < 0 {
+		if rc != nil {
+			rc.recycle()
+		}
+		return false
+	}
+	// Clear the blocking parser's deadline ownership (see comment).
+	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
+	if rc == nil || rc.fd != fd {
+		// No reusable struct (plain blocking-path conn), or the rc
+		// does not match this fd (defensive: never reuse state across
+		// conns) — draw a fresh one from the pool. The fd check is the
+		// identity contract: a pooled rc is only ever reused on the
+		// conn it was built for.
+		if rc != nil {
+			rc.recycle()
+		}
+		rc = newReactorConn(conn, r.p, rawRead(fd), rawWrite(fd))
+		rc.fd = fd
+		rc.writeVecFn = rawWritev(fd)
+	}
+	rc.conn = conn
+	rc.reset(r.p.nowFunc())
+	select {
+	case r.pending <- rc:
+		r.wake()
+		if m := r.p.reactorMetrics; m != nil {
+			m.IncrementReactorReturn()
+		}
+		return true
+	default:
+		// Pending queue full: accept-side traffic has priority — a
+		// returned connection already has a serving owner (the worker),
+		// a fresh accept does not. The rc is NOT recycled here: the
+		// worker keeps serving on this conn and the same rc stays
+		// attached to the next handoff's prefixConn.
+		return false
+	}
+}
+
+// drainPending registers connections parked by the accept goroutine or
+// returned by the blocking parser. Runs on the loop goroutine only.
 func (r *reactorEpoll) drainPending() {
 	for {
 		select {
 		case rc := <-r.pending:
 			if r.ntracked >= reactorMaxConns {
 				// Over cap: the blocking parser owns it.
+				r.p.noteReactorHandoff(api.ReactorHandoffCap)
 				rc.handoff(&r.handoffs)
 				continue
 			}
 			if err := r.register(asEpollFD(rc.fd), rc); err != nil {
 				rc.release()
 				_ = rc.conn.Close()
+			} else if m := r.p.reactorMetrics; m != nil {
+				m.IncrementReactorConnRegistered()
 			}
 		default:
 			return
@@ -696,12 +845,12 @@ func (r *reactorEpoll) cleanup() {
 		}
 	}
 drained:
-	// Stop the spawner: it drains any queued jobs (each wg.Add +
-	// goroutine start) before exiting, and quit makes every late
-	// spawnFromLoop a conn close instead of a send on a dead queue.
+	// Stop the worker pool: the dispatcher drains any queued jobs (each
+	// wg.Add + one-shot goroutine) before exiting, and quit makes every
+	// late enqueue a conn close instead of a send on a dead pool.
 	// handoffsDone closes only after this join, so Close's WaitGroup
 	// wait cannot race a still-pending Add.
-	if r.handoffs.spawns != nil {
+	if r.handoffs.jobs != nil {
 		r.handoffs.stopSpawner()
 	}
 	_ = unix.Close(r.wakeR)
@@ -762,6 +911,23 @@ func (r *reactorEpoll) Close() {
 		r.handoffs.drainForceClose()
 		<-drained
 	}
+
+	// Final pending drain: every return-to-reactor pusher is a
+	// handoff goroutine (Serve calls the hook before returning), and
+	// they have all exited by the time the wg wait above completes —
+	// so the queue can no longer grow. A connection returned between
+	// the loop's own cleanup drain and this point would otherwise leak
+	// as an unowned socket. Exclusive channel receives make the
+	// double drain (cleanup + here) safe.
+	for {
+		select {
+		case rc := <-r.pending:
+			rc.release()
+			_ = rc.conn.Close()
+		default:
+			return
+		}
+	}
 }
 
 // Run drives the reactor until the listener is closed. Blocks.
@@ -779,20 +945,20 @@ func (r *reactorEpoll) MetricsDropped() uint64 {
 	return 0
 }
 
-// handoff starts the blocking Parser on the spawner goroutine,
-// replaying the buffered bytes. Called by the transport on actHandoff.
-// The tracker owns the blocking goroutine: it tracks the conn, closes
-// it when Serve returns, and force-closes it during shutdown drain
-// after the grace window to unpark Serve's keep-alive read loop (Serve
-// never closes the conn itself — the blocking path's caller does,
-// which is the tracker). The prefixConn allocation stays on the loop
-// goroutine: the readBuf it aliases is loop-owned and must not be
-// freed before the handoff escapes the loop — the job's channel send
-// is exactly the ownership boundary.
+// handoff hands the conn to a blocking-path worker, replaying the
+// buffered bytes. Called by the transport on actHandoff. The tracker
+// owns the worker lifecycle: it tracks the conn, closes it when Serve
+// returns, and force-closes it during shutdown drain after the grace
+// window to unpark Serve's keep-alive read loop (Serve never closes the
+// conn itself — the blocking path's caller does, which is the
+// tracker). The prefixConn (with the pooled rc attached) is built on
+// the loop goroutine: the readBuf it aliases is loop-owned and must
+// not be freed before the handoff escapes the loop — the job's channel
+// send is exactly the ownership boundary.
 func (rc *reactorConn) handoff(tracker *handoffTracker) {
 	conn := rc.handoffConn()
 	rc.state = rcHandoff
-	tracker.spawnFromLoop(rc.parser, conn)
+	tracker.enqueue(rc.parser, conn)
 }
 
 // writeStuckExpired reports whether a write phase has exceeded the
@@ -812,48 +978,63 @@ func (rc *reactorConn) writeStuckExpired(now time.Time) bool {
 // the two constants must stay in sync.
 const reactorWriteTimeout = 5 * time.Minute
 
-// handoffTracker owns the blocking-parser goroutines spawned at handoff.
-// Each goroutine closes its conn on exit (Serve never closes it), so an
-// fd can never leak. The set is keyed by conn pointer: register before
-// the goroutine starts, unregister in its defer, so drainForceClose
-// always sees the exact set of live handoffs.
+// handoffTracker owns the blocking-path worker pool that serves handed-
+// off connections. Workers loop: each takes a job from the jobs
+// channel, runs Parser.Serve to completion (the conn's lifetime),
+// closes the conn unless Serve handed it back to the reactor, recycles
+// the pooled reactorConn, and takes the next job. A fixed worker set
+// replaces the spawn-per-miss model: goroutine creation (and the
+// ~32 KiB stack that grows with each spawn) was per-miss churn under
+// missy traffic, and a full queue dropped conns with resets; queued
+// jobs now wait for a worker (bounded backpressure) instead of being
+// shed.
 //
-// The spawn work (mutex, map insert, `go` statement — ~1-2 µs) runs on
-// the spawner goroutine, not the reactor loop goroutine: under missy
-// traffic every one of those microseconds is serial latency added to
-// every hit multiplexed on the same listener. The loop's part of a
-// handoff is only the ownership-critical epoll/map work plus a
-// non-blocking channel send; wg.Add happens on the spawner before the
-// blocking-parser goroutine starts, which is the ordering the WaitGroup
-// contract requires — the spawner serializes Add against the spawn
-// queue, and Close only Waits after the loop has exited and the queue
-// has been drained and joined, so no Add can race the Wait.
+// Growth: a dedicated dispatcher goroutine spawns a new worker when a
+// job arrives and none is parked, up to handoffMaxWorkers. wg.Add
+// happens on the dispatcher, before the worker starts — the ordering
+// the WaitGroup contract requires against Close's wg.Wait: Close joins
+// the dispatcher first (dispatcherDone), so no Add can race the Wait.
 //
-// drain waits for in-flight handed-off requests up to the grace window,
-// then force-closes any conns still held by blocking parsers: after a
-// request finishes, Serve's keep-alive loop parks on the read deadline
-// (120s), and shutdown must not wait that out. A force-close unparks it
-// — Serve treats the read error as connection termination, exactly like
-// a client reset, and the goroutine's own conn close follows.
+// Shutdown contract (unchanged from the spawner model): Close waits
+// for in-flight requests up to handoffDrainGrace, then force-closes
+// every live conn (conns set) to unpark Serve's keep-alive read.
+// stopSpawner joins the dispatcher, so a queued-but-unserved job can
+// never be orphaned mid-shutdown: stopSpawner drains the queue itself,
+// serving each leftover job on a fresh one-shot goroutine.
 type handoffTracker struct {
-	conns map[net.Conn]struct{}
-	// spawns feeds the spawner goroutine. Buffered: the loop never
-	// blocks on a full queue (a full queue means the spawner is
-	// backed up, and the alternative — stalling the loop's hits —
-	// costs more than the overflow policy below).
-	spawns chan handoffJob
-	// spawnerDone closes after the spawner has drained the queue and
-	// exited. The WaitGroup wait must be ordered after this: every
-	// wg.Add happens on the spawner, so joining the spawner first
+	// jobs feeds the dispatcher (the pool's only consumer). Buffered:
+	// the loop never blocks on a full queue — a full queue means the
+	// dispatcher is backed up; enqueue sheds instead.
+	jobs chan handoffJob
+	// idle is the parked-worker stack (LIFO: the most recently parked
+	// worker's stack is hottest). Workers park themselves here with
+	// their inbox; the dispatcher pops one per incoming job and hands
+	// the job over the inbox — no channel re-queue, no lost jobs, no
+	// busy spin.
+	idle chan *handoffWorker
+	// dispatcherDone closes after the dispatcher has drained the jobs
+	// queue and exited. The WaitGroup wait must be ordered after this:
+	// every wg.Add happens on the dispatcher, so joining it first
 	// guarantees no Add can race the Wait.
-	spawnerDone chan struct{}
-	// quit signals the spawner to stop accepting work. Closed exactly
-	// once by stopSpawner (loop shutdown); spawnFromLoop's select drops
-	// late jobs rather than sending on a closed channel — the channel
-	// is never closed, only quit is.
+	dispatcherDone chan struct{}
+	// quit signals the dispatcher (and workers) to stop. Closed exactly
+	// once by stopSpawner (loop shutdown); enqueue's select drops late
+	// jobs rather than blocking on a shut-down pool — the channels are
+	// never closed, only quit is.
 	quit chan struct{}
-	wg   sync.WaitGroup
-	mu   sync.Mutex
+	// conns is the live-conn set for drainForceClose, keyed by conn
+	// pointer. Registered by the worker before Serve, unregistered in
+	// its defer — the set always mirrors exactly the conns a worker is
+	// currently serving.
+	conns map[net.Conn]struct{}
+	mu    sync.Mutex
+	wg    sync.WaitGroup
+}
+
+// handoffWorker is a parked pool worker's identity: the inbox the
+// dispatcher delivers jobs to while the worker is parked.
+type handoffWorker struct {
+	inbox chan handoffJob
 }
 
 // handoffJob is one queued blocking-parser start.
@@ -862,98 +1043,223 @@ type handoffJob struct {
 	conn net.Conn
 }
 
-// handoffSpawnQueue is the per-tracker spawn queue capacity.
-const handoffSpawnQueue = 128
+// handoffJobQueue is the per-tracker job queue capacity. Bounded
+// backpressure: when full, enqueue sheds (closes) the conn — the
+// alternative is stalling the loop's hits.
+const handoffJobQueue = 128
 
-// startSpawner boots the tracker's spawner goroutine. Must be called
-// before the first spawnFromLoop; the goroutine exits when spawns
-// closes (at loop shutdown, in cleanup).
+// handoffMaxWorkers caps the pool size. Sizing mirrors the reactor's
+// own connection budget scale (reactorMaxConns / 4): beyond this,
+// shedding is the honest response to a sustained miss storm.
+const handoffMaxWorkers = 1024
+
+// startSpawner boots the tracker's dispatcher goroutine. Must be
+// called before the first enqueue. (Name kept from the spawner era:
+// it is the tracker's bootstrap call, wired from newReactorLoop.)
 func (t *handoffTracker) startSpawner() {
-	t.spawns = make(chan handoffJob, handoffSpawnQueue)
-	t.spawnerDone = make(chan struct{})
+	t.jobs = make(chan handoffJob, handoffJobQueue)
+	t.idle = make(chan *handoffWorker, handoffMaxWorkers)
+	t.dispatcherDone = make(chan struct{})
 	t.quit = make(chan struct{})
-	go t.spawner()
+	go t.dispatcher()
 }
 
-// stopSpawner signals the spawner to finish and waits for it. Every
-// job still in the queue is spawned (blocking-parser goroutines own
-// their conns' close), so nothing parked in the queue can leak. Call
-// from the loop goroutine's cleanup path only.
+// stopSpawner signals the pool to finish and joins the dispatcher.
+// Every job still in the queue is served by a fresh one-shot worker
+// (workers own their conns' close), so nothing parked in the queue can
+// leak. Race with the dispatcher's own drain is safe: channel receive
+// is exclusive, whichever side pops a job serves it exactly once.
+// Call from the loop goroutine's cleanup path only.
 func (t *handoffTracker) stopSpawner() {
 	close(t.quit)
 	for {
 		select {
-		case job := <-t.spawns:
-			t.spawn(job.p, job.conn)
+		case job := <-t.jobs:
+			t.serveJobOnce(job)
 		default:
-			<-t.spawnerDone
+			<-t.dispatcherDone
 			return
 		}
 	}
 }
 
-func (t *handoffTracker) spawner() {
-	defer close(t.spawnerDone)
+// serveJobOnce serves one job on a fresh one-shot goroutine, pairing
+// the wg.Add with the Done (pool workers amortize one Add across many
+// serveJob calls, so serveJob itself cannot own the Done).
+func (t *handoffTracker) serveJobOnce(job handoffJob) {
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		t.serveJob(job)
+	}()
+}
+
+// dispatcher is the pool's single consumer and spawner. For each job:
+// pop a parked worker and deliver the job on its unbuffered inbox (a
+// rendezvous — the send completes only with the parked worker's
+// receive, so no delivery can commit into a buffer nobody reads), or —
+// when none is parked — spawn a new worker and hand it the job
+// directly as its first assignment (no park race). At the worker cap
+// with none parked, the dispatcher holds the job and waits for a
+// park or shutdown: jobs behind it make the enqueue side shed, the
+// intended saturation behavior. Every wait carries quit: a shutdown
+// never strands the dispatcher holding an unservable job.
+func (t *handoffTracker) dispatcher() {
+	defer close(t.dispatcherDone)
+	spawned := 0
 	for {
 		select {
 		case <-t.quit:
 			// Drain the remainder here too — stopSpawner races its own
-			// drain; whichever side pops a job, it is spawned exactly
+			// drain; whichever side pops a job, it is served exactly
 			// once (channel receive is exclusive).
 			for {
 				select {
-				case job := <-t.spawns:
-					t.spawn(job.p, job.conn)
+				case job := <-t.jobs:
+					t.serveJobOnce(job)
 				default:
 					return
 				}
 			}
-		case job := <-t.spawns:
-			t.spawn(job.p, job.conn)
+		case job := <-t.jobs:
+			t.deliver(job, &spawned)
 		}
 	}
 }
 
-// spawnFromLoop enqueues a blocking-parser start from the reactor loop
-// goroutine. Non-blocking: when the queue is full the conn is closed
-// instead of served — the client sees a reset, which for a miss under
-// spawner saturation is the honest outcome, and infinitely better than
-// parking every hit on the listener.
-func (t *handoffTracker) spawnFromLoop(p *Parser, conn net.Conn) {
-	job := handoffJob{p: p, conn: conn}
-	select {
-	case t.spawns <- job:
-	case <-t.quit:
-		// Shutdown already started: this conn arrived after the loop's
-		// final batch (accept-side race). Nobody will serve it; close
-		// it here — the client sees a reset, which under shutdown is
-		// the honest outcome.
-		_ = conn.Close()
-	default:
-		_ = conn.Close()
+// deliver hands one job to a parked worker, spawning one when none is
+// parked (up to the cap), or serves it on a one-shot goroutine if
+// shutdown interrupts the delivery. Every exit serves the job exactly
+// once: the loop returns only after the job reached a worker or a
+// one-shot took it.
+func (t *handoffTracker) deliver(job handoffJob, spawned *int) {
+	for {
+		select {
+		case w := <-t.idle:
+			select {
+			case w.inbox <- job:
+				return
+			case <-t.quit:
+				// The parked worker may take quit instead of the
+				// delivery (unbuffered rendezvous lost the race).
+				// Serve the job here — nobody else owns it.
+				t.serveJobOnce(job)
+				return
+			}
+		default:
+			if *spawned < handoffMaxWorkers {
+				*spawned++
+				t.wg.Add(1)
+				go t.worker(job)
+				return
+			}
+			// Pool capped and no worker parked: wait for a park or
+			// shutdown. This is the backpressure point — jobs queued
+			// behind this one make enqueue shed.
+			select {
+			case w := <-t.idle:
+				select {
+				case w.inbox <- job:
+				case <-t.quit:
+					t.serveJobOnce(job)
+				}
+				return
+			case <-t.quit:
+				t.serveJobOnce(job)
+				return
+			}
+		}
 	}
 }
 
-func (t *handoffTracker) spawn(p *Parser, conn net.Conn) {
-	t.wg.Add(1)
+// worker is the pool loop. It starts with its first job in hand (the
+// dispatcher hands a fresh worker its job directly — no park race),
+// serves it, then parks: publish on the idle stack, wait for a
+// delivery or quit. The inbox is unbuffered, so a delivery and the
+// worker's receive are one rendezvous — there is no committed delivery
+// to drain on the quit path.
+func (t *handoffTracker) worker(first handoffJob) {
+	defer t.wg.Done()
+	w := &handoffWorker{inbox: make(chan handoffJob)}
+	t.serveJob(first)
+	for {
+		// Park: publish the inbox to the idle stack. Buffered by the
+		// worker cap, so this never blocks.
+		select {
+		case t.idle <- w:
+		case <-t.quit:
+			return
+		}
+		// Wait for delivery or shutdown.
+		select {
+		case job := <-w.inbox:
+			t.serveJob(job)
+		case <-t.quit:
+			return
+		}
+	}
+}
+
+// serveJob runs one handed-off conn to completion on this goroutine:
+// track, Serve, close-or-recycle, untrack. Shared by pool workers and
+// the shutdown drains (stopSpawner / dispatcher quit path), so every
+// job is served exactly once by exactly one goroutine.
+//
+// errReactorReturned means Serve transferred the conn back to the
+// reactor loop (return-to-reactor): the reactor now owns its close,
+// and closing here would yank the fd out from under a registered
+// reactorConn. Every other exit path (including panics, where returned
+// stays false) keeps the close here.
+func (t *handoffTracker) serveJob(job handoffJob) {
+	conn := job.conn
 	t.mu.Lock()
 	if t.conns == nil {
 		t.conns = make(map[net.Conn]struct{})
 	}
 	t.conns[conn] = struct{}{}
 	t.mu.Unlock()
-	go func() {
-		defer t.wg.Done()
-		defer t.unregister(conn)
-		defer func() { _ = conn.Close() }()
-		_ = p.Serve(conn)
+
+	returned := false
+	defer func() {
+		t.mu.Lock()
+		delete(t.conns, conn)
+		t.mu.Unlock()
+		if !returned {
+			_ = conn.Close()
+			// The pooled reactorConn dies with the conn: recycle it.
+			// Its readBuf bytes may be stale — reset + parse overwrite
+			// them, and no other conn can ever be wired to this fd
+			// again (the fd is closed).
+			if pc, ok := conn.(*prefixConn); ok && pc.rc != nil {
+				pc.rc.recycle()
+			}
+		}
 	}()
+
+	err := job.p.Serve(conn)
+	returned = errors.Is(err, errReactorReturned)
 }
 
-func (t *handoffTracker) unregister(conn net.Conn) {
-	t.mu.Lock()
-	delete(t.conns, conn)
-	t.mu.Unlock()
+// enqueue hands a job to the pool from the reactor loop goroutine.
+// Non-blocking: when the queue is full the conn is closed instead of
+// served — the client sees a reset, which for a miss under worker-pool
+// saturation is the honest outcome, and infinitely better than
+// parking every hit on the listener.
+func (t *handoffTracker) enqueue(p *Parser, conn net.Conn) {
+	job := handoffJob{p: p, conn: conn}
+	select {
+	case t.jobs <- job:
+	case <-t.quit:
+		// Shutdown already started: this conn arrived after the loop's
+		// final batch (accept-side race). Nobody will serve it; close
+		// it here — the client sees a reset, which under shutdown is
+		// the honest outcome.
+		p.noteReactorDrop()
+		_ = conn.Close()
+	default:
+		p.noteReactorDrop()
+		_ = conn.Close()
+	}
 }
 
 // drainForceClose force-closes every live handed-off conn. Used after

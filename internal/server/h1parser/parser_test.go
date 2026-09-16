@@ -131,7 +131,7 @@ func BenchmarkGate_H1Parse_Get(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, &scratch)
+		req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, 0, &scratch)
 		if err != nil {
 			b.Fatalf("parseRequest: %v", err)
 		}

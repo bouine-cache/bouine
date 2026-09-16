@@ -52,11 +52,16 @@ bouine.adminServiceName returns the name of the dedicated admin
 
 {{/*
 bouine.listenPort extracts the numeric port from a config.listen address
-value (e.g. ":80" → 80, "0.0.0.0:8080" → 8080). The StatefulSet's
-containerPorts, the Services' targetPort resolution (named ports must
-match), and the NetworkPolicy's DNAT-side ports all derive from these, so
+value (e.g. ":80" → 80, "0.0.0.0:8080" → 8080), or returns an empty
+string for an empty value. An empty listen address is the app's
+documented "disabled plane" form (internal/config/config.go: "Listen
+enumerates the listener addresses. Empty strings disable.") — the common
+case being TLS termination upstream, where no data-plane TLS listener is
+wanted. Callers gate derived wiring (StatefulSet containerPorts, Service
+named-port resolution, NetworkPolicy DNAT-side ports) on the result so
 a user who overrides config.listen.* keeps routing, probes, and policy
-coherent. A value without a trailing port fails at template time.
+coherent. A non-empty value without a trailing port fails at template
+time.
 */}}
 {{- define "bouine.listenPort" -}}
 {{- $addr := toString .value -}}
@@ -64,7 +69,7 @@ coherent. A value without a trailing port fails at template time.
 {{- if contains ":" $addr -}}
 {{- $port = last (splitList ":" $addr) -}}
 {{- end -}}
-{{- if not $port -}}
+{{- if and $addr (not $port) -}}
 {{- fail (printf "config.listen.%s must end in a port (got %q)" .key .value) -}}
 {{- end -}}
 {{- $port -}}

@@ -106,26 +106,26 @@
             "http": {
               "type": "string",
               "default": ":80",
-              "pattern": "^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
-              "description": "Listen address for the http plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.http keeps routing coherent."
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the http plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.http keeps routing coherent. An empty string disables the plane (the app requires at least one listener)."
             },
             "https": {
               "type": "string",
               "default": ":443",
-              "pattern": "^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
-              "description": "Listen address for the https plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.https keeps routing coherent."
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the https plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.https keeps routing coherent. An empty string disables the plane — the common case when TLS terminates upstream."
             },
             "admin": {
               "type": "string",
               "default": ":9000",
-              "pattern": "^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
-              "description": "Listen address for the admin plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.admin keeps routing coherent."
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the admin plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.admin keeps routing coherent. An empty string disables the plane (the app requires at least one listener)."
             },
             "cluster": {
               "type": "string",
               "default": ":8443",
-              "pattern": "^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
-              "description": "Listen address for the cluster plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.cluster keeps routing coherent."
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the cluster plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.cluster keeps routing coherent. An empty string disables the cluster plane."
             },
             "max_connections": {
               "description": "Cap on simultaneously open data-plane connections. Under HTTP/1.1 this bounds in-flight requests; over-limit connections receive 503 + close. Idle keep-alive connections hold a slot. 0 disables the limit.",

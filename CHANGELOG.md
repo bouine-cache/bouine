@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- The Helm chart again accepts an empty `config.listen.https` (and any
+  empty listen address). The 0.5.19 schema patterns and the
+  `bouine.listenPort` helper turned the app's documented "empty string
+  disables the plane" form — the shape used by `make test-k8s-setup` and
+  by every deployment that terminates TLS at an upstream proxy/LB — into
+  an install-time error, leaving rendered manifests failing with
+  "Does not match pattern" in CD pipelines. An empty address now disables
+  the derived wiring with it: the StatefulSet containerPort, the
+  data-plane Service port (its named targetPort would otherwise dangle),
+  the NetworkPolicy rule, and the NOTES port listing. Non-empty values
+  are validated exactly as before, and the kubeconform gate now renders
+  the https-disabled variant on every chart change so this cannot ship
+  silently again. Downstream consumers pinned to chart 0.5.18 for this
+  reason can unpin on the next chart release.
+
 ## [0.5.19] - 2026-09-16
 
 ### Added

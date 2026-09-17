@@ -670,16 +670,53 @@ type RouteKey struct {
 	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
 }
 
-// RouteRequest is the per-route request-side header rewrite block.
+// RouteRequest is the per-route request-side rewrite block.
 type RouteRequest struct {
 	HeaderSet map[string]string `yaml:"header_set,omitempty" json:"header_set,omitempty"`
 	// StripPrefix removes this path prefix from the request URL before
 	// forwarding to the upstream. The cache key uses the original path
 	// so different routes with the same stripped path don't collide.
-	// Must start with "/" when non-empty.
-	StripPrefix  string   `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	// Must start with "/" when non-empty. Mutually exclusive with
+	// path_rewrite.
+	StripPrefix string `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	// PathRewrite is a regex path rewrite applied to the origin-bound
+	// request URI (nginx `rewrite ... break` / Varnish regsub equivalent).
+	// Mutually exclusive with strip_prefix. See PathRewriteConfig.
+	PathRewrite PathRewriteConfig `yaml:"path_rewrite,omitempty" json:"path_rewrite,omitempty"`
+	// HeaderRemove removes the listed request headers from the
+	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
 	HeaderRemove []string `yaml:"header_remove,omitempty" json:"header_remove,omitempty"`
 }
+
+// PathRewriteConfig is the per-route regex path rewrite. The pattern is
+// compiled once at startup (Go RE2 — linear time, no backtracking) and
+// applied to every origin-bound request URI for this route: miss, bypass
+// (POST and other non-cacheable methods), revalidation, background
+// refresh, and streaming fetches. The cache key, ban matching, purges,
+// and every client-facing surface keep the original (public) path, the
+// same contract as strip_prefix. Only the first match is replaced
+// (nginx semantics), and the query string is never matched or modified.
+// Unstable.
+type PathRewriteConfig struct {
+	// Match is the RE2 pattern applied to the path part of the request
+	// URI. Use capture groups (`(.*)`) and reference them from Replace
+	// (`$1`). Anchors (`^`, `$`) are the operator's choice, exactly like
+	// nginx rewrite. Capped at MaxPathRewritePatternBytes. Required.
+	Match string `yaml:"match,omitempty" json:"match,omitempty"`
+	// Replace is the replacement template substituted for the first
+	// match. `$1`–`$9` reference capture groups. Capped at
+	// MaxPathRewritePatternBytes. Required. The rewritten path must
+	// start with "/" — a replacement producing a relative path would
+	// corrupt the origin request line, so the rewrite is skipped
+	// instead (the origin sees the original path).
+	Replace string `yaml:"replace,omitempty" json:"replace,omitempty"`
+}
+
+// MaxPathRewritePatternBytes bounds the match pattern and replacement
+// template. Rewrites are route configuration, not user input: 512 B
+// leaves room for a dozen labeled groups while keeping the compiled
+// program and per-route config small enough to audit by eye.
+const MaxPathRewritePatternBytes = 512
 
 // RouteResponse is the per-route response-side header rewrite block.
 type RouteResponse struct {

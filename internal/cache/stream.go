@@ -95,7 +95,7 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	resp.StreamBody = true
 
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)

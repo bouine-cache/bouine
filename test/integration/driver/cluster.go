@@ -200,6 +200,19 @@ routes:
       ttl_default: 60s
     request:
       strip_prefix: /api/v1
+  - match:
+      path_prefix: /payment/orchestrator/callback/
+    pool: origin
+    cache:
+      ttl_default: 60s
+    request:
+      path_rewrite:
+        # Rewrites the public callback prefix onto the origin's /echo
+        # endpoint so integration tests can assert on the exact URI
+        # the origin received (it echoes "uri <path>"). e.g.
+        # /payment/orchestrator/callback/echo?x=1 -> /echo?x=1.
+        match: ^/payment/orchestrator/callback/(.*)$
+        replace: /$1
   - match: {}
     pool: origin
     cache:

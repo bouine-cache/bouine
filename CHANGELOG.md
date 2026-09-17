@@ -10,6 +10,27 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- **Regex path rewriting (`request.path_rewrite`)** — a per-route regex
+  rewrite applied to the origin-bound request path, the nginx
+  `rewrite ... break` / Varnish `regsub` equivalent. `match` (Go RE2 —
+  linear time, no ReDoS) and `replace` (`$1`–`$9` capture references)
+  are compiled once at config load and applied on every origin-bound
+  fetch: miss, bypass, invalidating methods (POST/PUT/DELETE),
+  foreground revalidation, SWR background revalidation,
+  refresh-before-expiry, and stream fetches. Hardening, each pinned by
+  tests: the query string is split off before matching and re-appended
+  unchanged (the pattern can never swallow `?signature=...`), only the
+  first match is replaced (nginx semantics), a relative result is
+  discarded (the origin request line is never corrupted), output is
+  capped at 16 KiB (blocking `$1$1$1` amplification), and pattern and
+  template are capped at 512 B. Mutually exclusive with
+  `request.strip_prefix` (validation rejects both). The cache key, ban
+  matching, purges, and all client-facing surfaces keep the original
+  public path, so invalidation addresses the URLs clients request. The
+  hit path is untouched: zero allocs/op gates hold, and non-matching
+  URIs pass through at 4 ns / 0 allocs.
+
 ### Fixed
 - The cluster's peer PipelineClient diagnostics no longer bypass the
   structured log pipeline. Every "error in PipelineClient(...)" line

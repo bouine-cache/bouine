@@ -559,6 +559,137 @@ routes:
 	assert.Equal(t, "/api/v1", cfg.Routes[0].Request.StripPrefix)
 }
 
+func TestParse_PathRewrite_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { path_prefix: /payment/orchestrator/callback }
+    pool: app
+    request:
+      path_rewrite:
+        match: ^/payment/orchestrator/callback/(.*)$
+        replace: /scrooge/callback/$1
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	assert.Equal(t, `^/payment/orchestrator/callback/(.*)$`, cfg.Routes[0].Request.PathRewrite.Match)
+	assert.Equal(t, "/scrooge/callback/$1", cfg.Routes[0].Request.PathRewrite.Replace)
+}
+
+func TestValidate_PathRewrite_RequiresBothFields(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cases := []struct {
+		name string
+		pw   PathRewriteConfig
+	}{
+		{"match only", PathRewriteConfig{Match: `^/a/`}},
+		{"replace only", PathRewriteConfig{Replace: "/b/"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{PathRewrite: tc.pw}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "requires both match and replace") {
+				t.Fatalf("expected path_rewrite both-fields error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_PathRewrite_MutuallyExclusiveWithStripPrefix(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		StripPrefix: "/api/v1",
+		PathRewrite: PathRewriteConfig{Match: `^/api/`, Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "both strip_prefix and path_rewrite") {
+		t.Fatalf("expected strip_prefix/path_rewrite exclusivity error, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_RejectsInvalidPattern(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{Match: "(", Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "path_rewrite.match is not a valid regular expression") {
+		t.Fatalf("expected invalid-pattern error, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_RejectsOversizedPattern(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{
+			Match:   "^/" + strings.Repeat("a", MaxPathRewritePatternBytes) + "/$",
+			Replace: "/x/",
+		},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "path_rewrite.match exceeds") {
+		t.Fatalf("expected pattern size-cap error, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_RejectsOversizedReplace(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{
+			Match:   `^/a/`,
+			Replace: "/x/" + strings.Repeat("a", MaxPathRewritePatternBytes),
+		},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "path_rewrite.replace exceeds") {
+		t.Fatalf("expected replace size-cap error, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_AcceptedNearBoundary(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	// A pattern within the cap (repeating 5-byte [a-z] groups) must pass
+	// validation — the cap rejects the oversized, not the large-but-
+	// legal.
+	pattern := "^/" + strings.Repeat("[a-z]", (MaxPathRewritePatternBytes-len("^/"))/5-1) + "$"
+	if len(pattern) > MaxPathRewritePatternBytes {
+		t.Fatalf("test construction: pattern %d > cap %d", len(pattern), MaxPathRewritePatternBytes)
+	}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{Match: pattern, Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("in-cap pattern must validate, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_EmptyBlockAccepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app"}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("route without path_rewrite must validate, got %v", err)
+	}
+}
+
 func TestParse_MethodsNormalisedToUpper(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

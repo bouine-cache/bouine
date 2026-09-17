@@ -308,6 +308,10 @@ type Handler struct {
 	// and all client-facing surfaces keep the original path. Nil means
 	// no stripping (zero cost on routes without strip_prefix).
 	stripPrefix []byte
+	// pathRewrite applies the request.path_rewrite regex to every
+	// origin-bound request URI after strip_prefix. Nil on routes without
+	// path_rewrite (zero cost). See PathRewrite for the hardening rules.
+	pathRewrite *PathRewrite
 	// reqHeaderSet sets (overrides) request headers on every origin-bound
 	// fetch (request.header_set). nil = no-op.
 	reqHeaderSet map[string]string
@@ -397,6 +401,11 @@ type HandlerConfig struct {
 	// every client-facing surface keep the original path (see
 	// config.RouteRequest.StripPrefix). Empty means no stripping.
 	StripPrefix string
+	// PathRewrite, when non-nil, applies the route's request.path_rewrite
+	// regex to every origin-bound request URI after StripPrefix. Nil
+	// means no rewrite. Mutually exclusive with StripPrefix at the
+	// config layer; validated and compiled by config.validatePathRewrite.
+	PathRewrite *PathRewrite
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -633,13 +642,21 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 	return h.fastClient.Do(context.Background(), req, resp)
 }
 
-// strippedURI returns uri with the route's strip prefix removed from the
-// start. Used for origin-bound request URIs only: the cache key, ban
-// matching, and Location resolution all keep the original path (config
-// contract in config.RouteRequest.StripPrefix). Boundary semantics live
-// in StripRequestURI.
-func (h *Handler) strippedURI(uri []byte) []byte {
-	return StripRequestURI(h.stripPrefix, uri)
+// originURI returns the origin-bound form of uri: the route's strip
+// prefix removed (when configured) and the path_rewrite regex applied
+// (when configured). This is the single choke point every origin-bound
+// URI passes through — miss, invalidating proxy, revalidate, background
+// revalidate, background refresh, shed refill, stream, and the
+// in-process upstream. Cache keys, ban matching, purges, Location
+// resolution, and every client-facing surface keep the original uri
+// (config contract in RouteRequest.StripPrefix and
+// RouteRequest.PathRewrite).
+func (h *Handler) originURI(uri []byte) []byte {
+	uri = StripRequestURI(h.stripPrefix, uri)
+	if h.pathRewrite != nil {
+		return h.pathRewrite.RewriteURI(uri)
+	}
+	return uri
 }
 
 // rewriteRequestCtx applies the request-side rewrite directives directly
@@ -688,6 +705,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		upstream:                cfg.Upstream,
 		fastClient:              cfg.FastClient,
 		stripPrefix:             []byte(cfg.StripPrefix),
+		pathRewrite:             cfg.PathRewrite,
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
 		negativeTTL:             cfg.NegativeTTL,
@@ -1060,7 +1078,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(ri.GetMethod())
-	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	req.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
 	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		req.Header.Set(k, v)
@@ -1947,7 +1965,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethodBytes(ctx.Method())
-	revalReq.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	revalReq.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	revalReq.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
@@ -2120,7 +2138,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethod(ri.GetMethod())
-	revalReq.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	revalReq.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
 	revalReq.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		revalReq.Header.Set(k, v)
@@ -2348,7 +2366,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseResponse(resp)
 
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
@@ -2620,7 +2638,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(ri.GetMethod())
 	// lgtm[go/request-forgery] — origin target is the configured pool; see docs/security/threat-model.md §A10
-	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	req.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
 	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		req.Header.Set(k, v)
@@ -2767,7 +2785,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Populate the request from *fasthttp.RequestCtx.
 	// Use *Bytes variants to avoid string([]byte) conversions.
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
@@ -2873,7 +2891,7 @@ func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
 func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
 	upstreamCtx.Request.Reset()
 	ctx.Request.CopyTo(&upstreamCtx.Request)
-	upstreamCtx.Request.SetRequestURIBytes(h.strippedURI(ctx.Request.URI().RequestURI()))
+	upstreamCtx.Request.SetRequestURIBytes(h.originURI(ctx.Request.URI().RequestURI()))
 	h.upstream(upstreamCtx)
 }
 

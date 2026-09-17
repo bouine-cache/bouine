@@ -91,12 +91,19 @@ config:
   #       hedge_timeout: 50ms           # fire a duplicate request after this delay
   upstream_pools: []
   # Header rewrite directives (request.header_set, request.header_remove,
-  # response.header_set, response.header_remove) apply per route:
+  # response.header_set, response.header_remove) apply per route.
+  # Request path rewrites: request.strip_prefix (pure prefix removal) and
+  # request.path_rewrite {match, replace} (Go RE2 regex, nginx
+  # `rewrite ... break` equivalent; mutually exclusive) rewrite the
+  # origin-bound path while the cache key keeps the public path:
   #   routes:
   #     - name: web
   #       pool: app
   #       request:
   #         header_remove: [X-Client-Trace]
+  #         path_rewrite:
+  #           match: ^/payment/orchestrator/callback/(.*)$
+  #           replace: /scrooge/callback/$1
   #       response:
   #         header_set:
   #           X-Content-Type-Options: nosniff

@@ -14,28 +14,50 @@ the curated, human-readable summary.
 - **Regex path rewriting (`request.path_rewrite`)** — a per-route regex
   rewrite applied to the origin-bound request path, the nginx
   `rewrite ... break` / Varnish `regsub` equivalent. `match` (Go RE2 —
-  linear time, no ReDoS) and `replace` (`$1`–`$9` capture references)
-  are compiled once at config load and applied on every origin-bound
-  fetch: miss, bypass, invalidating methods (POST/PUT/DELETE),
-  foreground revalidation, SWR background revalidation,
-  refresh-before-expiry, and stream fetches. Hardening, each pinned by
-  tests: the query string is split off before matching and re-appended
-  unchanged (the pattern can never swallow `?signature=...`), only the
-  first match is replaced (nginx semantics), a relative result is
-  discarded (the origin request line is never corrupted), output is
-  capped at 16 KiB (blocking `$1$1$1` amplification), pattern and
-  template are capped at 512 B, raw control bytes are rejected, and
-  every `$reference` in the template must resolve against the
-  pattern's capture groups at config load — Go's Expand would
-  otherwise silently expand an unknown reference (the `$1x` typo is
-  a lookup of group "1x") to the empty string. Mutually exclusive with
-  `request.strip_prefix` (validation rejects both). The cache key, ban
-  matching, purges, and all client-facing surfaces keep the original
-  public path, so invalidation addresses the URLs clients request. The
-  hit path is untouched: zero allocs/op gates hold, and non-matching
-  URIs pass through at 4 ns / 0 allocs.
+  linear time, no ReDoS) and `replace` (`$1` index and `$name` capture
+  references, `${1}x` braced disambiguation) are compiled once at config
+  load and applied exactly once on every origin-bound fetch: miss,
+  bypass, invalidating methods (POST/PUT/DELETE), foreground
+  revalidation, SWR background revalidation, refresh-before-expiry, and
+  stream fetches. Hardening, each pinned by tests: the query string is
+  split off before matching and re-appended unchanged (the pattern can
+  never swallow `?signature=...`), only the first match is replaced
+  (nginx semantics), a relative result is discarded (the origin request
+  line is never corrupted), output is capped at 16 KiB (blocking
+  `$1$1$1` amplification), pattern and template are capped at 512 B,
+  raw control bytes and raw request-target bytes (space, `?`, `#`) are
+  rejected in the template, and every `$reference` in the template must
+  resolve against the pattern's capture groups at config load — Go's
+  Expand would otherwise silently expand an unknown reference to the
+  empty string (the `$1x` typo is a lookup of group "1x"; a padded
+  index like `$01` is a name lookup, not group 1). The `${VAR}` config
+  interpolation only applies to env-var-shaped names, so `${1}x` loads
+  exactly as written. Mutually exclusive with `request.strip_prefix`
+  (validation rejects both). The cache key, ban matching, purges, and
+  all client-facing surfaces keep the original public path, so
+  invalidation addresses the URLs clients request. The hit path is
+  untouched: zero allocs/op gates hold, and non-matching URIs pass
+  through at 4 ns / 0 allocs.
 
 ### Fixed
+- `request.strip_prefix` on cache-enabled static routes was applied
+  twice on every origin fetch: the strip/rewrite wrappers were wired
+  into the upstream handler chain that the cache handler invokes, on
+  top of the cache handler's own origin-bound URI rewriting. A public
+  path carrying the prefix twice (`/api/api/f`) was stripped down to
+  `/f` instead of `/api/f`. The upstream handed to the cache handler is
+  now the bare static handler; the cache handler's origin-bound URI
+  rewriting is the single application point, and the in-process bypass
+  fallback applies it in place. The same restructure keeps
+  `request.path_rewrite` single-application on cached static routes
+  (non-idempotent patterns were silently applied twice).
+- `${VAR}` environment-variable interpolation in config files now
+  applies only to env-var-shaped names (a letter or underscore, then
+  letters, digits, or underscores). Braced runs that are not plausible
+  environment variable names — digit-leading sequences such as `${1}`
+  (a path_rewrite capture-group reference) — were silently replaced
+  with the value of an env var that cannot exist, usually the empty
+  string. They now survive the loader verbatim.
 - The cluster's peer PipelineClient diagnostics no longer bypass the
   structured log pipeline. Every "error in PipelineClient(...)" line
   from fasthttp's pipeline worker — dial refusals, EOFs, broken pipes,

@@ -116,7 +116,11 @@ func Load(path string) (*Config, error) {
 // Environment variable interpolation is applied before YAML decoding:
 // ${VAR} is replaced with the value of VAR from the process environment.
 // ${VAR:-default} provides a fallback when VAR is unset or empty.
-// Literal dollar signs can be escaped as $$.
+// Interpolation applies only to ${NAME} where NAME is shaped like an
+// environment variable name (a letter or underscore, then letters,
+// digits, or underscores); other braced sequences (e.g. ${1}, a
+// path_rewrite capture-group reference) are left untouched. Literal
+// dollar signs can be escaped as $$.
 func Parse(b []byte) (*Config, error) {
 	expanded := expandEnvVars(b)
 	cfg := Defaults()
@@ -260,6 +264,19 @@ func expandEnvVars(b []byte) []byte {
 				name = expr[:idx]
 				defVal = expr[idx+2:]
 			}
+			// Only env-var-shaped names interpolate. A braced run that
+			// starts with a digit ($1, ${1}, ${01}) or is otherwise not a
+			// plausible environment variable name is a path_rewrite
+			// capture-group reference or a typo, not an env lookup: POSIX
+			// env names never start with a digit. Leaving it verbatim keeps
+			// the documented `${1}x` template syntax intact through the
+			// loader; before this gate it was silently replaced with the
+			// (usually empty) value of an env var that cannot exist.
+			if !isEnvName(name) {
+				sb.WriteString(s[i : i+2+end+1])
+				i += 2 + end + 1
+				continue
+			}
 			val := os.Getenv(name)
 			if val == "" {
 				val = defVal
@@ -272,6 +289,28 @@ func expandEnvVars(b []byte) []byte {
 		i++
 	}
 	return []byte(sb.String())
+}
+
+// isEnvName reports whether s is shaped like a POSIX environment
+// variable name: a letter or underscore, then letters, digits, or
+// underscores. Environment-variable interpolation is restricted to
+// these names so braced capture-group references (`${1}`, `${01}`) and
+// other non-name runs survive the loader verbatim (see expandEnvVars).
+func isEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == '_' || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') {
+			continue
+		}
+		if i > 0 && '0' <= b && b <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ResolveHotMaxBytes derives the hot store memory budget from the
@@ -443,6 +482,17 @@ func validatePathRewrite(i int, req RouteRequest) error {
 	if err := rejectControlBytes("path_rewrite.replace", i, pw.Replace); err != nil {
 		return err
 	}
+	// The replace template is a literal, not a regex: bytes that cannot
+	// appear in an origin-form request-target can only corrupt the
+	// origin-bound request. A raw space breaks the request line
+	// (fasthttp writes it verbatim); a raw '?' splices a second query
+	// delimiter in front of the preserved original query; a raw '#' is
+	// a fragment marker. In the match pattern these stay legal (space
+	// and '?' are regex syntax there — a literal '?' in match simply
+	// never matches, since the query is split off first).
+	if err := rejectNonTargetBytes("path_rewrite.replace", i, pw.Replace); err != nil {
+		return err
+	}
 	// Compile now (RE2 — linear time, no backtracking, so an
 	// operator-supplied pattern cannot ReDoS the data plane). This is
 	// a correctness gate, not a compile-cache: cache.NewPathRewrite
@@ -470,6 +520,22 @@ func rejectControlBytes(field string, i int, s string) error {
 	for j := 0; j < len(s); j++ {
 		if s[j] < 0x20 || s[j] == 0x7f {
 			return fmt.Errorf("config: route %d %s contains a raw control byte (0x%02x) at offset %d — escape it or remove it",
+				i, field, s[j], j)
+		}
+	}
+	return nil
+}
+
+// rejectNonTargetBytes rejects raw bytes that cannot appear in an
+// origin-form request-target and are therefore always a mistake in the
+// literal replace template: space (breaks the origin request line),
+// '?' (the engine re-appends the original query itself, so a template
+// '?' splices a second delimiter into it), and '#' (fragment marker:
+// fasthttp drops it from the parsed path while sending it raw).
+func rejectNonTargetBytes(field string, i int, s string) error {
+	for j := 0; j < len(s); j++ {
+		if s[j] == ' ' || s[j] == '?' || s[j] == '#' {
+			return fmt.Errorf("config: route %d %s contains %q at offset %d — a request-target cannot carry it raw (write %%20 for a space; the query string is never modified by the template)",
 				i, field, s[j], j)
 		}
 	}
@@ -527,6 +593,15 @@ func validateTemplateRefs(i int, re *regexp.Regexp, template string) error {
 // resolveTemplateRef checks one parsed reference against the pattern.
 func resolveTemplateRef(i int, ref string, numGroups int, names []string) error {
 	if allDigits(ref) {
+		// Go's Expand disallows leading-zero indexes: extract() marks
+		// them as names ("01" is a group name, not group 1), and an
+		// unknown name expands to the empty string. Reject the padded
+		// form rather than silently dropping text from every rewritten
+		// path — the same failure class as an out-of-range index.
+		if len(ref) > 1 && ref[0] == '0' {
+			return fmt.Errorf("config: route %d path_rewrite.replace references $%s — leading-zero group indexes are not valid (Go expands them to the empty string); write the index without padding",
+				i, ref)
+		}
 		n, err := strconv.Atoi(ref)
 		if err != nil || n > numGroups {
 			return fmt.Errorf("config: route %d path_rewrite.replace references group $%s but the pattern has only %d capture group(s)",

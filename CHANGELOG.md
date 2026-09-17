@@ -23,8 +23,12 @@ the curated, human-readable summary.
   unchanged (the pattern can never swallow `?signature=...`), only the
   first match is replaced (nginx semantics), a relative result is
   discarded (the origin request line is never corrupted), output is
-  capped at 16 KiB (blocking `$1$1$1` amplification), and pattern and
-  template are capped at 512 B. Mutually exclusive with
+  capped at 16 KiB (blocking `$1$1$1` amplification), pattern and
+  template are capped at 512 B, raw control bytes are rejected, and
+  every `$reference` in the template must resolve against the
+  pattern's capture groups at config load — Go's Expand would
+  otherwise silently expand an unknown reference (the `$1x` typo is
+  a lookup of group "1x") to the empty string. Mutually exclusive with
   `request.strip_prefix` (validation rejects both). The cache key, ban
   matching, purges, and all client-facing surfaces keep the original
   public path, so invalidation addresses the URLs clients request. The

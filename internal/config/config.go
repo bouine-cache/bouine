@@ -701,14 +701,25 @@ type PathRewriteConfig struct {
 	// Match is the RE2 pattern applied to the path part of the request
 	// URI. Use capture groups (`(.*)`) and reference them from Replace
 	// (`$1`). Anchors (`^`, `$`) are the operator's choice, exactly like
-	// nginx rewrite. Capped at MaxPathRewritePatternBytes. Required.
+	// nginx rewrite. Capped at MaxPathRewritePatternBytes. Raw control
+	// bytes (CR, LF, NUL, ...) are rejected at validation: request paths
+	// cannot carry them, so they could only produce a corrupted origin
+	// request. Escaped forms in the pattern (`\x0d`) remain legal
+	// syntax — they simply never match a path. Required.
 	Match string `yaml:"match,omitempty" json:"match,omitempty"`
 	// Replace is the replacement template substituted for the first
-	// match. `$1`–`$9` reference capture groups. Capped at
-	// MaxPathRewritePatternBytes. Required. The rewritten path must
+	// match. `$1`, `$2`, ... reference capture groups (`$0` is the whole
+	// match); `(?P<name>...)` groups are referenced as `$name`.
+	// `$name` grabs the longest word-run that follows, so write
+	// `${1}x` for "group 1 plus literal x" — `$1x` references a group
+	// named "1x". `$$` is a literal dollar. Every reference must
+	// resolve against the pattern's groups: an out-of-range index or
+	// unknown name is rejected at validation, because Go's Expand
+	// would otherwise silently expand it to the empty string. Capped
+	// at MaxPathRewritePatternBytes. Required. The rewritten path must
 	// start with "/" — a replacement producing a relative path would
-	// corrupt the origin request line, so the rewrite is skipped
-	// instead (the origin sees the original path).
+	// corrupt the origin request line, so the rewrite is skipped at
+	// runtime instead (the origin sees the original path).
 	Replace string `yaml:"replace,omitempty" json:"replace,omitempty"`
 }
 

@@ -79,3 +79,22 @@ first range as 206 (per RFC 9110 §14.3.2). Unsatisfiable range → 416.
 - `bouine_staticfile_requests_total{route, result}` — result is one of:
   `served`, `not_found`, `too_large`, `traversal_blocked`, `method_not_allowed`.
 - `bouine_staticfile_bytes_total{route}` — total bytes served.
+
+## Path rewrites on static routes
+
+`request.strip_prefix` and `request.path_rewrite` (mutually exclusive)
+rewrite the path the static file handler resolves, while the cache key
+keeps the public path. On cache-enabled static routes the rewrite is
+applied exactly once, by the cache handler's origin-bound URI rewriting
+(the static handler is wired as the bare upstream).
+
+**Failure mode — rewrite silently skipped**: a `path_rewrite` whose
+result is not an absolute path (`/...`) or exceeds 16 KiB is discarded
+per request and the origin sees the original public path. On a static
+route this surfaces as `not_found` on `bouine_staticfile_requests_total`
+for a file that demonstrably exists at the rewritten location. Check the
+`replace` template: a template that does not start with `/` when the
+match is anchored (`^`) always produces a relative result. Validation
+rejects the template bytes that can corrupt the request (control bytes,
+raw space, `?`, `#`) at startup, so a mid-flight 4xx/5xx from the origin
+is not a rewrite failure — only silent `not_found` is.

@@ -712,14 +712,24 @@ type PathRewriteConfig struct {
 	// match); `(?P<name>...)` groups are referenced as `$name`.
 	// `$name` grabs the longest word-run that follows, so write
 	// `${1}x` for "group 1 plus literal x" — `$1x` references a group
-	// named "1x". `$$` is a literal dollar. Every reference must
-	// resolve against the pattern's groups: an out-of-range index or
+	// named "1x". Every reference must resolve against the pattern's
+	// groups: an out-of-range index, a leading-zero index (`$01`), or an
 	// unknown name is rejected at validation, because Go's Expand
-	// would otherwise silently expand it to the empty string. Capped
-	// at MaxPathRewritePatternBytes. Required. The rewritten path must
-	// start with "/" — a replacement producing a relative path would
-	// corrupt the origin request line, so the rewrite is skipped at
-	// runtime instead (the origin sees the original path).
+	// would otherwise silently expand it to the empty string. Raw bytes
+	// that cannot appear in a request-target (control bytes, space,
+	// '?', '#') are also rejected: the query string is never modified
+	// by the template, and those bytes could only corrupt the origin
+	// request. Note for config files: the loader's ${VAR} interpolation
+	// only applies to env-var-shaped names, so `${1}x` loads as
+	// written; a braced named reference (`${name}`) collides with env
+	// interpolation when an env var of that name is set — escape the
+	// dollar as `$${name}`. A literal dollar in the template is `$$`,
+	// written `$$$$` in a config file (the loader's `$$` escape
+	// consumes one level). Capped at MaxPathRewritePatternBytes.
+	// Required. The rewritten path must start with "/" — a replacement
+	// producing a relative path would corrupt the origin request line,
+	// so the rewrite is skipped at runtime instead (the origin sees the
+	// original path).
 	Replace string `yaml:"replace,omitempty" json:"replace,omitempty"`
 }
 

@@ -712,6 +712,9 @@ func TestValidate_PathRewrite_TemplateRefs(t *testing.T) {
 		{"dollar at end is lone", `^/a/`, "/b/$", "lone '$'"},
 		{"index run past groups is a name", `^/a/(.*)$`, "/b/$1x", "unknown group \"1x\""},
 		{"out-of-range index", `^/a/(.*)$`, "/b/$2", "only 1 capture group"},
+		{"leading zero index", `^/a/(.*)$`, "/b/$01", "leading-zero group indexes"},
+		{"braced leading zero index", `^/a/(.*)$`, "/b/${01}x", "leading-zero group indexes"},
+		{"double zero index", `^/a/(.*)$`, "/b/$00", "leading-zero group indexes"},
 		{"unknown name", `^/a/(.*)$`, "/b/$user", "unknown group \"user\""},
 		{"unterminated brace", `^/a/(.*)$`, "/b/${1", "unterminated"},
 	}
@@ -757,6 +760,11 @@ func TestValidate_PathRewrite_ControlBytes(t *testing.T) {
 		{"DEL in replace", `^/a/(.*)$`, "/b/\x7f$1", "raw control byte"},
 		{"escaped form in match legal", `^/a/\x0d/(.*)$`, "/b/$1", ""},
 		{"escape syntax legal", `^/a/[\r\n]/(.*)$`, "/b/$1", ""},
+		{"space in replace", `^/a/(.*)$`, "/b/a b$1", "cannot carry it raw"},
+		{"question mark in replace", `^/a/(.*)$`, "/b/$1?x=1", "cannot carry it raw"},
+		{"hash in replace", `^/a/(.*)$`, "/b/$1#frag", "cannot carry it raw"},
+		{"regex quantifier in match stays legal", `^/a/(x?)$`, "/b/$1", ""},
+		{"percent-encoded space in replace legal", `^/a/(.*)$`, "/b/a%20b/$1", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1162,6 +1170,53 @@ func TestExpandEnvVars_NoMatch(t *testing.T) {
 func TestExpandEnvVars_UnclosedBrace(t *testing.T) {
 	got := expandEnvVars([]byte("val: ${UNCLOSED"))
 	require.Equal(t, "val: ${UNCLOSED", string(got))
+}
+
+// TestExpandEnvVars_NonNameBracesLeftLiteral pins the interpolation
+// restriction: only env-var-shaped names expand. Digit-leading and
+// otherwise non-name braced runs (path_rewrite capture-group references
+// such as ${1}) survive the loader verbatim instead of being silently
+// replaced with the value of an env var that cannot exist.
+func TestExpandEnvVars_NonNameBracesLeftLiteral(t *testing.T) {
+	t.Setenv("BOUINE_TEST_HOST", "api.example.com")
+	for _, raw := range []string{
+		"replace: /b/${1}x",
+		"replace: /b/${01}",
+		"replace: /b/${1x}",
+		"replace: /b/${a.b}",
+		"replace: /b/${}",
+	} {
+		got := string(expandEnvVars([]byte(raw)))
+		require.Equal(t, raw, got, "non-name braces must survive verbatim: %s", raw)
+	}
+	// Env-var-shaped names still expand, with and without defaults.
+	got := string(expandEnvVars([]byte("a: ${BOUINE_TEST_HOST} b: ${unset_var:-d}")))
+	require.Contains(t, got, "api.example.com")
+	require.Contains(t, got, "b: d")
+}
+
+// TestParse_PathRewrite_BracedRefSurvivesInterpolation pins the
+// documented `${1}x` disambiguation syntax end-to-end through the YAML
+// loader: the braced capture-group reference must reach validation
+// intact (the ${VAR} interpolation only applies to env-var-shaped
+// names) and resolve against the pattern's groups.
+func TestParse_PathRewrite_BracedRefSurvivesInterpolation(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { path_prefix: /a }
+    pool: app
+    request:
+      path_rewrite:
+        match: ^/a/(.*)$
+        replace: /b/${1}x
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the documented ${1}x braced syntax must load and validate")
+	assert.Equal(t, "/b/${1}x", cfg.Routes[0].Request.PathRewrite.Replace)
 }
 
 func TestParse_EnvVarInterpolation(t *testing.T) {

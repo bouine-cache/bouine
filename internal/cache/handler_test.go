@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -2958,7 +2959,7 @@ func TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy(t *testing.T) {
 		// A query-param-stripping policy: BuildKey drops "utm_foo", so
 		// the slow path's lookup key differs from the fast path's
 		// nil-policy key for the same URL.
-		Policy: NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false),
+		Policy: NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil),
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
@@ -2980,7 +2981,7 @@ func TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy(t *testing.T) {
 	assert.Equal(t, int32(1), originCalls.Load())
 	if len(peerFetchKeys) == 1 {
 		want := BuildKey(requestInfoFromURL("GET", "http://example.com/policied?utm_foo=x"),
-			NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false))
+			NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil))
 		assert.Equal(t, want, peerFetchKeys[0], "peer RPC must use the policied (stripped) key")
 	}
 }
@@ -3045,7 +3046,7 @@ func TestHandleCacheMiss_GateRejectHintIgnoredWithKeyPolicy(t *testing.T) {
 		Upstream:   originUpstream,
 		FastClient: &testFastClient{handler: originUpstream},
 		Store:      store,
-		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false),
+		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil),
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
@@ -3391,7 +3392,7 @@ func TestLookup_VaryVariantMiss(t *testing.T) {
 func TestAppendCanonicalQueryString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [256]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
 	// "q=test&utm=x" → should strip utm, keep q.
 	n := appendCanonicalQueryString(buf[:], 0, "q=test&utm=x", policy)
 	result := string(buf[:n])
@@ -3420,7 +3421,7 @@ func TestAppendCanonicalQueryString_MoreThan8Params(t *testing.T) {
 func TestAppendCanonicalQuerySlowString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [512]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
 	n := appendCanonicalQuerySlowString(buf[:], 0, "q=test&utm=x&fbclid=123", policy)
 	result := string(buf[:n])
 	assert.Contains(t, result, "q=test")
@@ -4388,4 +4389,204 @@ func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
 	require.True(t, owned)
 
 	require.Equal(t, 0, h.refreshRegistry.Len(), "refresh registry should be cleared after soft purge with hard delete")
+}
+
+// --- cache.key.include_headers (issue #632) ---
+
+// TestIncludeHeaders_OriginNoVary is the acceptance test for
+// cache.key.include_headers: a route whose policy includes
+// Accept-Language, an origin that sends no Vary at all, must still
+// store distinct variants per Accept-Language value — exactly as if
+// the origin had sent "Vary: Accept-Language". A request without the
+// header selects the empty-value variant (RFC 9111 Vary semantics),
+// and list-value normalization collapses "en, FR" and "fr, en".
+func TestIncludeHeaders_OriginNoVary(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("lang=" + string(ctx.Request.Header.Peek(header.AcceptLanguage))))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}),
+	})
+
+	serve := func(al string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", "http://example.com/v")
+		if al != "" {
+			ctx.Request.Header.Set(header.AcceptLanguage, al)
+		}
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	// en and fr store distinct variants.
+	rEn := serve("en")
+	require.Equal(t, "MISS", respHeader(rEn, header.XCache))
+	require.Equal(t, "lang=en", respBody(rEn))
+	rFr := serve("fr")
+	require.Equal(t, "MISS", respHeader(rFr, header.XCache))
+	require.Equal(t, "lang=fr", respBody(rFr))
+
+	// Each variant hits with its own body.
+	rEn2 := serve("en")
+	require.Equal(t, "HIT", respHeader(rEn2, header.XCache))
+	require.Equal(t, "lang=en", respBody(rEn2))
+	rFr2 := serve("fr")
+	require.Equal(t, "HIT", respHeader(rFr2, header.XCache))
+	require.Equal(t, "lang=fr", respBody(rFr2))
+
+	// A request without the header selects the empty-value variant.
+	rNone := serve("")
+	require.Equal(t, "MISS", respHeader(rNone, header.XCache))
+	require.Equal(t, "lang=", respBody(rNone))
+	rNone2 := serve("")
+	require.Equal(t, "HIT", respHeader(rNone2, header.XCache))
+	require.Equal(t, "lang=", respBody(rNone2))
+
+	// "en, FR" and "fr, en" collapse onto the en/fr-normalized variant
+	// order: isListValuedVaryField normalizes Accept-Language for keying.
+	rA := serve("en, FR")
+	require.Equal(t, "MISS", respHeader(rA, header.XCache))
+	require.Equal(t, "lang=en, FR", respBody(rA))
+	rB := serve("FR, en")
+	require.Equal(t, "HIT", respHeader(rB, header.XCache), `"FR, en" must hit the "en, FR" variant`)
+	require.Equal(t, "lang=en, FR", respBody(rB))
+
+	require.Equal(t, int32(4), originCalls.Load(), "en, fr, empty and en-FR variants fetch once each")
+}
+
+// TestIncludeHeaders_MixedWithOriginVary covers the union case: origin
+// sends "Vary: Accept-Encoding" and the route includes Accept-Language —
+// both fields key the variant.
+func TestIncludeHeaders_MixedWithOriginVary(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("enc=" + string(ctx.Request.Header.Peek(header.AcceptEncoding)) +
+			" lang=" + string(ctx.Request.Header.Peek(header.AcceptLanguage))))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}),
+	})
+
+	serve := func(enc, lang string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", "http://example.com/v")
+		ctx.Request.Header.Set(header.AcceptEncoding, enc)
+		if lang != "" {
+			ctx.Request.Header.Set(header.AcceptLanguage, lang)
+		}
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	// (gzip, en) stores a variant.
+	r1 := serve("gzip", "en")
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	// (gzip, fr) is a different variant: same Vary field, different
+	// include field.
+	r2 := serve("gzip", "fr")
+	require.Equal(t, "MISS", respHeader(r2, header.XCache))
+	require.Equal(t, "enc=gzip lang=fr", respBody(r2))
+	// (gzip, en) hits.
+	r3 := serve("gzip", "en")
+	require.Equal(t, "HIT", respHeader(r3, header.XCache))
+	require.Equal(t, "enc=gzip lang=en", respBody(r3))
+	require.Equal(t, int32(2), originCalls.Load())
+}
+
+// TestIncludeHeaders_304RefreshKeepsUnion pins the 304 revalidation
+// path: an object stored under an include-listed field must keep the
+// union in VaryValue after revalidation, or the refreshed object would
+// collapse onto the primary key and cross-variant contamination
+// follows.
+func TestIncludeHeaders_304RefreshKeepsUnion(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"})
+
+	// A stored object whose origin sent no Vary: the union is the
+	// include list alone.
+	storedHeader := headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`)
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		StatusCode: 200,
+		Header:     storedHeader.Clone(),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+		VaryValue:  "accept-language",
+	}
+
+	// 304 responses carry no Vary line at all.
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.CacheControl, "max-age=60")),
+	}
+	refreshed := h.refreshFrom304(stale, res, time.Now())
+	require.Equal(t, "accept-language", refreshed.VaryValue,
+		"a 304 without Vary must not drop the include_headers union from VaryValue")
+
+	// And a 304 that re-sends a partial Vary keeps the union too.
+	res2 := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.Vary, "Accept-Encoding")),
+	}
+	refreshed2 := h.refreshFrom304(stale, res2, time.Now())
+	require.Equal(t, "accept-encoding, accept-language", refreshed2.VaryValue)
+}
+
+// TestIncludeHeaders_PeerVaryGateParity mirrors
+// TestPeerVaryGateHeaderParity for include-keyed variants: an
+// owner-stored variant whose VaryValue carries the union must gate
+// correctly on the requester side — the gate recomputes BuildVaryKey
+// from the stored VaryValue, so as long as VaryValue and VaryKey are
+// the same union the peer hit resolves.
+func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
+	t.Parallel()
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "BM-Market"})
+
+	// The owner's view: a request parsed by fasthttp.
+	var rctx fasthttp.RequestCtx
+	require.NoError(t, rctx.Request.Read(bufio.NewReader(strings.NewReader(
+		"GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nBM-Market: US\r\n\r\n"))))
+	fastView := headerFromCtx(&rctx)
+
+	// An object stored with the union as VaryValue: origin sent
+	// "Vary: Accept-Encoding", include list contributed the rest.
+	varyValue := effectiveVary(headerMap(header.Vary, "Accept-Encoding"), policy)
+	require.Equal(t, "accept-encoding, accept-language, bm-market", varyValue)
+
+	vk := BuildVaryKey(varyValue, fastView, nil)
+
+	// The requester-side gate: identical BuildVaryKey over the stored
+	// VaryValue must reproduce the stored VaryKey.
+	got := BuildVaryKey(varyValue, fastView, nil)
+	require.Equal(t, vk, got)
+
+	// A different Accept-Language must NOT match the stored VaryKey —
+	// the cross-variant body-swap guard.
+	var other fasthttp.RequestCtx
+	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(
+		"GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nBM-Market: US\r\n\r\n"))))
+	otherVK := BuildVaryKey(varyValue, headerFromCtx(&other), nil)
+	require.NotEqual(t, vk, otherVK, "a different include-listed header value must fail the peer gate")
 }

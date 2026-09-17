@@ -73,7 +73,7 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 
 func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
 	h1 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "abc")
 	h2 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "xyz")
 	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, excludePolicy)
@@ -87,7 +87,7 @@ func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 
 func TestBuildVaryKey_ExcludeAllHeaders(t *testing.T) {
 	t.Parallel()
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
 	h1 := headerMap("X-Request-Id", "abc")
 	h2 := headerMap("X-Request-Id", "xyz")
 	k1 := BuildVaryKey("X-Request-Id", h1, excludePolicy)
@@ -221,25 +221,25 @@ func TestBuildKey_NormaliseListHeader_NoComma(t *testing.T) {
 func TestBuildKey_PolicySlowPath(t *testing.T) {
 	t.Parallel()
 	// Exercise the policy slow path (appendCanonicalQuerySlow) with keepParams.
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false)
+	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripEmpty(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&empty="), policy))
 }
 
 func TestBuildKey_PolicySlowPath_Dedup(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2&a=1"), policy))
 }
 
@@ -258,32 +258,32 @@ func TestBuildKey_MoreThan8Params(t *testing.T) {
 
 func TestAppendCanonicalQuerySlow_KeepParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
 	// Use percent-encoded params to force the slow path.
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false)
+	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripPrefixes(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false)
+	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm_source=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripEmpty(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&empty="), policy))
 }
 
 func TestAppendCanonicalQuerySlow_Dedup(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%32&a=%31"), policy))
 }
 
@@ -292,6 +292,7 @@ func TestAppendCanonicalQuerySlow_AllFeatures(t *testing.T) {
 	policy := NewKeyPolicy(
 		map[string]bool{"q": true},
 		nil, nil, nil, true, true,
+		nil,
 	)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&q=dup&empty="), policy))
 }

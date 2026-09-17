@@ -34,3 +34,10 @@
 # - max-age, max-stale, min-fresh request directives
 # - only-if-cached
 # - immutable
+#
+# FuzzEffectiveVary seeds:
+# - origin Vary unioned with include list (sorted output)
+# - empty Vary with include list (include-only route)
+# - origin field also present in include list (dedup)
+# - mixed-case and whitespace-padded fields (trim + lowercase)
+# - 16+ entry union (pathological, stays on the alloc path)

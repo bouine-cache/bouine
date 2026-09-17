@@ -416,29 +416,20 @@ tls:
     - cert_file: /etc/bouine/tls/api.crt
       key_file:  /etc/bouine/tls/api.key
       sni:       ["api.example.com", "*.api.example.com"]
-  alpn: [h2, http/1.1]
   min_version: "1.2"
-  ocsp_stapling: auto
 
 storage:
   hot_max_bytes:  2Go
   warm_dir:       /var/lib/bouine
   warm_max_bytes: 20Go
-  eviction:       sieve
 
 cluster:
-  enabled:   true
   join:      ["bouine-headless.default.svc.cluster.local"]
-  replicas:  2
   hop_limit: 2
 
 upstream_pools:
   - name: app
     targets: [app.default.svc:8080]
-    tls:
-      enabled:    false
-      ca_bundle:  /etc/bouine/upstream-ca.pem
-      min_version: "1.2"
     health:
       active:
         path:                /healthz
@@ -458,10 +449,6 @@ routes:
       stale_if_error:        5m
       key:
         include_headers: [Accept-Language]
-      prefetch:
-        link_rel_preload: true
-        sitemap:          https://api.example.com/sitemap.xml
-        max_concurrency:  4
 ```
 
 ---

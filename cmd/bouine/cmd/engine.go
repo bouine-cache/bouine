@@ -606,7 +606,7 @@ func sanitizedConfig(cfg config.Config) config.Config {
 // cache key using the default key policy, looks up the store, and
 // returns what the cache engine would do with this request.
 func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheCheckResult {
-	policy := cache.NewKeyPolicy(nil, nil, nil, nil, false, false)
+	policy := cache.NewKeyPolicy(nil, nil, nil, nil, false, false, nil)
 	key := cache.BuildKeyFromURL(rawURL, policy)
 	result := admin.CacheCheckResult{
 		URL:    rawURL,

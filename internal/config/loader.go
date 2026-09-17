@@ -764,6 +764,41 @@ func validateRouteKey(i int, rk RouteKey) error {
 			return fmt.Errorf("config: route %d strip_query_prefix[%d] must be non-empty", i, j)
 		}
 	}
+	if err := validateIncludeHeaders(i, rk); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateIncludeHeaders validates cache.key.include_headers: capped at
+// 16 entries (mirrors strip_query_prefix), no empty entries, no "*" (a
+// wildcard Vary is unkeyable and would explode the variant space),
+// no case-insensitive duplicates, and no overlap with exclude_headers —
+// the overlap check is load-bearing, not cosmetic: an excluded header
+// force-included into the key would silently collapse variants.
+func validateIncludeHeaders(i int, rk RouteKey) error {
+	if len(rk.IncludeHeaders) > 16 {
+		return fmt.Errorf("config: route %d include_headers capped at 16 entries, got %d", i, len(rk.IncludeHeaders))
+	}
+	seen := make(map[string]bool, len(rk.IncludeHeaders))
+	for j, h := range rk.IncludeHeaders {
+		if h == "" {
+			return fmt.Errorf("config: route %d include_headers[%d] must be non-empty", i, j)
+		}
+		lower := strings.ToLower(h)
+		if lower == "*" {
+			return fmt.Errorf("config: route %d include_headers[%d] must not be \"*\": a wildcard Vary is unkeyable (RFC 9111 §4.1)", i, j)
+		}
+		if seen[lower] {
+			return fmt.Errorf("config: route %d include_headers[%d] (%s) is a duplicate (comparison is case-insensitive)", i, j, h)
+		}
+		seen[lower] = true
+	}
+	for j, h := range rk.ExcludeHeaders {
+		if seen[strings.ToLower(h)] {
+			return fmt.Errorf("config: route %d exclude_headers[%d] (%s) is also listed in include_headers: an excluded header must not participate in the key", i, j, h)
+		}
+	}
 	return nil
 }
 

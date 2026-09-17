@@ -1,6 +1,9 @@
 package cache
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // KeyPolicy encodes cache key construction rules for a route.
 // Allocated once at handler construction; read-only on the hot path.
@@ -14,9 +17,15 @@ type KeyPolicy struct {
 	stripParams    map[string]bool // exact names to strip from query
 	keepParams     map[string]bool // when non-nil, allowlist (only these participate)
 	excludeHeaders map[string]bool // headers to exclude from Vary variant key
-	stripPrefixes  []string        // prefix patterns to strip, capped at 16
-	stripEmpty     bool            // strip params with empty values
-	dedup          bool            // keep first value (in request order) for duplicate params
+	// includeHeaders is the route's cache.key.include_headers allow-list,
+	// trimmed, lowercased, and sorted at construction; read-only
+	// afterwards. The fields are unioned into the stored Vary at
+	// object-build time (see effectiveVary), so the variant-key
+	// hash-input builders in vary.go never need to know about them.
+	includeHeaders []string
+	stripPrefixes  []string // prefix patterns to strip, capped at 16
+	stripEmpty     bool     // strip params with empty values
+	dedup          bool     // keep first value (in request order) for duplicate params
 }
 
 // shouldStripParam returns true if the query param should be excluded
@@ -106,7 +115,27 @@ func (p *KeyPolicy) HasQueryPolicy() bool {
 
 // NewKeyPolicy constructs a KeyPolicy from the given parameters.
 // All maps are pre-allocated; the returned policy is read-only.
-func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool) *KeyPolicy {
+// includeHeaders is trimmed, lowercased, and sorted here: config
+// validation guarantees no duplicates, so the canonical form makes the
+// stored union deterministic and lets effectiveVary dedupe a field the
+// origin also lists in Vary (its own trims must match).
+func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool, includeHeaders []string) *KeyPolicy {
+	if len(includeHeaders) > 0 {
+		lowered := make([]string, 0, len(includeHeaders))
+		for _, h := range includeHeaders {
+			if h = strings.TrimSpace(strings.ToLower(h)); h != "" {
+				lowered = append(lowered, h)
+			}
+		}
+		if len(lowered) == 0 {
+			includeHeaders = nil
+		} else {
+			sort.Strings(lowered)
+			includeHeaders = lowered
+		}
+	} else {
+		includeHeaders = nil
+	}
 	return &KeyPolicy{
 		stripParams:    stripParams,
 		keepParams:     keepParams,
@@ -114,7 +143,17 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 		stripEmpty:     stripEmpty,
 		dedup:          dedup,
 		excludeHeaders: excludeHeaders,
+		includeHeaders: includeHeaders,
 	}
+}
+
+// IncludeHeaders returns the route's include_headers allow-list,
+// lowercased and sorted; nil when the route declares none.
+func (p *KeyPolicy) IncludeHeaders() []string {
+	if p == nil {
+		return nil
+	}
+	return p.includeHeaders
 }
 
 // ShouldExcludeHeader returns true if the given header name should be

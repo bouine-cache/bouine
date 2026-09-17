@@ -649,6 +649,22 @@ type RouteKey struct {
 	// per-request headers (X-Request-ID, X-Trace-ID) from fragmenting
 	// the cache when the origin includes them in Vary.
 	ExcludeHeaders []string `yaml:"exclude_headers,omitempty" json:"exclude_headers,omitempty"`
+	// IncludeHeaders adds the listed request header names to the
+	// Vary-based variant key, exactly as if the origin had listed
+	// them in Vary: the effective Vary is the union of the response's
+	// Vary field names and this list, never a replacement. Use this
+	// when the origin varies by a header but does not — or cannot —
+	// send Vary. A request header absent from the request hashes as
+	// an empty value (one variant), matching RFC 9111 Vary
+	// semantics. Validation rejects "*", empty entries,
+	// case-insensitive duplicates, entries also listed in
+	// exclude_headers (an excluded header force-included into the
+	// key would collapse variants), and more than 16 entries. The
+	// list must be identical across all cluster nodes serving the
+	// route: a node with a different include list stores and
+	// resolves variants under different keys (same hazard class as
+	// exclude_headers).
+	IncludeHeaders []string `yaml:"include_headers,omitempty" json:"include_headers,omitempty"`
 	// KeepQueryParams, when non-empty, restricts the cache key to only
 	// these query parameters; all others are excluded. Mutually
 	// exclusive with strip_query_params and strip_query_prefix.

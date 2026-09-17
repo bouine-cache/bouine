@@ -2056,7 +2056,11 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute HasDate in case the 304 response added or changed Date.
 	refreshed.HasDate = refreshed.Header.Has(header.Date)
-	refreshed.VaryValue = joinedVary(refreshed.Header)
+	// effectiveVary keeps the stored VaryValue carrying the route's
+	// include_headers union across revalidation: a 304 that drops Vary
+	// (or is served by an origin that never sent it) must not collapse
+	// an include-keyed variant onto the primary key.
+	refreshed.VaryValue = effectiveVary(refreshed.Header, h.policy)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	newCC := ParseCacheControl(refreshed.CacheControl)
@@ -2227,7 +2231,7 @@ func (h *Handler) writeAndMaybeStore(
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
-		if vary := joinedVary(resMap); vary != "" {
+		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -3029,11 +3033,13 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 		HasDate:      hasDate,
-		// joinedVary, not Get: Vary is list-based, so field lines split
-		// across multiple headers combine per RFC 9110 §5.2. Get kept only
-		// the first line and the variant key ignored the later field
-		// names, collapsing distinct variants onto one cache entry.
-		VaryValue:          joinedVary(resMap),
+		// effectiveVary, not joinedVary/Get: Vary is list-based, so field
+		// lines split across multiple headers combine per RFC 9110 §5.2, and
+		// cache.key.include_headers fields are unioned in. The union is
+		// computed once so VaryValue and VaryKey below see the identical
+		// value — skew between them breaks the peer variant gates
+		// (handler.go handleCacheMiss, fastpath.go peerGateMatchesVary).
+		VaryValue:          effectiveVary(resMap, policy),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 	}
@@ -3079,7 +3085,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(joinedVary(resMap), ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(obj.VaryValue, ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 

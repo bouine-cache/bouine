@@ -67,7 +67,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	require.Equal(t, primary, VariantKey(primary, "*", header.Map{}, nil))
 
 	// Policy exclusions don't change the result — still primary.
-	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false)
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false, nil)
 	require.Equal(t, primary, VariantKey(primary, "*", h1, policy))
 }
 
@@ -77,7 +77,7 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	// Exclude map uses lowercase; Vary header uses mixed case.
 	// VariantKey lowercases Vary fields before lookup, so this should
 	// match.
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
 	h1 := headerMap("X-Request-ID", "abc")
 	h2 := headerMap("X-Request-ID", "xyz")
 	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
@@ -508,4 +508,114 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 	resp2, ok := fp.TryHit(marketReq("us"), time.Now())
 	assert.False(t, ok, "a different BM-Market must not hit the fr variant")
 	assert.Nil(t, resp2)
+}
+
+// --- effectiveVary (cache.key.include_headers union) ---
+
+// includePolicy builds a KeyPolicy with only an include_headers list,
+// the shape a route with no other key knobs produces.
+func includePolicy(include ...string) *KeyPolicy {
+	return NewKeyPolicy(nil, nil, nil, nil, false, false, include)
+}
+
+func TestEffectiveVary_IncludeEmptyPassthrough(t *testing.T) {
+	t.Parallel()
+	multi := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
+	multi.AppendEntry(header.Vary, "BM-Market")
+	for name, policy := range map[string]*KeyPolicy{
+		"nil policy":    nil,
+		"empty include": includePolicy(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market",
+				effectiveVary(multi, policy))
+		})
+	}
+}
+
+func TestEffectiveVary_ZeroAllocsWhenIncludeEmpty(t *testing.T) {
+	// Not parallel: AllocsPerRun cannot run during parallel tests.
+	m := headerMap(header.Vary, "Accept-Encoding")
+	// With a nil policy (or an empty include list) effectiveVary is a
+	// direct joinedVary passthrough, so it must not add a single
+	// allocation over joinedVary itself. The absolute count cannot be
+	// pinned to 0: under -race the detector charges header.Map's
+	// shared-slice reads one instrumentation alloc, so the assertion
+	// is on the delta, which is 0 in every mode.
+	base := testing.AllocsPerRun(100, func() {
+		_ = joinedVary(m)
+	})
+	for name, policy := range map[string]*KeyPolicy{
+		"nil policy":    nil,
+		"empty include": includePolicy(),
+	} {
+		withPolicy := testing.AllocsPerRun(100, func() {
+			_ = effectiveVary(m, policy)
+		})
+		require.Equal(t, base, withPolicy, "%s must be a zero-alloc passthrough", name)
+	}
+}
+
+func TestEffectiveVary_Union(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		varyMap header.Map
+		include []string
+		want    string
+	}{
+		{
+			name:    "include only, origin sends no vary",
+			varyMap: headerMap(header.ContentType, "text/html"),
+			include: []string{"Accept-Language"},
+			want:    "accept-language",
+		},
+		{
+			name:    "union with origin vary, sorted",
+			varyMap: headerMap(header.Vary, "Accept-Encoding"),
+			include: []string{"Accept-Language"},
+			want:    "accept-encoding, accept-language",
+		},
+		{
+			name:    "response field also in include appears once",
+			varyMap: headerMap(header.Vary, "Accept-Language"),
+			include: []string{"accept-language", "BM-Market"},
+			want:    "accept-language, bm-market",
+		},
+		{
+			name: "multi-line vary unions and dedupes",
+			varyMap: func() header.Map {
+				m := headerMap(header.Vary, "Accept-Encoding, Accept-Language")
+				m.AppendEntry(header.Vary, "BM-Market")
+				return m
+			}(),
+			include: []string{"X-Region", "accept-language"},
+			want:    "accept-encoding, accept-language, bm-market, x-region",
+		},
+		{
+			name:    "mixed-case include lowercased",
+			varyMap: headerMap(header.Vary, "Accept-Encoding"),
+			include: []string{"X-Geo-Region"},
+			want:    "accept-encoding, x-geo-region",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := effectiveVary(tc.varyMap, includePolicy(tc.include...))
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestEffectiveVary_DeterministicAcrossIncludeOrder pins the property
+// cluster consistency depends on: the same include set in any
+// configuration order produces the same stored VaryValue.
+func TestEffectiveVary_DeterministicAcrossIncludeOrder(t *testing.T) {
+	t.Parallel()
+	m := headerMap(header.Vary, "Accept-Encoding")
+	a := effectiveVary(m, includePolicy("X-Region", "Accept-Language", "BM-Market"))
+	b := effectiveVary(m, includePolicy("bm-market", "x-region", "ACCEPT-LANGUAGE"))
+	require.Equal(t, a, b)
 }

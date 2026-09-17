@@ -38,6 +38,21 @@ the curated, human-readable summary.
   invalidation addresses the URLs clients request. The hit path is
   untouched: zero allocs/op gates hold, and non-matching URIs pass
   through at 4 ns / 0 allocs.
+- `cache.key.include_headers` (issue #632) — a per-route allow-list of
+  request headers that participate in the variant key exactly as if the
+  origin had listed them in `Vary`: the include list is unioned with the
+  response's `Vary` at object-build time (never a replacement), so the
+  hit path, the H1 fast path, and every peer variant gate work
+  unchanged. A request header absent from the request hashes as an
+  empty value (one variant), matching RFC 9111 Vary semantics. Use it
+  when the origin varies by a header (e.g. `Accept-Language`) but does
+  not send `Vary`. Validation rejects `*`, empty entries,
+  case-insensitive duplicates, entries also present in
+  `exclude_headers`, and lists longer than 16 entries. Routes without
+  an include list keep the zero-allocation passthrough, so miss-path
+  alloc budgets are unchanged (ADR-0046). The flagship config example
+  in `docs/architecture.md` now parses under the strict decoder — a
+  regression test extracts and validates it on every run.
 
 ### Fixed
 - `request.strip_prefix` on cache-enabled static routes was applied

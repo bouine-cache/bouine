@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -641,6 +643,56 @@ func joinedVary(h header.Map) string {
 	return h.GetAll(header.Vary)
 }
 
+// effectiveVary returns the Vary value the variant key is built from:
+// the response's joined Vary field lines, unioned with the route's
+// include_headers allow-list (cache.key.include_headers). An include
+// header participates in the variant key exactly as if the origin had
+// listed it in Vary — the union is never a replacement. The value is
+// stored as VaryValue/VaryKey, so the hit path, the fast path, and
+// every peer gate (which read the stored value) need no changes, and
+// an include-listed header inherits the value normalization each
+// variant-key construction site already applies to Vary fields.
+//
+// A nil policy or empty include list returns the joined value
+// unchanged — the zero-allocation passthrough that keeps the
+// include-free miss path on its alloc budget (Handler_CacheMiss_
+// Cacheable). An absent response Vary with a non-empty include list
+// yields the include list itself: the variant key then selects
+// variants by those request headers, and a request header that is
+// absent hashes as an empty value (one variant), matching RFC 9111
+// Vary semantics.
+//
+// It can never emit "*": config validation rejects "*" in
+// include_headers, and responses carrying "Vary: *" are refused
+// storage by isCacheBlocked, so their value never reaches the union.
+func effectiveVary(h header.Map, policy *KeyPolicy) string {
+	joined := joinedVary(h)
+	if policy == nil || len(policy.includeHeaders) == 0 {
+		return joined
+	}
+	// Union into a lowercase, trimmed, deduplicated, sorted field list
+	// joined with ", " per RFC 9110 §5.2. Sorting makes the result
+	// deterministic regardless of the origin's field order, so
+	// VaryValue/VaryKey stay byte-identical across the store sites and
+	// across cluster nodes; dedup collapses a field the origin also
+	// lists in Vary (NewKeyPolicy already dedupes the include side).
+	fields := make([]string, 0, strings.Count(joined, ",")+1+len(policy.includeHeaders))
+	if joined != "" {
+		for f := range strings.SplitSeq(joined, ",") {
+			fields = append(fields, strings.TrimSpace(strings.ToLower(f)))
+		}
+	}
+	fields = append(fields, policy.includeHeaders...)
+	sort.Strings(fields)
+	uniq := fields[:0]
+	for i, f := range fields {
+		if i == 0 || f != fields[i-1] {
+			uniq = append(uniq, f)
+		}
+	}
+	return strings.Join(uniq, ", ")
+}
+
 // streamMissBuffered handles the non-streaming fallback: the client
 // doesn't support body streaming, the request is HEAD, or the response
 // is not cacheable. The body is already in resp.Body().
@@ -723,7 +775,7 @@ func (h *Handler) streamMissBuffered(
 			return
 		}
 		storeKey := primaryKey
-		if vary := joinedVary(resMap); vary != "" {
+		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 			if storeKey != primaryKey {
 				if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
@@ -787,7 +839,7 @@ func (h *Handler) streamMissTee(
 	resMap header.Map,
 ) {
 	storeKey := primaryKey
-	if vary := joinedVary(resMap); vary != "" {
+	if vary := effectiveVary(resMap, h.policy); vary != "" {
 		storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		if storeKey != primaryKey {
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {

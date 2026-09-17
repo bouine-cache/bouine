@@ -593,6 +593,7 @@ func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 		rk.StripQueryPrefix,
 		rk.StripEmptyParams,
 		rk.DedupQueryParams,
+		rk.IncludeHeaders,
 	)
 }
 
@@ -610,6 +611,7 @@ func buildKeepSet(params []string) map[string]bool {
 // hasKeyPolicy checks the query/header fields only.
 func hasKeyPolicy(rk config.RouteKey) bool {
 	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
+		len(rk.IncludeHeaders) > 0 ||
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
 		rk.StripEmptyParams || rk.DedupQueryParams
 }

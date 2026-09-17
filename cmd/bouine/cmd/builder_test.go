@@ -2217,3 +2217,26 @@ func TestPurgeKey_IgnoresPurgeEventVaryKey(t *testing.T) {
 		require.Nil(t, obj, probe.name+" must be gone after purge")
 	}
 }
+
+func TestBuildKeyPolicy_IncludeHeaders(t *testing.T) {
+	t.Parallel()
+	p := buildKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language", "X-Geo-Region"}})
+	require.NotNil(t, p)
+	// NewKeyPolicy lowercases and sorts the include list so the stored
+	// Vary union is deterministic.
+	assert.Equal(t, []string{"accept-language", "x-geo-region"}, p.IncludeHeaders())
+}
+
+func TestBuildKeyPolicy_IncludeOnly(t *testing.T) {
+	t.Parallel()
+	// An include-only route (no other key knobs) must still build a
+	// policy, or the include list would silently vanish.
+	p := buildKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}})
+	require.NotNil(t, p)
+	assert.Equal(t, []string{"accept-language"}, p.IncludeHeaders())
+}
+
+func TestHasKeyPolicy_IncludeHeaders(t *testing.T) {
+	t.Parallel()
+	assert.True(t, hasKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}}))
+}

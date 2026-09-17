@@ -230,3 +230,35 @@ func durationFromSec(s int) time.Duration {
 	}
 	return time.Duration(s) * time.Second
 }
+
+// FuzzEffectiveVary fuzzes the include_headers union: it must never
+// panic, be deterministic, and be idempotent — feeding the union back
+// as the response Vary with the same include list must yield the same
+// value (the union's dedup collapses the repeated fields), which is
+// what keeps 304-refreshed objects stable. Mirrors FuzzVariantKey.
+func FuzzEffectiveVary(f *testing.F) {
+	f.Add("Accept-Encoding", "Accept-Language")
+	f.Add("", "Accept-Language")
+	f.Add("Accept-Language", "accept-language")
+	f.Add("Accept-Encoding, Accept-Language", "BM-Market, Accept-Language")
+	f.Add(" Vary-Case ,  x-lower ", "X-Geo-Region")
+	f.Add("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p", "q,r")
+
+	f.Fuzz(func(t *testing.T, vary, include string) {
+		fields := strings.Split(include, ",")
+		policy := NewKeyPolicy(nil, nil, nil, nil, false, false, fields)
+
+		v1 := effectiveVary(headerMap(header.Vary, vary), policy)
+		v2 := effectiveVary(headerMap(header.Vary, vary), policy)
+		if v1 != v2 {
+			t.Fatalf("effectiveVary not deterministic for vary=%q include=%q: %q vs %q", vary, include, v1, v2)
+		}
+
+		// Idempotence: the union of the union with the same include
+		// list is the union (fields already present dedupe away).
+		v3 := effectiveVary(headerMap(header.Vary, v1), policy)
+		if v1 != v3 {
+			t.Fatalf("effectiveVary not idempotent for vary=%q include=%q: %q vs %q", vary, include, v1, v3)
+		}
+	})
+}

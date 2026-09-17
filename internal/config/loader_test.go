@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1393,4 +1394,122 @@ func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
+}
+
+// --- cache.key.include_headers (issue #632) ---
+
+func TestParse_IncludeHeaders_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - match: { host: api.example.com }
+    pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_headers: [Accept-Language, X-Geo-Region]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept include_headers")
+	require.Equal(t, []string{"Accept-Language", "X-Geo-Region"},
+		cfg.Routes[0].Cache.Key.IncludeHeaders)
+}
+
+// TestValidate_IncludeHeaders_Rejections pins every validation rule:
+// the include list participates in the cache key, so an unsound list
+// (wildcard, duplicate, overlap with exclude_headers, unbounded) is a
+// security issue (threat-model T06), not a cosmetic one.
+func TestValidate_IncludeHeaders_Rejections(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	mk := func(key RouteKey) Config {
+		return Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{pool},
+			Routes:        []Route{{Pool: "app", Cache: RouteCache{Key: key}}},
+		}
+	}
+	tests := []struct {
+		name string
+		key  RouteKey
+		want string
+	}{
+		{"star is unkeyable", RouteKey{IncludeHeaders: []string{"Accept-Language", "*"}}, `include_headers[1] must not be "*"`},
+		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1] must be non-empty"},
+		{
+			"case-insensitive duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", "accept-language"}},
+			"is a duplicate",
+		},
+		{
+			"overlap with exclude_headers", RouteKey{
+				IncludeHeaders: []string{"Accept-Language"},
+				ExcludeHeaders: []string{"X-Request-ID", "accept-language"},
+			}, "is also listed in include_headers",
+		},
+		{
+			"more than 16 entries", RouteKey{IncludeHeaders: []string{
+				"H01", "H02", "H03", "H04", "H05", "H06", "H07", "H08",
+				"H09", "H10", "H11", "H12", "H13", "H14", "H15", "H16", "H17",
+			}}, "capped at 16 entries",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := mk(tc.key)
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidate_IncludeHeaders_Accepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes: []Route{{Pool: "app", Cache: RouteCache{Key: RouteKey{
+			// 16 entries, mixed case, distinct from exclude_headers.
+			IncludeHeaders: []string{
+				"H01", "H02", "H03", "H04", "H05", "H06", "H07", "H08",
+				"H09", "H10", "H11", "H12", "H13", "H14", "H15", "Accept-Language",
+			},
+			ExcludeHeaders: []string{"X-Request-ID"},
+		}}}},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+// TestParse_DocsArchitectureExample pins the regression that filed
+// issue #632: the flagship config example in docs/architecture.md §9
+// uses cache.key.include_headers and must parse under the strict
+// decoder (KnownFields) and validate. The YAML block is extracted from
+// the doc at runtime so the test fails when the example and the real
+// schema drift apart again.
+func TestParse_DocsArchitectureExample(t *testing.T) {
+	t.Parallel()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	docPath := filepath.Join(wd, "..", "..", "docs", "architecture.md")
+	raw, err := os.ReadFile(docPath) //nolint:gosec // repo fixture read at test time
+	require.NoError(t, err)
+
+	re := regexp.MustCompile("(?s)```yaml\n(listen:.*?)```")
+	m := re.FindSubmatch(raw)
+	require.NotNil(t, m, "docs/architecture.md must contain the flagship ```yaml config example")
+	example := string(m[1])
+
+	cfg, err := Parse([]byte(example))
+	require.NoError(t, err,
+		"the docs/architecture.md example must parse and validate; a drift here re-files issue #632")
+	require.NotEmpty(t, cfg.Routes)
+	require.Equal(t, []string{"Accept-Language"}, cfg.Routes[0].Cache.Key.IncludeHeaders,
+		"the example exercises cache.key.include_headers")
 }

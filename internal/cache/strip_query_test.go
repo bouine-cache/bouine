@@ -13,7 +13,7 @@ import (
 
 func TestBuildKey_StripQueryParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false)
+	policy := NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false, nil)
 
 	k1 := BuildKey(requestInfoFromURL("GET", "http://example.com/page?a=1&utm_source=email&b=2"), policy)
 	k2 := BuildKey(requestInfoFromURL("GET", "http://example.com/page?a=1&b=2"), nil)
@@ -23,7 +23,7 @@ func TestBuildKey_StripQueryParams(t *testing.T) {
 
 func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"a": true, "b": true}, nil, nil, nil, false, false)
+	policy := NewKeyPolicy(map[string]bool{"a": true, "b": true}, nil, nil, nil, false, false, nil)
 
 	k1 := BuildKey(requestInfoFromURL("GET", "http://example.com/page?a=1&b=2"), policy)
 	k2 := BuildKey(requestInfoFromURL("GET", "http://example.com/page"), nil)
@@ -41,7 +41,7 @@ func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 
 func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false)
+	policy := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false, nil)
 
 	k1 := BuildKey(requestInfoFromURL("GET", "http://example.com/page?a=1&utm_source=x"), policy)
 	k2 := BuildKey(requestInfoFromURL("GET", "http://example.com/page?a=1"), nil)
@@ -67,7 +67,7 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 		Upstream:   upstream,
 		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
-		Policy:     NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false),
+		Policy:     NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false, nil),
 	})
 
 	ctx1 := testCtx("GET", "http://example.com/page?a=1&utm_source=email")

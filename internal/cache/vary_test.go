@@ -414,7 +414,7 @@ func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
 		Header:     fromHeaderMap(multi.Clone()),
 	}
 
-	refreshed := h.refreshFrom304(stale, res, time.Now())
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
 	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", refreshed.VaryValue)
 }
 
@@ -516,6 +516,19 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 // the shape a route with no other key knobs produces.
 func includePolicy(include ...string) *KeyPolicy {
 	return NewKeyPolicy(nil, nil, nil, nil, false, false, include)
+}
+
+// TestNewKeyPolicy_IncludeHeadersNormalized pins the constructor's
+// canonical form: the include list is trimmed, lowercased, and sorted
+// so the stored Vary union is deterministic regardless of config order
+// and case. The union over an empty response Vary exposes the
+// normalized list directly.
+func TestNewKeyPolicy_IncludeHeadersNormalized(t *testing.T) {
+	t.Parallel()
+	m := headerMap(header.ContentType, "text/html")
+	got := effectiveVary(m, NewKeyPolicy(nil, nil, nil, nil, false, false,
+		[]string{" X-Geo-Region ", "accept-language"}))
+	require.Equal(t, "accept-language, x-geo-region", got)
 }
 
 func TestEffectiveVary_IncludeEmptyPassthrough(t *testing.T) {

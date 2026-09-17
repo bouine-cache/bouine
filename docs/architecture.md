@@ -10,8 +10,8 @@ layer model, implementation decisions, and operational characteristics.
 
 ### 1.1 Goals
 
-- **Protocol coverage** — terminate HTTP/1.1 with TLS, ALPN, and
-  HTTP upgrade.
+- **Protocol coverage** — terminate HTTP/1.1 with TLS (ALPN pinned to
+  `http/1.1`; HTTP upgrade is a backlog item, not implemented).
 - **RFC 9111 compliance** — score at least on par with Varnish on
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 - **Embedded storage** — no external KV (Redis, Memcached, etcd…). Hot tier
@@ -142,8 +142,10 @@ Headline trust-boundary guarantees:
 - **TB1 — Internet ↔ data plane**: TLS terminates here. Strict RFC 9112 parser
   blocks request smuggling (T05). Header / URL / body caps always enforced
   (T37). HTTP/2 reset-flood mitigations on by default (T10).
-- **TB3 — bouine ↔ origin**: TLS verified by default; mTLS, custom CA bundles,
-  optional SPKI pinning, server-name override — all configured per pool.
+- **TB3 — bouine ↔ origin**: `https://` targets use Go's default TLS
+  verification. Per-pool mTLS, custom CA bundles, SPKI pinning, and
+  server-name override are backlog features (see §6.1) — not yet
+  configurable.
 - **TB4 — bouine ↔ peer bouine**: cluster mTLS is mandatory, on its own CA,
   with versioned wire protocol.
 - **TB5 — operator ↔ admin API**: bearer token (constant-time compare) or
@@ -338,7 +340,8 @@ rolling-deploy compatibility.
 
 ## 6. Upstream / Origin (L4)
 
-- Connection pool per upstream, keyed by host:port + TLS profile.
+- Connection pool per upstream, keyed by host:port (single TLS profile
+  today — Go defaults for `https://` targets, see §6.1).
 - **Active health checks** — HTTP probe, expected status codes, EWMA latency,
   jittered interval.
 - **Passive health checks** — outlier ejection based on rolling error rate.
@@ -350,11 +353,13 @@ rolling-deploy compatibility.
 
 ### 6.1 Upstream TLS
 
-Configurable per pool: `tls.enabled`, `tls.server_name` (SNI override),
-`tls.ca_bundle`, `tls.client_cert` / `tls.client_key` (mTLS to origin),
-`tls.min_version` (default `1.2`), `tls.alpn` (default `[http/1.1]`),
-`tls.pinned_spki_sha256`. `tls.insecure_skip_verify` is accepted in config
-but refused at startup in release builds.
+Targets using the `https://` scheme are fetched over TLS with Go's
+default verification (system roots, hostname check, TLS 1.2+). There
+are no per-pool TLS knobs yet: mTLS, custom CA bundles, SNI overrides,
+SPKI pinning, and `insecure_skip_verify` are **backlog features, not
+config** — none of them parse under the strict decoder. The pool
+config surface is `name`, `targets`, `health`, and `connect`
+(`internal/config/config.go UpstreamPool`).
 
 ---
 
@@ -595,8 +600,9 @@ These decisions are locked in for v1.0. See also
    at startup; multiple certs via SNI rules; OCSP staples forwarded when
    present. Rotation by updating the mounted Secret/ConfigMap and rolling
    the pod.
-8. **Upstream TLS is a first-class config** — mTLS to origin, custom CA,
-   optional SPKI pinning, `insecure_skip_verify` only in dev builds.
+8. **Upstream TLS is backlog, not config** — `https://` targets verify
+   with Go defaults today; per-pool mTLS, custom CA, SPKI pinning, and
+   `insecure_skip_verify` do not exist in the schema (see §6.1).
 9. **Cluster wire protocol is versioned** — magic bytes + `uint16` version;
    N/N-1 compatibility window for rolling upgrades.
 10. **Graceful shutdown is a fixed sequence** — fail readiness → stop

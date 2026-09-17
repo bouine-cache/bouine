@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -1988,7 +1989,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=3600, no-cache=\"X-Sensitive\"", header.ETag, `"v2"`)),
 	}
 
-	refreshed := h.refreshFrom304(stale, res, time.Now())
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
 
 	// SerializedHead is lazy — must be nil after refresh (not eagerly computed).
 	require.Nil(t, refreshed.LoadSerializedHead())
@@ -4541,33 +4542,89 @@ func TestIncludeHeaders_304RefreshKeepsUnion(t *testing.T) {
 		StatusCode: 304,
 		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.CacheControl, "max-age=60")),
 	}
-	refreshed := h.refreshFrom304(stale, res, time.Now())
+	frReq := requestInfoFromURL("GET", "http://example.com/test")
+	frReq.Header.Set(header.AcceptLanguage, "fr")
+	refreshed := h.refreshFrom304(stale, res, frReq, time.Now())
 	require.Equal(t, "accept-language", refreshed.VaryValue,
 		"a 304 without Vary must not drop the include_headers union from VaryValue")
+	require.Equal(t, BuildVaryKey("accept-language", frReq.Header, nil), refreshed.VaryKey,
+		"VaryValue and VaryKey must stay a matching pair across revalidation")
 
 	// And a 304 that re-sends a partial Vary keeps the union too.
 	res2 := fetchResult{
 		StatusCode: 304,
 		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.Vary, "Accept-Encoding")),
 	}
-	refreshed2 := h.refreshFrom304(stale, res2, time.Now())
+	refreshed2 := h.refreshFrom304(stale, res2, frReq, time.Now())
 	require.Equal(t, "accept-encoding, accept-language", refreshed2.VaryValue)
+	require.Equal(t, BuildVaryKey("accept-encoding, accept-language", frReq.Header, nil), refreshed2.VaryKey,
+		"a 304 that changes Vary must recompute VaryKey from the new union, or the peer gates reject the pair")
+}
+
+// TestIncludeHeaders_304VaryStarFailsSafe pins the one path where a
+// union can contain "*": a 304 runs before any cacheability gate, and
+// MergeHeaders304 copies its Vary lines wholesale, so a "Vary: *"
+// 304 over an include-keyed object produces a "*" union in VaryValue.
+// refreshFrom304 must then blank VaryKey — the pair stays consistent
+// and every variant-key constructor treats the object as unkeyable,
+// so the damage is failed hits, never a cross-variant body.
+func TestIncludeHeaders_304VaryStarFailsSafe(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"})
+
+	storedHeader := headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`)
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		StatusCode: 200,
+		Header:     storedHeader.Clone(),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+		VaryValue:  "accept-language",
+		VaryKey:    BuildVaryKey("accept-language", headerMap(header.AcceptLanguage, "fr"), nil),
+	}
+
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.Vary, "*")),
+	}
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
+	require.Equal(t, "*, accept-language", refreshed.VaryValue,
+		"a 304's Vary: * merges into the union — the one documented '*' path")
+	require.Empty(t, refreshed.VaryKey,
+		"a '*' union must blank VaryKey so the pair never lies to the peer gates")
 }
 
 // TestIncludeHeaders_PeerVaryGateParity mirrors
-// TestPeerVaryGateHeaderParity for include-keyed variants: an
-// owner-stored variant whose VaryValue carries the union must gate
-// correctly on the requester side — the gate recomputes BuildVaryKey
-// from the stored VaryValue, so as long as VaryValue and VaryKey are
-// the same union the peer hit resolves.
+// TestPeerVaryGateHeaderParity for include-keyed variants: the owner
+// stores the object with the union in VaryValue and hashes it into
+// VaryKey from its view of the wire bytes, while the requester-side
+// gate recomputes BuildVaryKey over the stored VaryValue from its own
+// view. Parity — the two views must produce identical Vary keys for
+// the same wire bytes — is what makes the include-keyed variant gate
+// resolve instead of rejecting every peer hit.
 func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "BM-Market"})
 
-	// The owner's view: a request parsed by fasthttp.
+	wire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nBM-Market: US\r\n\r\n"
+
+	// The requester's view: the request head parsed by the h1parser
+	// (the production header stage via the test bridge), the same way
+	// a fast-path peer request materializes its headers.
+	var scratch api.RawRequest
+	require.NoError(t, h1parser.ParseHeadersForTest([]byte(wire), &scratch))
+	rawView := reqHeaderMapFromRaw(&scratch)
+
+	// The owner's view: the same wire bytes re-parsed by fasthttp —
+	// handleFallThrough replays the head through Request.Read, so the
+	// owner-side BuildVaryKey (buildObject, refreshFrom304) sees this
+	// map.
 	var rctx fasthttp.RequestCtx
-	require.NoError(t, rctx.Request.Read(bufio.NewReader(strings.NewReader(
-		"GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nBM-Market: US\r\n\r\n"))))
+	require.NoError(t, rctx.Request.Read(bufio.NewReader(strings.NewReader(wire))))
 	fastView := headerFromCtx(&rctx)
 
 	// An object stored with the union as VaryValue: origin sent
@@ -4575,18 +4632,19 @@ func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	varyValue := effectiveVary(headerMap(header.Vary, "Accept-Encoding"), policy)
 	require.Equal(t, "accept-encoding, accept-language, bm-market", varyValue)
 
-	vk := BuildVaryKey(varyValue, fastView, nil)
-
-	// The requester-side gate: identical BuildVaryKey over the stored
-	// VaryValue must reproduce the stored VaryKey.
-	got := BuildVaryKey(varyValue, fastView, nil)
-	require.Equal(t, vk, got)
+	// The owner's stored VaryKey (buildObject) vs the requester-side
+	// gate's recomputation: identical wire bytes must produce
+	// identical keys from both header views.
+	ownerVK := BuildVaryKey(varyValue, fastView, nil)
+	gateVK := BuildVaryKey(varyValue, rawView, nil)
+	require.Equal(t, ownerVK, gateVK,
+		"owner (fasthttp view) and requester (h1parser raw view) must compute identical Vary keys for the same wire bytes")
 
 	// A different Accept-Language must NOT match the stored VaryKey —
 	// the cross-variant body-swap guard.
+	otherWire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nBM-Market: US\r\n\r\n"
 	var other fasthttp.RequestCtx
-	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(
-		"GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nBM-Market: US\r\n\r\n"))))
+	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(otherWire))))
 	otherVK := BuildVaryKey(varyValue, headerFromCtx(&other), nil)
-	require.NotEqual(t, vk, otherVK, "a different include-listed header value must fail the peer gate")
+	require.NotEqual(t, ownerVK, otherVK, "a different include-listed header value must fail the peer gate")
 }

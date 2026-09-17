@@ -1111,7 +1111,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, time.Now())
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
@@ -2028,7 +2028,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, now)
+		refreshed := h.refreshFrom304(stale, res, ri, now)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
@@ -2046,7 +2046,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 // stale.Header is cloned by CloneForRefresh before mutation: it is shared
 // with any other goroutine that looked up the same object, and
 // MergeHeaders304's writes would race with their reads.
-func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Time) *api.Object {
+func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestInfo, now time.Time) *api.Object {
 	refreshed := stale.CloneForRefresh()
 	refreshed.StoredAt = now
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
@@ -2061,6 +2061,25 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	// (or is served by an origin that never sent it) must not collapse
 	// an include-keyed variant onto the primary key.
 	refreshed.VaryValue = effectiveVary(refreshed.Header, h.policy)
+	// Recompute VaryKey from the same union: CloneForRefresh copies the
+	// stale object's VaryKey verbatim, and a 304 that changes Vary
+	// (MergeHeaders304 replaces the stored lines wholesale) would
+	// otherwise leave the pair skewed — a mismatch the peer gates
+	// (servePeerHit, peerGateMatchesVary) reject on sight, failing
+	// every peer fetch of the object until TTL. Skew between the pair
+	// is the same bug class buildObject guards against when it hashes
+	// obj.VaryValue into obj.VaryKey from one computed value.
+	// A union containing "*" anywhere is unkeyable the same way
+	// lookup treats it: VariantKey* short-circuits to the primary key
+	// on varyContainsStar (token anywhere in the list, not just a
+	// pure-"*" value), so a "Vary: *" 304 merged over an include-keyed
+	// object ("*, accept-language") must blank VaryKey for the pair to
+	// stay consistent with what every lookup site computes.
+	if refreshed.VaryValue != "" && !varyContainsStar(refreshed.VaryValue) {
+		refreshed.VaryKey = BuildVaryKey(refreshed.VaryValue, ri.Header, h.policy)
+	} else {
+		refreshed.VaryKey = ""
+	}
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	newCC := ParseCacheControl(refreshed.CacheControl)
@@ -2167,7 +2186,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, time.Now())
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		return
 	}

@@ -690,6 +690,95 @@ func TestValidate_PathRewrite_EmptyBlockAccepted(t *testing.T) {
 	}
 }
 
+// TestValidate_PathRewrite_TemplateRefs pins the template-reference
+// resolution: every $-reference must resolve against the pattern.
+// Go's Expand silently expands unknown references to "" — the `$1x`
+// typo below would corrupt every rewritten path with no error
+// anywhere if validation did not reject it.
+func TestValidate_PathRewrite_TemplateRefs(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	tests := []struct {
+		name    string
+		match   string
+		replace string
+		wantErr string
+	}{
+		{"plain index ok", `^/a/(.*)$`, "/b/$1", ""},
+		{"whole match ok", `^/a/`, "/b$0", ""},
+		{"named group ok", `^/u/(?P<name>[a-z]+)$`, "/user/$name", ""},
+		{"braced disambiguation ok", `^/a/(.*)$`, "/b/${1}x", ""},
+		{"literal dollar ok", `^/a/(.*)$`, "/b/$$$1", ""},
+		{"dollar at end is lone", `^/a/`, "/b/$", "lone '$'"},
+		{"index run past groups is a name", `^/a/(.*)$`, "/b/$1x", "unknown group \"1x\""},
+		{"out-of-range index", `^/a/(.*)$`, "/b/$2", "only 1 capture group"},
+		{"unknown name", `^/a/(.*)$`, "/b/$user", "unknown group \"user\""},
+		{"unterminated brace", `^/a/(.*)$`, "/b/${1", "unterminated"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{
+				PathRewrite: PathRewriteConfig{Match: tc.match, Replace: tc.replace},
+			}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("template must validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestValidate_PathRewrite_ControlBytes pins the control-byte gate: raw
+// CR/LF/NUL in match or replace are rejected (paths cannot carry them,
+// so they could only produce a corrupted origin request), while the
+// equivalent escaped forms in the pattern stay legal.
+func TestValidate_PathRewrite_ControlBytes(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	tests := []struct {
+		name    string
+		match   string
+		replace string
+		wantErr string
+	}{
+		{"CR in match", "^/a\r/x/", "/b/", "raw control byte"},
+		{"LF in match", "^/a\n/x/", "/b/", "raw control byte"},
+		{"NUL in match", "^/a\x00/x/", "/b/", "raw control byte"},
+		{"CR in replace", `^/a/(.*)$`, "/b/\r$1", "raw control byte"},
+		{"LF in replace", `^/a/(.*)$`, "/b/\n$1", "raw control byte"},
+		{"DEL in replace", `^/a/(.*)$`, "/b/\x7f$1", "raw control byte"},
+		{"escaped form in match legal", `^/a/\x0d/(.*)$`, "/b/$1", ""},
+		{"escape syntax legal", `^/a/[\r\n]/(.*)$`, "/b/$1", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{
+				PathRewrite: PathRewriteConfig{Match: tc.match, Replace: tc.replace},
+			}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("must validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestParse_MethodsNormalisedToUpper(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

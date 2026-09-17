@@ -97,9 +97,15 @@ routes:
         replace: /scrooge/callback/$1
 ```
 
-The pattern is Go RE2 (linear time — no ReDoS). Only the first match is
-replaced, the query string is never matched or modified, and a result
-that is not an absolute path (`/...`) is discarded and the original
-path forwarded. The cache key, ban matching, and purges keep the public
+The pattern is Go RE2 (linear time — no ReDoS; Go also rejects `{1000}`+
+repeat counts, so oversized-program patterns never compile). Only the
+first match is replaced, the query string is never matched or modified,
+and a result that is not an absolute path (`/...`) is discarded and the
+original path forwarded. Validation fails startup on: pattern or
+template over 512 bytes, raw control bytes (CR/LF/NUL), and any
+`$reference` that does not resolve against the pattern's capture
+groups — write `${1}x` for "group 1 plus literal x" (`$1x` is a
+reference to a group named `1x`, which would otherwise silently expand
+to nothing). The cache key, ban matching, and purges keep the public
 path — `POST /v1/purge` and `/v1/ban` address the URLs clients request,
 not the rewritten upstream paths.

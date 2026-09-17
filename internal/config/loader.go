@@ -412,7 +412,10 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 // mistake, not a no-op), mutually exclusive with strip_prefix (two
 // mechanisms rewriting the same origin path cannot be reasoned about),
 // compiled here so a bad pattern fails startup instead of the first
-// request, and size-capped.
+// request, size-capped, free of raw control bytes, and every template
+// reference resolvable against the pattern's capture groups.
+//
+//nolint:gocyclo // 16: flat checklist mirroring validateRouteCache's structure
 func validatePathRewrite(i int, req RouteRequest) error {
 	pw := req.PathRewrite
 	if pw.Match == "" && pw.Replace == "" {
@@ -430,14 +433,133 @@ func validatePathRewrite(i int, req RouteRequest) error {
 	if len(pw.Replace) > MaxPathRewritePatternBytes {
 		return fmt.Errorf("config: route %d path_rewrite.replace exceeds %d bytes", i, MaxPathRewritePatternBytes)
 	}
+	// Raw control bytes can never appear in a request path (the data
+	// plane rejects them at parse time), so a template carrying them
+	// can only produce a corrupted origin request. Escaped forms in
+	// the pattern (`\x0d`) stay legal — they simply never match.
+	if err := rejectControlBytes("path_rewrite.match", i, pw.Match); err != nil {
+		return err
+	}
+	if err := rejectControlBytes("path_rewrite.replace", i, pw.Replace); err != nil {
+		return err
+	}
 	// Compile now (RE2 — linear time, no backtracking, so an
 	// operator-supplied pattern cannot ReDoS the data plane). This is
 	// a correctness gate, not a compile-cache: cache.NewPathRewrite
 	// recompiles for the handler.
-	if _, err := regexp.Compile(pw.Match); err != nil {
+	re, err := regexp.Compile(pw.Match)
+	if err != nil {
 		return fmt.Errorf("config: route %d path_rewrite.match is not a valid regular expression: %w", i, err)
 	}
+	// Every $reference in the template must resolve to a group of the
+	// pattern. Go's Expand silently expands an unknown reference to
+	// the empty string — the classic `$1x` typo (reference to a group
+	// named "1x") would corrupt every rewritten path with no error
+	// anywhere. Reject it here, at config load.
+	if err := validateTemplateRefs(i, re, pw.Replace); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rejectControlBytes rejects raw C0 control bytes in a path_rewrite
+// string. Escaped regex syntax is untouched: only literal bytes < 0x20
+// (plus DEL) are checked, which is exactly the set a request path
+// cannot carry.
+func rejectControlBytes(field string, i int, s string) error {
+	for j := 0; j < len(s); j++ {
+		if s[j] < 0x20 || s[j] == 0x7f {
+			return fmt.Errorf("config: route %d %s contains a raw control byte (0x%02x) at offset %d — escape it or remove it",
+				i, field, s[j], j)
+		}
+	}
+	return nil
+}
+
+// validateTemplateRefs checks every $-reference in the replace template
+// against the compiled pattern's capture groups. References:
+//
+//	$$       literal dollar
+//	$1, $2…  index (0 = whole match)
+//	$name    named group (?P<name>…)
+//	${name}  braces disambiguate from following word bytes
+//
+// Go's Expand takes the longest word-run after $ as the group name, so
+// `$1x` is a lookup of group "1x" — an unknown reference that expands
+// to the empty string. Fail loudly at load instead.
+func validateTemplateRefs(i int, re *regexp.Regexp, template string) error {
+	numGroups := re.NumSubexp()
+	names := re.SubexpNames() // index 0 = "", names for (?P<name>…) groups
+	for j := 0; j < len(template); j++ {
+		if template[j] != '$' {
+			continue
+		}
+		if j+1 < len(template) && template[j+1] == '$' {
+			j++ // $$ literal dollar — skip both
+			continue
+		}
+		// Collect the reference: optional '{' … '}', else the longest
+		// word-run ([A-Za-z0-9_]).
+		ref, next := "", j+1
+		if next < len(template) && template[next] == '{' {
+			end := strings.IndexByte(template[next:], '}')
+			if end < 0 {
+				return fmt.Errorf("config: route %d path_rewrite.replace has unterminated '${' reference at offset %d", i, j)
+			}
+			ref, next = template[next+1:next+end], next+end+1
+		} else {
+			for next < len(template) && isWordByte(template[next]) {
+				next++
+			}
+			ref = template[j+1 : next]
+		}
+		if ref == "" {
+			return fmt.Errorf("config: route %d path_rewrite.replace has a lone '$' at offset %d — use $$ for a literal dollar", i, j)
+		}
+		if err := resolveTemplateRef(i, ref, numGroups, names); err != nil {
+			return err
+		}
+		j = next - 1
+	}
+	return nil
+}
+
+// resolveTemplateRef checks one parsed reference against the pattern.
+func resolveTemplateRef(i int, ref string, numGroups int, names []string) error {
+	if allDigits(ref) {
+		n, err := strconv.Atoi(ref)
+		if err != nil || n > numGroups {
+			return fmt.Errorf("config: route %d path_rewrite.replace references group $%s but the pattern has only %d capture group(s)",
+				i, ref, numGroups)
+		}
+		return nil
+	}
+	for _, name := range names {
+		if name == ref {
+			return nil
+		}
+	}
+	return fmt.Errorf("config: route %d path_rewrite.replace references unknown group %q — the pattern defines no (?P<%s>...) group",
+		i, ref, ref)
+}
+
+// isWordByte reports whether b is a byte that Go's Expand treats as
+// part of a reference name ([A-Za-z0-9_]).
+func isWordByte(b byte) bool {
+	return b == '_' || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
+}
+
+// allDigits reports whether s is non-empty and all decimal digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for j := 0; j < len(s); j++ {
+		if s[j] < '0' || s[j] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // validateStatic validates a StaticConfig block.

@@ -228,8 +228,12 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		// is wired with Upstream (the staticfile handler) and no
 		// FastClient. Run the upstream handler in-process: its response
 		// is already in ctx.Response, so only the attribution headers
-		// and rewrites remain.
+		// and rewrites remain. The origin-bound URI is applied in place
+		// first (see handleBypassFast).
 		if h.upstream != nil {
+			if u := h.originURI(ctx.RequestURI()); !bytes.Equal(u, ctx.RequestURI()) {
+				ctx.Request.SetRequestURIBytes(u)
+			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
 			h.applyResponseRewrites(&ctx.Response.Header)

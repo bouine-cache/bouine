@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -400,7 +401,43 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
 	}
+	if err := validatePathRewrite(i, r.Request); err != nil {
+		return err
+	}
 	return validateRouteCache(i, r.Cache)
+}
+
+// validatePathRewrite validates the request.path_rewrite block: both
+// fields required together (a half-configured rewrite is an operator
+// mistake, not a no-op), mutually exclusive with strip_prefix (two
+// mechanisms rewriting the same origin path cannot be reasoned about),
+// compiled here so a bad pattern fails startup instead of the first
+// request, and size-capped.
+func validatePathRewrite(i int, req RouteRequest) error {
+	pw := req.PathRewrite
+	if pw.Match == "" && pw.Replace == "" {
+		return nil
+	}
+	if pw.Match == "" || pw.Replace == "" {
+		return fmt.Errorf("config: route %d path_rewrite requires both match and replace", i)
+	}
+	if req.StripPrefix != "" {
+		return fmt.Errorf("config: route %d has both strip_prefix and path_rewrite — specify exactly one", i)
+	}
+	if len(pw.Match) > MaxPathRewritePatternBytes {
+		return fmt.Errorf("config: route %d path_rewrite.match exceeds %d bytes", i, MaxPathRewritePatternBytes)
+	}
+	if len(pw.Replace) > MaxPathRewritePatternBytes {
+		return fmt.Errorf("config: route %d path_rewrite.replace exceeds %d bytes", i, MaxPathRewritePatternBytes)
+	}
+	// Compile now (RE2 — linear time, no backtracking, so an
+	// operator-supplied pattern cannot ReDoS the data plane). This is
+	// a correctness gate, not a compile-cache: cache.NewPathRewrite
+	// recompiles for the handler.
+	if _, err := regexp.Compile(pw.Match); err != nil {
+		return fmt.Errorf("config: route %d path_rewrite.match is not a valid regular expression: %w", i, err)
+	}
+	return nil
 }
 
 // validateStatic validates a StaticConfig block.

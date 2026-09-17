@@ -1404,6 +1404,108 @@ func TestBuildRouter_StripPrefixWired(t *testing.T) {
 		"origin must receive the stripped path")
 }
 
+// TestBuildRouter_PathRewriteWired mirrors
+// TestBuildRouter_StripPrefixWired: request.path_rewrite on a proxied
+// route must reach the cache handler, so the origin sees the rewritten
+// path while cache keys keep the original path.
+func TestBuildRouter_PathRewriteWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write(ctx.RequestURI())
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "echo", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{
+					Name: "payment-callback",
+					Pool: "echo",
+					Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+						Match:   `^/payment/orchestrator/callback/(.*)$`,
+						Replace: "/scrooge/callback/$1",
+					}},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/payment/orchestrator/callback/payin123?sig=1")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, "/scrooge/callback/payin123?sig=1", string(ctx.Response.Body()),
+		"origin must receive the rewritten path with query preserved")
+
+	// The cache-key contract (keys keep the ORIGINAL public path) is
+	// pinned by internal/cache/path_rewrite_route_test.go and the
+	// test/integration/path_rewrite_test.go cluster regression; this
+	// builder test only proves the wiring reaches the handler.
+}
+
+// TestBuildStaticRoute_WithPathRewrite covers the non-cached static
+// route surface: the builder-lowered wrapper rewrites before the
+// static handler runs.
+func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index.html"), []byte("static"), 0o600))
+	e := &engine{
+		cfg:    &config.Config{},
+		logger: newTestLogger(),
+	}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store}
+	rc := config.Route{
+		Name:   "static-rewrite",
+		Static: config.StaticConfig{Root: dir},
+		Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+			Match:   `^/assets/(.*)$`,
+			Replace: "/$1",
+		}},
+	}
+	e.buildStaticRoute(router, rs, rc)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/assets/index.html")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"rewritten path must reach the file")
+	assert.Equal(t, "static", string(ctx.Response.Body()))
+}
+
+// TestBuildPathRewrite_NilWhenUnset pins the zero-config behaviour:
+// no path_rewrite means no compiled rewrite (zero cost).
+func TestBuildPathRewrite_NilWhenUnset(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, buildPathRewrite(config.Route{}))
+	require.NotNil(t, buildPathRewrite(config.Route{Request: config.RouteRequest{
+		PathRewrite: config.PathRewriteConfig{Match: `^/a/`, Replace: "/b/"},
+	}}))
+}
+
 func TestUpdateStartupMetrics(t *testing.T) {
 	t.Parallel()
 	seq := shutdown.NewSequencer(newTestLogger())

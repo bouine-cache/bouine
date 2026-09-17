@@ -16,7 +16,8 @@ This document maps NGINX `proxy_cache` directives to bouine config.
 | `proxy_cache_bypass $http_x_no_cache` | Request `Cache-Control: no-cache` | bouine respects RFC 9111 request directives. |
 | `proxy_no_cache $http_set_cookie` | `cache.cookies.allow_set_cookie: false` (default) | Responses with `Set-Cookie` not cached unless opt-in. |
 | `proxy_pass http://backend` | `upstream_pools[].targets: [backend:80]` | |
-| `proxy_set_header Host $host` | (automatic) | bouine forwards `Host` from the client. |
+| `rewrite ^/payment/orchestrator/callback/(.*)$ /scrooge/callback/$1 break;` | `routes[].request.path_rewrite: {match, replace}` | Regex path rewrite on the origin-bound request. Go RE2 (linear time, no ReDoS); first match replaced; query never matched or modified. Cache key keeps the public path. Mutually exclusive with `strip_prefix`. |
+| `proxy_pass http://backend/internal/;` (URI rewriting via trailing proxy_pass path) | `routes[].request.strip_prefix: /public` | Only for pure prefix removal; for any other shape use `path_rewrite`. || `proxy_set_header Host $host` | (automatic) | bouine forwards `Host` from the client. |
 | `proxy_next_upstream error timeout` | `health.passive.consecutive_5xx: 5` | Passive health ejection replaces retry-on-error. |
 | `proxy_connect_timeout 5s` | `upstream_pools[].connect.timeout: 5s` | |
 | `proxy_cache_lock on` | (automatic) | bouine coalesces concurrent misses for the same cache key (request collapsing). |
@@ -71,3 +72,34 @@ routes:
       stale_if_error: 5m
       stale_while_revalidate: 30s
 ```
+
+## Example: path rewrite (nginx `rewrite ... break`)
+
+NGINX:
+```nginx
+location ~ ^/payment/orchestrator/callback/* {
+    rewrite ^/payment/orchestrator/callback/(.*)$ /scrooge/callback/$1 break;
+    proxy_pass http://payment-orchestrator:8080;
+}
+```
+
+bouine:
+```yaml
+upstream_pools:
+  - name: payment-orchestrator
+    targets: [payment-orchestrator:8080]
+routes:
+  - match: { path_prefix: /payment/orchestrator/callback }
+    pool: payment-orchestrator
+    request:
+      path_rewrite:
+        match: ^/payment/orchestrator/callback/(.*)$
+        replace: /scrooge/callback/$1
+```
+
+The pattern is Go RE2 (linear time — no ReDoS). Only the first match is
+replaced, the query string is never matched or modified, and a result
+that is not an absolute path (`/...`) is discarded and the original
+path forwarded. The cache key, ban matching, and purges keep the public
+path — `POST /v1/purge` and `/v1/ban` address the URLs clients request,
+not the rewritten upstream paths.

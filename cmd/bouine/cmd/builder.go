@@ -177,6 +177,29 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 	}
 }
 
+// pathRewriteFastHTTP rewrites the request path with the compiled
+// path_rewrite before forwarding to next. The regex sibling of
+// stripPrefixFastHTTP: same surface (static routes without cache),
+// same boundary semantics via cache.PathRewrite.RewriteURI.
+func pathRewriteFastHTTP(rw *cache.PathRewrite, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		rw.Apply(&ctx.Request)
+		next(ctx)
+	}
+}
+
+// buildPathRewrite compiles the route's request.path_rewrite into a
+// cache.PathRewrite. The pattern was validated and compiled once by
+// config.validatePathRewrite; the second compile here is the one the
+// handler keeps. Returns nil when path_rewrite is not configured.
+func buildPathRewrite(rc config.Route) *cache.PathRewrite {
+	pw := rc.Request.PathRewrite
+	if pw.Match == "" || pw.Replace == "" {
+		return nil
+	}
+	return cache.NewPathRewrite(pw.Match, pw.Replace)
+}
+
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
 	// The metrics middleware attributes by upstream pool: the label set
@@ -283,6 +306,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			Upstream:                p.FastHandler(0),
 			FastClient:              p.FastClient(),
 			StripPrefix:             rc.Request.StripPrefix,
+			PathRewrite:             buildPathRewrite(rc),
 			RequestHeaderSet:        rc.Request.HeaderSet,
 			RequestHeaderRemove:     rc.Request.HeaderRemove,
 			ResponseHeaderSet:       rc.Response.HeaderSet,
@@ -373,6 +397,13 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	if rc.Request.StripPrefix != "" {
 		handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
 	}
+	// path_rewrite is mutually exclusive with strip_prefix (config
+	// validation), so at most one wrapper applies. Both apply BEFORE the
+	// cache handler on the non-cached path so the static handler sees the
+	// rewritten path, mirroring strip_prefix's dual wiring.
+	if rw := buildPathRewrite(rc); rw != nil {
+		handler = pathRewriteFastHTTP(rw, handler)
+	}
 
 	// Wrap in cache handler only when cache is explicitly enabled.
 	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
@@ -380,6 +411,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,
 			StripPrefix:             rc.Request.StripPrefix,
+			PathRewrite:             buildPathRewrite(rc),
 			RequestHeaderSet:        rc.Request.HeaderSet,
 			RequestHeaderRemove:     rc.Request.HeaderRemove,
 			ResponseHeaderSet:       rc.Response.HeaderSet,
@@ -436,10 +468,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 
 	// When cache is not enabled, wire the staticfile handler's native
 	// fasthttp ServeRequest method directly — no adaptor needed. Header
-	// rewrites still apply: they wrap the handler the same way.
+	// rewrites still apply: they wrap the handler the same way. Path
+	// rewrites already landed in the handler chain above.
 	if !cacheEnabled {
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods,
-			wrapStaticRewrites(rc, sh.ServeRequest))
+			wrapStaticRewrites(rc, handler))
 		return
 	}
 

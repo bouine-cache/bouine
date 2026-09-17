@@ -749,6 +749,12 @@ func routeFeatures(rc config.Route) []RouteFeature {
 			Title: "strip_prefix: this path prefix is removed before forwarding to the upstream. The cache key keeps the original path.",
 		})
 	}
+	if rc.Request.PathRewrite.Match != "" {
+		f = append(f, RouteFeature{
+			Label: "rewrite " + rc.Request.PathRewrite.Match,
+			Title: "path_rewrite: the origin-bound path is rewritten with this regex (query is never matched or modified). The cache key keeps the original path.",
+		})
+	}
 	if n := len(rc.Cache.Key.StripQueryParams); n > 0 {
 		f = append(f, RouteFeature{
 			Label: fmt.Sprintf("q-strip ×%d", n),

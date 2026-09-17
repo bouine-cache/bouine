@@ -46,13 +46,19 @@ the curated, human-readable summary.
   unchanged. A request header absent from the request hashes as an
   empty value (one variant), matching RFC 9111 Vary semantics. Use it
   when the origin varies by a header (e.g. `Accept-Language`) but does
-  not send `Vary`. Validation rejects `*`, empty entries,
-  case-insensitive duplicates, entries also present in
-  `exclude_headers`, and lists longer than 16 entries. Routes without
+  not send `Vary`. Validation (trimmed entries, compared as stored)
+  rejects `*` (padded or not), whitespace-only entries, non-token
+  entries (commas, spaces — RFC 9110 §5.1), case-insensitive
+  duplicates, entries also present in `exclude_headers`, and lists
+  longer than 16 entries. Routes without
   an include list keep the zero-allocation passthrough, so miss-path
   alloc budgets are unchanged (ADR-0046). The flagship config example
   in `docs/architecture.md` now parses under the strict decoder — a
-  regression test extracts and validates it on every run.
+  regression test extracts and validates it on every run. 304
+  revalidation recomputes `VaryKey` from the merged union so the
+  stored `VaryValue`/`VaryKey` pair can never skew across a Vary
+  change, and a `Vary: *` 304 blanks `VaryKey` (fail-safe: failed
+  hits, never wrong bodies).
 
 ### Fixed
 - `request.strip_prefix` on cache-enabled static routes was applied

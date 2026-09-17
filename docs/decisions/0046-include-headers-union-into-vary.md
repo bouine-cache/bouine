@@ -43,8 +43,14 @@ exactly as they would for an origin-declared Vary field.
 A nil policy or empty include list is a zero-allocation passthrough to
 `joinedVary`, so the include-free miss path stays on its alloc budget.
 
-Validation: capped at 16 entries; `*`, empty entries, case-insensitive
-duplicates, and overlap with `exclude_headers` are rejected (an
+Validation: capped at 16 entries; every comparison runs on the
+**trimmed** entry (matching `NewKeyPolicy`'s storage normalization, so
+`" *"` and `"x, y"` cannot slip past on padding). Rejected: `*`
+(padded or not — a wildcard Vary is unkeyable), whitespace-only
+entries, non-token entries (anything but an RFC 9110 §5.1 tchar
+sequence — a comma in an entry would be one union field to
+`effectiveVary` but two Vary fields to the variant-key builders),
+case-insensitive duplicates, and overlap with `exclude_headers` (an
 excluded header force-included into the key would silently collapse
 variants — the overlap check is the T06 control, not cosmetic).
 
@@ -64,6 +70,11 @@ variants — the overlap check is the T06 control, not cosmetic).
   `/v1/debug/cachecheck` output and peer-fetch logs.
 - A union larger than `maxVaryFields` (16) falls back to the
   allocation path; the config cap keeps this bounded.
+- A 304 that changes `Vary` forces a `VaryKey` recompute on
+  revalidation (`refreshFrom304`), so the merged union and its hash
+  stay a matching pair; a `Vary: *` 304 blanks `VaryKey` (fail-safe:
+  the object is unkeyable until re-fetched, failed hits not wrong
+  bodies).
 
 ### Risks
 - Mixed-config clusters (nodes disagreeing on the include list) store

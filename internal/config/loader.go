@@ -771,35 +771,88 @@ func validateRouteKey(i int, rk RouteKey) error {
 }
 
 // validateIncludeHeaders validates cache.key.include_headers: capped at
-// 16 entries (mirrors strip_query_prefix), no empty entries, no "*" (a
-// wildcard Vary is unkeyable and would explode the variant space),
-// no case-insensitive duplicates, and no overlap with exclude_headers —
-// the overlap check is load-bearing, not cosmetic: an excluded header
-// force-included into the key would silently collapse variants.
+// 16 entries (mirrors strip_query_prefix), every entry must be a single
+// RFC 9110 token (§5.1: one header name, no commas or spaces — "x,y"
+// would be one union field to effectiveVary but two Vary fields to the
+// variant-key builders, i.e. a knob whose meaning depends on the
+// reader), no "*" (a wildcard Vary is unkeyable and would explode the
+// variant space), no case-insensitive duplicates, and no overlap with
+// exclude_headers — the overlap check is load-bearing, not cosmetic: an
+// excluded header force-included into the key would silently collapse
+// variants. Every comparison runs on the trimmed entry: NewKeyPolicy
+// trims before storing, so " *", "x ", or " x,y" must be rejected here
+// or validation and the stored policy disagree (issue #632 review).
 func validateIncludeHeaders(i int, rk RouteKey) error {
 	if len(rk.IncludeHeaders) > 16 {
 		return fmt.Errorf("config: route %d include_headers capped at 16 entries, got %d", i, len(rk.IncludeHeaders))
 	}
 	seen := make(map[string]bool, len(rk.IncludeHeaders))
-	for j, h := range rk.IncludeHeaders {
+	for j, raw := range rk.IncludeHeaders {
+		h := strings.TrimSpace(raw)
 		if h == "" {
-			return fmt.Errorf("config: route %d include_headers[%d] must be non-empty", i, j)
+			return fmt.Errorf("config: route %d include_headers[%d] must be a non-empty header name", i, j)
 		}
 		lower := strings.ToLower(h)
 		if lower == "*" {
 			return fmt.Errorf("config: route %d include_headers[%d] must not be \"*\": a wildcard Vary is unkeyable (RFC 9111 §4.1)", i, j)
+		}
+		if !isHTTPToken(lower) {
+			return fmt.Errorf("config: route %d include_headers[%d] (%q) must be a single RFC 9110 §5.1 header name: one comma-free token, no whitespace or separators", i, j, h)
 		}
 		if seen[lower] {
 			return fmt.Errorf("config: route %d include_headers[%d] (%s) is a duplicate (comparison is case-insensitive)", i, j, h)
 		}
 		seen[lower] = true
 	}
-	for j, h := range rk.ExcludeHeaders {
-		if seen[strings.ToLower(h)] {
-			return fmt.Errorf("config: route %d exclude_headers[%d] (%s) is also listed in include_headers: an excluded header must not participate in the key", i, j, h)
+	for j, raw := range rk.ExcludeHeaders {
+		if seen[strings.ToLower(strings.TrimSpace(raw))] {
+			return fmt.Errorf("config: route %d exclude_headers[%d] (%s) is also listed in include_headers: an excluded header must not participate in the key", i, j, raw)
 		}
 	}
 	return nil
+}
+
+// isHTTPToken reports whether s is a valid RFC 9110 §5.1 token:
+// one or more tchar (visible ASCII excluding separators) — the shape
+// of a single header field name.
+func isHTTPToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isTchar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isTchar reports whether c is an RFC 9110 §5.1 tchar: ALPHA, DIGIT,
+// or one of "!#$%&'*+-.^_`|~". Everything else (space, comma, colon,
+// separators, non-ASCII) fails the token check.
+func isTchar(c byte) bool {
+	return tcharTable[c]
+}
+
+// tcharTable is the RFC 9110 §5.1 tchar bit set, indexed by byte.
+var tcharTable = [256]bool{
+	'0': true, '1': true, '2': true, '3': true, '4': true,
+	'5': true, '6': true, '7': true, '8': true, '9': true,
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
+	'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
+	'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
+	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
+	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
+	'Z': true,
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true,
+	'f': true, 'g': true, 'h': true, 'i': true, 'j': true,
+	'k': true, 'l': true, 'm': true, 'n': true, 'o': true,
+	'p': true, 'q': true, 'r': true, 's': true, 't': true,
+	'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
+	'z': true,
+	'!': true, '#': true, '$': true, '%': true, '&': true,
+	'\'': true, '*': true, '+': true, '-': true, '.': true,
+	'^': true, '_': true, '`': true, '|': true, '~': true,
 }
 
 func validatePoolDurations(p *UpstreamPool) error {

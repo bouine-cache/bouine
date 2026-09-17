@@ -2220,11 +2220,16 @@ func TestPurgeKey_IgnoresPurgeEventVaryKey(t *testing.T) {
 
 func TestBuildKeyPolicy_IncludeHeaders(t *testing.T) {
 	t.Parallel()
-	p := buildKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language", "X-Geo-Region"}})
+	// The include list must flow through to the policy: the cmd-level
+	// contract is hasKeyPolicy wiring (non-nil policy) and the
+	// NewKeyPolicy pass-through. The lowercase/sort normalization and
+	// the stored Vary union it produces are covered in internal/cache
+	// (TestEffectiveVary_*).
+	p := buildKeyPolicy(config.RouteKey{
+		IncludeHeaders:   []string{"Accept-Language", "X-Geo-Region"},
+		StripQueryParams: []string{"utm"},
+	})
 	require.NotNil(t, p)
-	// NewKeyPolicy lowercases and sorts the include list so the stored
-	// Vary union is deterministic.
-	assert.Equal(t, []string{"accept-language", "x-geo-region"}, p.IncludeHeaders())
 }
 
 func TestBuildKeyPolicy_IncludeOnly(t *testing.T) {
@@ -2233,7 +2238,6 @@ func TestBuildKeyPolicy_IncludeOnly(t *testing.T) {
 	// policy, or the include list would silently vanish.
 	p := buildKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}})
 	require.NotNil(t, p)
-	assert.Equal(t, []string{"accept-language"}, p.IncludeHeaders())
 }
 
 func TestHasKeyPolicy_IncludeHeaders(t *testing.T) {

@@ -147,15 +147,6 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 	}
 }
 
-// IncludeHeaders returns the route's include_headers allow-list,
-// lowercased and sorted; nil when the route declares none.
-func (p *KeyPolicy) IncludeHeaders() []string {
-	if p == nil {
-		return nil
-	}
-	return p.includeHeaders
-}
-
 // ShouldExcludeHeader returns true if the given header name should be
 // excluded from the Vary variant key.
 func (p *KeyPolicy) ShouldExcludeHeader(h string) bool {

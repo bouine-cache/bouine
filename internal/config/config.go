@@ -656,10 +656,13 @@ type RouteKey struct {
 	// when the origin varies by a header but does not — or cannot —
 	// send Vary. A request header absent from the request hashes as
 	// an empty value (one variant), matching RFC 9111 Vary
-	// semantics. Validation rejects "*", empty entries,
-	// case-insensitive duplicates, entries also listed in
-	// exclude_headers (an excluded header force-included into the
-	// key would collapse variants), and more than 16 entries. The
+	// semantics. Each entry must be a single RFC 9110 §5.1 header
+	// name (one comma-free token; comparisons run on the trimmed
+	// entry). Validation rejects "*" (padded or not), whitespace-only
+	// or non-token entries, case-insensitive duplicates, entries
+	// also listed in exclude_headers (an excluded header
+	// force-included into the key would collapse variants), and more
+	// than 16 entries. The
 	// list must be identical across all cluster nodes serving the
 	// route: a node with a different include list stores and
 	// resolves variants under different keys (same hazard class as

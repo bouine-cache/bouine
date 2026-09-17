@@ -1440,15 +1440,32 @@ func TestValidate_IncludeHeaders_Rejections(t *testing.T) {
 		want string
 	}{
 		{"star is unkeyable", RouteKey{IncludeHeaders: []string{"Accept-Language", "*"}}, `include_headers[1] must not be "*"`},
-		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1] must be non-empty"},
+		{"padded star is still a star", RouteKey{IncludeHeaders: []string{" *"}}, `must not be "*"`},
+		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1] must be a non-empty header name"},
+		{"whitespace-only entry", RouteKey{IncludeHeaders: []string{" "}}, "must be a non-empty"},
 		{
 			"case-insensitive duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", "accept-language"}},
 			"is a duplicate",
 		},
 		{
+			"padded duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", " accept-language"}},
+			"is a duplicate",
+		},
+		{
+			"comma entry is two fields downstream", RouteKey{IncludeHeaders: []string{"X-Geo", "x,y"}},
+			"must be a single RFC 9110 §5.1 header name",
+		},
+		{"space inside entry", RouteKey{IncludeHeaders: []string{"X Geo"}}, "must be a single RFC 9110 §5.1 header name"},
+		{
 			"overlap with exclude_headers", RouteKey{
 				IncludeHeaders: []string{"Accept-Language"},
 				ExcludeHeaders: []string{"X-Request-ID", "accept-language"},
+			}, "is also listed in include_headers",
+		},
+		{
+			"padded overlap with exclude_headers", RouteKey{
+				IncludeHeaders: []string{"Accept-Language"},
+				ExcludeHeaders: []string{" accept-language "},
 			}, "is also listed in include_headers",
 		},
 		{

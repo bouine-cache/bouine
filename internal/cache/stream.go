@@ -662,9 +662,16 @@ func joinedVary(h header.Map) string {
 // absent hashes as an empty value (one variant), matching RFC 9111
 // Vary semantics.
 //
-// It can never emit "*": config validation rejects "*" in
-// include_headers, and responses carrying "Vary: *" are refused
+// On the store paths it can never emit "*": config validation rejects
+// "*" in include_headers, and responses carrying "Vary: *" are refused
 // storage by isCacheBlocked, so their value never reaches the union.
+// The 304-revalidation path is the one exception — a 304 runs before
+// any cacheability gate, and MergeHeaders304 copies its Vary lines
+// into the stored header wholesale, so a "Vary: *" 304 can produce a
+// union containing "*". That is fail-safe downstream (every
+// variant-key constructor returns the primary key on varyContainsStar,
+// and refreshFrom304 blanks VaryKey for a "*" union), so the damage
+// is failed hits until the object is re-fetched, never a wrong body.
 func effectiveVary(h header.Map, policy *KeyPolicy) string {
 	joined := joinedVary(h)
 	if policy == nil || len(policy.includeHeaders) == 0 {

@@ -56,10 +56,10 @@ func NewPathRewrite(pattern, replace string) *PathRewrite {
 }
 
 // RewriteURI rewrites the path of uri (path[?query]) and returns the
-// result. When the pattern does not match, the rewrite is invalid
-// (relative result, oversized output), or the URI has no '?' split
-// anomaly, the original uri is returned unchanged. The returned slice
-// may alias uri; callers must not mutate it in place.
+// result. When the pattern does not match, or the rewrite result would
+// be invalid (a relative path, oversized output), the original uri is
+// returned unchanged. The returned slice may alias uri; callers must
+// not mutate it in place.
 func (p *PathRewrite) RewriteURI(uri []byte) []byte {
 	q := bytes.IndexByte(uri, '?')
 	var path, query []byte

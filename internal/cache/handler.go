@@ -646,10 +646,12 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 // prefix removed (when configured) and the path_rewrite regex applied
 // (when configured). This is the single choke point every origin-bound
 // URI passes through — miss, invalidating proxy, revalidate, background
-// revalidate, background refresh, shed refill, stream, and the
-// in-process upstream. Cache keys, ban matching, purges, Location
-// resolution, and every client-facing surface keep the original uri
-// (config contract in RouteRequest.StripPrefix and
+// revalidate, background refresh, shed refill, stream, the in-process
+// upstream fetches, and the upstream bypass fallbacks
+// (handleBypassFast / streamBypass), which apply it in place on the
+// live request before invoking the in-process upstream. Cache keys, ban
+// matching, purges, Location resolution, and every client-facing surface
+// keep the original uri (config contract in RouteRequest.StripPrefix and
 // RouteRequest.PathRewrite).
 func (h *Handler) originURI(uri []byte) []byte {
 	uri = StripRequestURI(h.stripPrefix, uri)
@@ -1614,9 +1616,16 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		// Upstream fallback (issue #598): a cached-static-route handler
 		// is wired with Upstream (the staticfile handler) and no
-		// FastClient. Run the upstream handler in-process — its
-		// response is already in ctx.Response.
+		// FastClient. Run the upstream handler in-process — its response
+		// is already in ctx.Response. The upstream is the bare handler,
+		// so the origin-bound URI (strip_prefix / path_rewrite) is
+		// applied here, in place, exactly once; the bypass path used to
+		// rely on rewrite wrappers baked into the upstream chain, which
+		// double-applied on every miss fetch.
 		if h.upstream != nil {
+			if u := h.originURI(ctx.RequestURI()); !bytes.Equal(u, ctx.RequestURI()) {
+				ctx.Request.SetRequestURIBytes(u)
+			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 			h.applyResponseRewrites(&ctx.Response.Header)

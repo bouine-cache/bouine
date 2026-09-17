@@ -390,23 +390,29 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		return
 	}
 
+	// strip_prefix / path_rewrite wrappers are wired ONLY on the
+	// non-cached path: the router dispatches straight into this chain,
+	// so the wrappers are the single application point there. When cache
+	// is enabled the cache.Handler owns the origin-bound URI — its
+	// originURI applies strip/rewrite on every miss, revalidate, and
+	// bypass — so the upstream handed to it must be the bare static
+	// handler. Wrapping both double-applies on every miss: a
+	// non-idempotent pattern (/x/ -> /y/ on /x/x/f) silently resolved to
+	// /y/y/f. The same restructure fixes strip_prefix, which carried the
+	// identical double-strip on cached static routes (a /api prefix
+	// stripped /api/api/f down to /f).
 	var handler fasthttp.RequestHandler = sh.ServeRequest
-
-	// Apply strip_prefix if configured (reuses the same mechanism as
-	// proxied routes — one place, one behavior).
-	if rc.Request.StripPrefix != "" {
-		handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
-	}
-	// path_rewrite is mutually exclusive with strip_prefix (config
-	// validation), so at most one wrapper applies. Both apply BEFORE the
-	// cache handler on the non-cached path so the static handler sees the
-	// rewritten path, mirroring strip_prefix's dual wiring.
-	if rw := buildPathRewrite(rc); rw != nil {
-		handler = pathRewriteFastHTTP(rw, handler)
+	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
+	if !cacheEnabled {
+		if rc.Request.StripPrefix != "" {
+			handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
+		}
+		if rw := buildPathRewrite(rc); rw != nil {
+			handler = pathRewriteFastHTTP(rw, handler)
+		}
 	}
 
 	// Wrap in cache handler only when cache is explicitly enabled.
-	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
 	if cacheEnabled {
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,

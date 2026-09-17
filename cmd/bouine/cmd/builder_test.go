@@ -1496,6 +1496,86 @@ func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
 	assert.Equal(t, "static", string(ctx.Response.Body()))
 }
 
+// TestBuildStaticRoute_CachedPathRewriteAppliedOnce pins the cached
+// static wiring against double application: the cache.Handler's
+// originURI is the single rewrite point, and the Upstream handed to it
+// must be the bare static handler. A non-idempotent pattern
+// (/x/ -> /y/ on /x/x/f) applied twice resolves /y/y/f; applied once it
+// resolves /y/x/f. The bypass request (Cache-Control: no-cache) covers
+// the in-process upstream fallback, which applies originURI in place.
+func TestBuildStaticRoute_CachedPathRewriteAppliedOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "y", "x"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y", "x", "f"), []byte("once"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "y", "y"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y", "y", "f"), []byte("twice"), 0o600))
+
+	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
+	enabled := true
+	rc := config.Route{
+		Name:   "static-cached-rewrite",
+		Static: config.StaticConfig{Root: dir},
+		Cache:  config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
+		Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+			Match:   `/x/`,
+			Replace: "/y/",
+		}},
+	}
+	e.buildStaticRoute(router, rs, rc)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/x/x/f")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "miss must serve the once-rewritten file")
+	assert.Equal(t, "once", string(ctx.Response.Body()),
+		"a double application would resolve /y/y/f (\"twice\")")
+
+	ctx2 := &fasthttp.RequestCtx{}
+	ctx2.Request.SetRequestURI("/x/x/f")
+	ctx2.Request.Header.Set("Cache-Control", "no-cache")
+	router.ServeRequest(ctx2)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode())
+	assert.Equal(t, "once", string(ctx2.Response.Body()),
+		"the bypass upstream fallback must also apply the rewrite exactly once")
+}
+
+// TestBuildStaticRoute_CachedStripPrefixAppliedOnce pins the same
+// single-application contract for strip_prefix on cached static routes:
+// /api/api/f strips one /api prefix (serving api/f), not two.
+func TestBuildStaticRoute_CachedStripPrefixAppliedOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "api"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "api", "f"), []byte("once"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("twice"), 0o600))
+
+	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
+	enabled := true
+	rc := config.Route{
+		Name:    "static-cached-strip",
+		Static:  config.StaticConfig{Root: dir},
+		Cache:   config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
+		Request: config.RouteRequest{StripPrefix: "/api"},
+	}
+	e.buildStaticRoute(router, rs, rc)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/api/f")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "miss must serve the once-stripped file")
+	assert.Equal(t, "once", string(ctx.Response.Body()),
+		"a double strip would resolve /f (\"twice\")")
+}
+
 // TestBuildPathRewrite_NilWhenUnset pins the zero-config behaviour:
 // no path_rewrite means no compiled rewrite (zero cost).
 func TestBuildPathRewrite_NilWhenUnset(t *testing.T) {

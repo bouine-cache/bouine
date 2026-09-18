@@ -68,12 +68,12 @@ type RawRequest struct {
 	// OwnerMissContextKey so handleCacheMiss skips the duplicate owner
 	// lookup and peer RPC and goes straight to origin. The slow path
 	// only honors the hint on routes WITHOUT a KeyPolicy: the production
-	// fast path is built without one, so on a policied route the hint's
-	// miss was computed under a different key and proves nothing. Never
-	// set on peer errors (the slow-path retry is kept) or on gate
-	// rejections (the slow path, with the route's key policy, may still
-	// accept). Reset to false by the parser's per-request soft reset;
-	// zero value = unset.
+	// fast path runs under its route's KeyPolicy (per-route handlers,
+	// issue #696), so on a policied route the hint's miss was computed
+	// under a different key and proves nothing. Never set on peer errors
+	// (the slow-path retry is kept) or on gate rejections (the slow
+	// path, with the route's key policy, may still accept). Reset to
+	// false by the parser's per-request soft reset; zero value = unset.
 	OwnerMiss bool
 	// OwnerGateReject reports that the fast path asked the key's ring
 	// owner and got back an object whose VaryKey failed this request's

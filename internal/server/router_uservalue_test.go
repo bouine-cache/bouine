@@ -21,10 +21,10 @@ import (
 func TestRouter_UserValues(t *testing.T) {
 	t.Parallel()
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("", "/api/", "api", "app", nil, ok200("api"))
-	rt.AddRoute("", "/s/", "static-route", "", nil, ok200("s"))
-	rt.AddRoute("only.com", "", "host-route", "only-pool", nil, ok200("x"))
-	rt.AddRoute("", "/", "root", "edge", nil, ok200("root"))
+	rt.AddRoute("", "/api/", "api", "app", nil, ok200("api"), nil)
+	rt.AddRoute("", "/s/", "static-route", "", nil, ok200("s"), nil)
+	rt.AddRoute("only.com", "", "host-route", "only-pool", nil, ok200("x"), nil)
+	rt.AddRoute("", "/", "root", "edge", nil, ok200("root"), nil)
 
 	tests := []struct {
 		name       string
@@ -62,9 +62,9 @@ func TestRouter_UpstreamPoolLabelStaysBounded(t *testing.T) {
 	dm.PreResolveRoutes([]string{"proxy-pool"})
 
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("", "/p/", "proxy-route", "proxy-pool", nil, ok200("p"))
-	rt.AddRoute("", "/s/", "static-route", "", nil, ok200("s"))
-	rt.AddRoute("", "/u/", "", "", nil, ok200("u"))
+	rt.AddRoute("", "/p/", "proxy-route", "proxy-pool", nil, ok200("p"), nil)
+	rt.AddRoute("", "/s/", "static-route", "", nil, ok200("s"), nil)
+	rt.AddRoute("", "/u/", "", "", nil, ok200("u"), nil)
 
 	mw := dm.FastHTTPMiddleware(rt.ServeRequest)
 	for _, path := range []string{"/p/x", "/s/x", "/u/x"} {

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -22,6 +23,7 @@ type Router struct {
 type routeEntry struct {
 	methods    map[string]bool // nil = match all methods
 	handler    fasthttp.RequestHandler
+	fastPath   api.FastPathHandler // per-route H1 fast path; nil = none
 	host       string
 	pathPrefix string
 	label      string
@@ -60,7 +62,9 @@ func NewRouter(cfg RouterConfig) *Router {
 // files): the metrics middleware uses it as the upstream_pool label and
 // falls back to "_default" when empty, so that label set stays bounded
 // by the pool configuration. The label still feeds the dashboard rings.
-func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler) {
+// fastPath, when non-nil, is the route's H1 fast-path handler (see
+// NewRoutedFastPath); routes without one never receive TryHit.
+func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler, fastPath api.FastPathHandler) {
 	if label == "" {
 		switch {
 		case host != "":
@@ -86,6 +90,7 @@ func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []strin
 		labelVal:   label,
 		pool:       pool,
 		handler:    handler,
+		fastPath:   fastPath,
 	})
 }
 

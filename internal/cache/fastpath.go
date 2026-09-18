@@ -42,6 +42,11 @@ const maxFastPathHeaderBytes = 8 * 1024
 // to serve cache hits without constructing a full RequestInfo.
 type FastPathHandler struct {
 	store storage.Store
+	// owner is the cache.Handler this handler was built from
+	// (NewFastPathHandler); nil when store-constructed. Retained so
+	// the engine can wire per-route SWR through the owning route
+	// handler (see Owner).
+	owner *Handler
 	// ownerFn and peerFetch mirror the slow-path Handler fields of the
 	// same names (handler.go): ownerFn reports the ring owner for a key
 	// and whether it is local; peerFetch asks that owner for the object.
@@ -56,16 +61,30 @@ type FastPathHandler struct {
 	cachedDateUnix atomic.Int64
 }
 
-// NewFastPathHandler creates a FastPathHandler from a Handler's config.
-// The Handler must be fully initialized before calling this.
+// NewFastPathHandler creates a FastPathHandler from a Handler's
+// config. The Handler must be fully initialized before calling this.
+// The cluster peer wiring (ownerFn/peerFetch) is deliberately NOT
+// inherited: the engine decides per deployment whether the fast path
+// may issue blocking peer RPCs (experimental.h1_fast_peer_path, and
+// never under the epoll reactor), and applies it explicitly via
+// WithPeerFetch. Inheriting silently would put a blocking network call
+// on every h1parser goroutine (and the reactor event loop) with no
+// flag opt-in (issue #696).
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:     h.store,
-		poolName:  h.poolName,
-		policy:    h.policy,
-		ownerFn:   h.ownerFn,
-		peerFetch: h.peerFetch,
+		store:    h.store,
+		owner:    h,
+		poolName: h.poolName,
+		policy:   h.policy,
 	}
+}
+
+// Owner returns the cache.Handler this handler was built from by
+// NewFastPathHandler; nil for store-constructed handlers. The engine
+// uses it to wire per-route SWR revalidation (WithOnStale) through the
+// route's own handler.
+func (f *FastPathHandler) Owner() *Handler {
+	return f.owner
 }
 
 // WithOnStale sets the callback invoked after a fast-path StaleHit is
@@ -298,12 +317,15 @@ func reqHeaderMapFromRaw(req *api.RawRequest) header.Map {
 // with the primary-key resolver (blank VaryKey by protocol) — treat as
 // a miss.
 //
-// Note: the production fast path is built per-engine without the route's
-// KeyPolicy (NewFastPathHandlerFromStore sets policy nil). On routes
-// with key.exclude_headers the gate may mismatch a legitimately-stored
-// variant; the branch then falls through and the slow path's gate (with
-// the correct policy) decides. Fail-safe direction: never serves a
-// foreign variant, only falls back.
+// Note: the production fast path is built per route from that route's
+// Handler (NewFastPathHandler), so the gate runs under the route's
+// KeyPolicy — the same policy the slow path's gate uses. Only a
+// store-constructed handler (tests, deployments wiring
+// NewFastPathHandlerFromStore directly) runs with policy nil; on
+// routes with key.exclude_headers that gate may mismatch a
+// legitimately-stored variant, falls through, and the slow path's
+// gate decides. Fail-safe direction: never serves a foreign variant,
+// only falls back.
 func (f *FastPathHandler) peerGateMatchesVary(req *api.RawRequest, peerObj *api.Object) bool {
 	vary := peerObj.VaryValue
 	if vary == "" {

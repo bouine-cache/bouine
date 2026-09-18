@@ -929,10 +929,11 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 // chain. Called by the h1parser after serving a cache hit.
 func (m *DataPlaneMetrics) RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 	if pool == "" {
-		// The engine-level fast path carries no pool attribution (the
-		// store is shared across routes), and pool-less routes (static,
-		// catch-all) must not leak their route names into the
-		// upstream_pool label; "_default" covers both.
+		// Pool-less fast paths (cache-enabled static routes with no
+		// upstream pool) must not leak their route names into the
+		// upstream_pool label; "_default" covers them, matching the
+		// slow path's middleware fallback. Proxied routes carry their
+		// configured pool on the response (issue #696).
 		pool = "_default"
 	}
 	dur := duration.Seconds()

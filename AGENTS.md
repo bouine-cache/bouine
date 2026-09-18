@@ -333,6 +333,14 @@ Observability is a product feature, not an afterthought.
   surface.
 - README stays a quickstart. Deep content lives under `docs/`.
 - Diagrams use Mermaid in Markdown; no binary images committed.
+- `CHANGELOG.md` entries are append-only under `## [Unreleased]` —
+  never edit, reorder, or delete entries added on another branch.
+  This makes `CHANGELOG.md` conflict-free by construction except for
+  insertion order under the same section heading, whose resolution is
+  mechanical: keep **both** sides, upstream (`main`) entry first,
+  then the branch's. This is the resolution to use for any
+  `CHANGELOG.md` conflict when rebasing or merging; it makes rebases
+  resolve on the first try instead of needing a hand-merged fixup.
 - TODO (doc-lint): add a CI check that fails when any file path, `make`
   target, ADR number, or `§` reference cited in this file no longer
   resolves. Until it exists, references here are verified by review only.

@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.21] - 2026-09-17
+
 ### Changed
 - **Unified RFC 9111 evaluation (issue #589)** — the three hand-maintained
   copies of the cache decision state machine (`Evaluate` on the header.Map
@@ -1760,7 +1762,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.20...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.21...HEAD
+[0.5.21]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.21
 [0.5.20]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.20
 [0.5.19]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.19
 [0.5.18]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.18

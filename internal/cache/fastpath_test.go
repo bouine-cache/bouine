@@ -690,27 +690,27 @@ func BenchmarkGate_FastPath_HitWithWrite(b *testing.B) {
 	}
 }
 
-func TestEvaluateFromRaw_NoStore(t *testing.T) {
+func TestEvaluateFastPath_NoStore(t *testing.T) {
 	t.Parallel()
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "no-store"}
 	req.NHeaders = 1
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second}
-	d := evaluateFromRaw(req, obj, time.Now(), Directives{NoStore: true})
+	d := evaluate(obj, Directives{NoStore: true}, respGateFromObject(obj), time.Now())
 	assert.Equal(t, Bypass, d.Decision)
 }
 
-func TestEvaluateFromRaw_NoCache(t *testing.T) {
+func TestEvaluateFastPath_NoCache(t *testing.T) {
 	t.Parallel()
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "no-cache"}
 	req.NHeaders = 1
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second, ETag: `"v1"`}
-	d := evaluateFromRaw(req, obj, time.Now(), Directives{NoCache: true})
+	d := evaluate(obj, Directives{NoCache: true}, respGateFromObject(obj), time.Now())
 	assert.Equal(t, Revalidate, d.Decision)
 }
 
-func TestEvaluateFromRaw_MustRevalidate(t *testing.T) {
+func TestEvaluateFastPath_MustRevalidate(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StoredAt:           time.Now().Add(-2 * time.Second),
@@ -718,12 +718,17 @@ func TestEvaluateFromRaw_MustRevalidate(t *testing.T) {
 		CacheControl:       "max-age=1, must-revalidate",
 		RespMustRevalidate: true,
 	}
-	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, obj, time.Now(), Directives{})
+	d := evaluate(obj, Directives{}, respGateFromObject(obj), time.Now())
+	// No validators (no ETag/Last-Modified): must-revalidate degrades to a
+	// full refetch — conditional revalidation is impossible.
+	assert.Equal(t, Miss, d.Decision)
+
+	obj.ETag = `"v1"`
+	d = evaluate(obj, Directives{}, respGateFromObject(obj), time.Now())
 	assert.Equal(t, Revalidate, d.Decision)
 }
 
-func TestEvaluateFromRaw_MaxStale(t *testing.T) {
+func TestEvaluateFastPath_MaxStale(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StoredAt: time.Now().Add(-10 * time.Second),
@@ -732,22 +737,20 @@ func TestEvaluateFromRaw_MaxStale(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "max-stale=60"}
 	req.NHeaders = 1
-	d := evaluateFromRaw(req, obj, time.Now(), Directives{MaxStaleSet: true, MaxStale: 60 * time.Second})
+	d := evaluate(obj, Directives{MaxStaleSet: true, MaxStale: 60 * time.Second}, respGateFromObject(obj), time.Now())
 	assert.Equal(t, StaleHit, d.Decision)
 }
 
-func TestEvaluateFromRaw_Fresh(t *testing.T) {
+func TestEvaluateFastPath_Fresh(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second}
-	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, obj, time.Now(), Directives{})
+	d := evaluate(obj, Directives{}, respGateFromObject(obj), time.Now())
 	assert.Equal(t, Hit, d.Decision)
 }
 
-func TestEvaluateFromRaw_NilObj(t *testing.T) {
+func TestEvaluateFastPath_NilObj(t *testing.T) {
 	t.Parallel()
-	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, nil, time.Now(), Directives{})
+	d := evaluate(nil, Directives{}, respGateFromObject(nil), time.Now())
 	assert.Equal(t, Miss, d.Decision)
 }
 
@@ -755,14 +758,14 @@ func TestVariantKeyFromRaw_VaryStar(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	assert.Equal(t, primary, variantKeyFromRaw(primary, "*", req, nil))
+	assert.Equal(t, primary, VariantKeyFromRaw(primary, "*", req, nil))
 }
 
 func TestVariantKeyFromRaw_EmptyVary(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	assert.Equal(t, primary, variantKeyFromRaw(primary, "", req, nil))
+	assert.Equal(t, primary, VariantKeyFromRaw(primary, "", req, nil))
 }
 
 func TestVariantKeyFromRaw_DifferentHeaders(t *testing.T) {
@@ -774,8 +777,8 @@ func TestVariantKeyFromRaw_DifferentHeaders(t *testing.T) {
 	req2 := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req2.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "br"}
 	req2.NHeaders = 1
-	k1 := variantKeyFromRaw(primary, "Accept-Encoding", req1, nil)
-	k2 := variantKeyFromRaw(primary, "Accept-Encoding", req2, nil)
+	k1 := VariantKeyFromRaw(primary, "Accept-Encoding", req1, nil)
+	k2 := VariantKeyFromRaw(primary, "Accept-Encoding", req2, nil)
 	assert.NotEqual(t, k2, k1)
 	assert.NotEqual(t, primary, k1)
 }
@@ -790,8 +793,8 @@ func TestVariantKeyFromRaw_PolicyExclusion(t *testing.T) {
 	req2 := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req2.Headers[0] = api.RawHeader{Key: "X-Request-Id", Value: "xyz"}
 	req2.NHeaders = 1
-	k1 := variantKeyFromRaw(primary, "X-Request-Id", req1, policy)
-	k2 := variantKeyFromRaw(primary, "X-Request-Id", req2, policy)
+	k1 := VariantKeyFromRaw(primary, "X-Request-Id", req1, policy)
+	k2 := VariantKeyFromRaw(primary, "X-Request-Id", req2, policy)
 	assert.Equal(t, k2, k1)
 	assert.Equal(t, primary, k1)
 }
@@ -800,7 +803,9 @@ func TestVariantKeyFromRaw_TooManyFields(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	// >16 Vary fields → falls back to primary.
+	// >16 Vary fields → falls back to the alloc path (variantKeySlow),
+	// matching VariantKey/VariantKeyFast — not the old mirror's silent
+	// return of the primary key, which could select the wrong variant.
 	vary := ""
 	for i := range 20 {
 		if i > 0 {
@@ -808,7 +813,8 @@ func TestVariantKeyFromRaw_TooManyFields(t *testing.T) {
 		}
 		vary += "X-H" + string(rune('0'+i))
 	}
-	assert.Equal(t, primary, variantKeyFromRaw(primary, vary, req, nil))
+	k := VariantKeyFromRaw(primary, vary, req, nil)
+	assert.NotEqual(t, primary, k, "too-many-fields must fall back to the alloc path, not collapse to the primary key")
 }
 
 func TestQualifiesForFastPath_IfRange(t *testing.T) {
@@ -1045,7 +1051,7 @@ func TestFastPathHandler_VaryHit(t *testing.T) {
 		NHeaders: 1,
 	}
 	reqGzip.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
-	varyKeyGzip := variantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
+	varyKeyGzip := VariantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
 
 	// Store the gzip variant under its variant key.
 	gzipObj := &api.Object{
@@ -1124,7 +1130,7 @@ func TestFastPathHandler_VaryStaleHit(t *testing.T) {
 		NHeaders: 1,
 	}
 	reqGzip.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
-	varyKeyGzip := variantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
+	varyKeyGzip := VariantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
 
 	// Store a stale-but-SWR gzip variant.
 	gzipObj := &api.Object{
@@ -1237,7 +1243,7 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 	}
 	reqGzipEn.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
 	reqGzipEn.Headers[1] = api.RawHeader{Key: "Accept-Language", Value: "en"}
-	varyKeyGzipEn := variantKeyFromRaw(primary, "Accept-Encoding, Accept-Language", reqGzipEn, nil)
+	varyKeyGzipEn := VariantKeyFromRaw(primary, "Accept-Encoding, Accept-Language", reqGzipEn, nil)
 
 	// Store the gzip+en variant.
 	variantObj := &api.Object{
@@ -1809,7 +1815,7 @@ func TestFastPathHandler_PeerMatchingVariantServed(t *testing.T) {
 
 // TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired pins
 // RFC 9111 §5.2.2.2 on the peer path: a stale must-revalidate object
-// from a peer is not served (falls through), matching evaluateFromRaw.
+// from a peer is not served (falls through), matching the shared evaluate.
 func TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired(t *testing.T) {
 	t.Parallel()
 	req := &api.RawRequest{
@@ -1821,14 +1827,16 @@ func TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired(t *testing.T
 	}
 	key := buildKeyFromRaw(req, nil)
 	obj := &api.Object{
-		Key:                key,
-		StatusCode:         200,
-		Header:             peerHeaderMap13(),
+		Key:        key,
+		StatusCode: 200,
+		Header: headerMap("Content-Type", "text/html", header.ContentLength, "13",
+			header.CacheControl, "max-age=60, must-revalidate"),
+		CacheControl:       "max-age=60, must-revalidate",
+		RespMustRevalidate: true,
 		Body:               []byte("Hello, World!"),
 		BodySize:           13,
 		StoredAt:           time.Now().Add(-90 * time.Second),
 		TTL:                60 * time.Second,
-		RespMustRevalidate: true,
 	}
 	stub := newPeerFetchStub(obj)
 

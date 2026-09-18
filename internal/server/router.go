@@ -94,14 +94,24 @@ func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []strin
 	})
 }
 
-// MatchByHostPath returns the label of the first route matching
-// host:path, or "" if none. Uses the same matching logic as ServeRequest
-// (host case-insensitive + pathPrefix HasPrefix) but skips method
-// matching. Used by admin BuildKeyForURL to find the route's policy.
-func (rt *Router) MatchByHostPath(host, path string) string {
+// stripHostPort removes the port from a Host header value (an IPv6
+// literal keeps its brackets; a bare ":port" is preserved, matching
+// lastIndex semantics). Shared authority normalization for ServeRequest,
+// MatchByHostPath, and RoutedFastPath.TryHit.
+func stripHostPort(host string) string {
 	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
+		return host[:idx]
 	}
+	return host
+}
+
+// matchRoute returns the first route matching host (with port —
+// stripped here), path prefix, and method, using the router's single
+// first-match-wins table; nil when none matches. An empty method skips
+// method matching (used by the method-agnostic MatchByHostPath). A
+// matched route may carry a nil fastPath — the caller decides.
+func (rt *Router) matchRoute(host, path, method string) *routeEntry {
+	host = stripHostPort(host)
 	for i := range rt.routes {
 		re := &rt.routes[i]
 		if re.host != "" && !strings.EqualFold(re.host, host) {
@@ -110,50 +120,48 @@ func (rt *Router) MatchByHostPath(host, path string) string {
 		if re.pathPrefix != "" && !strings.HasPrefix(path, re.pathPrefix) {
 			continue
 		}
+		if method != "" && re.methods != nil && !re.methods[method] {
+			continue
+		}
+		return re
+	}
+	return nil
+}
+
+// MatchByHostPath returns the label of the first route matching
+// host:path, or "" if none. Uses the same matching logic as ServeRequest
+// (host case-insensitive + pathPrefix HasPrefix) but skips method
+// matching. Used by admin BuildKeyForURL to find the route's policy.
+func (rt *Router) MatchByHostPath(host, path string) string {
+	if re := rt.matchRoute(host, path, ""); re != nil {
 		return re.label
 	}
 	return ""
 }
 
-// ServeRequest implements fasthttp.RequestHandler. It matches the
+// ServeRequest implements fasthttp.RequestHandler. It matches an
 // incoming request to a route and dispatches to the route's handler.
 func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if rt.metrics.RequestsTotal != nil {
 		rt.metrics.RequestsTotal.Inc()
 	}
 
-	host := string(ctx.Host())
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
-	}
-	path := string(ctx.Path())
-
-	for i := range rt.routes {
-		re := &rt.routes[i]
-		if re.host != "" && !strings.EqualFold(re.host, host) {
-			continue
+	re := rt.matchRoute(string(ctx.Host()), string(ctx.Path()), string(ctx.Method()))
+	if re == nil {
+		if rt.metrics.NoRouteTotal != nil {
+			rt.metrics.NoRouteTotal.Inc()
 		}
-		if re.pathPrefix != "" && !strings.HasPrefix(path, re.pathPrefix) {
-			continue
-		}
-		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
-			continue
-		}
-		// Attribution travels as UserValues, not request headers: the
-		// old header form was forwarded verbatim upstream, leaking
-		// internal route names. The pool UserValue is set only for
-		// pool-bearing routes, so the middleware's _default fallback
-		// applies to static routes.
-		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
-		if re.pool != "" {
-			ctx.SetUserValue(header.XBouinePool, re.pool)
-		}
-		re.handler(ctx)
+		ctx.Error("no matching route", fasthttp.StatusNotFound)
 		return
 	}
-
-	if rt.metrics.NoRouteTotal != nil {
-		rt.metrics.NoRouteTotal.Inc()
+	// Attribution travels as UserValues, not request headers: the
+	// old header form was forwarded verbatim upstream, leaking
+	// internal route names. The pool UserValue is set only for
+	// pool-bearing routes, so the middleware's _default fallback
+	// applies to static routes.
+	ctx.SetUserValue(header.XBouineRoute, re.labelVal)
+	if re.pool != "" {
+		ctx.SetUserValue(header.XBouinePool, re.pool)
 	}
-	ctx.Error("no matching route", fasthttp.StatusNotFound)
+	re.handler(ctx)
 }

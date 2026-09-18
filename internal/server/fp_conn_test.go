@@ -71,16 +71,6 @@ func TestListener_Shutdown(t *testing.T) {
 	<-errCh
 }
 
-// --- reportFastPathError ---
-
-func TestReportFastPathError_NoPanic(t *testing.T) {
-	t.Parallel()
-	errCh := make(chan<- error, 1)
-	// Should not send anything to errCh and should not panic.
-	reportFastPathError(nil, errCh)
-	reportFastPathError(nil, errCh)
-}
-
 // --- Router additional tests ---
 
 func TestRouter_MatchByHostPath(t *testing.T) {

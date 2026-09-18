@@ -30,7 +30,7 @@ func hasMeaningfulCDNCCDirective(d Directives) bool {
 // RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
 // list of tokens"), the header is treated as absent.
 func cdnCacheControl(respHeader header.Map) (Directives, bool) {
-	v := mergeHeaderValues(respHeader, header.CDNCacheControl)
+	v := respHeader.GetAll(header.CDNCacheControl)
 	if v == "" {
 		return Directives{}, false
 	}
@@ -69,7 +69,7 @@ func IsCacheable(status int, reqHeader, respHeader header.Map, negativeTTL ...ti
 		respCC = cdnCC
 		hasCDN = true
 	} else {
-		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
+		respCC = ParseCacheControl(respHeader.GetAll(header.CacheControl))
 	}
 
 	if isCacheBlocked(status, respCC, hasCDN, reqHeader, respHeader) {
@@ -145,7 +145,7 @@ func IsCacheableWithDefault(status int, reqHeader, respHeader header.Map, negati
 		respCC = cdnCC
 		hasCDN = true
 	} else {
-		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
+		respCC = ParseCacheControl(respHeader.GetAll(header.CacheControl))
 	}
 	if isCacheBlocked(status, respCC, hasCDN, reqHeader, respHeader) {
 		return false
@@ -180,7 +180,7 @@ func newParsedResponse(status int, reqHeader, respHeader header.Map) parsedRespo
 		p.respCC = cdnCC
 		p.hasCDN = hasCDN
 	} else {
-		p.respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
+		p.respCC = ParseCacheControl(respHeader.GetAll(header.CacheControl))
 	}
 	return p
 }

@@ -72,8 +72,8 @@ func etagMatch(list, needle string) bool {
 // stored response, except for content-specific headers.
 func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	// Skipped headers are content-specific (RFC 9111 §3.2) and must not
-	// be updated from a 304. Set-Cookie is excluded because SetValues
-	// joins multi-values with ", " which is non-conformant per RFC 9110
+	// be updated from a 304. Set-Cookie is excluded because the joined
+	// multi-value form is non-conformant per RFC 9110
 	// §5.2 and serving stale cookies is a security risk.
 	//
 	// Vary is replaced wholesale instead of Set per line: Set writes the

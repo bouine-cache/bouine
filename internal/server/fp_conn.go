@@ -77,7 +77,6 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
 
 	go func() {
 		<-ctx.Done()
@@ -96,24 +95,18 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		wg.Add(1)
 		go func(c net.Conn) { //nolint:contextcheck // parser manages its own deadlines
 			defer wg.Done()
-			s.handleFastPathConn(c, parser, errCh)
+			s.handleFastPathConn(c, parser)
 		}(conn)
 	}
 
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			return err
-		}
-	}
 	return nil
 }
 
 // handleFastPathConn routes a single accepted connection to the h1parser.
 // For TLS connections, the handshake is performed first. All connections
 // go to the h1parser — HTTP/2 is not supported.
-func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
+func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser) {
 	defer func() { _ = conn.Close() }()
 
 	if parser == nil {
@@ -126,15 +119,11 @@ func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, er
 		}
 	}
 
-	if err := parser.Serve(conn); err != nil { //nolint:contextcheck // parser manages its own deadlines
-		reportFastPathError(err, errCh)
-	}
+	// All errors from parser.Serve are per-connection: EOF, closed,
+	// malformed request, timeout, smuggling detection, write failure.
+	// None are listener-level failures, so they are dropped here.
+	_ = parser.Serve(conn) //nolint:contextcheck // parser manages its own deadlines
 }
-
-// reportFastPathError handles errors from parser.Serve. All errors from
-// the parser are per-connection: EOF, closed, malformed request, timeout,
-// smuggling detection, write failure. None are listener-level failures.
-func reportFastPathError(_ error, _ chan<- error) {}
 
 // serveMultiFastPath runs the fast-path accept loop across multiple
 // SO_REUSEPORT listeners. Called from serveMulti when the fast path is enabled.

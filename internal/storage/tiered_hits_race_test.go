@@ -73,7 +73,12 @@ func TestRace_HitsVsWarmEncode(t *testing.T) {
 				return
 			default:
 				got, _, err := ts.hot.Get(context.Background(), key)
-				if err == nil && got != nil && got.Hits > 0 {
+				// Atomic load: this hammer's Get is the increment side of
+				// the issue-#218 pair — the same stored object's Hits is
+				// AddUint64'd under the shard lock by concurrent Gets, so
+				// a plain read here races with them (the encoder pairs
+				// with atomic.LoadUint64; so must this probe).
+				if err == nil && got != nil && atomic.LoadUint64(&got.Hits) > 0 {
 					increments.Add(1)
 				}
 				clearVisited()

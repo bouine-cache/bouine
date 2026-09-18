@@ -1384,8 +1384,11 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 // same way: skip the RPC, go to origin. The hint is trusted only when
 // the stored object is nil (otherwise the slow path's peer question
 // carries peerVaryAssertion(obj) — a different question) and the route
-// has no KeyPolicy (otherwise the slow path's gate/key differ from the
-// nil-policy fast path's and the hint proves nothing).
+// has no KeyPolicy (the hint flag does not bind to the producing
+// route's policy, so on a policied route the slow path cannot prove
+// its peer question identical to the fast path's and keeps the retry;
+// conservative, since the per-route fast path runs the route's own
+// policy — lifting the restriction needs a route-bound hint).
 func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool {
 	if obj != nil || h.policy != nil {
 		return false
@@ -1410,8 +1413,9 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// Both hints require obj == nil AND h.policy == nil: with a stale
 	// object or Vary resolver present (obj != nil) the slow path's peer
 	// question carries peerVaryAssertion(obj) — a different question —
-	// and with a KeyPolicy the slow path's gate/key differ from the
-	// nil-policy fast path's, so the hints prove nothing. The owner
+	// and with a KeyPolicy the hint flag does not bind to the producing
+	// route's policy, so the identical-question proof is unavailable
+	// and the retry is kept. The owner
 	// populating the key in the race window is missed either way;
 	// recovery is the same: the origin fetch is singleflight-collapsed
 	// and peer-put to the owner, so later requests recover through the

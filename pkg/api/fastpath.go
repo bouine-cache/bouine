@@ -67,10 +67,10 @@ type RawRequest struct {
 	// error). The h1parser transfers it to the fallback RequestCtx under
 	// OwnerMissContextKey so handleCacheMiss skips the duplicate owner
 	// lookup and peer RPC and goes straight to origin. The slow path
-	// only honors the hint on routes WITHOUT a KeyPolicy: the production
-	// fast path runs under its route's KeyPolicy (per-route handlers,
-	// issue #696), so on a policied route the hint's miss was computed
-	// under a different key and proves nothing. Never set on peer errors
+	// only honors the hint on routes WITHOUT a KeyPolicy: the hint flag
+	// does not bind to the producing route's policy, so on a policied
+	// route the slow path cannot prove its peer question identical to
+	// the fast path's and keeps the retry. Never set on peer errors
 	// (the slow-path retry is kept) or on gate rejections (the slow
 	// path, with the route's key policy, may still accept). Reset to
 	// false by the parser's per-request soft reset; zero value = unset.
@@ -85,8 +85,10 @@ type RawRequest struct {
 	// wire bytes (parity pinned by internal/cache's
 	// TestPeerVaryGateHeaderParity), so the identical question is
 	// deterministically rejected twice. Policiied routes keep the
-	// retry — their slow-path gate computes a different VaryKey and may
-	// accept. Reset to false by the parser's per-request soft reset;
+	// retry: the hint flag does not bind to the producing route's
+	// policy, so the identical-question proof only holds on nil-policy
+	// routes, and the retry is the conservative choice. Reset to false
+	// by the parser's per-request soft reset;
 	// zero value = unset.
 	OwnerGateReject bool
 }

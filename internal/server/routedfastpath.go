@@ -1,7 +1,6 @@
 package server
 
 import (
-	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -49,30 +48,17 @@ func NewRoutedFastPath(rt *Router, release api.FastPathHandler) *RoutedFastPath 
 	}
 }
 
-// TryHit implements api.FastPathHandler. It mirrors the router's
-// matching loop (host case-insensitive + optional port strip, path
-// prefix, method set, first match wins) and delegates to the matched
-// route's handler. Returns (nil, false) when no route matches or the
-// matched route has no fast path.
+// TryHit implements api.FastPathHandler. It resolves the route with
+// the router's shared matchRoute (first-match-wins over host, path
+// prefix, and methods) and delegates to the matched route's handler —
+// the same authority the router's ServeRequest has. Returns (nil,
+// false) when no route matches or the matched route has no fast path.
 func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
-	host := stripHostPort(req.Host)
-	for i := range r.router.routes {
-		re := &r.router.routes[i]
-		if re.host != "" && !strings.EqualFold(re.host, host) {
-			continue
-		}
-		if re.pathPrefix != "" && !strings.HasPrefix(req.Path, re.pathPrefix) {
-			continue
-		}
-		if re.methods != nil && !re.methods[req.Method] {
-			continue
-		}
-		if re.fastPath == nil {
-			return nil, false
-		}
-		return re.fastPath.TryHit(req, now)
+	re := r.router.matchRoute(req.Host, req.Path, req.Method)
+	if re == nil || re.fastPath == nil {
+		return nil, false
 	}
-	return nil, false
+	return re.fastPath.TryHit(req, now)
 }
 
 // Release implements api.FastPathHandler. The response may have been
@@ -83,14 +69,4 @@ func (r *RoutedFastPath) Release(resp *api.FastPathResponse) {
 		return
 	}
 	r.release.Release(resp)
-}
-
-// stripHostPort removes the port from a Host header value, mirroring
-// Router.ServeRequest's authority normalization (an IPv6 literal keeps
-// its brackets; a bare ":port" is preserved, matching lastIndex semantics).
-func stripHostPort(host string) string {
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		return host[:idx]
-	}
-	return host
 }

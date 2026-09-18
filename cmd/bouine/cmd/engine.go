@@ -1133,14 +1133,22 @@ func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
 	// (stale objects never refreshed); per-route wiring fixes both.
 	// triggerBgRevalidate's revalSem bounds concurrency per handler.
 	for _, fp := range rs.fastPathHandlers {
-		fp.WithOnStale(fp.Owner().TriggerBgRevalidateFromFastPath)
+		owner := fp.Owner()
+		if owner == nil {
+			// Store-constructed handlers (NewFastPathHandlerFromStore)
+			// have no owning route handler to revalidate through; wire
+			// SWR only for handlers that carry one.
+			continue
+		}
+		fp.WithOnStale(owner.TriggerBgRevalidateFromFastPath)
 	}
 	e.wireFastPathPeerFetch(rs)
 
 	// The router owns route semantics; the routed wrapper selects the
 	// per-route handler by the router's first-match-wins table. The
-	// release target may be any per-route handler: FastPathHandler
-	// returns responses to global pools and ignores its receiver, so
+	// release target may be any per-route handler: cache.FastPathHandler
+	// returns responses to global sync.Pools independent of its
+	// receiver (pinned by TestRoutedFastPath_ReleaseCrossInstance), so
 	// one target serves every route.
 	var release api.FastPathHandler
 	if len(rs.fastPathHandlers) > 0 {

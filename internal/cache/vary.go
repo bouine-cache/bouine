@@ -35,6 +35,36 @@ func varyContainsStar(vary string) bool {
 	return false
 }
 
+// varySource abstracts how the variant-key computation reads a request
+// header value and materializes a full header.Map on the overflow path.
+// Concrete adapters: header.Map (slow serving path), *fasthttp.RequestHeader
+// (fasthttp Peek path), *api.RawRequest (H1 fast path). A generic type
+// constraint, not a runtime interface — variantKeyCore instantiates per
+// adapter type, so the hit path carries no interface boxing.
+type varySource interface {
+	getValue(key string) string
+	toMap() header.Map
+}
+
+// mapVarySrc adapts header.Map for the generic variant-key core.
+type mapVarySrc struct{ m header.Map }
+
+func (s mapVarySrc) getValue(key string) string { return s.m.Get(key) }
+func (s mapVarySrc) toMap() header.Map          { return s.m }
+
+// fastVarySrc adapts *fasthttp.RequestHeader. Converts values to string
+// only for the specific fields listed in Vary (typically 1-2).
+type fastVarySrc struct{ h *fasthttp.RequestHeader }
+
+func (s fastVarySrc) getValue(key string) string { return string(s.h.Peek(key)) }
+func (s fastVarySrc) toMap() header.Map          { return headerFromFastHTTPReqHeader(s.h) }
+
+// rawVarySrc adapts *api.RawRequest (the H1 fast path's parsed headers).
+type rawVarySrc struct{ r *api.RawRequest }
+
+func (s rawVarySrc) getValue(key string) string { return s.r.Header(key) }
+func (s rawVarySrc) toMap() header.Map          { return reqHeaderMapFromRaw(s.r) }
+
 // VariantKey computes a composite storage key from the primary key and
 // the Vary header. If the response has no Vary (or Vary contains "*",
 // which is unmatchable per RFC 9111 §4.1), the primary key is returned.
@@ -43,6 +73,29 @@ func varyContainsStar(vary string) bool {
 // exclusion empties the Vary list entirely, the variant key collapses
 // to the primary key.
 //
+// Delegates to the shared variantKeyCore — the single implementation of
+// the Vary variant-key computation for every request representation.
+func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyPolicy) api.Key {
+	return variantKeyCore(primary, vary, mapVarySrc{reqHeader}, policy)
+}
+
+// VariantKeyFast computes the variant key using fasthttp.RequestHeader
+// directly, avoiding the headerFromCtx allocation (which builds a full
+// header.Map with string() for every request header).
+func VariantKeyFast(primary api.Key, vary string, reqHeader *fasthttp.RequestHeader, policy *KeyPolicy) api.Key {
+	return variantKeyCore(primary, vary, fastVarySrc{reqHeader}, policy)
+}
+
+// VariantKeyFromRaw computes the variant key from a RawRequest (the H1
+// fast path). Same contract as VariantKey; overflow falls back to the
+// alloc path via rawHeaderMap instead of silently returning the primary
+// key (the old mirror's behavior, which could serve the wrong variant).
+func VariantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
+	return variantKeyCore(primary, vary, rawVarySrc{req}, policy)
+}
+
+// variantKeyCore is the single Vary variant-key computation: split and
+// sort field names, hash "field=value;" pairs sorted by field name.
 // Zero-alloc fast path: when the Vary header has ≤ maxVaryFields fields
 // and the total hash input fits in 256 bytes, the function uses a
 // stack-allocated buffer and xxhash.Sum64 instead of allocating a
@@ -50,7 +103,7 @@ func varyContainsStar(vary string) bool {
 // pathological inputs.
 //
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
-func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyPolicy) api.Key {
+func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
 	}
@@ -69,7 +122,7 @@ func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyP
 	for f := range strings.SplitSeq(vary, ",") {
 		if n >= maxVaryFields {
 			// Pathological Vary — fall back to alloc path.
-			return variantKeySlow(primary, vary, reqHeader, policy)
+			return variantKeySlow(primary, vary, src.toMap(), policy)
 		}
 		fields[n] = strings.ToLower(strings.TrimSpace(f))
 		n++
@@ -94,69 +147,11 @@ func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyP
 		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
-		val := normalizeHeaderValue(reqHeader.Get(f))
+		val := normalizeHeaderValue(src.getValue(f))
 		needed := len(f) + 1 + len(val) + 1 // f=val;
 		if off+needed > len(buf) {
 			// Buffer overflow — fall back to alloc path.
-			return variantKeySlow(primary, vary, reqHeader, policy)
-		}
-		off += copy(buf[off:], f)
-		buf[off] = '='
-		off++
-		off += copy(buf[off:], val)
-		buf[off] = ';'
-		off++
-		written = true
-	}
-	if !written {
-		return primary
-	}
-	return primary.WithVary(xxhash.Sum64(buf[:off]))
-}
-
-// VariantKeyFast computes the variant key using fasthttp.RequestHeader
-// directly, avoiding the headerFromCtx allocation (which builds a full
-// header.Map with string() for every request header). It reads Vary
-// field values via Peek (zero-alloc []byte) and converts to string
-// only for the specific fields listed in Vary (typically 1-2).
-func VariantKeyFast(primary api.Key, vary string, reqHeader *fasthttp.RequestHeader, policy *KeyPolicy) api.Key {
-	if vary == "" {
-		return primary
-	}
-	if varyContainsStar(vary) {
-		return primary
-	}
-
-	var fields [maxVaryFields]string
-	n := 0
-	for f := range strings.SplitSeq(vary, ",") {
-		if n >= maxVaryFields {
-			return variantKeySlow(primary, vary, headerFromFastHTTPReqHeader(reqHeader), policy)
-		}
-		fields[n] = strings.ToLower(strings.TrimSpace(f))
-		n++
-	}
-	if n == 0 {
-		return primary
-	}
-	for i := 1; i < n; i++ {
-		for j := i; j > 0 && fields[j-1] > fields[j]; j-- {
-			fields[j-1], fields[j] = fields[j], fields[j-1]
-		}
-	}
-
-	var buf [256]byte
-	off := 0
-	written := false
-	for i := 0; i < n; i++ {
-		f := fields[i]
-		if policy != nil && policy.ShouldExcludeHeader(f) {
-			continue
-		}
-		val := normalizeHeaderValue(string(reqHeader.Peek(f)))
-		needed := len(f) + 1 + len(val) + 1
-		if off+needed > len(buf) {
-			return variantKeySlow(primary, vary, headerFromFastHTTPReqHeader(reqHeader), policy)
+			return variantKeySlow(primary, vary, src.toMap(), policy)
 		}
 		off += copy(buf[off:], f)
 		buf[off] = '='

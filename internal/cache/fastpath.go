@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bouine-cache/xxhash/v3"
-
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -131,7 +129,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	lookupKey := key
 	if vary := obj.VaryValue; vary != "" {
-		vk := variantKeyFromRaw(key, vary, req, f.policy)
+		vk := VariantKeyFromRaw(key, vary, req, f.policy)
 		if vk != key {
 			vobj, vsrc, verr := f.store.Get(ctx, vk)
 			if verr != nil || vobj == nil {
@@ -143,7 +141,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		}
 	}
 
-	disp := evaluateFromRaw(req, obj, now, reqCC)
+	disp := evaluate(obj, reqCC, respGateFromObject(obj), now)
 	switch disp.Decision {
 	case Hit:
 		resp := f.serializeResponse(req, obj, src, now, "HIT")
@@ -241,7 +239,7 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	// encodings (issue #187 codec): restore the transient fields the
 	// wire codec does not carry — the warm tier does the same on load
 	// (storage/tiered.go; OriginAge is left to its header-parse fallback
-	// in effectiveOriginAge) — so evaluateFromRaw and serializeResponse
+	// in effectiveOriginAge) — so evaluate and serializeResponse
 	// see the same state they would for a local hit.
 	if peerObj.CacheControl == "" {
 		peerObj.CacheControl = peerObj.Header.Get(header.CacheControl)
@@ -252,7 +250,7 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	if !peerObj.HasDate {
 		peerObj.HasDate = peerObj.Header.Has(header.Date)
 	}
-	disp := evaluateFromRaw(req, peerObj, now, reqCC)
+	disp := evaluate(peerObj, reqCC, respGateFromObject(peerObj), now)
 	switch disp.Decision {
 	case Hit:
 		resp := f.serializeResponse(req, peerObj, api.SourcePeer, now, "HIT")
@@ -318,7 +316,7 @@ func (f *FastPathHandler) peerGateMatchesVary(req *api.RawRequest, peerObj *api.
 // before attempting a cache lookup. This avoids the store.Get call
 // entirely for requests that can never be served from cache.
 // Returns the parsed request Cache-Control directives so the caller can
-// pass them to evaluateFromRaw without re-parsing.
+// pass them to evaluate without re-parsing.
 //
 // The h1parser's fused header scan already derived the facts
 // (conditional/precondition/TE/CL presence in DisqualifyFastPath,
@@ -981,104 +979,10 @@ func appendCanonicalQuerySlowString(buf []byte, n int, raw string, p *KeyPolicy)
 	return n
 }
 
-// evaluateFromRaw runs a simplified RFC 9111 state machine for the fast
-// path. It only handles Hit and StaleHit — all other dispositions return
-// false so the caller falls through to the full handler. This avoids the full
-// Evaluate overhead for requests that can be served from cache.
-func evaluateFromRaw(_ *api.RawRequest, obj *api.Object, now time.Time, reqCC Directives) Disposition {
-	if obj == nil {
-		return Disposition{Decision: Miss}
-	}
-
-	if reqCC.NoStore {
-		return Disposition{Decision: Bypass}
-	}
-
-	// Use pre-computed response CC flags to avoid ParseCacheControl on every hit.
-	if obj.RespNoCache || reqCC.NoCache {
-		return Disposition{Decision: Revalidate}
-	}
-
-	// Fresh check.
-	if freshWithRequestCC(obj, reqCC, now) {
-		return Disposition{Decision: Hit, Object: obj}
-	}
-
-	// Stale checks: SWR, SIE, max-stale, heuristic freshness.
-	if obj.RespMustRevalidate {
-		return Disposition{Decision: Revalidate}
-	}
-	if reqCC.MaxStaleSet {
-		originAge := effectiveOriginAge(obj)
-		age := now.Sub(obj.StoredAt) + originAge
-		staleAge := age - (obj.TTL + originAge)
-		if staleAge <= reqCC.MaxStale {
-			return Disposition{Decision: StaleHit, Object: obj}
-		}
-	}
-	if obj.StaleForSWR(now) {
-		return Disposition{Decision: StaleHit, Object: obj}
-	}
-
-	return Disposition{Decision: Revalidate}
-}
-
-// variantKeyFromRaw computes the variant key from a RawRequest.
-// It mirrors VariantKey but reads header values from RawRequest
-// instead of a header.Map from RequestInfo. Vary:* returns primary (RFC 9111 §4.1;
-// isCacheBlocked prevents such objects from being stored).
-func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
-	if vary == "" {
-		return primary
-	}
-	if varyContainsStar(vary) {
-		return primary
-	}
-
-	// Parse and sort Vary field names.
-	var fields [maxVaryFields]string
-	n := 0
-	for f := range strings.SplitSeq(vary, ",") {
-		if n >= maxVaryFields {
-			return primary // pathological — fall back
-		}
-		fields[n] = strings.ToLower(strings.TrimSpace(f))
-		n++
-	}
-	if n == 0 {
-		return primary
-	}
-	// Insertion sort.
-	for i := 1; i < n; i++ {
-		for j := i; j > 0 && fields[j-1] > fields[j]; j-- {
-			fields[j-1], fields[j] = fields[j], fields[j-1]
-		}
-	}
-
-	// Build hash input.
-	var buf [256]byte
-	off := 0
-	written := false
-	for i := 0; i < n; i++ {
-		f := fields[i]
-		if policy != nil && policy.ShouldExcludeHeader(f) {
-			continue
-		}
-		val := normalizeHeaderValue(req.Header(f))
-		needed := len(f) + 1 + len(val) + 1
-		if off+needed > len(buf) {
-			return primary // overflow — fall back
-		}
-		off += copy(buf[off:], f)
-		buf[off] = '='
-		off++
-		off += copy(buf[off:], val)
-		buf[off] = ';'
-		off++
-		written = true
-	}
-	if !written {
-		return primary
-	}
-	return primary.WithVary(xxhash.Sum64(buf[:off]))
-}
+// evaluateFromRaw and variantKeyFromRaw were the RawRequest mirrors of
+// the RFC 9111 state machine and the Vary variant-key computation. Deleted
+// (issue #589): the fast-path call sites now use the shared evaluate and
+// VariantKeyFromRaw, so the fast path makes the same decisions as the
+// header.Map serving path — including the stale-if-error, validator-aware
+// no-cache, and heuristic-freshness branches the mirror had drifted to
+// lack.

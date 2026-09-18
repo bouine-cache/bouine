@@ -24,8 +24,10 @@ import (
 // builds a full header.Map (needed for Vary matching, cacheability
 // checks, storage, etc.).
 
-// evaluateFast runs the RFC 9111 state machine using direct Peek calls
-// on the request headers, avoiding headerFromCtx allocation.
+// evaluateFast runs the RFC 9111 state machine via the shared evaluate,
+// reading request directives straight from the *fasthttp.RequestCtx via
+// Peek (zero-alloc) and deriving the response gate from the pre-parsed
+// object flags — no ParseCacheControl on the hit path.
 func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disposition {
 	method := ctx.Method()
 	if !bytes.Equal(method, []byte("GET")) && !bytes.Equal(method, []byte("HEAD")) {
@@ -41,60 +43,7 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 		reqCC.NoCache = true
 	}
 
-	if reqCC.NoStore {
-		return Disposition{Decision: Bypass}
-	}
-	if obj == nil {
-		return evalMiss(reqCC)
-	}
-
-	// Use pre-computed response CC flags to avoid ParseCacheControl on every hit.
-	if obj.RespNoCache || reqCC.NoCache {
-		if obj.ETag != "" || !obj.LastModified.IsZero() {
-			return Disposition{Decision: Revalidate, Object: obj}
-		}
-		return Disposition{Decision: Miss}
-	}
-	if freshWithRequestCC(obj, reqCC, now) {
-		return Disposition{Decision: Hit, Object: obj}
-	}
-	if obj.RespMustRevalidate {
-		return revalidateOrMiss(obj)
-	}
-	// Stale checks (RFC 9111 §4.2).
-	return staleDisposition(obj, reqCC, now)
-}
-
-// staleDisposition evaluates stale-path directives (SWR, SIE, max-stale,
-// heuristic freshness) and returns the resulting Disposition. Extracted
-// from evaluateFast to keep cyclomatic complexity under the gocyclo limit.
-func staleDisposition(obj *api.Object, reqCC Directives, now time.Time) Disposition {
-	originAge := effectiveOriginAge(obj)
-	if reqCC.MaxStaleSet {
-		age := now.Sub(obj.StoredAt) + originAge
-		staleAge := age - (obj.TTL + originAge)
-		if staleAge <= reqCC.MaxStale {
-			return Disposition{Decision: StaleHit, Object: obj}
-		}
-	}
-	if obj.StaleForSWR(now) {
-		return Disposition{Decision: StaleHit, Object: obj}
-	}
-	if obj.StaleForSIE(now) {
-		return revalidateOrMiss(obj)
-	}
-	// Heuristic freshness (RFC 9111 §4.2.2): only applicable when the
-	// response had no explicit freshness directives. Parse response CC
-	// lazily here — this is a rare edge case on the stale path.
-	ccStr := obj.CacheControl
-	if ccStr == "" {
-		ccStr = obj.Header.Get(header.CacheControl)
-	}
-	respCC := ParseCacheControl(ccStr)
-	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get(header.Expires) == "" {
-		return Disposition{Decision: StaleHit, Object: obj}
-	}
-	return revalidateOrMiss(obj)
+	return evaluate(obj, reqCC, respGateFromObject(obj), now)
 }
 
 // tryConditional304Fast checks if the client's conditional headers match

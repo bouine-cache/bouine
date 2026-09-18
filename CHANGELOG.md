@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+- **Unified RFC 9111 evaluation (issue #589)** — the three hand-maintained
+  copies of the cache decision state machine (`Evaluate` on the header.Map
+  path, `evaluateFast` on the fasthttp Peek path, `evaluateFromRaw` on the
+  H1 fast path) and the three Vary variant-key computations (`VariantKey`,
+  `VariantKeyFast`, `variantKeyFromRaw`) were collapsed into one shared
+  `evaluate` core and one generic `variantKeyCore`. The H1 fast path gains
+  the stale-if-error, validator-aware no-cache, and heuristic-freshness
+  branches its mirror had drifted to lack; its variant-key overflow now
+  falls back to the allocation path instead of silently returning the
+  primary key (which could select the wrong variant).
+
 ### Added
 - **Regex path rewriting (`request.path_rewrite`)** — a per-route regex
   rewrite applied to the origin-bound request path, the nginx

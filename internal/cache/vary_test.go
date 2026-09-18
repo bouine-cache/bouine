@@ -61,7 +61,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	// Fast path must match.
 	raw := &api.RawRequest{NHeaders: 1}
 	raw.Headers[0] = api.RawHeader{Key: "Accept", Value: "text/html"}
-	require.Equal(t, primary, variantKeyFromRaw(primary, "*", raw, nil))
+	require.Equal(t, primary, VariantKeyFromRaw(primary, "*", raw, nil))
 
 	// Nil header must not panic.
 	require.Equal(t, primary, VariantKey(primary, "*", header.Map{}, nil))
@@ -422,7 +422,7 @@ func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
 // regression for the production incident: a stored object whose
 // VaryValue is the RFC-9110 §5.2 join of two Vary field lines
 // ("Accept-Encoding,Accept-Language" + "BM-Market") must be resolved
-// via variantKeyFromRaw on the full joined list. Hashing only the
+// via VariantKeyFromRaw on the full joined list. Hashing only the
 // first line's fields served one market's body to another without
 // touching the origin. Mirrors TestHandler_MultiLineVaryFastPathDistinctVariants
 // (handler path) on the fast path.
@@ -472,14 +472,14 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 		return req
 	}
 
-	frKey := variantKeyFromRaw(primary, vary, marketReq("fr"), nil)
+	frKey := VariantKeyFromRaw(primary, vary, marketReq("fr"), nil)
 	require.NotEqual(t, primary, frKey,
 		"the joined Vary list must produce a non-primary variant key")
 
 	// The incident stored the fr variant under a key that ignored
 	// BM-Market; pin that the key the fast path now computes is
 	// market-sensitive.
-	usKey := variantKeyFromRaw(primary, vary, marketReq("us"), nil)
+	usKey := VariantKeyFromRaw(primary, vary, marketReq("us"), nil)
 	require.NotEqual(t, frKey, usKey, "distinct markets must hash to distinct variant keys")
 
 	frObj := &api.Object{

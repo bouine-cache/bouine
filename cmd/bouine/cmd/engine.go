@@ -77,6 +77,20 @@ type runState struct {
 	token        string
 	handlers     []*cache.Handler // all cache.Handler instances; refresh-enabled ones filtered via RefreshEnabled()
 
+	// fastPathHandlers holds one FastPathHandler per cache-enabled
+	// route (proxied and cached-static), built from that route's
+	// Handler so pool/policy attribution matches the slow path
+	// (issue #696). The engine wires SWR/peer closures onto them and
+	// exposes them to the listeners through the router's route table
+	// (buildRouter). nil entries never occur: routes without a cache
+	// handler register no fast path at all.
+	fastPathHandlers []*cache.FastPathHandler
+
+	// router is the data-plane router built by buildHandler/buildRouter;
+	// startListeners wraps it into the routed H1 fast path. nil when
+	// buildDataPlane has not run (tests that only exercise builders).
+	router *server.Router
+
 	clusterNode    *cluster.Cluster
 	peerFetcher    *cluster.PeerFetcher
 	broadcaster    *cluster.Broadcaster
@@ -1051,43 +1065,7 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 
 	var fastPathHandler api.FastPathHandler
 	if e.cfg.Experimental.H1FastPath && rs.store != nil {
-		fp := cache.NewFastPathHandlerFromStore(rs.store)
-		// Wire SWR background revalidation: without this the fast path
-		// would serve stale objects that never refresh. Any
-		// refresh-enabled handler can schedule refreshes — the store is
-		// shared across routes.
-		for _, ch := range rs.handlers {
-			if ch.RefreshEnabled() {
-				fp.WithOnStale(ch.TriggerBgRevalidateFromFastPath)
-				break
-			}
-		}
-		// Wire the cluster peer branch (issue #636): on a local miss the
-		// fast path asks the key's owner before falling through to the
-		// slow path. Same closures the slow-path handlers use. Opt-in
-		// behind experimental.h1_fast_peer_path (default off). NOT wired
-		// under the epoll reactor: TryHit runs inline on the reactor's
-		// event loop, which must never block on network I/O (a miss
-		// would stall every connection on that loop for the peer-fetch
-		// timeout). The h1parser path blocks too, but it is already
-		// per-connection blocking by design; the reactor is not. When the
-		// flag is set but a condition above holds, an error is logged and
-		// the daemon starts without the branch (config validation cannot
-		// catch these: they depend on runtime wiring state).
-		if !e.cfg.Experimental.H1FastPeerPath {
-			// Flag off: nothing to wire, no diagnostics.
-		} else if e.cfg.Experimental.H1Reactor {
-			e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
-				"experimental", true)
-		} else if fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs); fpOwnerFn == nil || fpPeerFetch == nil {
-			e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
-				"experimental", true)
-		} else {
-			fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
-			e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
-		}
-		fastPathHandler = fp
-		e.logger.Info("H1 fast path enabled", "experimental", true)
+		fastPathHandler = e.buildFastPath(rs)
 	}
 
 	h1Reactor := e.cfg.Experimental.H1Reactor && e.cfg.Experimental.H1FastPath
@@ -1137,6 +1115,89 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)
 	}
+}
+
+// buildFastPath wires the H1 fast path for the listeners from the
+// per-route handlers built in buildRouter (issue #696). Each route's
+// handler carries its route's pool attribution and KeyPolicy, so
+// fast-path hits land in the route's upstream_pool series and the
+// peer variant gate runs under the same policy as the slow path.
+// Returns nil when no fast path can be built.
+func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
+	// SWR: wire onStale per route through that route's own cache
+	// Handler, so the background revalidation fetches from the
+	// route's upstream and applies the route's TTL/rewrite config.
+	// The old store-level wiring used the first refresh-enabled
+	// handler for every route (wrong upstream for all others) and
+	// wired nothing when no route configured refresh_before_expiry
+	// (stale objects never refreshed); per-route wiring fixes both.
+	// triggerBgRevalidate's revalSem bounds concurrency per handler.
+	for _, fp := range rs.fastPathHandlers {
+		fp.WithOnStale(fp.Owner().TriggerBgRevalidateFromFastPath)
+	}
+	e.wireFastPathPeerFetch(rs)
+
+	// The router owns route semantics; the routed wrapper selects the
+	// per-route handler by the router's first-match-wins table. The
+	// release target may be any per-route handler: FastPathHandler
+	// returns responses to global pools and ignores its receiver, so
+	// one target serves every route.
+	var release api.FastPathHandler
+	if len(rs.fastPathHandlers) > 0 {
+		release = rs.fastPathHandlers[0]
+	}
+	if r := rs.router; r != nil && release != nil {
+		e.logger.Info("H1 fast path enabled", "experimental", true)
+		return server.NewRoutedFastPath(r, release)
+	}
+	if release == nil {
+		// No cache-enabled route exists: no fast path, hits were
+		// impossible before this change too (nothing was stored
+		// through a cache handler).
+		e.logger.Info("H1 fast path disabled: no cache-enabled route", "experimental", true)
+		return nil
+	}
+	// Defensive: buildRouter always runs before startListeners
+	// (buildDataPlane → buildHandler → buildRouter), so a missing
+	// router is a wiring bug, not a config state. Log loudly instead
+	// of silently dropping the feature.
+	e.logger.Error("H1 fast path disabled: router not built (engine wiring bug)",
+		"experimental", true)
+	return nil
+}
+
+// wireFastPathPeerFetch wires the cluster peer branch (issue #636): on
+// a local miss the fast path asks the key's owner before falling
+// through to the slow path. Same closures the slow-path handlers use.
+// Opt-in behind experimental.h1_fast_peer_path (default off). NOT
+// wired under the epoll reactor: TryHit runs inline on the reactor's
+// event loop, which must never block on network I/O (a miss would
+// stall every connection on that loop for the peer-fetch timeout).
+// The h1parser path blocks too, but it is already per-connection
+// blocking by design; the reactor is not. When the flag is set but a
+// condition above holds, an error is logged and the daemon starts
+// without the branch (config validation cannot catch these: they
+// depend on runtime wiring state).
+func (e *engine) wireFastPathPeerFetch(rs *runState) {
+	if !e.cfg.Experimental.H1FastPeerPath {
+		// Flag off: nothing to wire, no diagnostics.
+		return
+	}
+	if e.cfg.Experimental.H1Reactor {
+		e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
+			"experimental", true)
+		return
+	}
+	fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)
+	if fpOwnerFn == nil || fpPeerFetch == nil {
+		e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
+			"experimental", true)
+		return
+	}
+	for _, fp := range rs.fastPathHandlers {
+		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+	}
+	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
 }
 
 func boolDefault(v *bool, def bool) bool {

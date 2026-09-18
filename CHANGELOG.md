@@ -91,6 +91,27 @@ the curated, human-readable summary.
   (a path_rewrite capture-group reference) — were silently replaced
   with the value of an env var that cannot exist, usually the empty
   string. They now survive the loader verbatim.
+- H1 fast-path hits are attributed to the route's `upstream_pool`
+  (issue #696). The fast path was built from the bare store with no
+  route knowledge, so every fast-path hit — local and, with
+  `experimental.h1_fast_peer_path`, peer-fetched — was recorded with
+  `upstream_pool="_default"`; enabling `h1_fast_path` fleet-wide made
+  per-pool dashboard series vanish wholesale (a prod incident read as
+  "peer fetch stopped working" while the service was healthy). The
+  fast path is now built per route from that route's cache handler and
+  selected by a router-backed wrapper (`RoutedFastPath`), so hits
+  carry the route's configured pool and run under the route's
+  `cache.key` policy (fewer `exclude_headers`/`include_headers` Vary
+  fall-throughs). Three incidental fixes land with it: per-route
+  `onStale` wires SWR through the route's own upstream (the old
+  store-level wiring used the first refresh-enabled handler for every
+  route, and nothing when no route configured `refresh_before_expiry`);
+  the peer branch is no longer inherited by handler construction (it
+  is applied explicitly behind `h1_fast_peer_path`, never under the
+  reactor); and requests matching no route or a non-cached route fall
+  through to the slow path instead of being served store-level ghost
+  hits. Route resolution adds 0 allocs/op and ~22 ns per hit
+  (`BenchmarkGate_RoutedFastPath_Hit`).
 - The cluster's peer PipelineClient diagnostics no longer bypass the
   structured log pipeline. Every "error in PipelineClient(...)" line
   from fasthttp's pipeline worker — dial refusals, EOFs, broken pipes,

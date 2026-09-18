@@ -1204,7 +1204,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		Name:   "static",
 		Static: config.StaticConfig{Root: dir},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1230,7 +1230,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		Static: config.StaticConfig{Root: dir},
 		Cache:  config.RouteCache{Enabled: &cacheEnabled, TTLDefault: 60 * time.Second},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Len(t, rs.handlers, 1)
 }
 
@@ -1248,7 +1248,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		Name:   "bad",
 		Static: config.StaticConfig{Root: "/nonexistent/path/that/does/not/exist"},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1268,7 +1268,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		Static:  config.StaticConfig{Root: dir},
 		Request: config.RouteRequest{StripPrefix: "/assets"},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 }
 
 func TestBuildRouter_WithStaticRoute(t *testing.T) {
@@ -1486,7 +1486,7 @@ func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
 			Replace: "/$1",
 		}},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/assets/index.html")
@@ -1526,7 +1526,7 @@ func TestBuildStaticRoute_CachedPathRewriteAppliedOnce(t *testing.T) {
 			Replace: "/y/",
 		}},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/x/x/f")
@@ -1566,7 +1566,7 @@ func TestBuildStaticRoute_CachedStripPrefixAppliedOnce(t *testing.T) {
 		Cache:   config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
 		Request: config.RouteRequest{StripPrefix: "/api"},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/api/api/f")

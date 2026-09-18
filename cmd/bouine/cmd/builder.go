@@ -202,6 +202,9 @@ func buildPathRewrite(rc config.Route) *cache.PathRewrite {
 
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
+	// Retain the router: startListeners wraps it into the routed H1
+	// fast path (issue #696). Must be set before listeners start.
+	rs.router = router
 	// The metrics middleware attributes by upstream pool: the label set
 	// stays bounded by the pool configuration, unlike route names.
 	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
@@ -293,9 +296,19 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
 	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
+	// The H1 fast path is per route: each cache-enabled route registers
+	// the FastPathHandler built from its own Handler, so hits carry the
+	// route's pool attribution and run under the route's KeyPolicy
+	// (issue #696). A single store-level handler cannot — the store is
+	// shared across routes and knows nothing about them.
+	buildRouteFP := func(cached *cache.Handler) *cache.FastPathHandler {
+		fp := cache.NewFastPathHandler(cached)
+		rs.fastPathHandlers = append(rs.fastPathHandlers, fp)
+		return fp
+	}
 	for _, rc := range e.cfg.Routes {
 		if rc.Static.Root != "" {
-			e.buildStaticRoute(router, rs, rc)
+			e.buildStaticRoute(router, rs, rc, buildRouteFP)
 			continue
 		}
 		p := rs.pools[rc.Pool]
@@ -363,7 +376,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
 	}
 	return router
 }
@@ -377,7 +390,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 // and the OS page cache provides the hot caching layer.
 //
 //nolint:funlen // 84: the cached-static-route wiring mirrors the proxied-route block by design; splitting it would hide the symmetry
-func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route) {
+func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route, buildRouteFP func(*cache.Handler) *cache.FastPathHandler) {
 	sh, err := staticfile.New(staticfile.Config{
 		Root:       rc.Static.Root,
 		IndexFiles: rc.Static.Index,
@@ -402,6 +415,10 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// identical double-strip on cached static routes (a /api prefix
 	// stripped /api/api/f down to /f).
 	var handler fasthttp.RequestHandler = sh.ServeRequest
+	// cacheFP holds the route's fast-path handler when the static route
+	// is cache-enabled; nil (no fast path) otherwise.
+	var cacheFP *cache.FastPathHandler
+
 	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
 	if !cacheEnabled {
 		if rc.Request.StripPrefix != "" {
@@ -470,6 +487,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		handler = cached.ServeRequest
+		// Cache-enabled static routes register the per-route fast path
+		// like proxied ones. Pool-less routes leave resp.Pool empty and
+		// the metrics hook attributes them to "_default" — matching the
+		// slow path's middleware behavior for pool-less routes.
+		cacheFP = buildRouteFP(cached)
 	}
 
 	// When cache is not enabled, wire the staticfile handler's native
@@ -478,11 +500,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// rewrites already landed in the handler chain above.
 	if !cacheEnabled {
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods,
-			wrapStaticRewrites(rc, handler))
+			wrapStaticRewrites(rc, handler), nil)
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler)
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler, cacheFP)
 }
 
 // clusterFastPathClosures builds the ownerFn/peerFetch closures shared

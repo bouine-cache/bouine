@@ -46,6 +46,9 @@
 #   Cachaner_EvictBounded:             0
 #   FastPath_Hit:                     0
 #   FastPath_HitWithWrite:            0  (includes WriteTo consumption)
+#   RoutedFastPath_Hit:               0  (issue #696 routed wrapper: route
+#                                      resolution before every fast-path hit;
+#                                      index-loop walk, no maps, no state)
 #   FastPath_PeerHit:                 0  (owner-first peer branch, plain key;
 #                                      peer decode excluded — production decodes
 #                                      before the branch; object rotation defeats
@@ -68,6 +71,7 @@ OUTFILE="$RESULTS_DIR/current.txt"
 PACKAGES=(
     ./internal/cache/...
     ./internal/storage/...
+    ./internal/server/...
     ./internal/server/h1parser/...
     ./internal/observability/...
 )
@@ -88,6 +92,7 @@ declare -A BUDGETS=(
     [Cachaner_EvictBounded]=0
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
+    [RoutedFastPath_Hit]=0
     [FastPath_PeerHit]=0
     [FastPath_PeerHitVary]=7
     [H1Parse_Get]=0

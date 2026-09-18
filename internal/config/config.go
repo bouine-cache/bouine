@@ -62,14 +62,6 @@ type ExperimentalConfig struct {
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 
-	// FasthttpMigration enables the fasthttp HTTP stack for the entire
-	// daemon (data plane, origin fetch, peer fetch, admin, dashboard).
-	// When false, the daemon uses net/http (legacy behavior). When true,
-	// the daemon uses fasthttp with the rewritten h1parser for cache-hit
-	// zero-alloc serving. See ADR-0034 and issue #521 for the full
-	// migration plan. Default false.
-	FasthttpMigration bool `yaml:"fasthttp_migration,omitempty" json:"fasthttp_migration,omitempty"`
-
 	// H1Reactor enables the single-goroutine epoll event loop that
 	// batch-serves cache hits without per-request goroutine park/unpark
 	// (Linux only; see docs/decisions/0041-h1-epoll-reactor.md). Requires

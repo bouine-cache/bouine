@@ -553,7 +553,7 @@ func TestPeerFetcher_QueueWaitMeasuredWhenSaturated(t *testing.T) {
 	defer srv.Close()
 
 	reg := prometheus.NewRegistry()
-	f := NewPeerFetcherWithLogger(nil, reg, nil, 0)
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, reg, nil)
 	defer f.Close(context.Background())
 	require.NotNil(t, f.pQueueWait)
 

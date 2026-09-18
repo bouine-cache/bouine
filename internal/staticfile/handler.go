@@ -203,11 +203,6 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	h.streamFastFile(ctx, f, servedPath)
 }
 
-// ServeHTTP implements http.Handler. Retained for cache-handler upstream
-// compatibility until the cache handler is fully migrated to fasthttp.
-//
-//nolint:depguard // net/http required for cache-handler upstream interface
-
 // isPathContained checks whether the cleaned path, when joined with
 // root, stays within the root directory.
 func (h *Handler) isPathContained(cleaned string) bool {

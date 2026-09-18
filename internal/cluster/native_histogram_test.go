@@ -14,7 +14,7 @@ import (
 func TestPeerFetchDuration_NativeHistogramPresent(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
-	f := NewPeerFetcher(nil, reg, 0)
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, reg, nil)
 	require.NotNil(t, f)
 	f.pDuration.Observe(0.05)
 

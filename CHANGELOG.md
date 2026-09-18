@@ -21,6 +21,22 @@ the curated, human-readable summary.
   branches its mirror had drifted to lack; its variant-key overflow now
   falls back to the allocation path instead of silently returning the
   primary key (which could select the wrong variant).
+### Removed
+- **Dead scaffolding from completed ADR migrations (issue #593)** —
+  zero-caller leftovers of ADR-0015/0034/0036 removed: the `server`
+  package's fast-path type aliases, the `reportFastPathError` no-op stub
+  and its `errCh` plumbing, the never-implemented
+  `api.FastPathHandlerCtx` interface, the `NewPeerFetcher` /
+  `NewPeerFetcherWithLogger` convenience constructors (use
+  `NewPeerFetcherWithConfig`), the pre-ADR-0015 `Bouine-Issuer` /
+  `Bouine-Seq` / `Bouine-Issued-At` / `Bouine-Method` header constants,
+  `header.Map.SetValues`, and the `mergeHeaderValues` wrapper (callers now
+  use `header.Map.GetAll` directly). `InternKeyCanonical`/`InternValue`
+  were unexported to `internKeyCanonical`/`internValue` (used only inside
+  `pkg/header`).
+- **`experimental.fasthttp_migration` config flag** — the ADR-0034
+  migration is complete and the flag gated nothing; it is ignored if
+  still present in existing configs.
 
 ### Added
 - **Regex path rewriting (`request.path_rewrite`)** — a per-route regex

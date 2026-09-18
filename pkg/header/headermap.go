@@ -111,15 +111,15 @@ func InternKey(key string) string {
 	return unique.Make(canonicalHeaderKey(key)).Value()
 }
 
-// InternKeyCanonical interns a key that is already known to be canonical,
+// internKeyCanonical interns a key that is already known to be canonical,
 // skipping the isCanonical check. Used by FromFastHTTP and headerFromCtx
 // where fasthttp guarantees normalized keys.
-func InternKeyCanonical(key string) string {
+func internKeyCanonical(key string) string {
 	return unique.Make(key).Value()
 }
 
-// InternValue deduplicates header value strings across all cached objects.
-func InternValue(s string) string {
+// internValue deduplicates header value strings across all cached objects.
+func internValue(s string) string {
 	return unique.Make(s).Value()
 }
 
@@ -150,9 +150,9 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 		if len(k) == 0 || len(v) == 0 {
 			continue
 		}
-		hm.values = append(hm.values, InternValue(BytesToString(v)))
+		hm.values = append(hm.values, internValue(BytesToString(v)))
 		hm.entries = append(hm.entries, headerEntry{
-			key: InternKeyCanonical(BytesToString(k)),
+			key: internKeyCanonical(BytesToString(k)),
 			off: len(hm.values) - 1,
 		})
 	}
@@ -226,7 +226,7 @@ func (h Map) GetAll(key string) string {
 // Set sets the header with the given key to the single value.
 func (h *Map) Set(key, value string) {
 	ck := InternKey(key)
-	iv := InternValue(value)
+	iv := internValue(value)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
 			h.values[h.entries[i].off] = iv
@@ -234,21 +234,6 @@ func (h *Map) Set(key, value string) {
 		}
 	}
 	h.insertSorted(ck, iv)
-}
-
-// SetValues sets the header with the given key to the provided values.
-func (h *Map) SetValues(key string, vals []string) {
-	if len(vals) == 0 {
-		h.Del(key)
-		return
-	}
-	var v string
-	if len(vals) == 1 {
-		v = vals[0]
-	} else {
-		v = strings.Join(vals, ", ")
-	}
-	h.Set(key, v)
 }
 
 // Del removes the header with the given key.
@@ -275,7 +260,7 @@ func (h Map) Has(key string) bool {
 
 // AppendEntry adds a key-value pair without checking for duplicates.
 func (h *Map) AppendEntry(key, value string) {
-	h.values = append(h.values, InternValue(value))
+	h.values = append(h.values, internValue(value))
 	h.entries = append(h.entries, headerEntry{
 		key: InternKey(key),
 		off: len(h.values) - 1,
@@ -284,12 +269,12 @@ func (h *Map) AppendEntry(key, value string) {
 
 // AppendEntryCanonical adds a key-value pair without checking for
 // duplicates, skipping the canonicalization check on the key. Use when
-// the key is already known canonical (e.g. from InternKeyCanonical or
+// the key is already known canonical (e.g. from internKeyCanonical or
 // a package-level constant). The value is still interned.
 func (h *Map) AppendEntryCanonical(key, value string) {
-	h.values = append(h.values, InternValue(value))
+	h.values = append(h.values, internValue(value))
 	h.entries = append(h.entries, headerEntry{
-		key: InternKeyCanonical(key),
+		key: internKeyCanonical(key),
 		off: len(h.values) - 1,
 	})
 }
@@ -517,7 +502,7 @@ func (h *Map) UnmarshalJSON(data []byte) error {
 		} else {
 			v = strings.Join(vals, ", ")
 		}
-		h.values = append(h.values, InternValue(v))
+		h.values = append(h.values, internValue(v))
 		h.entries = append(h.entries, headerEntry{
 			key: InternKey(textproto.CanonicalMIMEHeaderKey(k)),
 			off: len(h.values) - 1,

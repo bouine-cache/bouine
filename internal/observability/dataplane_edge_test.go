@@ -20,7 +20,7 @@ func TestDataPlaneMetrics_RecordHit_NoPoolTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	m.RecordHit("/api", "HIT", "hot", 200, 1024, 5*time.Millisecond)
+	m.RecordHit("/api", "", "HIT", "hot", 200, 1024, 5*time.Millisecond)
 }
 
 func TestDataPlaneMetrics_VaryCapHitsCount(t *testing.T) {
@@ -203,7 +203,7 @@ func TestFastPath_RecordHit_EmptyPoolMapsToDefault(t *testing.T) {
 	m := NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes(nil)
 
-	m.RecordHit("", "HIT", "hot", 200, 1024, 5*time.Millisecond)
+	m.RecordHit("", "csr", "HIT", "hot", 200, 1024, 5*time.Millisecond)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)

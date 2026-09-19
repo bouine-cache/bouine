@@ -10,6 +10,31 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- **`traffic_class` metric label (issue #707, ADR-0047)** — a new
+  `metrics.traffic_classes` config section declares up to 8 named
+  traffic populations matched by host patterns (exact, leading `*.`,
+  or trailing `.*`/`*`; declaration order is precedence). The label is
+  added — always present, values exclusively from the configured set
+  plus the `unclassified` fallback — to `bouine_requests_total`,
+  `bouine_request_duration_seconds`, and
+  `bouine_response_bytes_total`, enabling per-population hit-ratio,
+  latency, and saved-bandwidth queries inside one instance. Access
+  logs gain a matching `traffic_class` attribute. Zero allocations on
+  the hit path; the label set is closed and spoof-proof by
+  construction.
+- **Cardinality exception (ADR-0047)** — `bouine_requests_total`
+  crosses the AGENTS.md §9 10 000-series line whenever
+  `pools × (1 + #classes) > 57`; the overage is opt-in (no configured
+  classes ⇒ no multiplication) and documented with the
+  `metric_relabel_configs` mitigation in the native-histogram runbook.
+
+### Changed
+- **Metric series identity reset** — adding the `traffic_class` label
+  changes every data-plane series' identity; expect one `rate()` gap
+  window at the upgrade boundary (see the upgrade note in
+  docs/runbook/native-histogram.md).
+
 ## [0.5.21] - 2026-09-17
 
 ### Changed

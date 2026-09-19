@@ -41,6 +41,35 @@ quantiles). After the relabel is in place, each active label tuple costs
 `_sum` + `_count` + sparse buckets (~1-45 depending on traffic spread,
 capped at 80) instead of 16 classic bucket series per tuple.
 
+## Series arithmetic with the traffic_class axis (ADR-0047)
+
+With `traffic_class` (ADR-0047) each family's per-tuple ceiling is
+multiplied by `1 + #configured classes` (config cap 8, so max 9); with
+no classes configured the multiplier is 1.
+
+| Family | Per (pool, class) | At 33 pools × 9 classSlots |
+|---|---|---|
+| `bouine_requests_total` | 7 status × 5 results × 5 sources = 175 | 51 975 |
+| `bouine_request_duration_seconds` (classic `_bucket`) | 6 status classes × 5 results = 30 tuples | 8 910 tuples → 142 560 classic series |
+| `bouine_response_bytes_total` | 5 results × 5 sources = 25 | 7 425 |
+
+- Keep `pools × (1 + #classes) ≤ 57` to stay under the AGENTS.md §9
+  10 000-series line for `bouine_requests_total`; above it, reduce
+  classes, split fleets, or extend the drop pattern above
+  (`metric_relabel_configs` can drop whole classes on this family
+  too). The overage is a documented exception (ADR-0047): opt-in, and
+  the label set is closed.
+- The histogram's classic `_bucket` series dominate; the existing
+  `metric_relabel_configs` drop rule removes them. The native sparse
+  form costs `_sum` + `_count` + ≤80 sparse buckets per tuple.
+
+## Upgrade note: series identity reset
+
+Adding the `traffic_class` label changes every data-plane series'
+identity: `rate()` over these families shows a one-window gap at the
+deploy boundary, self-healing after one scrape interval. Recording
+rules and alerts need no change.
+
 ## Cost
 
 - Native `Observe` was benched at 0 allocs/op with a ~19 ns vs ~6 ns

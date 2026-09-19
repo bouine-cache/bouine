@@ -10,33 +10,35 @@ import (
 // IsCacheable is the main entry point; the rest are helpers.
 
 // isCDNCCCharForbidden reports whether b is a character that is not allowed
-// in a CDN-Cache-Control value (non-token chars per RFC 9213 §2 / RFC 7230 §3.2.6).
+// in a CDN-Cache-Control value (structured-fields token chars; RFC 9213 §2
+// defines the field as a Dictionary Structured Field per RFC 8941).
 func isCDNCCCharForbidden(b byte) bool {
 	return b == '&' || b == '@' || b == '[' || b == ']' || b == '{' || b == '}' || b == '"'
 }
 
 // hasMeaningfulCDNCCDirective reports whether d contains at least one directive
 // that can influence caching behaviour. Values with no meaningful directives are
-// treated as absent (RFC 9211 §4).
+// treated as absent: RFC 9213 §2 requires that a targeted field with no usable
+// directives behaves as if the field were not present.
 func hasMeaningfulCDNCCDirective(d Directives) bool {
 	return d.MaxAgeSet || d.SMaxAgeSet || d.NoStore || d.Private || d.NoCache
 }
 
 // cdnCacheControl returns the effective Cache-Control directives for a
-// shared cache (CDN tier) per RFC 9211. When CDN-Cache-Control is
+// shared cache (CDN tier) per RFC 9213. When CDN-Cache-Control is
 // present it takes precedence over Cache-Control for all shared-cache
 // decisions; otherwise Cache-Control is used.
-// If the CDN-CC value contains unknown or invalid token types (per
-// RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
-// list of tokens"), the header is treated as absent.
+// RFC 9213 §2.1: if the targeted field is empty or fails to parse, it
+// MUST be ignored by the cache — treat the header as absent.
 func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 	v := respHeader.GetAll(header.CDNCacheControl)
 	if v == "" {
 		return Directives{}, false
 	}
-	// Reject values containing non-token characters (§9213 §4).
-	// A CDN-CC value with garbage tokens must be ignored entirely,
-	// falling back to Cache-Control.
+	// Reject values containing characters that cannot appear in a
+	// structured-fields token (RFC 9213 §2: parse errors mean the
+	// field MUST be ignored entirely,
+	// falling back to Cache-Control).
 	for _, b := range []byte(v) {
 		// RFC 7230 §3.2.6 token chars: VCHAR except delimiters.
 		// We reject &, invalid bytes and other non-token noise.
@@ -62,7 +64,7 @@ func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 // the per-status TTL policy.
 func IsCacheable(status int, reqHeader, respHeader header.Map, neg *StatusTTL) bool {
 	// CDN-Cache-Control overrides Cache-Control for shared-cache
-	// decisions (RFC 9211). Use it when present.
+	// decisions (RFC 9213). Use it when present.
 	var respCC Directives
 	var hasCDN bool
 	if cdnCC, ok := cdnCacheControl(respHeader); ok {

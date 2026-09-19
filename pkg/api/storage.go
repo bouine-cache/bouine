@@ -26,7 +26,7 @@ type Object struct {
 	// header block (static headers as "Key: Value\r\n" pairs, without
 	// status line or trailing \r\n). Computed on the first fast-path
 	// cache hit, not at store time — objects never served via the
-	// fast-path (misses, net/http path) never pay the ~512-byte cost.
+	// fast-path (misses, slow-path requests) never pay the ~512-byte cost.
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`

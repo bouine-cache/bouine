@@ -59,7 +59,7 @@ type PurgeEvent struct {
 	// purge (the BuildVaryKey assertion hex of the local object), not a
 	// purge target. Receivers MUST ignore it and apply the purge to
 	// evt.Key and every locally tracked variant under it: an invalidation
-	// of a resource removes all its variants (RFC 9111 §4.2.4), and a
+	// of a resource removes all its variants (RFC 9111 §4.4), and a
 	// variant store key cannot be reconstructed from the assertion hex
 	// alone (they use different canonicalization; ADR-0045). Senders
 	// currently pass "".

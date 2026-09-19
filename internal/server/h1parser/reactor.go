@@ -124,7 +124,7 @@ type reactorConn struct {
 	// header accumulation O(n) instead of O(n²).
 	scanned int
 	// closeAfterFlush marks a hit whose response ended with
-	// Connection: close (RFC 9110 §9.6): the flush completes, then the
+	// Connection: close (RFC 9112 §9.6): the flush completes, then the
 	// transport drops the connection instead of returning to reading.
 	closeAfterFlush bool
 	// epollInterest is the currently-armed readiness mask, initialized

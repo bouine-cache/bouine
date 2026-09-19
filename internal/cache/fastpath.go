@@ -393,7 +393,7 @@ func (f *FastPathHandler) getCachedDate(now time.Time) string {
 // so hits inside a cached second reuse the exact bytes and skip
 // per-hit header appends entirely.
 //
-// When the request asked for Connection: close (RFC 9110 §9.6), the
+// When the request asked for Connection: close (RFC 9112 §9.6), the
 // composed head ends with "Connection: close" and the response
 // carries CloseConn so the writer closes the connection after the
 // flush instead of reusing it.
@@ -503,8 +503,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // X-Cache, X-Cache-Source, Warning, Connection) plus the trailing \r\n
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
-// The Connection trailer reflects the request's own token (RFC 9110
-// §9.6): "close" when the client requested close, keep-alive otherwise.
+// The Connection trailer reflects the request's own token (RFC 9112 §9.6): "close" when the client requested close, keep-alive otherwise.
 func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served

@@ -55,10 +55,10 @@ type Config struct {
 // ExperimentalConfig holds opt-in experimental features.
 type ExperimentalConfig struct {
 	// H1FastPath enables the custom HTTP/1.1 parser that bypasses
-	// net/http on cache hits. When true, GET/HEAD requests with no
-	// conditional headers are served directly from the parsed request
-	// without allocating *http.Request or http.ResponseWriter. Misses
-	// and non-GET/HEAD requests fall through to net/http unchanged.
+	// fasthttp's pooled *fasthttp.RequestCtx machinery on cache hits.
+	// When true, GET/HEAD requests with no conditional headers are
+	// served directly from the parsed request. Misses and non-GET/HEAD
+	// requests fall through to the regular fasthttp handler unchanged.
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 

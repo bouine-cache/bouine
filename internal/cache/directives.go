@@ -388,7 +388,7 @@ func eqFold(a, b string) bool {
 // FreshnessLifetime computes the freshness lifetime of a response
 // per RFC 9111 §4.2.1. When CDN-Cache-Control is present it takes
 // precedence over Cache-Control for shared-cache TTL decisions
-// (RFC 9211).
+// (RFC 9213).
 func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present.
 	if cdnCC := getHdr(header.CDNCacheControl); cdnCC != "" {
@@ -429,7 +429,7 @@ func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Dura
 // directly so it can detect multiple Expires headers (which are
 // invalid per RFC 9110 §5.3) and read CDN-Cache-Control.
 func FreshnessLifetimeH(respCC Directives, h header.Map) (time.Duration, bool) {
-	// CDN-Cache-Control takes precedence when present (RFC 9211).
+	// CDN-Cache-Control takes precedence when present (RFC 9213).
 	if cdnCC := h.GetAll(header.CDNCacheControl); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {

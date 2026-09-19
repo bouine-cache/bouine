@@ -72,8 +72,8 @@ func ValidateStatusTTLCode(code int) error {
 // empty returns a nil policy (no negative caching).
 //
 // This is the single authority: internal/config calls it during
-// Validate; internal/cache wraps its result. A map that validates here
-// constructs there.
+// Validate, and every consumer receives the resulting policy instead
+// of constructing its own.
 func NewStatusTTLMap(statusTTL map[string]time.Duration) (*StatusTTLPolicy, error) {
 	if len(statusTTL) == 0 {
 		return nil, nil

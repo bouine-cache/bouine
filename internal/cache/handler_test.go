@@ -2868,7 +2868,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	// caching) must still skip proactive refresh: re-fetching an origin
 	// that is already returning errors amplifies the outage.
 	h := testRefreshHandler(t, 1)
-	h.negTTL = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
+	h.neg = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
 	key := testkey.Key(11)
 	r := testCtx("GET", "http://example.com/404")
 	obj := &api.Object{
@@ -2914,7 +2914,7 @@ func TestStoreObject_StatusTTLCached5xxSkipRefresh(t *testing.T) {
 	// forever.
 	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
 	h := testRefreshHandler(t, 1)
-	h.negTTL = neg
+	h.neg = neg
 	key := testkey.Key(12)
 	r := testCtx("GET", "http://example.com/flaky")
 	obj := &api.Object{

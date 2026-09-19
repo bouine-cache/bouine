@@ -11,8 +11,7 @@ import (
 // and its parser live in pkg/api so config validation and cache lookup
 // share one construction path and one resolution order (exact > class >
 // not cacheable). A nil *StatusTTL disables negative caching; the
-// policy is built once by config.Validate and handed to the handler —
-// never re-validated or re-built here.
+// policy is built once by config.Validate and handed to the handler.
 type StatusTTL = api.StatusTTLPolicy
 
 // JitterTTL applies a random ±pct% jitter to a TTL. pct is clamped to

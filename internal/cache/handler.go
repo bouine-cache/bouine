@@ -262,7 +262,7 @@ type Handler struct {
 	flight        singleflight.Group
 	logger        observability.Logger
 	fastClient    FastClient
-	negTTL        *StatusTTL
+	neg           *StatusTTL
 	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
 	// is deliberately NOT the foreground fetchSem: the refill exists to
 	// clear the post-ban miss backlog, and sharing the foreground budget
@@ -712,7 +712,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		pathRewrite:             cfg.PathRewrite,
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
-		negTTL:                  cfg.Negative,
+		neg:                     cfg.Negative,
 		jitterPercent:           cfg.JitterPercent,
 		stayinAlive:             cfg.StayinAlive,
 		logCacheKeys:            cfg.LogCacheKeys,
@@ -1120,7 +1120,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	resMap := res.Header.ToMap()
-	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negTTL, h.defaultTTL) {
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -1129,7 +1129,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -2203,14 +2203,14 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgResMap := res.Header.ToMap()
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
-	if bgParsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) {
+	if bgParsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && bgResMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, ri, res, bgResMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -2246,7 +2246,7 @@ func (h *Handler) writeAndMaybeStore(
 	// IsCacheableWithDefault re-parses again).
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
-	if parsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) {
+	if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			return
 		}
@@ -2267,7 +2267,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -2500,7 +2500,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getRI, res, hdr, h.negTTL, h.defaultTTL, h.overrideTTL,
+	obj := buildObject(key, getRI, res, hdr, h.neg, h.defaultTTL, h.overrideTTL,
 		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
 	if obj == nil {
 		return
@@ -2569,7 +2569,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		// An error status covered by the negative-caching policy skips
 		// proactive refresh: re-fetching an origin already returning
 		// errors amplifies the outage.
-		if h.negTTL.Cacheable(obj.StatusCode) {
+		if h.neg.Cacheable(obj.StatusCode) {
 			return
 		}
 		if !isRefresh && h.refreshReactiveFirst {
@@ -2718,12 +2718,12 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	// path's store gate (no client response is written here).
 	resMap := res.Header.ToMap()
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
-	if !parsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) ||
+	if !parsed.isCacheableWithDefault(h.neg, h.defaultTTL) ||
 		(!h.allowSetCookie && resMap.Get(header.SetCookie) != "") ||
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
-	obj := buildObject(key, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 	h.storeObject(ctx, key, obj, ri, true, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
@@ -3162,9 +3162,9 @@ func serializeHead(obj *api.Object) []byte {
 // per-status policy wins first for covered statuses: caching a 5xx for
 // hours because the origin echoes Last-Modified, or for ttl_default's
 // duration instead of the operator's 10s, is exactly what the policy
-// exists to prevent. Statuses it does not cover keep the pre-existing
-// resolution: heuristic freshness outranks ttl_default, as before this
-// feature. Jitter and the origin Age adjustment apply last.
+// exists to prevent. Uncovered statuses fall through to the heuristic
+// and the operator default, in that order. Jitter and the origin Age
+// adjustment apply last.
 func computeTTL(hdr header.Map, status int, respCC Directives,
 	neg *StatusTTL, defaultTTL time.Duration, jitterPct int,
 	originAge time.Duration, now time.Time) time.Duration {

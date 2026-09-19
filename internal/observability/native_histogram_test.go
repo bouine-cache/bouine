@@ -18,7 +18,7 @@ func TestRequestDuration_NativeHistogramPresent(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	m.RecordHit("p", "HIT", "hot", 200, 10, 500*time.Microsecond)
+	m.RecordHit("p", "csr", "HIT", "hot", 200, 10, 500*time.Microsecond)
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestRequestDuration_NativeBucketCap(t *testing.T) {
 	m := NewDataPlaneMetrics(reg)
 	// 10k distinct values, 0.5ms..1.5s, one tuple.
 	for i := range 10_000 {
-		m.RecordHit("p", "HIT", "hot", 100+i%900, 10, time.Duration(500_000+i*99))
+		m.RecordHit("p", "csr", "HIT", "hot", 100+i%900, 10, time.Duration(500_000+i*99))
 	}
 	_ = m
 	mfs, err := reg.Gather()
@@ -95,11 +95,11 @@ func BenchmarkGate_HistogramObserve_Native(b *testing.B) {
 	m.PreResolveRoutes([]string{"p"})
 
 	// Steady-state shape: one pool, one tuple, one latency value.
-	m.RecordHit("p", "HIT", "hot", 200, 10, 500*time.Microsecond)
+	m.RecordHit("p", "csr", "HIT", "hot", 200, 10, 500*time.Microsecond)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		m.RecordHit("p", "HIT", "hot", 200, 10, 500*time.Microsecond)
+		m.RecordHit("p", "csr", "HIT", "hot", 200, 10, 500*time.Microsecond)
 	}
 }
 
@@ -114,7 +114,7 @@ func BenchmarkGate_HistogramObserve_Native_Distinct(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
-		m.RecordHit("p", "HIT", "hot", 200, 10, time.Duration(1+i%990_000))
+		m.RecordHit("p", "csr", "HIT", "hot", 200, 10, time.Duration(1+i%990_000))
 	}
 }
 

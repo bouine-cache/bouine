@@ -15,9 +15,10 @@ import (
 //
 // Stable.
 type Router struct {
-	logger  observability.Logger
-	metrics *RouterMetrics
-	routes  []routeEntry
+	logger          observability.Logger
+	metrics         *RouterMetrics
+	trafficClassify *TrafficClassifier
+	routes          []routeEntry
 }
 
 type routeEntry struct {
@@ -39,8 +40,9 @@ type RouterMetrics struct {
 
 // RouterConfig configures a Router.
 type RouterConfig struct {
-	Logger  observability.Logger
-	Metrics *RouterMetrics
+	Logger          observability.Logger
+	Metrics         *RouterMetrics
+	TrafficClassify *TrafficClassifier
 }
 
 // NewRouter builds a Router. Routes are matched in the order they are
@@ -51,8 +53,9 @@ func NewRouter(cfg RouterConfig) *Router {
 		cfg.Metrics = &RouterMetrics{}
 	}
 	return &Router{
-		logger:  cfg.Logger,
-		metrics: cfg.Metrics,
+		logger:          cfg.Logger,
+		metrics:         cfg.Metrics,
+		trafficClassify: cfg.TrafficClassify,
 	}
 }
 
@@ -144,6 +147,15 @@ func (rt *Router) MatchByHostPath(host, path string) string {
 func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if rt.metrics.RequestsTotal != nil {
 		rt.metrics.RequestsTotal.Inc()
+	}
+
+	// Classified from the raw Host before route resolution so no-route
+	// 404s (Host known, route absent) carry the label too. With no
+	// classifier configured the UserValue stays absent and the
+	// middleware falls back to "unclassified", matching the _default
+	// pool fallback pattern.
+	if rt.trafficClassify != nil {
+		ctx.SetUserValue(header.XBouineTrafficClass, rt.trafficClassify.Classify(string(ctx.Host())))
 	}
 
 	re := rt.matchRoute(string(ctx.Host()), string(ctx.Path()), string(ctx.Method()))

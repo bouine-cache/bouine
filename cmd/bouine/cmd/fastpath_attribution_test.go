@@ -127,7 +127,7 @@ func TestFastPathPoolAttribution_Metrics(t *testing.T) {
 	m := observability.NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes([]string{"reviews-pool"})
 
-	m.RecordHit("reviews-pool", "HIT", "cache", 200, 13, 500*time.Microsecond)
+	m.RecordHit("reviews-pool", "csr", "HIT", "cache", 200, 13, 500*time.Microsecond)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)

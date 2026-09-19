@@ -315,15 +315,16 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 			// for the retain-safety argument); no request-derived
 			// string is retained. Never blocks: overflow drops.
 			rc.parser.metricsRing.pushHit(hitMetricsRecord{
-				pool:        resp.Pool,
-				cacheResult: resp.CacheResult,
-				source:      resp.Source,
-				durNs:       dur.Nanoseconds(),
-				bytesOut:    resp.BytesOut,
-				status:      resp.StatusCode,
+				pool:         resp.Pool,
+				trafficClass: resp.TrafficClass,
+				cacheResult:  resp.CacheResult,
+				source:       resp.Source,
+				durNs:        dur.Nanoseconds(),
+				bytesOut:     resp.BytesOut,
+				status:       resp.StatusCode,
 			})
 		} else {
-			hook(resp.Pool, resp.CacheResult,
+			hook(resp.Pool, resp.TrafficClass, resp.CacheResult,
 				resp.Source, resp.StatusCode, resp.BytesOut, dur)
 		}
 	}

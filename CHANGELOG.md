@@ -34,6 +34,13 @@ the curated, human-readable summary.
   will fail to exchange meta/state during a rolling upgrade; upgrade
   all nodes together.
 
+- **Admin API and SDK use `encoding/json/v2`.** Same wire format, but
+  parsing is stricter: request bodies with duplicate JSON keys are now
+  rejected with `400` (previously the last value silently won) and
+  member matching is case-sensitive. The in-repo SDK is unaffected;
+  hand-rolled clients sending duplicate keys or misspelled field
+  casing will start receiving `400`s.
+
 - **One negative-caching key.** The scalar `negative_ttl: 30s` and the
   new map form are the same setting written two ways; the scalar is
   shorthand for the default error set (404/405/410/501). There is no

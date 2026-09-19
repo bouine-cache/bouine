@@ -39,7 +39,8 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 }
 
 func encodePeerFetchRequest(req api.PeerFetchRequest) []byte {
-	body := make([]byte, 0, 18+len(req.VaryKey))
+	body := make([]byte, 0, binaryHdrLen+16+1+len(req.VaryKey))
+	body = append(body, binaryMagic)
 	body = append(body, peerFetchBinaryVersion)
 	body = append(body, req.Key[:]...)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // test input, VaryKey < 256 bytes
@@ -88,6 +89,34 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	if obj.Key != key || obj.StatusCode != 200 {
 		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
 	}
+}
+
+// TestParsePeerFetchBody_RejectsNonEnvelopeBodies pins that the
+// peer-fetch frame requires the same magic + version header as all
+// other cluster binary frames — including the old version-only framing
+// this file's fixtures previously used.
+func TestParsePeerFetchBody_RejectsNonEnvelopeBodies(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(1)
+	body := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
+
+	noMagic := append([]byte(nil), body[1:]...)
+	_, ok := parsePeerFetchBody(noMagic)
+	require.False(t, ok, "version-only frame (no magic) must be rejected")
+
+	badMagic := append([]byte(nil), body...)
+	badMagic[0] = 0x00
+	_, ok = parsePeerFetchBody(badMagic)
+	require.False(t, ok, "wrong magic byte must be rejected")
+
+	badVersion := append([]byte(nil), body...)
+	badVersion[1] = peerFetchBinaryVersion + 1
+	_, ok = parsePeerFetchBody(badVersion)
+	require.False(t, ok, "unknown version must be rejected")
+
+	short := body[:binaryHdrLen+16]
+	_, ok = parsePeerFetchBody(short)
+	require.False(t, ok, "truncated frame must be rejected")
 }
 
 func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {

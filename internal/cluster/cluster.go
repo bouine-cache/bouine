@@ -329,14 +329,21 @@ func (c *Cluster) Leave(ctx context.Context) error {
 
 // NodeMeta serialises PeerInfo as the node's user metadata.
 // Oversized payloads are dropped whole: a truncated frame fails
-// decoding on every receiver, so sending it only creates a silently
-// dropped peer.
+// decoding on every receiver, and a decode failure means the peer
+// cannot be added to the ring at all, so sending nothing is no worse
+// than sending garbage. The drop is logged so the misconfiguration is
+// visible at the node that causes it.
 func (c *Cluster) NodeMeta(limit int) []byte {
 	b, err := EncodePeerInfoMeta(c.local)
 	if err != nil {
+		c.logger.Error("cluster: cannot encode node meta, joining without peer metadata",
+			"error", err)
 		return nil
 	}
 	if len(b) > limit {
+		c.logger.Error("cluster: encoded node meta exceeds memberlist limit, dropping",
+			"size", len(b), "limit", limit,
+			"hint", "shorten PeerInfo strings (name, addresses, version)")
 		return nil
 	}
 	return b
@@ -680,6 +687,8 @@ func (c *Cluster) reconcileOnce() {
 	for _, n := range liveMembers {
 		info, err := DecodePeerInfoMeta(n.Meta)
 		if err != nil {
+			c.logger.Warn("cluster: undecodable peer meta, skipping reconcile",
+				"node", n.Name, "error", err)
 			continue
 		}
 		info.Name = n.Name
@@ -731,9 +740,14 @@ func (c *Cluster) reconcileRunning() bool {
 func (c *Cluster) NotifyJoin(n *memberlist.Node) {
 	info, err := DecodePeerInfoMeta(n.Meta)
 	if err != nil {
-		c.logger.Warn("cluster: malformed peer meta", "node", n.Name, "error", err)
-		info.Name = n.Name
-		info.Addr = fmt.Sprintf("%s:%d", n.Addr, n.Port)
+		// A meta we cannot decode carries no usable data addresses;
+		// adding a fallback peer would put it in the ring and route
+		// peer-fetches to an address that cannot serve them. Skip it —
+		// reconcile and future NotifyUpdate events retry with fresh
+		// metadata.
+		c.logger.Warn("cluster: undecodable peer meta, not adding peer",
+			"node", n.Name, "error", err)
+		return
 	}
 	c.addPeer(n.Name, info)
 	c.logger.Info("cluster peer joined", "name", n.Name, "addr", info.Addr)

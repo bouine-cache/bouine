@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1053,4 +1054,37 @@ func TestMetrics_NilReceiverSafe(t *testing.T) {
 	m.IncGossipInvalidation("purge")
 	m.IncHTTPInvalidation("ban")
 	m.IncBroadcastFailure("purge", "dial")
+}
+
+// TestNotifyJoin_UndecodableMetaSkipsPeer pins the fix for the
+// half-functional peer: a node whose meta cannot be decoded must NOT
+// be added to the ring with a fallback address (no DataAddr means
+// peer-fetches routed to it can never be served). It must stay out of
+// the ring until fresh metadata arrives via NotifyUpdate/reconcile.
+func TestNotifyJoin_UndecodableMetaSkipsPeer(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "meta-skip", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	c.NotifyJoin(&memberlist.Node{Name: "legacy-node", Meta: []byte("not a frame")})
+	c.NotifyJoin(&memberlist.Node{Name: "legacy-node", Meta: nil})
+
+	assert.NotContains(t, c.Members(), api.PeerInfo{Name: "legacy-node", Addr: "127.0.0.1:0"},
+		"undecodable meta must not produce a ring peer")
+}
+
+// TestNodeMeta_OversizeDropsWhole pins that an encoded meta larger than
+// the memberlist limit is dropped whole (never truncated) — a truncated
+// frame would fail decoding on every receiver.
+func TestNodeMeta_OversizeDropsWhole(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "meta-big", "127.0.0.1:0")
+	cfg.PeerInfo.Version = strings.Repeat("v", 600)
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	assert.Nil(t, c.NodeMeta(512), "oversized meta must be dropped, not truncated")
 }

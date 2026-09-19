@@ -30,9 +30,10 @@ var peerFetchEncodePool = sync.Pool{
 }
 
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
-// request format. v2 uses 16-byte (128-bit) keys. This is the only
-// accepted format: the legacy JSON fallback was removed (retrocompat
-// drop).
+// request frame, framed with the same binaryMagic + version header as
+// all other cluster binary frames. v2 uses 16-byte (128-bit) keys.
+// This is the only accepted format: the legacy JSON fallback was
+// removed (retrocompat drop).
 const peerFetchBinaryVersion = 2
 
 const (
@@ -603,7 +604,8 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) 
 	}
 	uri := scheme + "://" + fetchAddr + PeerFetchPath
 
-	body := make([]byte, 0, 18+len(req.VaryKey))
+	body := make([]byte, 0, binaryHdrLen+16+1+len(req.VaryKey))
+	body = append(body, binaryMagic)
 	body = append(body, peerFetchBinaryVersion)
 	body = append(body, req.Key[:]...)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
@@ -838,15 +840,15 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 // ok=false maps to a 400 response.
 func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	var req api.PeerFetchRequest
-	if len(body) < 18 || body[0] != peerFetchBinaryVersion {
+	if len(body) < 19 || body[0] != binaryMagic || body[1] != peerFetchBinaryVersion {
 		return req, false
 	}
-	copy(req.Key[:], body[1:17])
-	varyLen := int(body[17])
-	if len(body) < 18+varyLen {
+	copy(req.Key[:], body[2:18])
+	varyLen := int(body[18])
+	if len(body) < 19+varyLen {
 		return req, false
 	}
-	req.VaryKey = string(body[18 : 18+varyLen])
+	req.VaryKey = string(body[19 : 19+varyLen])
 	return req, true
 }
 

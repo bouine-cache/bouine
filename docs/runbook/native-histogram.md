@@ -43,14 +43,9 @@ capped at 80) instead of 16 classic bucket series per tuple.
 
 ## Series arithmetic with the traffic_class axis (ADR-0047)
 
-The `traffic_class` label multiplies each family's per-tuple ceiling by
-`1 + #configured classes` (the `unclassified` fallback plus the
-configured set; the config cap is 8, so the multiplier tops out at 9).
-With no classes configured the multiplier is exactly 1 — the label is
-present but single-valued, so deployments without the feature see no
-cardinality change.
-
-Per-family worst case at 33 pools (incl. `_default`) × 9 classSlots:
+With `traffic_class` (ADR-0047) each family's per-tuple ceiling is
+multiplied by `1 + #configured classes` (config cap 8, so max 9); with
+no classes configured the multiplier is 1.
 
 | Family | Per (pool, class) | At 33 pools × 9 classSlots |
 |---|---|---|
@@ -58,30 +53,22 @@ Per-family worst case at 33 pools (incl. `_default`) × 9 classSlots:
 | `bouine_request_duration_seconds` (classic `_bucket`) | 6 status classes × 5 results = 30 tuples | 8 910 tuples → 142 560 classic series |
 | `bouine_response_bytes_total` | 5 results × 5 sources = 25 | 7 425 |
 
-Two operator guidelines follow:
-
-- **`bouine_requests_total` crosses the AGENTS.md §9 10 000-series line
-  whenever `pools × (1 + #classes) > 57`** (33 pools × 3 slots is
-  already 17 325). This is a documented exception (ADR-0047): the
-  overage is opt-in and the label set is closed. If you are above the
-  line, reduce classes, split fleets, or apply the drop pattern above
-  (`metric_relabel_configs` can drop whole classes on this family too).
-- **The histogram's classic `_bucket` series are the dominant cost**
-  and the existing `metric_relabel_configs` drop rule already removes
-  them; the native sparse form multiplies identically but costs
-  `_sum` + `_count` + ≤80 sparse buckets per tuple.
+- Keep `pools × (1 + #classes) ≤ 57` to stay under the AGENTS.md §9
+  10 000-series line for `bouine_requests_total`; above it, reduce
+  classes, split fleets, or extend the drop pattern above
+  (`metric_relabel_configs` can drop whole classes on this family
+  too). The overage is a documented exception (ADR-0047): opt-in, and
+  the label set is closed.
+- The histogram's classic `_bucket` series dominate; the existing
+  `metric_relabel_configs` drop rule removes them. The native sparse
+  form costs `_sum` + `_count` + ≤80 sparse buckets per tuple.
 
 ## Upgrade note: series identity reset
 
 Adding the `traffic_class` label changes every data-plane series'
-identity (Prometheus treats a label-set change as a new series). At
-the upgrade boundary, `rate()` over `bouine_requests_total` /
-`bouine_request_duration_seconds` / `bouine_response_bytes_total` will
-show a one-window gap per series while old and new series coexist.
-Recording rules and alerts that aggregate these families need no
-change — the gap is transient and self-heals after one scrape
-interval; dashboards drawn across the boundary may show a visual
-discontinuity at the deploy timestamp.
+identity: `rate()` over these families shows a one-window gap at the
+deploy boundary, self-healing after one scrape interval. Recording
+rules and alerts need no change.
 
 ## Cost
 

@@ -103,6 +103,16 @@ func TestRequestsTotal_NoMethodLabel(t *testing.T) {
 	}
 }
 
+// TestStatusClassString pins the histogram's status-class label for
+// the boundary and out-of-range codes: everything the index cannot
+// bin into 1xx-5xx must collapse into the catch-all "0" slot.
+func TestStatusClassString(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "0", statusClassString(0))
+	assert.Equal(t, "0", statusClassString(99))
+	assert.Equal(t, "0", statusClassString(600))
+}
+
 // TestTrafficClass_LabelSpaceClosed pins the ADR-0047 label contract:
 // the traffic_class label values on all three data-plane families come
 // exclusively from the pre-resolved config set plus "unclassified" —

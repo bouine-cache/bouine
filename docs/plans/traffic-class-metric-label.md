@@ -251,9 +251,12 @@ before the metric ships and cross-checks the label in incident forensics.
       additive change; make no semver-additive claim for it.
 - [ ] `internal/server/routedfastpath.go`: stamp class from the route
       match pass (config-owned string).
-- [ ] `internal/cache/fastpath.go`: propagate `TrafficClass` through
-      `buildFastPathResponse` / `responseFromComposedHead` from the
-      handler's classifier-resolved value.
+- [x] `internal/cache/fastpath.go`: as-built, this item shrank to the
+      `Release` reset (`resp.TrafficClass = ""`) — the propagation
+      prescribed here is impossible without a forbidden L3→L1 depguard
+      import (cache importing server's classifier). Stamping happens in
+      `RoutedFastPath.TryHit` (see previous item); see ADR-0047
+      Decision 3.
 - [ ] `internal/server/h1parser`: `hitMetricsRecord`, `metricsDrainer.hook`,
       parser + reactor pushHit/inline call gain the field.
 - [ ] `internal/observability/dataplane.go`: label on the three families,

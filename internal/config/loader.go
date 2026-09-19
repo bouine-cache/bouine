@@ -775,7 +775,7 @@ func validateRouteKey(i int, rk RouteKey) error {
 
 // validateIncludeHeaders validates cache.key.include_headers: capped at
 // 16 entries (mirrors strip_query_prefix), every entry must be a single
-// RFC 9110 token (§5.1: one header name, no commas or spaces — "x,y"
+// RFC 9110 token (§5.6.2: tchar only, so one comma-free header name — "x,y"
 // would be one union field to effectiveVary but two Vary fields to the
 // variant-key builders, i.e. a knob whose meaning depends on the
 // reader), no "*" (a wildcard Vary is unkeyable and would explode the
@@ -815,7 +815,7 @@ func validateIncludeHeaders(i int, rk RouteKey) error {
 	return nil
 }
 
-// isHTTPToken reports whether s is a valid RFC 9110 §5.1 token:
+// isHTTPToken reports whether s is a valid RFC 9110 §5.6.2 token:
 // one or more tchar (visible ASCII excluding separators) — the shape
 // of a single header field name.
 func isHTTPToken(s string) bool {
@@ -830,14 +830,14 @@ func isHTTPToken(s string) bool {
 	return true
 }
 
-// isTchar reports whether c is an RFC 9110 §5.1 tchar: ALPHA, DIGIT,
+// isTchar reports whether c is an RFC 9110 §5.6.2 tchar: ALPHA, DIGIT,
 // or one of "!#$%&'*+-.^_`|~". Everything else (space, comma, colon,
 // separators, non-ASCII) fails the token check.
 func isTchar(c byte) bool {
 	return tcharTable[c]
 }
 
-// tcharTable is the RFC 9110 §5.1 tchar bit set, indexed by byte.
+// tcharTable is the RFC 9110 §5.6.2 tchar bit set, indexed by byte.
 var tcharTable = [256]bool{
 	'0': true, '1': true, '2': true, '3': true, '4': true,
 	'5': true, '6': true, '7': true, '8': true, '9': true,

@@ -7,7 +7,7 @@ import "strings"
 // of host OS MIME database differences (/etc/mime.types on Linux, registry
 // on Windows). Unknown extensions fall back to application/octet-stream.
 //
-// Per ADR-0017 §6, Content-Type is set from this bundled map, not the host
+// Per ADR-0017 (decision item 6), Content-Type is set from this bundled map, not the host
 // OS MIME database. The handler lowercases the extension before lookup to
 // preserve the case-insensitive matching that mime.TypeByExtension provided.
 var bundledMIMEs = map[string]string{

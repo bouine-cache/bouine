@@ -863,7 +863,7 @@ func (h *Handler) Close(ctx context.Context) error {
 }
 
 // Purge invalidates a primary cache key and every Vary variant stored under
-// it, enforcing RFC 9111 §4.2.4: when a resource is invalidated, all stored
+// it, enforcing RFC 9111 §4.4: when a resource is invalidated, all stored
 // variants MUST be invalidated too.
 //
 // Returns owned=true when this handler had the key (tracked variants or a
@@ -3010,7 +3010,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
 func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
-	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
+	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
 	//
 	// Cache the ToMap() result — it was called 5x before, each allocating a

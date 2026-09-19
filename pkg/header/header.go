@@ -32,7 +32,7 @@ const (
 	// representation body.
 	ContentEncoding = "Content-Encoding"
 
-	// ContentLength — RFC 9110 §8.2. Length of the representation body
+	// ContentLength — RFC 9110 §8.6. Length of the representation body
 	// in octets.
 	ContentLength = "Content-Length"
 
@@ -57,7 +57,7 @@ const (
 	// http.Header map key without .Set()/.Get() canonicalization.
 	ETag = "Etag"
 
-	// Expires — RFC 9110 §8.7.2 / RFC 9111 §4.2.1. Date/time after which
+	// Expires — RFC 9111 §5.3 (freshness calculation §4.2.1). Date/time after which
 	// the response is considered stale.
 	Expires = "Expires"
 
@@ -80,7 +80,7 @@ const (
 	// Location — RFC 9110 §10.2.2. Target resource URI for a redirect.
 	Location = "Location"
 
-	// Pragma — RFC 9110 §15.2. Obsolete implementation-defined directives
+	// Pragma — RFC 9111 §5.4 (obsoleted). Obsolete implementation-defined directives
 	// (still used for "no-cache" in legacy clients).
 	Pragma = "Pragma"
 
@@ -95,7 +95,7 @@ const (
 	// times.
 	SetCookie = "Set-Cookie"
 
-	// Warning — RFC 9110 §15.8 (obsolete). Additional information about
+	// Warning — obsoleted by RFC 9111 §5.5 (formerly RFC 7234 §5.5). Additional information about
 	// the status of a message.
 	Warning = "Warning"
 
@@ -107,22 +107,22 @@ const (
 // Cache-specific headers defined in RFC 9111 (HTTP Caching) and related
 // specifications.
 const (
-	// Age — RFC 9111 §4.2.3. The age of the response in seconds
+	// Age — RFC 9111 §5.1. The age of the response in seconds
 	// (time since origin server generated it).
 	Age = "Age"
 
-	// CacheControl — RFC 9110 §5.2 / RFC 9111 §4.2.1. Directives for
+	// CacheControl — RFC 9111 §5.2. Directives for
 	// caches along the request/response path.
 	CacheControl = "Cache-Control"
 
-	// CDNCacheControl — RFC 9211 §4. CDN-specific cache directives that
+	// CDNCacheControl — RFC 9213 §3. Targeted cache directives that
 	// override Cache-Control for shared caches. The canonical MIME form
 	// is "Cdn-Cache-Control" (first letter uppercase, rest lowercase per
 	// word); using this constant avoids canonicalize allocations on every
 	// header lookup.
 	CDNCacheControl = "Cdn-Cache-Control"
 
-	// Vary — RFC 9111 §4.1. Request header fields that a cache must
+	// Vary — RFC 9110 §12.5.5. Request header fields that a cache must
 	// include in the cache key to select the correct variant.
 	Vary = "Vary"
 )
@@ -160,14 +160,14 @@ const (
 	// KeepAlive — Obsolete hop-by-hop header for persistent connections.
 	KeepAlive = "Keep-Alive"
 
-	// TE — RFC 9110 §7.1.4. Transfer codings acceptable in the request.
+	// TE — RFC 9110 §10.1.4. Transfer codings acceptable in the request.
 	TE = "TE"
 
 	// Trailer — RFC 9110 §6.6.2. Header fields present in the trailer
 	// of a chunked message.
 	Trailer = "Trailer"
 
-	// TransferEncoding — RFC 9110 §6.2.2. How the message body is
+	// TransferEncoding — RFC 9112 §6.1. How the message body is
 	// encoded for transfer (e.g. "chunked").
 	TransferEncoding = "Transfer-Encoding"
 

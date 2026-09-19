@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -105,4 +106,73 @@ func TestPeerRefreshHandler_BadBody(t *testing.T) {
 	handler(ctx)
 
 	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
+}
+
+func TestPeerPurgeHandler_FnError(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerPurgeHandler(func(api.PurgeEvent) error {
+		return errors.New("internal failure")
+	})
+
+	evt := api.PurgeEvent{Key: testkey.Key(1), Issuer: "node-0"}
+	body, _ := EncodePurgeHTTP(evt)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/purge")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
+
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
+}
+
+func TestPeerBanHandler_BadBody(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerBanHandler(func(api.BanEvent) error {
+		return nil
+	})
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/ban")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody([]byte("bad"))
+	handler(ctx)
+
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
+}
+
+func TestPeerBanHandler_FnError(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerBanHandler(func(api.BanEvent) error {
+		return errors.New("ban failed")
+	})
+
+	evt := api.BanEvent{Issuer: "node-0"}
+	body, _ := EncodeBanHTTP(evt)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/ban")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
+
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
+}
+
+func TestPeerRefreshHandler_FnError(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerRefreshHandler(func(api.RefreshEvent) error {
+		return errors.New("refresh failed")
+	})
+
+	evt := api.RefreshEvent{Key: testkey.Key(1), Issuer: "node-0"}
+	body, _ := EncodeRefreshHTTP(evt)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/refresh")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
+
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }

@@ -322,8 +322,10 @@ type Cluster struct {
 	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
 	// BanTTL is how long a lazy invalidation ban (purge, surrogate-key
 	// or predicate ban) stays in the store's active ban list before the
-	// reaper prunes it. RFC 9111 §4.4 exempts objects stored after the
-	// ban from matching, so the TTL only bounds how long PRE-ban copies
+	// reaper prunes it. RFC 9111 §4.4 invalidation only removes
+	// responses that already existed when the invalidating request
+	// arrives, so objects stored after the ban are naturally exempt and
+	// the TTL only bounds how long PRE-ban copies
 	// keep being rejected — and those are reclaimed by TTL expiry, the
 	// reaper, and exempt refills anyway. The default (24h) is
 	// conservative; cache-lifecycle surrogate invalidations are safe at

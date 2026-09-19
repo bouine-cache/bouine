@@ -570,7 +570,7 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// flow as Do and FastHandler, which carry the already-accepted
 	// go/request-forgery alerts. Suppressing here keeps this
 	// duplicated sink from adding a third alert.
-	// lgtm[go/request-forgery] — see docs/architecture.md §6 threat model
+	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
 
 	t.metrics.incActiveConnection(c.pool.Name, t.addr)

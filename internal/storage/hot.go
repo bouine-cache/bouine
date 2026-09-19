@@ -72,11 +72,9 @@ type HotStore struct {
 	// (UnixNano) to keep the fast path lock-free.
 	shards []shard
 	// bans is the lazy ban state: the ordered activeBan list (source
-	// of truth for eager scans) plus a compiled banSnapshot giving the
-	// hit path an O(1) rejection check instead of a per-ban predicate
-	// walk (see bans.go). The read path (matchesActiveBan) reads the
 	// snapshot without locks or allocation. Objects stored AFTER a
-	// ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics);
+	// ban's CreatedAt are not subject to it — RFC 9111 §4.4 invalidation
+	// only removes responses that existed at invalidation time;
 	// the TTL reaper prunes expired bans each tick.
 	bans  banListState
 	stats hotStats
@@ -96,7 +94,8 @@ type activeBan struct {
 	// exemptAfter is the ORIGINAL expr.CreatedAt of the ban (possibly
 	// zero = no exemption). It mirrors the exemption check inside pred:
 	// objects stored after this instant are not subject to the ban
-	// (RFC 9111 §4.4). The composite ban snapshot consults it directly
+	// (RFC 9111 §4.4 invalidation only removes responses that existed
+	// at invalidation time). The composite ban snapshot consults it directly
 	// to reject exempt objects without calling pred.
 	exemptAfter time.Time
 	// expr records the pattern fields of the api.BanExpr the predicate
@@ -777,7 +776,7 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 // whose stored object matches the ban predicate. After the eager
 // scan, the predicate is registered in the lazy ban list so objects
 // filled after this scan are also checked on next lookup (RFC 9111
-// §4.4 lazy semantics). This handles the common case of
+// §4.4 invalidation, applied lazily). This handles the common case of
 // host/path/surrogate-key invalidation on administrative APIs.
 //
 // Scan coalescing: the eager scan is O(entries) under each shard's
@@ -796,7 +795,7 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 
 	// Register in the lazy ban list FIRST so objects filled during
 	// (and after) the eager scan are also checked on next lookup
-	// (RFC 9111 §4.4 lazy semantics).
+	// (RFC 9111 §4.4 invalidation, applied lazily).
 	now := h.registerBan(expr, pred)
 
 	// Pure surrogate-key bans never need an eager scan: the compiled

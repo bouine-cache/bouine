@@ -190,7 +190,8 @@ func surrogateListed(keys []string, banned map[string]time.Time, obj *api.Object
 // subjectTo reports whether obj is subject to a ban whose exemption
 // time is exempt (the ban's original expr.CreatedAt; zero means the
 // ban has no exemption and everything is subject). Objects stored
-// after the exemption time are not subject (RFC 9111 §4.4).
+// after the exemption time are not subject — RFC 9111 §4.4 invalidation
+// only removes responses that existed at invalidation time.
 func subjectTo(obj *api.Object, exempt time.Time) bool {
 	return exempt.IsZero() || !obj.StoredAt.After(exempt)
 }

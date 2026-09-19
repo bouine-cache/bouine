@@ -66,11 +66,11 @@ func TestMetricsDrainer_AppliesRecordsThroughHook(t *testing.T) {
 	ring := &metricsRing{}
 	var mu sync.Mutex
 	var got []hitMetricsRecord
-	hook := func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+	hook := func(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, hitMetricsRecord{
-			pool: pool, cacheResult: cacheResult, source: source,
+			pool: pool, trafficClass: trafficClass, cacheResult: cacheResult, source: source,
 			durNs: duration.Nanoseconds(), bytesOut: bytesOut,
 			status: status,
 		})
@@ -110,7 +110,7 @@ func TestMetricsDrainer_TickerDrainsWithoutStop(t *testing.T) {
 	t.Parallel()
 	ring := &metricsRing{}
 	var count atomic.Int64
-	d := &metricsDrainer{ring: ring, hook: func(string, string, string, int, int, time.Duration) {
+	d := &metricsDrainer{ring: ring, hook: func(string, string, string, string, int, int, time.Duration) {
 		count.Add(1)
 	}}
 	stop := make(chan struct{})

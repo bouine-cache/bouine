@@ -42,6 +42,14 @@ const (
 	SourceOrigin Source = "origin"
 )
 
+// TrafficClassUnclassified is the traffic_class label value for
+// requests whose Host matches no configured traffic class (ADR-0047).
+// It is the fallback on all data-plane request metrics; a non-zero
+// rate on it is a self-documenting misconfiguration signal.
+//
+// Stable.
+const TrafficClassUnclassified = "unclassified"
+
 // RequestContext is the canonical metadata captured for a single
 // processed request. Phase 1+ populate fields as features land.
 //

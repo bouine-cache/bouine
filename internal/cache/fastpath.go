@@ -645,6 +645,7 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 	resp.CacheResult = ""
 	resp.Source = ""
 	resp.Pool = ""
+	resp.TrafficClass = ""
 	resp.BytesOut = 0
 	resp.CloseConn = false
 	fastPathRespPool.Put(resp)

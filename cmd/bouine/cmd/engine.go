@@ -91,6 +91,13 @@ type runState struct {
 	// buildDataPlane has not run (tests that only exercise builders).
 	router *server.Router
 
+	// trafficClassify maps the request Host to a configured traffic
+	// class for the traffic_class metric label (ADR-0047). Compiled
+	// once in buildRouter from metrics.traffic_classes and shared by
+	// the router (slow path) and the routed fast path. nil when no
+	// classes are configured — everything then carries "unclassified".
+	trafficClassify *server.TrafficClassifier
+
 	clusterNode    *cluster.Cluster
 	peerFetcher    *cluster.PeerFetcher
 	broadcaster    *cluster.Broadcaster

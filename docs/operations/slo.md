@@ -19,6 +19,13 @@ on a 3-node StatefulSet with 4 vCPU / 4 GiB per pod.
 | DP-5 | Zero 5xx during rolling restart | Same as DP-4 measured during `kubectl rollout` window | Per-release | Any 5xx in window |
 | DP-6 | 99.9 % monthly availability | `1 - (error_minutes / total_minutes)` | 30-day calendar | < 99.5 % trailing 7d |
 
+*Per-population variants: when `metrics.traffic_classes` is configured
+(ADR-0047), DP-3/DP-1/DP-2 style queries can be split per population by
+adding `traffic_class` to the aggregation — e.g.
+`sum by (traffic_class) (rate(bouine_requests_total{cache_result="HIT"}[5m])) /
+ sum by (traffic_class) (rate(bouine_requests_total[5m]))`. Class names are a
+deployment convention (e.g. csr/ssr); bouine attaches no semantics.*
+
 ---
 
 ## Cluster SLOs

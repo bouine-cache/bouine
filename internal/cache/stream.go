@@ -133,7 +133,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		return nil, fmt.Errorf("origin fetch: %w", err)
 	}
 
-	// Check Content-Length against maxResponseBytes if available.
 	if h.maxResponseBytes > 0 {
 		if cl := resp.Header.ContentLength(); cl > 0 && int64(cl) > h.maxResponseBytes {
 			fasthttp.ReleaseRequest(req)
@@ -330,7 +329,6 @@ func (h *Handler) streamMiss(
 		return
 	}
 
-	// Set up response headers for the client.
 	dst := &ctx.Response.Header
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
@@ -422,7 +420,7 @@ func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, res
 
 // isResponseCacheableBytes is isResponseCacheable over the raw fasthttp
 // response headers, without building a header.Map first. It mirrors the
-// Map-based path exactly: CDN-Cache-Control precedence (RFC 9211), the
+// Map-based path exactly: CDN-Cache-Control precedence (RFC 9213), the
 // blocking directives (no-store, private, Vary:*, Pragma, Set-Cookie,
 // request Authorization), explicit freshness (max-age/s-maxage/Expires),
 // heuristic freshness (Last-Modified on heuristically-cacheable status),
@@ -437,7 +435,7 @@ func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo
 	status := sf.StatusCode
 
 	// CDN-Cache-Control overrides Cache-Control for shared caches
-	// (RFC 9211). Reuse the Map path when present: merging multiple
+	// (RFC 9213). Reuse the Map path when present: merging multiple
 	// values and validating token characters needs the joined value,
 	// and CDN-CC is rare enough that the Map build is acceptable.
 	if cdn := hdr.Peek(header.CDNCacheControl); len(cdn) > 0 {
@@ -512,7 +510,7 @@ func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Dir
 
 // isBlockedByPragmaBytes mirrors isBlockedByPragma over raw header bytes:
 // Pragma: no-cache blocks when there is no explicit freshness signal
-// (skipped under CDN-CC per RFC 9211).
+// (skipped under CDN-CC per RFC 9213).
 func isBlockedByPragmaBytes(hdr *fasthttp.ResponseHeader, respCC Directives) bool {
 	if !bytes.Equal(hdr.Peek(header.Pragma), []byte("no-cache")) {
 		return false

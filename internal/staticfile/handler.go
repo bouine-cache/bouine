@@ -344,7 +344,7 @@ func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f *os.File, cleanedPa
 // ServeHTTP resets it to 0 before any body streaming.
 //
 // Returns an empty string if the content hash cannot be computed
-// (seek/read error). Per ADR-0017 §7, a missing ETag is strictly safer
+// (seek/read error). Per ADR-0017 (decision item 7), a missing ETag is strictly safer
 // than a wrong mtime-based one: clients fall back to If-Modified-Since
 // validation, which is correct.
 func (h *Handler) computeETag(f *os.File, cleanedPath string, stat os.FileInfo) string {
@@ -426,7 +426,7 @@ const (
 // written (either 206 or 416). Returns false if the range is invalid and
 // the caller should fall through to a full 200 response.
 //
-// Per RFC 9110 §14.3.2, a server MAY collapse a multipart range request
+// Per RFC 9110 §15.3.7.2, a server MAY collapse a multipart range request
 // into a single 206 response. We serve the first range only.
 //
 // The already-opened file f is reused from resolveFile — no second

@@ -402,10 +402,7 @@ func (h Map) WriteToFastHTTP(dst *fasthttp.ResponseHeader) {
 // The zero-length case returns "" without dereferencing the slice header,
 // avoiding an index-out-of-range panic on empty slices.
 //
-// does not outlive the caller's byte slice in any path that doesn't
-// immediately copy it (unique.Make, InternKey, etc.).
-//
-//nolint:gosec // G103: unsafe.String is safe: the string is read-only and
+//nolint:gosec // G103: string is read-only and immediately consumed or copied (unique.Make, InternKey)
 func BytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""

@@ -571,7 +571,6 @@ func NewStore(cfg Config) (*Store, error) {
 	if s.fdCache != nil && s.fdCache.capacity > len(s.segs) && len(s.segs) > 0 {
 		s.fdCache.capacity = len(s.segs)
 	}
-	// Set the max_bytes gauge once at construction. 0 means unlimited.
 	if s.metrics != nil {
 		s.metrics.SetMaxBytes(cfg.MaxBytes)
 	}
@@ -684,7 +683,7 @@ func (s *Store) preallocateSegments() error {
 // double-checks whether the last segment is still full under s.mu.Lock —
 // so N goroutines that hit errSegFull simultaneously create exactly one
 // new segment, not N.
-//
+
 // ensureBudgetLocked checks whether recSize fits within the configured
 // budgets, attempting eviction if not. Returns nil if the record fits
 // (either directly or after eviction), errSegFull if the active segment

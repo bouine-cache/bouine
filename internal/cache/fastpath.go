@@ -145,7 +145,6 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		return f.tryPeerFetch(ctx, req, key, now, reqCC)
 	}
 
-	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	lookupKey := key
 	if vary := obj.VaryValue; vary != "" {
 		vk := VariantKeyFromRaw(key, vary, req, f.policy)
@@ -393,7 +392,7 @@ func (f *FastPathHandler) getCachedDate(now time.Time) string {
 // so hits inside a cached second reuse the exact bytes and skip
 // per-hit header appends entirely.
 //
-// When the request asked for Connection: close (RFC 9110 §9.6), the
+// When the request asked for Connection: close (RFC 9112 §9.6), the
 // composed head ends with "Connection: close" and the response
 // carries CloseConn so the writer closes the connection after the
 // flush instead of reusing it.
@@ -440,7 +439,6 @@ func (f *FastPathHandler) composeResponse(req *api.RawRequest, obj *api.Object, 
 		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now), closeConn)
 	}
 
-	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date).
 	dateStr := f.getCachedDate(now)
 	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
 
@@ -503,8 +501,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // X-Cache, X-Cache-Source, Warning, Connection) plus the trailing \r\n
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
-// The Connection trailer reflects the request's own token (RFC 9110
-// §9.6): "close" when the client requested close, keep-alive otherwise.
+// The Connection trailer reflects the request's own token (RFC 9112 §9.6): "close" when the client requested close, keep-alive otherwise.
 func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
@@ -636,7 +633,6 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 		// Oversized buffers are discarded (not returned to pool).
 		resp.BufPtr = nil
 	}
-	// Reset and return the response to its pool.
 	resp.HeaderBuf = nil
 	resp.BuffersArr = [3][]byte{}
 	resp.Buffers = nil

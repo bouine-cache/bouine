@@ -80,7 +80,6 @@ func buildCFPropagator(
 		p.circuit.OnReject(func() {
 			metrics.CFCircuitRejected.Inc()
 		})
-		// Set initial state metric.
 		metrics.CFCircuitState.Set(float64(bouinecf.CircuitClosed))
 	}
 

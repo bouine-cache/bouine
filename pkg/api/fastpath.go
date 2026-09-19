@@ -22,10 +22,7 @@ const OwnerGateRejectContextKey = "bouine.owner_gate_reject"
 //
 // Unstable.
 //
-// same allocator size class (3456), and the field order keeps the
-// per-request hot string group contiguous ahead of the scalar tail.
-//
-//nolint:govet // fieldalignment: the reported 8-byte saving is inside the
+//nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
 type RawRequest struct {
 	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
 	// leads the struct so the scalar tail stays in the final cache
@@ -47,7 +44,7 @@ type RawRequest struct {
 	// ConnectionClose reports whether the request carried a
 	// "Connection: close" token (RFC 9110 §7.6.1). The parser sets it
 	// once while scanning headers; the fast path reads it to emit
-	// "Connection: close" on the response (§9.6) and its callers to
+	// "Connection: close" on the response (RFC 9112 §9.6) and its callers to
 	// close the connection after the hit instead of re-scanning
 	// headers. False for the zero value.
 	//
@@ -129,7 +126,7 @@ const (
 )
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.
-// Requests exceeding this fall through to net/http.
+// Requests exceeding this fall through to the fasthttp slow path.
 const MaxRawHeaders = 100
 
 // RawHeader is a single parsed header key-value pair. Both Key and Value
@@ -168,7 +165,7 @@ func (r *RawRequest) HasHeader(key string) bool {
 // request qualifies (GET/HEAD, no conditional headers, cache hit), it
 // returns a non-nil FastPathResponse. If the request does not qualify
 // (miss, conditional, range, etc.), it returns nil — the caller falls
-// through to net/http.
+// through to the fasthttp slow path.
 //
 // Release returns a FastPathResponse (and its pooled header buffer) to
 // the pool. The caller MUST call Release after serveHit has finished
@@ -196,7 +193,7 @@ type FastPathHandler interface {
 // every TryHit avoids allocating a new [][]byte backing array on pool reuse.
 //
 // CloseConn, when true, tells the writer the response header block ends
-// with "Connection: close" (RFC 9110 §9.6): the connection must not be
+// with "Connection: close" (RFC 9112 §9.6): the connection must not be
 // reused for another request after this response. Set by the fast path
 // when the request requested close; the h1parser and the reactor both
 // read it to terminate their keep-alive loops after the flush.

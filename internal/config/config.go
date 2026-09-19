@@ -55,10 +55,10 @@ type Config struct {
 // ExperimentalConfig holds opt-in experimental features.
 type ExperimentalConfig struct {
 	// H1FastPath enables the custom HTTP/1.1 parser that bypasses
-	// net/http on cache hits. When true, GET/HEAD requests with no
-	// conditional headers are served directly from the parsed request
-	// without allocating *http.Request or http.ResponseWriter. Misses
-	// and non-GET/HEAD requests fall through to net/http unchanged.
+	// fasthttp's pooled *fasthttp.RequestCtx machinery on cache hits.
+	// When true, GET/HEAD requests with no conditional headers are
+	// served directly from the parsed request. Misses and non-GET/HEAD
+	// requests fall through to the regular fasthttp handler unchanged.
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 
@@ -322,8 +322,10 @@ type Cluster struct {
 	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
 	// BanTTL is how long a lazy invalidation ban (purge, surrogate-key
 	// or predicate ban) stays in the store's active ban list before the
-	// reaper prunes it. RFC 9111 §4.4 exempts objects stored after the
-	// ban from matching, so the TTL only bounds how long PRE-ban copies
+	// reaper prunes it. RFC 9111 §4.4 invalidation only removes
+	// responses that already existed when the invalidating request
+	// arrives, so objects stored after the ban are naturally exempt and
+	// the TTL only bounds how long PRE-ban copies
 	// keep being rejected — and those are reclaimed by TTL expiry, the
 	// reaper, and exempt refills anyway. The default (24h) is
 	// conservative; cache-lifecycle surrogate invalidations are safe at

@@ -1,8 +1,3 @@
-// Package origin is the L5 upstream layer. It manages connection pools
-// to origin servers, selects targets via round-robin (ADR-0005),
-// performs passive health checking (consecutive-5xx ejection), active
-// health probes, hedged requests, and exposes a fasthttp.RequestHandler
-// that forwards requests to the chosen target.
 package origin
 
 import (
@@ -575,7 +570,7 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// flow as Do and FastHandler, which carry the already-accepted
 	// go/request-forgery alerts. Suppressing here keeps this
 	// duplicated sink from adding a third alert.
-	// lgtm[go/request-forgery] — see docs/architecture.md §6 threat model
+	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
 
 	t.metrics.incActiveConnection(c.pool.Name, t.addr)

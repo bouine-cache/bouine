@@ -5,14 +5,32 @@ read at 3 AM. Each runbook addresses a specific failure mode or
 operator task. Per `AGENTS.md §10`, runbooks are updated alongside the
 code change that introduces a new failure mode.
 
-## Available runbooks
+## Index
 
 | File | Topic |
 |------|-------|
-| [`00-lifecycle.md`](00-lifecycle.md) | Start, stop, reload, drain. |
-| [`10-cluster-modes.md`](10-cluster-modes.md) | Cluster modes (strong, eventual, full) and capacity. |
-| [`20-purge-ban.md`](20-purge-ban.md) | Purge and ban invalidation. |
-| [`30-rolling-restart.md`](30-rolling-restart.md) | Rolling restarts and cluster operations. |
-| [`40-memory-accounting.md`](40-memory-accounting.md) | Memory accounting and tuning. |
-| [`50-warm-disk-exhaustion.md`](50-warm-disk-exhaustion.md) | Warm-disk exhaustion and incident response. |
+| [`00-lifecycle.md`](00-lifecycle.md) | Start, stop, config updates, and drain. |
+| [`10-cluster-modes.md`](10-cluster-modes.md) | Verify, diagnose, and switch between `strong` and `eventual`. |
+| [`20-purge-ban.md`](20-purge-ban.md) | Purge (exact), ban (predicate), and refresh (soft-purge). |
+| [`30-rolling-restart.md`](30-rolling-restart.md) | Zero-5xx rolling restart in a Kubernetes StatefulSet. |
+| [`40-memory-accounting.md`](40-memory-accounting.md) | Interpreting hot_store_bytes vs heap metrics; capturing pprof profiles. |
+| [`50-warm-disk-exhaustion.md`](50-warm-disk-exhaustion.md) | Diagnosing and mitigating warm-tier disk pressure and ENOSPC errors. |
+| [`51-h1-reactor.md`](51-h1-reactor.md) | H1 reactor: stuck writers, dropped hit-metric records, spawner saturation. |
+| [`52-sse-streaming.md`](52-sse-streaming.md) | SSE streaming: hint contract, idle deadlines, tuning per route. |
+| [`53-origin-timeouts.md`](53-origin-timeouts.md) | Origin timeouts: per-route fetch_timeout resolution and pool fallback. |
+| [`54-origin-ejection.md`](54-origin-ejection.md) | Origin ejection: circuit-breaker state and recovery. |
+| [`gc-tuning-fasthttp.md`](gc-tuning-fasthttp.md) | GC tuning under fasthttp. |
+| [`native-histogram.md`](native-histogram.md) | Native-histogram latency metrics. |
 | [`static-files.md`](static-files.md) | Static file serving. |
+
+## Naming convention
+
+`NN-topic.md` where `NN` is a two-digit category:
+
+- `00-` — daily ops (start, stop, config updates, drain)
+- `10-` — capacity & scaling
+- `20-` — purge & cache invalidation
+- `30-` — cluster operations
+- `40-` — memory & observability
+- `50-` — incident response
+- `90-` — postmortems index

@@ -49,7 +49,6 @@ func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader strin
 		saved.Set(header.AcceptEncoding, ae)
 	}
 
-	// Store each Vary-relevant header.
 	if varyHeader != "" {
 		for _, h := range strings.Split(varyHeader, ",") {
 			h = strings.TrimSpace(h)

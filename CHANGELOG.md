@@ -21,6 +21,12 @@ the curated, human-readable summary.
   durations; zero explicitly disables caching for that status. The
   policy only applies when the origin sends no explicit freshness, and
   RFC 9111 blocking directives still win.
+- docs: trim code comments across all packages (cache, storage, server,
+  cluster, origin, config, observability, cloudflare, dashboard, cmd,
+  pkg) to why-only statements: restatements of the next line or the
+  signature deleted, verbose godoc blocks condensed, RFC-clause
+  citations and non-obvious decisions kept. Adds the reusable
+  `docs/agents/code-comment-condensation.md` prompt.
 
 ### Changed
 
@@ -43,6 +49,20 @@ the curated, human-readable summary.
   covered by the negative-caching policy are never proactively
   refreshed, regardless of how they were cached. Statuses outside the
   policy (including all 2xx/3xx) refresh normally.
+- docs: condense documentation without losing knowledge — fixed stale
+  HTTP-stack facts in `README.md` and `docs/architecture.md`, removed
+  `full` cluster-mode content (removed in ADR-0025) from the
+  cluster-modes runbook, deduplicated the runbook index, replaced the
+  duplicated ADR-0016 draft in the refresh-before-expiry plan with a
+  pointer, condensed the refresh-prioritization revision history, and
+  repaired a dangling plan reference in ADR-0023.
+- docs: remove completed one-time migration plans with no inbound
+  references (`transfer-to-bouine-cache-org`,
+  `cluster-local-cache-mode`), resolve duplicate ADR numbers by
+  reassigning changelog-automation to ADR-0047, the kubeconform hook to
+  ADR-0048, and PurgeEvent.VaryKey to ADR-0049, and complete the ADR
+  index in `docs/decisions/README.md` (including marking the removed
+  0002/0003 records).
 
 ## [0.5.21] - 2026-09-17
 

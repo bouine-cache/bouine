@@ -1,7 +1,7 @@
 // Package h1parser implements a zero-allocation HTTP/1.1 request parser
 // for the cache hit fast path. It parses request lines and headers from
-// a net.Conn into a stack-allocated RawRequest struct, avoiding the
-// *http.Request allocation that net/http imposes on every request.
+// a net.Conn into a stack-allocated RawRequest struct, bypassing
+// fasthttp's pooled *fasthttp.RequestCtx machinery on the hit path.
 //
 // The parser handles keep-alive in a loop: parse → try fast path →
 // serve or fall through. On fall-through (miss path), the parser
@@ -313,7 +313,7 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	closeConn := resp.CloseConn
 	p.fastPath.Release(resp)
 	if closeConn {
-		// The request asked for Connection: close (RFC 9110 §9.6) and
+		// The request asked for Connection: close (RFC 9112 §9.6) and
 		// the serialized response ended with "Connection: close" — the
 		// connection must not be reused after this response.
 		return serveClose, nil
@@ -553,7 +553,7 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 		pos = lineEnd + 2
 	}
 
-	// Connection: close detection (RFC 9110 §7.6.1/§9.6): the request
+	// Connection: close detection (RFC 9110 §7.6.1 / RFC 9112 §9.6): the request
 	// asked to terminate the connection after the response. The flag is
 	// read by the fast path (Connection trailer + CloseConn) and by
 	// Serve to leave its keep-alive loop after a hit. appendHeader sets
@@ -700,7 +700,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 
 	head := rebuildRequestHead(req, excess)
 
-	// Check if the client requested Connection: close.
 	clientClose := isConnectionClose(req)
 
 	// Reset deadlines so the fallback handler manages its own timeouts.
@@ -723,7 +722,7 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		return true, nil //nolint:nilerr // close-connection outcome, not an error to propagate
 	}
 	if ctx.Request.MayContinue() {
-		// Mirror fasthttp's serve loop (server.go:2546): send 100 Continue
+		// Mirror fasthttp's serve loop (server.go:2566): send 100 Continue
 		// before reading the body. maxBodySize=0 means unlimited — the
 		// route's body limits are enforced downstream by the cache layer.
 		if _, err := conn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n")); err != nil {
@@ -742,12 +741,11 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// miss for the plain key). Cheap: only set when the peer branch ran.
 	transferOwnerMissHint(&ctx, req)
 
-	// Call the fallback handler.
 	p.fallback(&ctx)
 
 	// Propagate Connection: close from the request to the response so
 	// the client knows the connection will not be reused. The fasthttp
-	// server's own serve loop does this automatically (server.go:2653),
+	// server's own serve loop does this automatically (server.go:2678),
 	// but handleFallThrough bypasses that loop.
 	if clientClose {
 		ctx.Response.Header.SetConnectionClose()

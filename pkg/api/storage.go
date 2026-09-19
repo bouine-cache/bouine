@@ -26,7 +26,7 @@ type Object struct {
 	// header block (static headers as "Key: Value\r\n" pairs, without
 	// status line or trailing \r\n). Computed on the first fast-path
 	// cache hit, not at store time — objects never served via the
-	// fast-path (misses, net/http path) never pay the ~512-byte cost.
+	// fast-path (misses, slow-path requests) never pay the ~512-byte cost.
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
@@ -138,11 +138,8 @@ func (o *Object) StoreSerializedHead(head []byte) {
 // afterwards; pooled bytes would be overwritten under live readers.
 // Immutable once stored: concurrent composers race benignly (same
 // content), and a new second or variant replaces the pointer.
-// the head slice ahead of the identity scalars it is keyed by; this
-// one-entry-per-object cache is cold relative to the hit path, and
-// 8 bytes of padding is not worth obscuring the layout.
 //
-//nolint:govet // fieldalignment: the reported "optimal" order would move
+//nolint:govet // fieldalignment: "optimal" order buries head slice behind scalars on a cold path
 type composedHead struct {
 	unix        int64
 	statusEnd   int

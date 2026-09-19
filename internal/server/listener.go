@@ -1,6 +1,3 @@
-// Package server is the data-plane front door. It owns HTTP/1.1
-// listeners (TLS and cleartext) and the route-matching router
-// that dispatches requests to cache handlers.
 package server
 
 import (

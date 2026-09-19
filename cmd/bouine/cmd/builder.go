@@ -429,7 +429,6 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		}
 	}
 
-	// Wrap in cache handler only when cache is explicitly enabled.
 	if cacheEnabled {
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,
@@ -528,9 +527,6 @@ func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner 
 	return ownerFn, peerFetch
 }
 
-// buildKeyPolicy compiles the route's cache key config into a
-// pre-compiled KeyPolicy. Returns nil when no query/header policy
-// is active (no allocation).
 // staticHeaderRewriter applies a route's header rewrite directives around
 // a non-cached static handler. The cache.Handler implements the same
 // semantics for cached routes; this keeps the two surfaces honest.
@@ -604,6 +600,9 @@ func (r *staticHeaderRewriter) wrap(next fasthttp.RequestHandler) fasthttp.Reque
 	}
 }
 
+// buildKeyPolicy compiles the route's cache key config into a
+// pre-compiled KeyPolicy. Returns nil when no query/header policy
+// is active (no allocation).
 func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	if !hasKeyPolicy(rk) {
 		return nil

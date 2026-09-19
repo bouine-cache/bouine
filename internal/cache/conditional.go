@@ -105,7 +105,7 @@ func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	})
 }
 
-// ConditionalHeaders sets If-None-Match and If-Modified-Since on a
+// setConditionalHeaders sets If-None-Match and If-Modified-Since on a
 // revalidation request from the stored object's validators.
 func setConditionalHeaders(set func(key, value string), obj *api.Object) {
 	if obj.ETag != "" {

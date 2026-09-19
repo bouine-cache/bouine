@@ -538,7 +538,6 @@ func sloBuckets(h observability.LatencyHistogram, total int64) []templates.SLOBu
 
 // toPeerResultsEnriched joins PeerResult with PeerInfo (for DataAddr/AdminAddr/Weight/JoinedAt).
 func toPeerResultsEnriched(in []PeerResult, peersFn func() []api.PeerInfo) []templates.PeerResult {
-	// Build name → PeerInfo map
 	infoMap := map[string]api.PeerInfo{}
 	if peersFn != nil {
 		for _, p := range peersFn() {

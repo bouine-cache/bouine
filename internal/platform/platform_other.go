@@ -19,13 +19,15 @@ func SetTCPFastOpen(fd int, backlog int) error { return nil }
 // SetTCPDeferAccept is a no-op on non-Linux platforms.
 func SetTCPDeferAccept(fd int, seconds int) error { return nil }
 
-// ReusePortSupported is true on Linux, false on other platforms.
+// ReusePortSupported is false on non-Linux platforms: SO_REUSEPORT
+// exists on macOS/BSD but with different semantics (see below).
 const ReusePortSupported = false
 
-// SetReusePort returns an error on non-Linux platforms.
-// SO_REUSEPORT exists on macOS/BSD but with different semantics
-// (all listeners receive all connections, not hash-based distribution).
-// Returning an error lets the listener fall back to single-listener mode.
+// errReusePortUnsupported is returned by SetReusePort on non-Linux
+// platforms. SO_REUSEPORT exists on macOS/BSD but with different
+// semantics (all listeners receive all connections, not hash-based
+// distribution). Returning an error lets the listener fall back to
+// single-listener mode.
 var errReusePortUnsupported = errors.New("SO_REUSEPORT not supported on this platform")
 
 // SetReusePort returns errReusePortUnsupported on non-Linux platforms.

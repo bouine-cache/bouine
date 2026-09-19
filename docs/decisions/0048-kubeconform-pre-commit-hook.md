@@ -1,4 +1,4 @@
-# ADR-0041: kubeconform validation of rendered Helm templates
+# ADR-0048: kubeconform validation of rendered Helm templates
 
 - **Status**: Accepted
 - **Date**: 2026-09-01

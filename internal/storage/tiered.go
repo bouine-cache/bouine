@@ -313,7 +313,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		}
 	}
 
-	// Start the warm sync goroutine if warm tier and sync are enabled.
 	if ts.warm != nil && warmSyncInterval > 0 {
 		ts.syncWg.Add(1)
 		go ts.warmSyncLoop()
@@ -328,7 +327,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		go ts.tombstoneDrainLoop()
 	}
 
-	// Start the checkpoint loop if warm tier and WAL are both enabled.
 	if ts.warm != nil && ts.wal != nil && ts.checkpointInterval > 0 {
 		ts.checkpointWg.Add(1)
 		go ts.checkpointLoop()
@@ -1175,7 +1173,7 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 // warm.Unprotect on each key. This is the Fix A drain path: SIEVE
 // evictions enqueue keys here (via OnEvictDemoted), and this function
 // clears the protected flag outside the hot shard lock, avoiding the
-// hot.mu → warm.idxMu lock-ordering cycle (see plan §5). No WAL
+// hot.mu → warm.idxMu lock-ordering cycle (ADR-0032). No WAL
 // entries — Unprotect does not write to disk; the on-disk record stays
 // live until warm SIEVE evicts it and writes its own tombstone.
 func (t *TieredStore) drainWarmUnprotects() int {

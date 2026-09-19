@@ -9,8 +9,6 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 )
 
-// slogAdapter bridges memberlist's stdlib *log.Logger output into slog,
-// parsing [LEVEL] tokens and re-emitting with component=memberlist.
 // handlerQueueFullMsg is the exact substring memberlist logs when a
 // per-peer handoff queue overflows. Anchored to memberlist@v0.6.0
 // net.go:472:
@@ -22,11 +20,14 @@ import (
 // corresponding test corpus when bumping memberlist.
 const handlerQueueFullMsg = "handler queue full"
 
-// closedConnMsg is the substring memberlist logs when a UDP write fails
-// because the socket was already closed by Shutdown. Anchored to
-// memberlist@v0.6.0 net.go / ping.go write-error paths.
+// closedConnMsg is the substring of the stdlib net error surfaced in
+// memberlist log lines when a UDP write fails because Shutdown already
+// closed the socket. It is not a memberlist literal: memberlist logs the
+// error value (%v) produced by the net package.
 const closedConnMsg = "use of closed network connection"
 
+// slogAdapter bridges memberlist's stdlib *log.Logger output into slog,
+// parsing [LEVEL] tokens and re-emitting with component=memberlist.
 type slogAdapter struct {
 	logger observability.Logger
 	// metrics is read atomically so that SetMetrics can update it

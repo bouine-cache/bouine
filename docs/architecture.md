@@ -105,7 +105,7 @@ for the full migration plan and performance analysis.
 /internal/origin             L4 — upstream pool, health, hedge, breaker
 /internal/staticfile        L4 — local file serving (alternative to upstream pool)
 /internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
-/internal/admin              L6 — net/http admin: purge, ban, refresh, config
+/internal/admin              L6 — admin API (fasthttp): purge, ban, refresh, config
 /internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
 /internal/observability      L7 — OTEL, Prom, slog, pprof
 /internal/cloudflare         Cloudflare Cache API invalidation propagation
@@ -377,7 +377,8 @@ L1 owns sockets, TLS, and ALPN. L1 pipeline stages (configurable, ordered):
 
 ## 8. Control Plane (L6)
 
-`net/http.ServeMux` on a dedicated admin port.
+`fasthttp.Server` on a dedicated admin port. Handler code uses
+`net/http` semantics via `fasthttpadaptor` (pprof, Prom metrics).
 
 | Endpoint | Description |
 |----------|-------------|

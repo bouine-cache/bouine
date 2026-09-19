@@ -4,17 +4,10 @@
 //
 //	client → listener → accesslog → metrics → router → CacheHandler → origin
 //
-// For every request the handler:
-//  1. Computes the cache key.
-//  2. Looks up the store.
-//  3. Runs Evaluate() to get a Decision.
-//  4. On Hit/StaleHit → serve from cache (with Age header).
-//  5. On Miss → fetch from origin via the upstream handler, store if
-//     cacheable.
-//  6. On Revalidate → conditional fetch; on 304, refresh TTL; on 200,
-//     replace.
-//  7. On Bypass → pass through to upstream.
-//  8. On POST/PUT/DELETE → invalidate matching key, pass through.
+// For every request the handler computes the cache key, looks up the
+// store, and serves, revalidates, fetches, or passes through according
+// to the Decision returned by Evaluate. POST/PUT/DELETE invalidate
+// matching keys and pass through.
 package cache
 
 import (
@@ -67,13 +60,11 @@ var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 // buffer that does not exist (ADR-0042).
 var ErrStreamUnshareable = errors.New("streaming response not shareable")
 
-// StripRequestURI removes prefix from the start of uri on a path boundary:
-// an exact-prefix match ("/api/v1") yields "/", a remainder starting with
-// "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
-// mid-segment match ("/api/v1x" vs "/api/v1") passes through unchanged
-// rather than producing a non-absolute request-line. A nil or empty prefix
-// returns uri unchanged. Allocation-free for the common (trimmed or
-// unchanged) cases.
+// StripRequestURI removes prefix from the start of uri on a path
+// boundary, passing a mid-segment match ("/api/v1x" vs "/api/v1")
+// through unchanged rather than producing a non-absolute request-line.
+// A nil or empty prefix returns uri unchanged. Allocation-free for the
+// common (trimmed or unchanged) cases.
 //
 // This is the single definition of strip-prefix boundary semantics for the
 // whole binary: the cache handler applies it to origin-bound request URIs
@@ -863,7 +854,7 @@ func (h *Handler) Close(ctx context.Context) error {
 }
 
 // Purge invalidates a primary cache key and every Vary variant stored under
-// it, enforcing RFC 9111 §4.2.4: when a resource is invalidated, all stored
+// it, enforcing RFC 9111 §4.4: when a resource is invalidated, all stored
 // variants MUST be invalidated too.
 //
 // Returns owned=true when this handler had the key (tracked variants or a
@@ -895,22 +886,13 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 	return true, nil
 }
 
-// SoftPurge marks a cached object as stale without deleting it, so the
-// next request serves the stale body via stale-while-revalidate (SWR)
-// or triggers a conditional revalidation via stale-if-error (SIE),
-// depending on which grace window the object has. This is a "refresh"
-// or "soft purge" in Varnish terminology. It is distinct from Purge,
-// which hard-deletes the object and forces a synchronous origin fetch
-// on the next request.
-//
-// The object's TTL is reduced to zero, making it immediately stale. If
-// the object has a non-zero StaleWhileRevalidate window, it remains
-// servable while a conditional revalidation fetch refreshes it in the
-// background. If the object has only a StaleIfError window, the next
-// request attempts a synchronous conditional fetch and falls back to
-// the stale body only if the origin errors. If the object has neither
-// SWR nor SIE, SoftPurge falls back to a hard delete (equivalent to
-// Purge) — there is no graceful degraded mode without a grace window.
+// SoftPurge marks a cached object as stale without deleting it — a
+// "refresh" or "soft purge" in Varnish terminology, distinct from
+// Purge's hard delete and forced synchronous origin fetch. The next
+// request serves the stale body under SWR or revalidates under SIE,
+// depending on the object's grace windows; with neither SWR nor SIE,
+// SoftPurge falls back to a hard delete — there is no graceful
+// degraded mode without a grace window.
 //
 // Returns (true, nil) when the key was found and soft-purged,
 // (false, nil) when the key was not in the store, and (true, err) when
@@ -966,7 +948,9 @@ func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, erro
 	return owned, nil
 }
 
-// key is gone or stale. Used by the scheduler's compaction pass.
+// lookupForRefresh returns the stored object for key when it is still
+// fresh; nil when the key is gone or stale. Used by the scheduler's
+// compaction pass.
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
 	defer cancel()
@@ -1320,18 +1304,6 @@ func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
 	h.invalidateAndProxy(ctx)
 }
 
-// handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
-// falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
-// Cluster peer-fetch: if this node does not own the key, ask the owner before
-// going to origin. The owner has a much higher hit rate for keys it owns
-// (consistent hashing concentrates fills there). On a peer hit the object
-// is served to the client but NOT stored locally — in strong mode only
-// the owner caches keys it owns, so the fleet cache is partitioned (3×
-// distinct keyspace) rather than redundant (3× same keys). The owner
-// refreshes stale objects; non-owners must not trigger revalidations for
-// keys they do not own (issue #509).
-// src is the storage-tier source from lookup (hot/warm); it is overridden
-// to "peer" on a successful peer hit.
 // peerVaryAssertion derives the Vary assertion sent with a peer fetch:
 // the stale/miss-side object's stored VaryKey when lookup found one
 // (variant miss), the primary-key object's otherwise, and "" on a plain
@@ -1399,6 +1371,19 @@ func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool
 		ctx.UserValue(api.OwnerGateRejectContextKey) == true
 }
 
+// handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
+// falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
+// Cluster peer-fetch: if this node does not own the key, ask the owner before
+// going to origin. The owner has a much higher hit rate for keys it owns
+// (consistent hashing concentrates fills there). On a peer hit the object
+// is served to the client but NOT stored locally — in strong mode only
+// the owner caches keys it owns, so the fleet cache is partitioned (3×
+// distinct keyspace) rather than redundant (3× same keys). The owner
+// refreshes stale objects; non-owners must not trigger revalidations for
+// keys they do not own (issue #509).
+// src is the storage-tier source from lookup (hot/warm); it is overridden
+// to "peer" on a successful peer hit.
+//
 //nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
@@ -1718,7 +1703,6 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	fh := getOrComputeFastHeader(obj)
 	fh.CopyTo(dst)
 
-	// Set dynamic headers per request.
 	var ageBuf [16]byte
 	ageSeconds := int64(ComputeAge(obj, now).Seconds())
 	ageStr := strconv.AppendInt(ageBuf[:0], ageSeconds, 10)
@@ -1890,7 +1874,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
-		// Write the buffered result without re-storing (leader already stored).
+		// No re-store: the leader already stored.
 		h.writeBufferedResult(ctx, res, primaryKey, ri)
 		return
 	}
@@ -1910,15 +1894,6 @@ func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
 }
 
-// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
-// serving the super-stale obj if the upstream is unavailable.
-// src is the original storage-tier source from lookup (hot/warm),
-// threaded to stale-fallback serveObject calls.
-// lookupKey is the key under which the stale object was found (may be a
-// Vary variant key); it is used for singleflight dedup so that different
-// Vary variants do not collapse into a single fetch.
-// primaryKey is the canonical key used for Vary variant storage in
-// writeAndMaybeStore.
 // writeBufferedResult writes a fetchResult to the client without
 // storing (the leader already stored it). Used by singleflight
 // followers in the streaming miss path.
@@ -1943,6 +1918,15 @@ func (h *Handler) writeBufferedResult(
 	h.applyResponseRewrites(dst)
 }
 
+// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
+// serving the super-stale obj if the upstream is unavailable.
+// src is the original storage-tier source from lookup (hot/warm),
+// threaded to stale-fallback serveObject calls.
+// lookupKey is the key under which the stale object was found (may be a
+// Vary variant key); it is used for singleflight dedup so that different
+// Vary variants do not collapse into a single fetch.
+// primaryKey is the canonical key used for Vary variant storage in
+// writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	if res.Err != nil {
@@ -2433,7 +2417,6 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Write the captured response to the client.
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
 		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
@@ -2481,16 +2464,14 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 9111 §4.3.1).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
-	// Check for Set-Cookie — responses with Set-Cookie are not stored.
+	// Responses with Set-Cookie are client-specific and never stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return
 	}
-	// Check Content-Location matches request URI (RFC 9111 §4.3.1).
-	loc := string(resp.Header.Peek(header.ContentLocation))
+	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 9111 §4.3.1
 	if loc == "" {
 		return
 	}
-	// Build fetchResult from the fasthttp response for buildObject.
 	body := make([]byte, len(resp.Body()))
 	copy(body, resp.Body())
 	hdr := header.FromFastHTTP(&resp.Header)
@@ -2840,7 +2821,6 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
 	}
 
-	// Check for max response bytes.
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		fasthttp.ReleaseResponse(resp)
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
@@ -3007,7 +2987,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
 func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
-	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
+	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
 	//
 	// Cache the ToMap() result — it was called 5x before, each allocating a
@@ -3226,7 +3206,6 @@ func parseSurrogateKeys(h header.Map) []string {
 	return nil
 }
 
-// isInvalidating returns true for unsafe methods that should trigger
 // staleFallbackAllowed reports whether a stale object may be served as a
 // fallback when the upstream returns a 5xx or connection error. It returns
 // false when the stored response has must-revalidate, proxy-revalidate,

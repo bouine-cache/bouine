@@ -1084,11 +1084,8 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	}
 }
 
-// evictPreferBacked selects and removes an entry from the SIEVE list,
-// preferring entries with a backup. It tries up to maxSkips
-// SIEVE evictions, re-inserting hot-only entries at the head for a
-// second chance (via Access + MarkVisited).
-// If no backed entries are found, falls back to standard eviction.
+// maxEvictSkips caps how many SIEVE evictions evictPreferBacked may
+// attempt while hunting for a backed entry.
 const maxEvictSkips = 4
 
 // maxSweepProbes caps the number of SIEVE entries scanned per Evict
@@ -1098,6 +1095,11 @@ const maxEvictSkips = 4
 // at 1 M entries). See ADR 0026.
 const maxSweepProbes = 128
 
+// evictPreferBacked selects and removes an entry from the SIEVE list,
+// preferring entries with a backup. It tries up to maxEvictSkips
+// SIEVE evictions, re-inserting hot-only entries at the head for a
+// second chance (via Access + MarkVisited).
+// If no backed entries are found, falls back to standard eviction.
 func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 	if s.backedCount == 0 {
 		return s.evict.EvictBounded(maxSweepProbes)

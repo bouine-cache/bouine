@@ -43,9 +43,8 @@ func (NoopLogger) Error(string, ...any) {}
 func (NoopLogger) Debug(string, ...any) {}
 
 // ResolveLogger returns l if non-nil, otherwise NoopLogger{}. Use it
-// in constructors to default a nil Logger field in one line:
-//
-//	logger := observability.ResolveLogger(cfg.Logger)
+// in constructors to default a nil Logger field in one line
+// (logger := observability.ResolveLogger(cfg.Logger)).
 func ResolveLogger(l Logger) Logger {
 	if l == nil {
 		return NoopLogger{}

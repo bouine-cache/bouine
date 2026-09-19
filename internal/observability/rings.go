@@ -1,7 +1,7 @@
-// Package observability — rings.go
-// In-memory ring buffers for the dashboard data layer.
-// Hot path: only atomic.Add calls. Rings are updated by a background
-// goroutine every 10s from live atomic accumulators.
+// rings.go holds the in-memory ring buffers for the dashboard data
+// layer. Hot path: only atomic.Add calls. Rings are updated by a
+// background goroutine every 10s from live atomic accumulators.
+
 package observability
 
 import (
@@ -621,14 +621,6 @@ func (ri *Rings) Summary() MetricsSummary {
 	}
 }
 
-// MergeSummaries aggregates multiple MetricsSummary into one.
-// Merge strategy:
-//   - Counters: sum
-//   - Ratios: weighted average
-//   - Latency p99: max
-//   - Latency histogram: element-wise sum (so the dashboard latency
-//     distribution reflects the combined cluster traffic, not just one node)
-//
 // mergeRequestBuckets accumulates per-bucket counters and latency histogram
 // bins from all summaries into merged.
 func mergeRequestBuckets(merged *MetricsSummary, summaries []MetricsSummary) {
@@ -722,7 +714,7 @@ func mergeURLStatsList(summaries []MetricsSummary) []URLStat {
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max
-//   - Latency histogram: element-wise sum across all peer summaries
+//   - Latency histogram: element-wise sum across all peer summaries.
 func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 	if len(summaries) == 0 {
 		return MetricsSummary{}

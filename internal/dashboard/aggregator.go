@@ -56,7 +56,7 @@ type PeerResult struct {
 // Unreachable peers are marked stale; their last-known summary is used
 // if available.
 //
-// SCALE: migrate to gossip push aggregation beyond ~5 pods — see docs/architecture.md §2
+// SCALE: migrate to gossip push aggregation beyond ~5 pods — see docs/architecture.md §2.
 func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary, []PeerResult) {
 	peers := []api.PeerInfo{}
 	if a.peersFn != nil {

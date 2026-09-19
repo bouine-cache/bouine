@@ -1,6 +1,6 @@
-// sse.go — Server-Sent Events request handling. A request that announces
-// SSE intent (Accept: text/event-stream, the WHATWG §9.2.2 client contract)
-// is served as a live stream: never cached, never singleflight-collapsed,
+// sse.go handles requests that announce SSE intent (Accept:
+// text/event-stream, the WHATWG §9.2.2 client contract). Such requests are
+// served as a live stream: never cached, never singleflight-collapsed,
 // and never buffered, because an event stream is per-connection by design —
 // two clients cannot share one origin stream.
 //
@@ -10,6 +10,7 @@
 // fallback. Those streams remain bounded by fetch_timeout because the
 // origin connection's read deadline was armed before the response headers
 // arrived (see ADR-0042); the Accept hint is the supported configuration.
+
 package cache
 
 import (

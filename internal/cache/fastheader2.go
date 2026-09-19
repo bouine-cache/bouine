@@ -36,13 +36,11 @@ func setNoDefaultDate(hdr *fasthttp.ResponseHeader) {
 }
 
 // getOrComputeFastHeader lazily builds a *fasthttp.ResponseHeader from
-// the stored object's headers on the first cache hit, then reuses it on
-// subsequent hits via CopyTo. The pre-built header contains only static
-// headers (hop-by-hop, internal, Age, X-Cache, X-Cache-Source, Warning,
-// and no-cache fields are excluded). Date is included via SetDateRaw.
-// noDefaultDate is set to true to prevent fasthttp from auto-adding a Date.
-// The result is cached in obj.FastHeader (atomic.Value) for race-safe
-// reuse across goroutines.
+// the stored object's static headers (see skipStaticHeader for the
+// exclusions) on the first cache hit, then reuses it on subsequent hits
+// via CopyTo. Cached in obj.FastHeader (atomic.Value) for race-safe
+// reuse across goroutines; noDefaultDate prevents fasthttp from
+// auto-adding a Date.
 func getOrComputeFastHeader(obj *api.Object) *fasthttp.ResponseHeader {
 	if v := obj.FastHeader.Load(); v != nil {
 		return v.(*fasthttp.ResponseHeader)

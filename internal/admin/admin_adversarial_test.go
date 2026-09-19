@@ -13,7 +13,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -131,6 +130,10 @@ func TestAdversarial_MalformedJSON_AllEndpoints(t *testing.T) {
 // TestAdversarial_JSONDuplicateFields verifies that duplicate JSON keys
 // are handled deterministically. Go's encoding/json keeps the last
 // value, which is the standard behaviour.
+// TestAdversarial_JSONDuplicateFields verifies that duplicate JSON keys
+// are rejected: encoding/json/v2 rejects duplicate object members, so a
+// body containing the same member twice maps to a 400 and the handler
+// never fires.
 func TestAdversarial_JSONDuplicateFields(t *testing.T) {
 	t.Parallel()
 	var purgedKey api.Key
@@ -144,10 +147,8 @@ func TestAdversarial_JSONDuplicateFields(t *testing.T) {
 	})
 	body := `{"url":"https://first.com/","url":"https://second.com/"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, fasthttp.StatusOK, code)
-	// Go's json decoder uses the last value for duplicate keys.
-	expectedKey := cache.BuildKeyFromURL("https://second.com/", nil)
-	require.Equal(t, expectedKey, purgedKey, "purge must use the last URL when keys are duplicated")
+	require.Equal(t, fasthttp.StatusBadRequest, code)
+	require.Zero(t, purgedKey, "purge must not run on a body with duplicate keys")
 }
 
 // --- adversarial oversized payload tests ---

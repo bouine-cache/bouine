@@ -1,10 +1,9 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"net"
 	"regexp"
@@ -799,13 +798,12 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 func writeJSON(ctx *fasthttp.RequestCtx, code int, v any) {
 	ctx.Response.Header.Set(header.ContentType, "application/json")
 	ctx.SetStatusCode(code)
-	_ = json.NewEncoder(ctx).Encode(v)
+	b, _ := jsonv2.Marshal(v)
+	_, _ = ctx.Write(b)
 }
 
 func decodeJSON(ctx *fasthttp.RequestCtx, v any) bool {
-	dec := json.NewDecoder(bytes.NewReader(ctx.PostBody()))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	if err := jsonv2.Unmarshal(ctx.PostBody(), v, jsonv2.RejectUnknownMembers(true)); err != nil {
 		ctx.Error("bad request: invalid or malformed JSON", fasthttp.StatusBadRequest)
 		return false
 	}

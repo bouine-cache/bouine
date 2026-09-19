@@ -40,12 +40,13 @@ import (
 // hitMetricsRecord is one fast-path hit observation, value-copied
 // through the ring. Strings are stable handler-owned values.
 type hitMetricsRecord struct {
-	pool        string
-	cacheResult string
-	source      string
-	durNs       int64
-	bytesOut    int
-	status      int
+	pool         string
+	trafficClass string
+	cacheResult  string
+	source       string
+	durNs        int64
+	bytesOut     int
+	status       int
 }
 
 // metricsRingCap is the SPSC ring capacity, a power of two. 2048
@@ -104,7 +105,7 @@ func (r *metricsRing) droppedTotal() uint64 { return r.dropped.Load() }
 // Owned by the reactor transport; one per loop with a metrics hook.
 type metricsDrainer struct {
 	ring *metricsRing
-	hook func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	hook func(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration)
 }
 
 // metricsDrainBatch is the drainer's pop batch size; draining loops
@@ -118,7 +119,7 @@ func (d *metricsDrainer) drainOnce() bool {
 	n := d.ring.drain(batch[:])
 	for i := range n {
 		rec := &batch[i]
-		d.hook(rec.pool, rec.cacheResult, rec.source,
+		d.hook(rec.pool, rec.trafficClass, rec.cacheResult, rec.source,
 			rec.status, rec.bytesOut, time.Duration(rec.durNs))
 	}
 	return n == len(batch)

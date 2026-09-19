@@ -212,6 +212,12 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 		poolNames = append(poolNames, pc.Name)
 	}
 	rs.dpMetrics.PreResolveRoutes(poolNames)
+	// The traffic-class slot table comes from the same config slice the
+	// classifier was compiled from (ADR-0047), so the classifier's
+	// outputs can only hit pre-resolved slots. Without classes the
+	// table still carries "unclassified" (slot 0) — the only value
+	// every request carries when the feature is absent.
+	rs.dpMetrics.PreResolveTrafficClasses(rs.trafficClassify.ClassNames())
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
 	// Native fasthttp middleware chain: tracing → metrics → router.
@@ -220,6 +226,20 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	// after the handler returns is race-free.
 	metricsWrapped := rs.dpMetrics.FastHTTPMiddleware(router.ServeRequest)
 	return tracing.FastHTTPMiddleware("bouine.pipeline", metricsWrapped)
+}
+
+// trafficClassSpecs maps the config tree's traffic classes onto the
+// server layer's spec type (see server.TrafficClassSpec for why the
+// plain pair, not the config type).
+func trafficClassSpecs(classes []config.TrafficClass) []server.TrafficClassSpec {
+	if len(classes) == 0 {
+		return nil
+	}
+	specs := make([]server.TrafficClassSpec, len(classes))
+	for i := range classes {
+		specs[i] = server.TrafficClassSpec{Name: classes[i].Name, Hosts: classes[i].Hosts}
+	}
+	return specs
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.
@@ -295,7 +315,13 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // All cache handlers are collected into rs.handlers; the engine
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
-	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
+	// The classifier is compiled once and shared by the router (slow
+	// path, via UserValues) and the routed fast path (TryHit stamping) —
+	// both attribution paths run the same classify over the same Host.
+	// The config types are mapped to the server-layer spec so L1 keeps
+	// its strict dependency diet (depguard).
+	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
+	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: rs.trafficClassify})
 	// The H1 fast path is per route: each cache-enabled route registers
 	// the FastPathHandler built from its own Handler, so hits carry the
 	// route's pool attribution and run under the route's KeyPolicy

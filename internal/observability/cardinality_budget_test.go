@@ -2,6 +2,7 @@ package observability
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -9,12 +10,42 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/pkg/api"
 
 	"github.com/valyala/fasthttp"
 )
 
+// gatherFamilyTuples returns the set of distinct label tuples for one
+// metric family, keyed by the traffic_class|status|cache_result|source|
+// upstream_pool label values (absent axes render empty), with the
+// duplicate count. Any duplicate would indicate a slot-table bug:
+// identical label tuples must collapse to one series.
+func gatherFamilyTuples(t *testing.T, reg *prometheus.Registry, family string) map[string]int {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	out := map[string]int{}
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range met.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			key := fmt.Sprintf("%s|%s|%s|%s|%s",
+				labels["traffic_class"], labels["status"], labels["cache_result"],
+				labels["source"], labels["upstream_pool"])
+			out[key]++
+		}
+	}
+	return out
+}
+
 // gatherHistogramTuples returns the set of active label tuples for
-// bouine_request_duration_seconds, formatted "statusClass|cache_result|upstream_pool".
+// bouine_request_duration_seconds, formatted
+// "statusClass|cache_result|upstream_pool|traffic_class".
 func gatherHistogramTuples(t *testing.T, reg *prometheus.Registry) map[string]int {
 	t.Helper()
 	mfs, err := reg.Gather()
@@ -29,18 +60,20 @@ func gatherHistogramTuples(t *testing.T, reg *prometheus.Registry) map[string]in
 			for _, l := range met.GetLabel() {
 				labels[l.GetName()] = l.GetValue()
 			}
-			key := fmt.Sprintf("%s|%s|%s",
-				labels["status"], labels["cache_result"], labels["upstream_pool"])
+			key := fmt.Sprintf("%s|%s|%s|%s",
+				labels["status"], labels["cache_result"], labels["upstream_pool"], labels["traffic_class"])
 			out[key]++
 		}
 	}
 	return out
 }
 
-// TestMetricCardinalityBudget pins the AGENTS.md §9 cardinality budget:
-// a realistic mixed workload over the maximum configured pools must keep
-// bouine_request_duration_seconds under 10k series (target < 5k), and idle
-// pools must cost zero series (lazy pre-resolution).
+// TestMetricCardinalityBudget pins the AGENTS.md §9 cardinality budget
+// across ALL three data-plane families (ADR-0047 §2.4): with a closed
+// label set the observed series count is the closed-form product of
+// the driven axes, so any excess is a leak, not arithmetic. The
+// histogram is checked against the 10k line and the 5k target; the
+// class axis multiplies it exactly like the pool axis.
 func TestMetricCardinalityBudget(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
@@ -52,33 +85,35 @@ func TestMetricCardinalityBudget(t *testing.T) {
 		names[i] = fmt.Sprintf("pool-%02d", i)
 	}
 	m.PreResolveRoutes(names)
+	// Three class slots driven: unclassified + csr + ssr.
+	m.PreResolveTrafficClasses([]string{"csr", "ssr"})
 
 	middleware := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {})
 	hits := []struct {
-		pool, cacheResult, source string
-		status                    int
+		pool, trafficClass, cacheResult, source string
+		status                                  int
 	}{
 		// Hot tuples across every pool.
-		{"_default", "HIT", "hot", 200},
-		{"_default", "MISS", "origin", 200},
-		{"pool-00", "HIT", "hot", 200},
-		{"pool-00", "MISS", "origin", 200},
-		{"pool-00", "STALE", "warm", 200},
-		{"pool-01", "HIT", "hot", 200},
-		{"pool-01", "BYPASS", "origin", 200},
+		{"_default", "unclassified", "HIT", "hot", 200},
+		{"_default", "unclassified", "MISS", "origin", 200},
+		{"pool-00", "csr", "HIT", "hot", 200},
+		{"pool-00", "csr", "MISS", "origin", 200},
+		{"pool-00", "ssr", "STALE", "warm", 200},
+		{"pool-01", "csr", "HIT", "hot", 200},
+		{"pool-01", "ssr", "BYPASS", "origin", 200},
 		// Fast-path hits.
-		{"pool-02", "HIT", "hot", 200},
+		{"pool-02", "csr", "HIT", "hot", 200},
 		// Error classes.
-		{"pool-03", "MISS", "origin", 404},
-		{"pool-03", "MISS", "origin", 500},
-		{"pool-03", "MISS", "origin", 503},
+		{"pool-03", "ssr", "MISS", "origin", 404},
+		{"pool-03", "ssr", "MISS", "origin", 500},
+		{"pool-03", "unclassified", "MISS", "origin", 503},
 	}
 	for _, h := range hits {
 		pool := h.pool
 		if pool == "_default" {
 			pool = ""
 		}
-		m.RecordHit(pool, h.cacheResult, h.source, h.status, 100, 1234567)
+		m.RecordHit(pool, h.trafficClass, h.cacheResult, h.source, h.status, 100, 1234567)
 	}
 
 	// Middleware path: 404 no-route traffic. No method axis exists, so
@@ -92,7 +127,7 @@ func TestMetricCardinalityBudget(t *testing.T) {
 	tuples := gatherHistogramTuples(t, reg)
 
 	// Every configured pool must exist once observed...
-	assert.Contains(t, tuples, "2xx|HIT|pool-00", "observed pool must have series")
+	assert.Contains(t, tuples, "2xx|HIT|pool-00|csr", "observed pool must have series")
 	// ...but idle pools cost nothing.
 	for i := 4; i < pools-1; i++ {
 		for key := range tuples {
@@ -100,10 +135,10 @@ func TestMetricCardinalityBudget(t *testing.T) {
 				"idle pool pool-%02d must have zero series", i)
 		}
 	}
-	// 11 observations collapse to 11 histogram tuples: 500 and 503 share
-	// the 5xx class, and identical (class, result, pool) shapes merge.
-	// Plus the middleware 404 tuple.
-	assert.Len(t, tuples, 11, "one tuple per observed class combination, no more")
+	// 11 RecordHit observations collapse to 11 histogram tuples: 500
+	// and 503 share the 5xx class, and identical (class, result, pool)
+	// shapes merge. Plus the middleware 404 tuple.
+	assert.Len(t, tuples, 12, "one tuple per observed class combination, no more")
 
 	total := 0
 	for _, n := range tuples {
@@ -111,9 +146,46 @@ func TestMetricCardinalityBudget(t *testing.T) {
 	}
 	// 16 series per tuple (13 buckets + +Inf + _sum + _count); the
 	// tail buckets (2.5/5/10s) distinguish slow misses from hung-fetches
-	// without adding label dimensions.
+	// without adding label dimensions. The observed count scales with
+	// driven tuples only — the class axis multiplies the ceiling, not
+	// the cost, because slot fill stays lazy.
 	assert.Less(t, total*16, 10000, "AGENTS.md §9: histogram series must stay under 10k")
 	assert.Less(t, total*16, 5000, "histogram series must stay under the 5k target")
+
+	// Closed-form product check on the two counter families (ADR-0047
+	// §2.4): with a closed label set every observation shape must
+	// appear exactly once — duplicates mean a slot-table leak.
+	// requests_total carries the status axis, so the 404/500 ssr misses
+	// stay distinct: 11 RecordHit shapes + the middleware tuple.
+	reqTuples := gatherFamilyTuples(t, reg, "bouine_requests_total")
+	assert.Len(t, reqTuples, 12, "one requests_total tuple per observation shape")
+	for _, n := range reqTuples {
+		assert.Equal(t, 1, n, "identical label tuples must collapse to one series")
+	}
+	// response_bytes has no status axis: the 404/500 ssr misses collapse
+	// into one tuple — 10 RecordHit shapes + the middleware tuple.
+	bytesTuples := gatherFamilyTuples(t, reg, "bouine_response_bytes_total")
+	assert.Len(t, bytesTuples, 11, "one response_bytes tuple per axis-distinct observation shape")
+	for _, n := range bytesTuples {
+		assert.Equal(t, 1, n, "identical label tuples must collapse to one series")
+	}
+
+	// Label-space sanity across every family: traffic_class values come
+	// exclusively from the pre-resolved set plus the fallback.
+	allowedClasses := map[string]bool{
+		api.TrafficClassUnclassified: true, "csr": true, "ssr": true,
+	}
+	for _, family := range []string{
+		"bouine_requests_total",
+		"bouine_response_bytes_total",
+		"bouine_request_duration_seconds",
+	} {
+		for key := range gatherFamilyTuples(t, reg, family) {
+			class, _, _ := strings.Cut(key, "|")
+			assert.True(t, allowedClasses[class],
+				"%s: traffic_class %q must come from the pre-resolved set", family, class)
+		}
+	}
 }
 
 // TestMetricCardinalityBudget_IdlePoolsZeroSeries is the explicit lazy
@@ -123,15 +195,49 @@ func TestMetricCardinalityBudget_IdlePoolsZeroSeries(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes([]string{"a", "b", "c", "d"})
+	m.PreResolveTrafficClasses([]string{"csr", "ssr"})
 
 	tuples := gatherHistogramTuples(t, reg)
 	assert.Empty(t, tuples, "pre-resolution must be lazy: no series before the first observation")
 
 	// Observing one tuple on pool "a" creates exactly one tuple; "b"/"c"/"d" stay empty.
-	m.RecordHit("a", "HIT", "hot", 200, 10, 1_000_000)
+	m.RecordHit("a", "csr", "HIT", "hot", 200, 10, 1_000_000)
 	tuples = gatherHistogramTuples(t, reg)
 	assert.Len(t, tuples, 1, "exactly one tuple after one observation")
-	assert.Contains(t, tuples, "2xx|HIT|a")
+	assert.Contains(t, tuples, "2xx|HIT|a|csr")
+}
+
+// TestMetricCardinalityBudget_ClassSlotsBoundCeiling pins the §9 slot
+// arithmetic at the config cap: the class axis tops out at
+// unclassified + MaxTrafficClasses, and the config validation cap must
+// fill the static array bound exactly (a cap/constant drift would
+// either overflow the array or waste slots).
+func TestMetricCardinalityBudget_ClassSlotsBoundCeiling(t *testing.T) {
+	t.Parallel()
+	classes := make([]string, config.MaxTrafficClasses)
+	for i := range classes {
+		classes[i] = fmt.Sprintf("c%d", i)
+	}
+	require.Equal(t, metricClassSlots, 1+len(classes),
+		"config cap must match the static slot-table bound")
+
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.PreResolveRoutes(nil)
+	m.PreResolveTrafficClasses(classes)
+
+	// Drive one tuple per class slot on the _default pool: unclassified
+	// first (slot 0), then every configured class.
+	m.RecordHit("", "", "HIT", "hot", 200, 10, 1_000_000)
+	for _, class := range classes {
+		m.RecordHit("", class, "HIT", "hot", 200, 10, 1_000_000)
+	}
+	tuples := gatherHistogramTuples(t, reg)
+	assert.Len(t, tuples, metricClassSlots,
+		"the class axis must top out at unclassified + configured classes")
+	for _, class := range append([]string{api.TrafficClassUnclassified}, classes...) {
+		assert.Contains(t, tuples, "2xx|HIT|_default|"+class)
+	}
 }
 
 // TestMetricCardinalityBudget_ManyPoolsValidate is the flip side of the

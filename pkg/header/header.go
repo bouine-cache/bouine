@@ -213,6 +213,14 @@ const (
 	// per-request header scan.
 	XBouinePool = "X-Bouine-Pool"
 
+	// XBouineTrafficClass — Prometheus attribution key for the
+	// traffic_class label (ADR-0047). The router sets the request's
+	// traffic class under this name as a fasthttp UserValue (not a
+	// wire header); the value comes from the configured classifier,
+	// never from request input. The inbound header form is ignored:
+	// the middleware reads the UserValue only.
+	XBouineTrafficClass = "X-Bouine-Traffic-Class"
+
 	// BouineHop — carries the current peer-fetch hop count for cluster
 	// loop detection.
 	BouineHop = "Bouine-Hop"

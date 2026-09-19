@@ -32,6 +32,12 @@ type Config struct {
 	UpstreamPools []UpstreamPool `yaml:"upstream_pools,omitempty" json:"upstream_pools,omitempty"`
 	// Routes are matched in declaration order; the first match wins.
 	Routes []Route `yaml:"routes,omitempty" json:"routes,omitempty"`
+	// Metrics configures observability axes derived from the request
+	// Host. Empty = no traffic classes (all requests fall into the
+	// "unclassified" label value; the metric shape is unchanged).
+	// Grouped with the slice fields so the GC-scan region stays
+	// contiguous (fieldalignment).
+	Metrics MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
 	// Cluster controls peer discovery and fan-out.
@@ -50,6 +56,38 @@ type Config struct {
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
+}
+
+// MetricsConfig configures data-plane metric axes that need
+// operator-declared inputs (as opposed to request-derived, unbounded
+// ones). Traffic classes feed the traffic_class label on the data-plane
+// request metrics (ADR-0047).
+type MetricsConfig struct {
+	// TrafficClasses declares named populations of traffic
+	// distinguished by the request Host. Declaration order is
+	// precedence: the first class whose host pattern matches wins.
+	// Capped at 8 classes, each with at most 64 host patterns
+	// (validated). The reserved name "unclassified" is rejected — it
+	// is the fallback for requests matching no class.
+	TrafficClasses []TrafficClass `yaml:"traffic_classes,omitempty" json:"traffic_classes,omitempty"`
+}
+
+// TrafficClass is one named traffic population matched by host
+// patterns. bouine attaches no semantics to class names — the
+// csr/ssr-style meaning is a deployment convention (ADR-0047).
+type TrafficClass struct {
+	// Name is the Prometheus traffic_class label value. Must match
+	// ^[a-z][a-z0-9_]{0,31}$, be unique across classes, and not be the
+	// reserved "unclassified".
+	Name string `yaml:"name" json:"name"`
+	// Hosts holds the glob host patterns for this class. A pattern is
+	// an exact host, a single leading "*." (suffix match), or a single
+	// trailing ".*" / "*" (prefix match); a "*" anywhere else is a
+	// config error. Matching is case-insensitive with the port
+	// stripped, identical to route matching. A bare "*" is rejected:
+	// it would match every host and, under first-match precedence,
+	// silently dead-config every later class.
+	Hosts []string `yaml:"hosts" json:"hosts"`
 }
 
 // ExperimentalConfig holds opt-in experimental features.

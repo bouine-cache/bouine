@@ -50,6 +50,13 @@ the curated, human-readable summary.
   duplicated ADR-0016 draft in the refresh-before-expiry plan with a
   pointer, condensed the refresh-prioritization revision history, and
   repaired a dangling plan reference in ADR-0023.
+- docs: remove completed one-time migration plans with no inbound
+  references (`transfer-to-bouine-cache-org`,
+  `cluster-local-cache-mode`), resolve duplicate ADR numbers by
+  reassigning changelog-automation to ADR-0047, the kubeconform hook to
+  ADR-0048, and PurgeEvent.VaryKey to ADR-0049, and complete the ADR
+  index in `docs/decisions/README.md` (including marking the removed
+  0002/0003 records).
 
 ## [0.5.21] - 2026-09-17
 

@@ -4,17 +4,10 @@
 //
 //	client → listener → accesslog → metrics → router → CacheHandler → origin
 //
-// For every request the handler:
-//  1. Computes the cache key.
-//  2. Looks up the store.
-//  3. Runs Evaluate() to get a Decision.
-//  4. On Hit/StaleHit → serve from cache (with Age header).
-//  5. On Miss → fetch from origin via the upstream handler, store if
-//     cacheable.
-//  6. On Revalidate → conditional fetch; on 304, refresh TTL; on 200,
-//     replace.
-//  7. On Bypass → pass through to upstream.
-//  8. On POST/PUT/DELETE → invalidate matching key, pass through.
+// For every request the handler computes the cache key, looks up the
+// store, and serves, revalidates, fetches, or passes through according
+// to the Decision returned by Evaluate. POST/PUT/DELETE invalidate
+// matching keys and pass through.
 package cache
 
 import (
@@ -67,13 +60,11 @@ var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 // buffer that does not exist (ADR-0042).
 var ErrStreamUnshareable = errors.New("streaming response not shareable")
 
-// StripRequestURI removes prefix from the start of uri on a path boundary:
-// an exact-prefix match ("/api/v1") yields "/", a remainder starting with
-// "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
-// mid-segment match ("/api/v1x" vs "/api/v1") passes through unchanged
-// rather than producing a non-absolute request-line. A nil or empty prefix
-// returns uri unchanged. Allocation-free for the common (trimmed or
-// unchanged) cases.
+// StripRequestURI removes prefix from the start of uri on a path
+// boundary, passing a mid-segment match ("/api/v1x" vs "/api/v1")
+// through unchanged rather than producing a non-absolute request-line.
+// A nil or empty prefix returns uri unchanged. Allocation-free for the
+// common (trimmed or unchanged) cases.
 //
 // This is the single definition of strip-prefix boundary semantics for the
 // whole binary: the cache handler applies it to origin-bound request URIs
@@ -895,22 +886,13 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 	return true, nil
 }
 
-// SoftPurge marks a cached object as stale without deleting it, so the
-// next request serves the stale body via stale-while-revalidate (SWR)
-// or triggers a conditional revalidation via stale-if-error (SIE),
-// depending on which grace window the object has. This is a "refresh"
-// or "soft purge" in Varnish terminology. It is distinct from Purge,
-// which hard-deletes the object and forces a synchronous origin fetch
-// on the next request.
-//
-// The object's TTL is reduced to zero, making it immediately stale. If
-// the object has a non-zero StaleWhileRevalidate window, it remains
-// servable while a conditional revalidation fetch refreshes it in the
-// background. If the object has only a StaleIfError window, the next
-// request attempts a synchronous conditional fetch and falls back to
-// the stale body only if the origin errors. If the object has neither
-// SWR nor SIE, SoftPurge falls back to a hard delete (equivalent to
-// Purge) — there is no graceful degraded mode without a grace window.
+// SoftPurge marks a cached object as stale without deleting it — a
+// "refresh" or "soft purge" in Varnish terminology, distinct from
+// Purge's hard delete and forced synchronous origin fetch. The next
+// request serves the stale body under SWR or revalidates under SIE,
+// depending on the object's grace windows; with neither SWR nor SIE,
+// SoftPurge falls back to a hard delete — there is no graceful
+// degraded mode without a grace window.
 //
 // Returns (true, nil) when the key was found and soft-purged,
 // (false, nil) when the key was not in the store, and (true, err) when

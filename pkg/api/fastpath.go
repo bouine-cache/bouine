@@ -22,10 +22,7 @@ const OwnerGateRejectContextKey = "bouine.owner_gate_reject"
 //
 // Unstable.
 //
-// same allocator size class (3456), and the field order keeps the
-// per-request hot string group contiguous ahead of the scalar tail.
-//
-//nolint:govet // fieldalignment: the reported 8-byte saving is inside the
+//nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
 type RawRequest struct {
 	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
 	// leads the struct so the scalar tail stays in the final cache

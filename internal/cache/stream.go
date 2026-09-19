@@ -408,7 +408,7 @@ func (h *Handler) streamMiss(
 // isResponseCacheable checks whether the origin response should be cached.
 func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, resMap header.Map) bool {
 	parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
-	cacheable := parsed.isCacheableWithDefault(h.negTTL, h.defaultTTL)
+	cacheable := parsed.isCacheableWithDefault(h.neg, h.defaultTTL)
 	if cacheable && !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 		return false
 	}
@@ -541,7 +541,7 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 		(isHeuristicStatus(status) || respCC.Public) {
 		return true
 	}
-	if h.negTTL.Cacheable(status) {
+	if h.neg.Cacheable(status) {
 		return true
 	}
 	// Operator default-TTL fallback: only heuristically-cacheable
@@ -1033,7 +1033,7 @@ func (h *Handler) storeStreamedObject(
 	res fetchResult,
 	resMap header.Map,
 ) *api.Object {
-	obj := buildObject(key, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 	h.storeObject(ctx, key, obj, ri, false, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj

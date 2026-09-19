@@ -88,6 +88,9 @@ func MapPathRegex(pattern string) MapResult {
 	// Strip leading ^ anchor — CF prefixes are implied anchors.
 	literal := strings.TrimPrefix(pattern, "^")
 
+	// Check the trailing $ anchor before the metacharacter rejection
+	// below ($ is itself a metacharacter) so we can report a more
+	// specific skip reason.
 	if strings.HasSuffix(literal, "$") {
 		return MapResult{
 			Skipped:    true,
@@ -121,6 +124,7 @@ func MapHostRegex(pattern string) MapResult {
 
 	literal := strings.ReplaceAll(pattern, `\.`, ".")
 
+	// Reject if any metacharacters remain after unescaping.
 	if metaCharPattern.MatchString(literal) {
 		return MapResult{
 			Skipped:    true,

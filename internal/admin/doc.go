@@ -1,4 +1,4 @@
-// Package admin is the L7 control plane. It serves the admin API,
+// Package admin is the L6 control plane. It serves the admin API,
 // health/readiness probes, metrics, and the dashboard SPA. The admin
 // surface MUST stay on its own listener; it is never bound on the
 // data-plane port (see docs/architecture.md §8).

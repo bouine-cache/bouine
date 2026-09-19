@@ -10,16 +10,16 @@ import (
 // IsCacheable is the main entry point; the rest are helpers.
 
 // isCDNCCCharForbidden reports whether b is a character that is not allowed
-// in a CDN-Cache-Control value (structured-fields token chars; RFC 9213 §2
-// defines the field as a Dictionary Structured Field per RFC 8941).
+// in a CDN-Cache-Control value (RFC 9213 §2.1 defines the field as a
+// Dictionary Structured Field per RFC 8941, so values use sf-token keys).
 func isCDNCCCharForbidden(b byte) bool {
 	return b == '&' || b == '@' || b == '[' || b == ']' || b == '{' || b == '}' || b == '"'
 }
 
 // hasMeaningfulCDNCCDirective reports whether d contains at least one directive
 // that can influence caching behaviour. Values with no meaningful directives are
-// treated as absent: RFC 9213 §2 requires that a targeted field with no usable
-// directives behaves as if the field were not present.
+// treated as absent: RFC 9213 §2.1 requires that a targeted field that is
+// empty or unparseable behaves as if the field were not present.
 func hasMeaningfulCDNCCDirective(d Directives) bool {
 	return d.MaxAgeSet || d.SMaxAgeSet || d.NoStore || d.Private || d.NoCache
 }
@@ -35,10 +35,10 @@ func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 	if v == "" {
 		return Directives{}, false
 	}
-	// Reject values containing characters that cannot appear in a
-	// structured-fields token (RFC 9213 §2: parse errors mean the
-	// field MUST be ignored entirely,
-	// falling back to Cache-Control).
+	// Reject values containing characters that cannot appear in an
+	// sf-token. The invalid value means the field fails to parse, and
+	// RFC 9213 §2.1 requires that a field with a parse error be ignored
+	// entirely, falling back to Cache-Control.
 	for _, b := range []byte(v) {
 		// RFC 7230 §3.2.6 token chars: VCHAR except delimiters.
 		// We reject &, invalid bytes and other non-token noise.
@@ -46,8 +46,8 @@ func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 			continue // spaces / commas are legal separators
 		}
 		if isCDNCCCharForbidden(b) {
-			// Non-token characters or quoted-string values — treat whole value as invalid.
-			// RFC 9213 §2: CDN-Cache-Control must use sf-integer for duration values, not quoted-strings.
+			// Quoted-string values — RFC 9213 §2.1 requires durations in a
+			// targeted field to be sf-integer, so this is a parse failure.
 			return Directives{}, false
 		}
 	}

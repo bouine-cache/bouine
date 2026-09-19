@@ -42,6 +42,7 @@ func BenchmarkGate_Middleware_Miss_TrafficClass(b *testing.B) {
 	m := NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes([]string{"bench"})
 	m.PreResolveTrafficClasses([]string{"csr", "ssr"})
+	m.SetAccessLog(NoopLogger{}, 0) // sampling off: worst case for the log path
 	h := m.FastHTTPMiddleware(benchTrafficClassShape("ssr"))
 
 	ctx := &fasthttp.RequestCtx{}
@@ -69,6 +70,7 @@ func BenchmarkGate_Middleware_Miss_TrafficClass_MixedCaseHost(b *testing.B) {
 	m := NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes([]string{"bench"})
 	m.PreResolveTrafficClasses([]string{"csr", "ssr"})
+	m.SetAccessLog(NoopLogger{}, 0) // sampling off: worst case for the log path
 	h := m.FastHTTPMiddleware(benchTrafficClassShape("csr"))
 
 	ctx := &fasthttp.RequestCtx{}

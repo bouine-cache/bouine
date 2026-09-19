@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	jsonv2 "encoding/json/v2"
 	"fmt"
 	"net"
 	"slices"
@@ -329,24 +328,29 @@ func (c *Cluster) Leave(ctx context.Context) error {
 // ---- memberlist.Delegate interface ----
 
 // NodeMeta serialises PeerInfo as the node's user metadata.
+// Oversized payloads are dropped whole: a truncated frame fails
+// decoding on every receiver, so sending it only creates a silently
+// dropped peer.
 func (c *Cluster) NodeMeta(limit int) []byte {
-	b, _ := encodeJSONv2(c.local)
+	b, err := EncodePeerInfoMeta(c.local)
+	if err != nil {
+		return nil
+	}
 	if len(b) > limit {
-		return b[:limit]
+		return nil
 	}
 	return b
 }
 
-// NotifyMsg handles incoming gossip user messages (purge/ban events).
-// Binary frames (purge/ban) are dispatched by the msgType byte;
-// JSON frames are dispatched by the "type" field. Malformed or unrecognised
-// payloads are logged and skipped.
+// NotifyMsg handles incoming gossip user messages (purge/ban events),
+// dispatched by the msgType byte. Malformed or unrecognised payloads
+// are logged and skipped.
 func (c *Cluster) NotifyMsg(msg []byte) {
 	if IsBinaryFrame(msg) {
 		c.handleBinaryGossip(msg)
 		return
 	}
-	c.handleJSONGossip(msg)
+	c.logger.Debug("cluster: unrecognized gossip message", "len", len(msg))
 }
 
 // SeenFromPeer reports whether an invalidation event from issuer with
@@ -528,17 +532,6 @@ func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
 	}
 }
 
-func (c *Cluster) handleJSONGossip(msg []byte) {
-	var hdr struct {
-		Type string `json:"type"`
-	}
-	if err := jsonv2.Unmarshal(msg, &hdr); err != nil {
-		c.logger.Debug("cluster: malformed gossip message", "error", err)
-		return
-	}
-	c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
-}
-
 // QueueBroadcast enqueues a message for gossip delivery. The message is
 // sent to all peers by memberlist's compound-message protocol alongside
 // normal heartbeat traffic, providing a reliable secondary delivery path
@@ -596,8 +589,7 @@ type gossipBroadcast struct {
 // is true on the first sync after joining.
 func (c *Cluster) LocalState(_ bool) []byte {
 	digest := c.Digest()
-	b, _ := encodeJSONv2(digest)
-	return b
+	return EncodeRingDigestState(digest)
 }
 
 // MergeRemoteState reconciles a remote node's ring digest with the
@@ -620,8 +612,8 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	if len(buf) == 0 {
 		return
 	}
-	var remote api.RingDigest
-	if err := decodeJSONv2(buf, &remote); err != nil {
+	remote, err := DecodeRingDigestState(buf)
+	if err != nil {
 		c.logger.Debug("cluster: bad remote state", "error", err)
 		return
 	}
@@ -686,8 +678,8 @@ func (c *Cluster) reconcileOnce() {
 	liveMembers := c.ml.Members()
 	c.pruneStalePeers(liveMembers)
 	for _, n := range liveMembers {
-		var info api.PeerInfo
-		if err := decodeJSONv2(n.Meta, &info); err != nil {
+		info, err := DecodePeerInfoMeta(n.Meta)
+		if err != nil {
 			continue
 		}
 		info.Name = n.Name
@@ -737,8 +729,8 @@ func (c *Cluster) reconcileRunning() bool {
 
 // NotifyJoin is called when a new node joins.
 func (c *Cluster) NotifyJoin(n *memberlist.Node) {
-	var info api.PeerInfo
-	if err := decodeJSONv2(n.Meta, &info); err != nil {
+	info, err := DecodePeerInfoMeta(n.Meta)
+	if err != nil {
 		c.logger.Warn("cluster: malformed peer meta", "node", n.Name, "error", err)
 		info.Name = n.Name
 		info.Addr = fmt.Sprintf("%s:%d", n.Addr, n.Port)

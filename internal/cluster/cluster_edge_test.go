@@ -239,7 +239,7 @@ func TestNotifyUpdate_DelegatesToNotifyJoin(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	info := api.PeerInfo{Name: "new-node", Addr: "127.0.0.1:1234"}
-	meta, _ := encodeJSONv2(info)
+	meta, _ := EncodePeerInfoMeta(info)
 
 	node := &memberlist.Node{Name: "new-node", Meta: meta}
 	c.NotifyUpdate(node)
@@ -265,7 +265,7 @@ func TestNodeMeta_RoundTrip(t *testing.T) {
 	meta := c.NodeMeta(512)
 	require.NotEmpty(t, meta)
 
-	var info api.PeerInfo
-	require.NoError(t, decodeJSONv2(meta, &info))
+	info, err := DecodePeerInfoMeta(meta)
+	require.NoError(t, err)
 	assert.Equal(t, "meta-test", info.Name)
 }

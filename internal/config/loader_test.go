@@ -367,7 +367,6 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 		{"ttl_default", func(rc *RouteCache) { rc.TTLDefault = -1 }},
 		{"stale_while_revalidate", func(rc *RouteCache) { rc.StaleWhileRevalidate = -1 }},
 		{"stale_if_error", func(rc *RouteCache) { rc.StaleIfError = -1 }},
-		{"negative_ttl", func(rc *RouteCache) { rc.NegativeTTL = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 6 * time.Minute }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 5 * time.Minute }},
@@ -1529,4 +1528,170 @@ func TestParse_DocsArchitectureExample(t *testing.T) {
 	require.NotEmpty(t, cfg.Routes)
 	require.Equal(t, []string{"Accept-Language"}, cfg.Routes[0].Cache.Key.IncludeHeaders,
 		"the example exercises cache.key.include_headers")
+}
+
+// --- negative_ttl validation ---
+
+func TestValidate_NegativeTTLMap(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	valid, err := NegTTLMap(map[string]time.Duration{
+		"404": 30 * time.Second, "5xx": 10 * time.Second,
+	})
+	require.NoError(t, err)
+	validCfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{NegativeTTL: valid}}},
+	}
+	require.NoError(t, validCfg.Validate())
+
+	cases := []struct {
+		name string
+		m    map[string]time.Duration
+	}{
+		{"negative_ttl", map[string]time.Duration{"40o4": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"99": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"200": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"400-999": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"3xx": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"404": -time.Second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// NegTTLMap is the programmatic path; the same parser
+			// (api.NewStatusTTLMap) gates the YAML path, so the
+			// rejection contract is proven here once.
+			_, err := NegTTLMap(tc.m)
+			require.Error(t, err, tc.name)
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("error %q does not mention field %q", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestParse_NegativeTTLOneKeyTwoForms(t *testing.T) {
+	t.Parallel()
+	// The scalar shorthand decodes to the default error set.
+	m := mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl: 30s
+`)).Routes[0].Cache.NegativeTTL.Policy()
+	entries := m.Entries()
+	require.Len(t, entries, 4)
+	for _, e := range entries {
+		require.Equal(t, 30*time.Second, e.TTL, e.Key)
+	}
+	for _, code := range []int{404, 405, 410, 501} {
+		require.True(t, m.Cacheable(code), "status %d", code)
+	}
+
+	// A bare number means seconds in both forms (durationValue shared
+	// by the scalar and the map entries), so `negative_ttl: 30` is not
+	// silently 30ns.
+	cfg := mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl: 30
+`))
+	require.True(t, cfg.Routes[0].Cache.NegativeTTL.Policy().Cacheable(404))
+	require.Equal(t, 30*time.Second, cfg.Routes[0].Cache.NegativeTTL.Policy().TTL(404), "bare scalar means seconds")
+
+	// The map form is a complete per-status policy.
+	cfg = mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl:
+        404: 1m
+        5xx: 10s
+        410: 0
+`))
+	p := cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.Len(t, p.Entries(), 3)
+	require.Equal(t, time.Minute, p.TTL(404))
+	require.Equal(t, 10*time.Second, p.TTL(502), "class member")
+	require.Equal(t, time.Duration(0), p.TTL(410), "explicit zero disables")
+	require.False(t, p.Cacheable(410))
+
+	// The separate status_ttl key no longer exists (strict decode).
+	_, err := Parse([]byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      status_ttl:
+        404: 1m
+`))
+	require.Error(t, err, "status_ttl must be rejected: negative_ttl is the single key")
+	require.Contains(t, err.Error(), "status_ttl")
+}
+
+// Validate resolves the route's negative-caching policy exactly once;
+// consumers read it via Policy() instead of re-validating the raw map.
+func TestValidate_NegativeTTLPolicyResolved(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	neg, err := NegTTLMap(map[string]time.Duration{
+		"404": 30 * time.Second, "5xx": 10 * time.Second, "503": 0,
+	})
+	require.NoError(t, err)
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{NegativeTTL: neg}}},
+	}
+	require.NoError(t, cfg.Validate())
+	p := cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.NotNil(t, p, "Validate must resolve the policy")
+	require.True(t, p.Cacheable(404))
+	require.Equal(t, 10*time.Second, p.TTL(502))
+	require.False(t, p.Cacheable(503), "exact zero shadows class")
+
+	// Empty policy: no negative caching, Policy returns nil.
+	cfg.Routes[0].Cache.NegativeTTL = NegTTLScalar(0)
+	require.NoError(t, cfg.Validate())
+	require.Nil(t, cfg.Routes[0].Cache.NegativeTTL.Policy())
+
+	// Scalar shorthand resolves to the same expanded policy.
+	cfg.Routes[0].Cache.NegativeTTL = NegTTLScalar(30 * time.Second)
+	require.NoError(t, cfg.Validate())
+	p = cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.True(t, p.Cacheable(410))
+	require.False(t, p.Cacheable(503))
+}
+
+func mustParse(t *testing.T, b []byte) *Config {
+	t.Helper()
+	cfg, err := Parse(b)
+	require.NoError(t, err)
+	return cfg
 }

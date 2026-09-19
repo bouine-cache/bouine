@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // maxFetchTimeout is the upper bound for fetch_timeout. It must stay
@@ -443,7 +445,7 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if err := validatePathRewrite(i, r.Request); err != nil {
 		return err
 	}
-	return validateRouteCache(i, r.Cache)
+	return validateRouteCache(i, &r.Cache)
 }
 
 // validatePathRewrite validates the request.path_rewrite block: both
@@ -653,7 +655,8 @@ func validateStatic(i int, sc StaticConfig) error {
 	return nil
 }
 
-func validateRouteCache(i int, rc RouteCache) error {
+//nolint:gocyclo // 17: flat checklist of independent fields
+func validateRouteCache(i int, rc *RouteCache) error {
 	if rc.TTLOverride < 0 {
 		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, rc.TTLOverride)
 	}
@@ -666,8 +669,8 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if rc.StaleIfError < 0 {
 		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, rc.StaleIfError)
 	}
-	if rc.NegativeTTL < 0 {
-		return fmt.Errorf("config: route %d negative_ttl must be >= 0, got %v", i, rc.NegativeTTL)
+	if err := validateStatusTTL(i, &rc.NegativeTTL); err != nil {
+		return err
 	}
 	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
 		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, rc.JitterPercent)
@@ -698,7 +701,7 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if err := validateRouteKey(i, rc.Key); err != nil {
 		return err
 	}
-	return validateRefreshConfig(i, rc)
+	return validateRefreshConfig(i, *rc)
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
@@ -1152,4 +1155,172 @@ func parseByteSize(s string) (int64, error) {
 		return 0, fmt.Errorf("unknown unit %q", unit)
 	}
 	return int64(val * mult), nil
+}
+
+// validateStatusTTL resolves the route's negative-caching policy via
+// api.NewStatusTTLMap — the single parser and overlap checker — and
+// stores the built policy on the config, consuming the raw map the
+// decoder left behind. A nil raw map means the policy is already
+// resolved (programmatic construction) or absent (no negative caching);
+// rebuilding would clobber it. After Validate, the policy is the only
+// stored form: consumers (cache handler, builder, dashboard) read it
+// via Policy() and its enumeration methods; the raw map never escapes
+// the config layer.
+func validateStatusTTL(i int, n *NegativeTTLConfig) error {
+	if n.raw == nil {
+		return nil
+	}
+	p, err := api.NewStatusTTLMap(n.raw)
+	if err != nil {
+		return fmt.Errorf("config: route %d %w", i, err)
+	}
+	n.policy = p
+	n.raw = nil
+	return nil
+}
+
+// ---- negative_ttl YAML unmarshalling ----
+
+// NegativeTTLConfig is the decoded form of the negative_ttl config
+// key, which accepts two shapes under one name so operators keep a
+// single mental slot for negative caching:
+//
+//	negative_ttl: 30s                           # default-set shorthand
+//	negative_ttl: {404: 1m, 5xx: 10s, 410: 0} # per-status map
+//
+// Both forms normalize to one map at decode time: the scalar expands
+// to the default set (404/405/410/501) via api.DefaultNegTTLMap, the
+// map is the complete policy (no implicit fallback statuses). Validate
+// then builds the *api.StatusTTLPolicy from that map and drops the
+// map: the policy is the single stored representation, and its
+// enumeration methods (Entries, CoversAnything) are how consumers see
+// the policy — no second shape to drift against. Key format, bounds,
+// and overlaps are validated by Validate via api.NewStatusTTLMap;
+// only the shape is decided here.
+type NegativeTTLConfig struct {
+	// raw holds the decoded map between UnmarshalYAML and Validate;
+	// nil afterwards. It never leaves the config layer.
+	raw map[string]time.Duration
+	// policy is the resolved *api.StatusTTLPolicy, built once by
+	// Validate. Nil when the route has no negative caching.
+	policy *api.StatusTTLPolicy
+}
+
+// Policy returns the resolved negative-caching policy, built once by
+// Validate via api.NewStatusTTLMap. Nil when the route has no
+// negative caching. Consumers must not construct the policy
+// themselves: a config that passed Validate already has it.
+func (n NegativeTTLConfig) Policy() *api.StatusTTLPolicy {
+	return n.policy
+}
+
+// IsZero reports whether any negative-caching policy is configured, so
+// yaml.v3 omitempty drops the key when empty. A policy resolved by
+// Validate also counts as configured.
+func (n NegativeTTLConfig) IsZero() bool {
+	return len(n.raw) == 0 && n.policy == nil
+}
+
+// durationValue decodes one TTL scalar. yaml.v3's native
+// time.Duration decoding rejects bare numbers like `0` or `30` (a
+// plain int, not "30s"), so entries decode through the same
+// scalar-or-parse path the ByteSize type uses: numbers are treated as
+// seconds, strings as duration literals ("30s", "1m"). Both
+// negative_ttl forms share it, so `negative_ttl: 30` and
+// `negative_ttl: {404: 30}` mean the same 30 seconds.
+type durationValue time.Duration
+
+func (d *durationValue) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("invalid duration %q: must be a scalar", value.Value)
+	}
+	var dur time.Duration
+	if err := value.Decode(&dur); err != nil {
+		// Not a duration literal; a bare number means seconds
+		// (mirrors "0" disabling a status in the map example).
+		var secs float64
+		if ferr := value.Decode(&secs); ferr != nil || secs < 0 {
+			return fmt.Errorf("invalid duration %q", value.Value)
+		}
+		dur = time.Duration(secs * float64(time.Second))
+	}
+	*d = durationValue(dur)
+	return nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for the negative_ttl key:
+// a duration scalar (shorthand for the default error statuses), or a
+// map of status codes/classes to durations (complete policy).
+func (n *NegativeTTLConfig) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var d durationValue
+		if err := value.Decode(&d); err != nil {
+			return fmt.Errorf("config: negative_ttl must be a duration or a status map: %w", err)
+		}
+		n.raw = api.DefaultNegTTLMap(time.Duration(d))
+		return nil
+	case yaml.MappingNode:
+		var raw map[string]durationValue
+		if err := value.Decode(&raw); err != nil {
+			return fmt.Errorf("config: negative_ttl must be a duration or a status map: %w", err)
+		}
+		n.raw = make(map[string]time.Duration, len(raw))
+		for k, v := range raw {
+			n.raw[k] = time.Duration(v)
+		}
+		return nil
+	default:
+		return fmt.Errorf("config: negative_ttl must be a duration or a status map, got YAML kind %d", value.Kind)
+	}
+}
+
+// NegTTLScalar builds the scalar shorthand's policy programmatically
+// (tests, SDK): d applies to the default error set. Non-positive d
+// yields no negative caching. Delegates to NegTTLMap over the default
+// expansion — one construction path for both forms, so they can never
+// disagree about what a scalar expands to.
+func NegTTLScalar(d time.Duration) NegativeTTLConfig {
+	// An error here is impossible: DefaultNegTTLMap emits only keys
+	// this parser accepts (exact codes of the default set, d > 0).
+	// Swallowing rather than panicking keeps the constructor total,
+	// matching the config-file path where d <= 0 means "no policy".
+	neg, _ := NegTTLMap(api.DefaultNegTTLMap(d))
+	return neg
+}
+
+// NegTTLMap builds a per-status policy programmatically. Keys use
+// the same "404" / "5xx" format as YAML. An invalid map is rejected
+// here, not deferred to Validate — an unrepresentable policy is a
+// programming error, and returning an error keeps the caller from
+// storing a config that could never load.
+func NegTTLMap(m map[string]time.Duration) (NegativeTTLConfig, error) {
+	p, err := api.NewStatusTTLMap(m)
+	if err != nil {
+		return NegativeTTLConfig{}, err
+	}
+	return NegativeTTLConfig{policy: p}, nil
+}
+
+// MarshalYAML emits the map form, rebuilt from the policy's entries:
+// it round-trips through UnmarshalYAML with the same semantics (the
+// scalar shorthand is canonical only at input).
+func (n NegativeTTLConfig) MarshalYAML() (any, error) {
+	m := make(map[string]time.Duration, len(n.policy.Entries()))
+	for _, e := range n.policy.Entries() {
+		m[e.Key] = e.TTL
+	}
+	return m, nil
+}
+
+// MarshalJSON emits the map form for the dashboard's JSON surfaces,
+// rebuilt from the policy's entries. json.Marshal renders an empty
+// map as {} and omits it via omitempty; the policy — not a stored
+// raw map — is the single representation.
+func (n NegativeTTLConfig) MarshalJSON() ([]byte, error) {
+	m := make(map[string]time.Duration, len(n.policy.Entries()))
+	for _, e := range n.policy.Entries() {
+		m[e.Key] = e.TTL
+	}
+	return json.Marshal(m)
 }

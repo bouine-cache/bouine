@@ -58,9 +58,9 @@ func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 }
 
 // IsCacheable determines whether an origin response should be stored.
-// negativeTTL enables negative caching for error statuses (404, 405,
-// 410, 501) when > 0.
-func IsCacheable(status int, reqHeader, respHeader header.Map, negativeTTL ...time.Duration) bool {
+// neg, when non-nil, enables negative caching for error statuses via
+// the per-status TTL policy.
+func IsCacheable(status int, reqHeader, respHeader header.Map, neg *StatusTTL) bool {
 	// CDN-Cache-Control overrides Cache-Control for shared-cache
 	// decisions (RFC 9211). Use it when present.
 	var respCC Directives
@@ -108,7 +108,7 @@ func IsCacheable(status int, reqHeader, respHeader header.Map, negativeTTL ...ti
 	}
 
 	// Negative caching: cache error responses with a configured TTL.
-	if len(negativeTTL) > 0 && negativeTTL[0] > 0 && IsNegativeCacheable(status) {
+	if neg.Cacheable(status) {
 		return true
 	}
 
@@ -132,8 +132,8 @@ func IsCacheable(status int, reqHeader, respHeader header.Map, negativeTTL ...ti
 // Pragma: no-cache, Vary: *, Set-Cookie (without explicit freshness), and
 // Authorization (without public/must-revalidate/s-maxage) all prevent
 // storage regardless of defaultTTL.
-func IsCacheableWithDefault(status int, reqHeader, respHeader header.Map, negativeTTL, defaultTTL time.Duration) bool {
-	if IsCacheable(status, reqHeader, respHeader, negativeTTL) {
+func IsCacheableWithDefault(status int, reqHeader, respHeader header.Map, neg *StatusTTL, defaultTTL time.Duration) bool {
+	if IsCacheable(status, reqHeader, respHeader, neg) {
 		return true
 	}
 	if defaultTTL <= 0 {
@@ -188,7 +188,7 @@ func newParsedResponse(status int, reqHeader, respHeader header.Map) parsedRespo
 // isCacheable checks cacheability using pre-parsed directives.
 // This is the zero-reparse path for callers that have already called
 // cdnCacheControl or ParseCacheControl (e.g. buildObject).
-func (p *parsedResponse) isCacheable(negativeTTL time.Duration) bool {
+func (p *parsedResponse) isCacheable(neg *StatusTTL) bool {
 	if isCacheBlocked(p.status, p.respCC, p.hasCDN, p.reqHeader, p.respHeader) {
 		return false
 	}
@@ -206,16 +206,13 @@ func (p *parsedResponse) isCacheable(negativeTTL time.Duration) bool {
 		}
 		return true
 	}
-	if negativeTTL > 0 && IsNegativeCacheable(p.status) {
-		return true
-	}
-	return false
+	return neg.Cacheable(p.status)
 }
 
 // isCacheableWithDefault extends isCacheable with the
 // operator-configured default-TTL fallback, using pre-parsed directives.
-func (p *parsedResponse) isCacheableWithDefault(negativeTTL, defaultTTL time.Duration) bool {
-	if p.isCacheable(negativeTTL) {
+func (p *parsedResponse) isCacheableWithDefault(neg *StatusTTL, defaultTTL time.Duration) bool {
+	if p.isCacheable(neg) {
 		return true
 	}
 	if defaultTTL <= 0 {

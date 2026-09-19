@@ -129,7 +129,7 @@ func TestRuleCacheLowHitRateEvidenceUsesWorstRoute(t *testing.T) {
 func TestRuleCacheNoNegTTL(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
-	cfg.Routes[0].Cache.NegativeTTL = 0
+	cfg.Routes[0].Cache.NegativeTTL = config.NegTTLScalar(0)
 	data := InsightData{
 		Config: cfg,
 		RouteStats: []observability.RouteStat{
@@ -143,6 +143,28 @@ func TestRuleCacheNoNegTTL(t *testing.T) {
 	data.RouteStats[0].Errors = 0
 	ins = ruleCacheNoNegTTL(data)
 	require.Nil(t, ins)
+}
+
+func TestRuleCacheNoNegTTL_Map(t *testing.T) {
+	t.Parallel()
+	stats := func() []observability.RouteStat {
+		return []observability.RouteStat{routeStats("api", 100, 80, 10, 80)}
+	}
+	// A positive per-status entry counts as negative caching.
+	cfg := baseConfig()
+	neg, err := config.NegTTLMap(map[string]time.Duration{"404": time.Minute})
+	require.NoError(t, err)
+	cfg.Routes[0].Cache.NegativeTTL = neg
+	ins := ruleCacheNoNegTTL(InsightData{Config: cfg, RouteStats: stats()})
+	require.Nil(t, ins)
+
+	// An all-zero map caches nothing → the advisory fires.
+	cfg = baseConfig()
+	neg, err = config.NegTTLMap(map[string]time.Duration{"404": 0})
+	require.NoError(t, err)
+	cfg.Routes[0].Cache.NegativeTTL = neg
+	ins = ruleCacheNoNegTTL(InsightData{Config: cfg, RouteStats: stats()})
+	require.NotNil(t, ins)
 }
 
 func TestRuleUpstreamUnhealthyTarget(t *testing.T) {

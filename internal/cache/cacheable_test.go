@@ -2,6 +2,7 @@ package cache
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,43 +130,43 @@ func TestParsedResponse_IsCacheable(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "no-store")
 		p := newParsedResponse(200, header.Map{}, h)
-		require.False(t, p.isCacheable(0))
+		require.False(t, p.isCacheable(nil))
 	})
 	t.Run("no_store_with_must_understand_understood", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "no-store, must-understand, max-age=60")
 		p := newParsedResponse(200, header.Map{}, h)
-		require.True(t, p.isCacheable(0))
+		require.True(t, p.isCacheable(nil))
 	})
 	t.Run("no_store_with_must_understand_not_understood", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "no-store, must-understand, max-age=60")
 		p := newParsedResponse(599, header.Map{}, h)
-		require.False(t, p.isCacheable(0))
+		require.False(t, p.isCacheable(nil))
 	})
 	t.Run("private_blocks", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "private, max-age=60")
 		p := newParsedResponse(200, header.Map{}, h)
-		require.False(t, p.isCacheable(0))
+		require.False(t, p.isCacheable(nil))
 	})
 	t.Run("explicit_max_age", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "max-age=60")
 		p := newParsedResponse(200, header.Map{}, h)
-		require.True(t, p.isCacheable(0))
+		require.True(t, p.isCacheable(nil))
 	})
 	t.Run("heuristic_with_last_modified", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
 		p := newParsedResponse(301, header.Map{}, h)
-		require.True(t, p.isCacheable(0))
+		require.True(t, p.isCacheable(nil))
 	})
 	t.Run("negative_cacheable", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
 		p := newParsedResponse(404, header.Map{}, h)
-		require.True(t, p.isCacheable(30))
+		require.True(t, p.isCacheable(mustStatusTTL(t, map[string]time.Duration{"404": 30 * time.Second})))
 	})
 }
 
@@ -175,24 +176,24 @@ func TestParsedResponse_IsCacheableWithDefault(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
 		p := newParsedResponse(200, header.Map{}, h)
-		require.True(t, p.isCacheableWithDefault(0, 60))
+		require.True(t, p.isCacheableWithDefault(nil, 60))
 	})
 	t.Run("default_ttl_zero_blocks", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
 		p := newParsedResponse(200, header.Map{}, h)
-		require.False(t, p.isCacheableWithDefault(0, 0))
+		require.False(t, p.isCacheableWithDefault(nil, 0))
 	})
 	t.Run("no_store_blocks_default", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "no-store")
 		p := newParsedResponse(200, header.Map{}, h)
-		require.False(t, p.isCacheableWithDefault(0, 60))
+		require.False(t, p.isCacheableWithDefault(nil, 60))
 	})
 	t.Run("non_heuristic_status_blocks_default", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
 		p := newParsedResponse(502, header.Map{}, h)
-		require.False(t, p.isCacheableWithDefault(0, 60))
+		require.False(t, p.isCacheableWithDefault(nil, 60))
 	})
 }

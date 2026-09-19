@@ -10,6 +10,7 @@ This document maps NGINX `proxy_cache` directives to bouine config.
 | `proxy_cache zone` | (automatic) | bouine has a single global store; no zone declaration needed. |
 | `proxy_cache_valid 200 60m` | `routes[].cache.ttl_default: 60m` | Per-route TTL override when origin sends no `Cache-Control`. |
 | `proxy_cache_valid 404 1m` | `routes[].cache.negative_ttl: 1m` | Caches 404, 405, 410, 501 responses for the configured duration. Zero disables negative caching. |
+| `proxy_cache_valid 404 1m 500 10s` | `routes[].cache.negative_ttl: {404: 1m, 5xx: 10s}` | Per-status (or class) negative-caching TTLs, 400-599 only; the same key as the scalar form. A zero value explicitly disables caching for that status. |
 | `proxy_cache_use_stale error timeout` | `routes[].cache.stale_if_error: 5m` | Serve stale on origin 5xx or timeout. Duration controls how long stale is served. |
 | `proxy_cache_use_stale updating` | `routes[].cache.stale_while_revalidate: 30s` | Serve stale while revalidating in background. |
 | `proxy_cache_key "$scheme$host$request_uri"` | (default) | bouine's default key is `scheme|host|path|query|method`. |

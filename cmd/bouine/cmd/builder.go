@@ -326,7 +326,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			NegativeTTL:             rc.Cache.NegativeTTL,
+			Negative:                negativeStatusTTL(rc.Cache),
 			JitterPercent:           rc.Cache.JitterPercent,
 			StayinAlive:             rc.Cache.StayinAlive,
 			LogCacheKeys:            true,
@@ -441,7 +441,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			NegativeTTL:             rc.Cache.NegativeTTL,
+			Negative:                negativeStatusTTL(rc.Cache),
 			JitterPercent:           rc.Cache.JitterPercent,
 			StayinAlive:             rc.Cache.StayinAlive,
 			LogCacheKeys:            true,
@@ -694,4 +694,13 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 // or 0 if hedging is not configured.
 func buildHedgeTimeout(pc config.UpstreamPool) time.Duration {
 	return pc.Connect.HedgeTimeout
+}
+
+// negativeStatusTTL returns the route's resolved negative-caching
+// policy. Both negative_ttl forms (scalar shorthand and per-status
+// map) are normalized to one map by the config layer, and
+// config.Validate built the policy from that map — construction never
+// repeats here.
+func negativeStatusTTL(c config.RouteCache) *cache.StatusTTL {
+	return c.NegativeTTL.Policy()
 }

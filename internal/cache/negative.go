@@ -7,20 +7,13 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// negativeStatuses are HTTP status codes eligible for negative caching
-// when a negative_ttl is configured (RFC 9111 §4.2.2 heuristic list).
-var negativeStatuses = map[int]bool{
-	404: true,
-	405: true,
-	410: true,
-	501: true,
-}
-
-// IsNegativeCacheable reports whether the status code is eligible for
-// negative caching.
-func IsNegativeCacheable(status int) bool {
-	return negativeStatuses[status]
-}
+// StatusTTL resolves per-status negative-caching TTLs. The policy type
+// and its parser live in pkg/api so config validation and cache lookup
+// share one construction path and one resolution order (exact > class >
+// not cacheable). A nil *StatusTTL disables negative caching; the
+// policy is built once by config.Validate and handed to the handler —
+// never re-validated or re-built here.
+type StatusTTL = api.StatusTTLPolicy
 
 // JitterTTL applies a random ±pct% jitter to a TTL. pct is clamped to
 // 0–50. Returns the original TTL when pct <= 0.

@@ -29,9 +29,9 @@ func TestIsCacheableWithDefault_NoFreshness(t *testing.T) {
 	req := header.Map{}
 	resp := header.Map{}
 
-	require.False(t, IsCacheable(200, req, resp))
-	assert.True(t, IsCacheableWithDefault(200, req, resp, 0, 5*time.Second))
-	assert.False(t, IsCacheableWithDefault(200, req, resp, 0, 0))
+	require.False(t, IsCacheable(200, req, resp, nil))
+	assert.True(t, IsCacheableWithDefault(200, req, resp, nil, 5*time.Second))
+	assert.False(t, IsCacheableWithDefault(200, req, resp, nil, 0))
 }
 
 func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
@@ -56,7 +56,7 @@ func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := IsCacheableWithDefault(tc.status, tc.req, tc.resp, 0, def)
+			got := IsCacheableWithDefault(tc.status, tc.req, tc.resp, nil, def)
 			if got != tc.want {
 				t.Errorf("IsCacheableWithDefault(%d) = %v, want %v", tc.status, got, tc.want)
 			}

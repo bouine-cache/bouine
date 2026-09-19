@@ -18,25 +18,48 @@ func TestBuildRouteRowsTTLOverride(t *testing.T) {
 			Name:  "api",
 			Pool:  "api-pool",
 			Match: config.RouteMatch{PathPrefix: "/api"},
-			Cache: config.RouteCache{TTLOverride: 2 * time.Minute, NegativeTTL: 30 * time.Second},
+			Cache: config.RouteCache{TTLOverride: 2 * time.Minute, NegativeTTL: config.NegTTLScalar(30 * time.Second)},
 		},
 		{
 			Name:  "inherit",
 			Pool:  "web-pool",
 			Match: config.RouteMatch{PathPrefix: "/web"},
-			Cache: config.RouteCache{NegativeTTL: 10 * time.Second},
+			Cache: config.RouteCache{NegativeTTL: config.NegTTLScalar(10 * time.Second)},
 		},
 	}
 	rows := BuildRouteRows(cfg, []observability.RouteStat{})
 	assert.Len(t, rows, 2)
 
-	// The TTL column shows ttl_override, not negative_ttl.
+	// The TTL column shows ttl_override, not negative_ttl. The neg_ttl
+	// cell shows the expanded policy (scalar shorthand included).
 	assert.Equal(t, "2m", rows[0].TTL)
-	assert.Equal(t, "30s", rows[0].NegTTL)
+	assert.Equal(t, "404:30s, 405:30s, 410:30s, 501:30s", rows[0].NegTTL)
 	// Without ttl_override the column reads "—": the route inherits
 	// the origin's Cache-Control TTL.
 	assert.Equal(t, "—", rows[1].TTL)
-	assert.Equal(t, "10s", rows[1].NegTTL)
+	assert.Equal(t, "404:10s, 405:10s, 410:10s, 501:10s", rows[1].NegTTL)
+}
+
+func TestNegativeTTLLabel(t *testing.T) {
+	t.Parallel()
+	// No policy: zero duration renders as "—".
+	assert.Equal(t, "—", negativeTTLLabel(config.RouteCache{}))
+
+	// Scalar shorthand is expanded: the label shows the policy actually
+	// in effect, never the shorthand that hides it.
+	rc := config.RouteCache{NegativeTTL: config.NegTTLScalar(30 * time.Second)}
+	assert.Equal(t, "404:30s, 405:30s, 410:30s, 501:30s", negativeTTLLabel(rc))
+
+	// Per-status map, including an explicit-zero "off" entry.
+	// Per-status map, including an explicit-zero "off" entry.
+	neg, err := config.NegTTLMap(map[string]time.Duration{
+		"404": time.Minute,
+		"5xx": 10 * time.Second,
+		"410": 0,
+	})
+	require.NoError(t, err)
+	rc = config.RouteCache{NegativeTTL: neg}
+	assert.Equal(t, "404:1m, 410:off, 5xx:10s", negativeTTLLabel(rc))
 }
 
 func TestBuildRouteRowsJoinsLiveStats(t *testing.T) {

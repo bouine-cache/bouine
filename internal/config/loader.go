@@ -1136,7 +1136,6 @@ func parseByteSize(s string) (int64, error) {
 		return n, nil
 	}
 
-	// Find the split between number and unit.
 	i := 0
 	for i < len(s) && (s[i] == '-' || s[i] == '.' || (s[i] >= '0' && s[i] <= '9')) {
 		i++

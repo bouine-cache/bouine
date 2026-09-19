@@ -206,3 +206,73 @@ func TestGossipMsgType_Refresh(t *testing.T) {
 	require.True(t, IsBinaryFrame(buf))
 	require.Equal(t, msgTypeRefresh, GossipMsgType(buf))
 }
+
+func TestJSONv2Envelope_RoundTrip(t *testing.T) {
+	t.Parallel()
+	info := api.PeerInfo{Name: "n1", Addr: "127.0.0.1:1", Weight: 2}
+	b, err := encodeJSONv2(info)
+	require.NoError(t, err)
+	require.Equal(t, metaMagic, b[0])
+	require.Equal(t, metaVersion, b[1])
+
+	var got api.PeerInfo
+	require.NoError(t, decodeJSONv2(b, &got))
+	require.Equal(t, info, got)
+}
+
+func TestJSONv2Envelope_RejectsUnversionedJSON(t *testing.T) {
+	t.Parallel()
+	var info api.PeerInfo
+	err := decodeJSONv2([]byte(`{"name":"n1"}`), &info)
+	require.ErrorIs(t, err, errBadMetaMagic)
+}
+
+func TestJSONv2Envelope_RejectsUnknownVersion(t *testing.T) {
+	t.Parallel()
+	b, err := encodeJSONv2(api.PeerInfo{Name: "n1"})
+	require.NoError(t, err)
+	b[1] = metaVersion + 1
+	var info api.PeerInfo
+	err = decodeJSONv2(b, &info)
+	require.ErrorIs(t, err, errUnsupportedVer)
+}
+
+func BenchmarkCodec_NodeMeta(b *testing.B) {
+	info := api.PeerInfo{
+		Name: "bench-node", Addr: "10.0.0.1:8080", AdminAddr: "10.0.0.1:8081",
+		DataAddr: "10.0.0.1:8082", Version: "0.5.21", Weight: 1,
+		JoinedAt: time.Now(),
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := encodeJSONv2(info); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCodec_LocalState(b *testing.B) {
+	digest := api.RingDigest{Hash: 0xDEADBEEFCAFEF00D, Size: 3, Version: 42}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := encodeJSONv2(digest); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCodec_DecodeMeta(b *testing.B) {
+	info := api.PeerInfo{
+		Name: "bench-node", Addr: "10.0.0.1:8080", AdminAddr: "10.0.0.1:8081",
+		DataAddr: "10.0.0.1:8082", Version: "0.5.21", Weight: 1,
+	}
+	buf, err := encodeJSONv2(info)
+	require.NoError(b, err)
+	b.ReportAllocs()
+	for b.Loop() {
+		var got api.PeerInfo
+		if err := decodeJSONv2(buf, &got); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

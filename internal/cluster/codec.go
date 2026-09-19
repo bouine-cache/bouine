@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"time"
@@ -408,4 +409,42 @@ func GossipMsgType(msg []byte) byte {
 		return 0
 	}
 	return msg[2]
+}
+
+const (
+	// metaMagic frames memberlist meta and push/pull state payloads
+	// (PeerInfo, RingDigest). It must not collide with binaryMagic
+	// (gossip frames) or '{' (legacy JSON), so traffic can be
+	// discriminated by the first byte.
+	metaMagic byte = 0xCA
+	// metaVersion is the current envelope version for meta/state
+	// payloads. Bump it on any wire-shape change; receivers reject
+	// other versions.
+	metaVersion byte = 1
+)
+
+var errBadMetaMagic = errors.New("cluster: bad meta/state magic byte")
+
+// encodeJSONv2 frames v with a magic + version envelope and marshals it
+// with encoding/json/v2. The envelope keeps memberlist meta and
+// push/pull state payloads self-describing and version-gated.
+func encodeJSONv2(v any) ([]byte, error) {
+	b, err := jsonv2.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(make([]byte, 0, 2+len(b)), metaMagic, metaVersion), b...), nil
+}
+
+// decodeJSONv2 validates the envelope and unmarshals the payload with
+// encoding/json/v2. Frames with an unknown magic or version are
+// rejected — there is no retrocompatibility with unversioned JSON.
+func decodeJSONv2(data []byte, v any) error {
+	if len(data) < 2 || data[0] != metaMagic {
+		return errBadMetaMagic
+	}
+	if data[1] != metaVersion {
+		return fmt.Errorf("%w: got %d", errUnsupportedVer, data[1])
+	}
+	return jsonv2.Unmarshal(data[2:], v)
 }

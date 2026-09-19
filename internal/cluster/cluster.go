@@ -2,7 +2,7 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"net"
 	"slices"
@@ -330,7 +330,7 @@ func (c *Cluster) Leave(ctx context.Context) error {
 
 // NodeMeta serialises PeerInfo as the node's user metadata.
 func (c *Cluster) NodeMeta(limit int) []byte {
-	b, _ := json.Marshal(c.local)
+	b, _ := encodeJSONv2(c.local)
 	if len(b) > limit {
 		return b[:limit]
 	}
@@ -532,7 +532,7 @@ func (c *Cluster) handleJSONGossip(msg []byte) {
 	var hdr struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(msg, &hdr); err != nil {
+	if err := jsonv2.Unmarshal(msg, &hdr); err != nil {
 		c.logger.Debug("cluster: malformed gossip message", "error", err)
 		return
 	}
@@ -596,7 +596,7 @@ type gossipBroadcast struct {
 // is true on the first sync after joining.
 func (c *Cluster) LocalState(_ bool) []byte {
 	digest := c.Digest()
-	b, _ := json.Marshal(digest)
+	b, _ := encodeJSONv2(digest)
 	return b
 }
 
@@ -621,7 +621,7 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 		return
 	}
 	var remote api.RingDigest
-	if err := json.Unmarshal(buf, &remote); err != nil {
+	if err := decodeJSONv2(buf, &remote); err != nil {
 		c.logger.Debug("cluster: bad remote state", "error", err)
 		return
 	}
@@ -687,7 +687,7 @@ func (c *Cluster) reconcileOnce() {
 	c.pruneStalePeers(liveMembers)
 	for _, n := range liveMembers {
 		var info api.PeerInfo
-		if err := json.Unmarshal(n.Meta, &info); err != nil {
+		if err := decodeJSONv2(n.Meta, &info); err != nil {
 			continue
 		}
 		info.Name = n.Name
@@ -738,7 +738,7 @@ func (c *Cluster) reconcileRunning() bool {
 // NotifyJoin is called when a new node joins.
 func (c *Cluster) NotifyJoin(n *memberlist.Node) {
 	var info api.PeerInfo
-	if err := json.Unmarshal(n.Meta, &info); err != nil {
+	if err := decodeJSONv2(n.Meta, &info); err != nil {
 		c.logger.Warn("cluster: malformed peer meta", "node", n.Name, "error", err)
 		info.Name = n.Name
 		info.Addr = fmt.Sprintf("%s:%d", n.Addr, n.Port)

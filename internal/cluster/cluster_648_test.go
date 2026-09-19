@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -47,7 +46,7 @@ func TestMergeRemoteState_PrunesStalePeerOnDigestMatch(t *testing.T) {
 	// Feed c1 its own digest, so local and remote hashes match — the
 	// equilibrium from issue #648.
 	localDigest := c1.Digest()
-	buf, err := json.Marshal(localDigest)
+	buf, err := encodeJSONv2(localDigest)
 	require.NoError(t, err)
 
 	// Before the fix, the digest shortcut returned early and the stale
@@ -84,7 +83,7 @@ func TestMergeRemoteState_SameHashStillPrunesStalePeer(t *testing.T) {
 
 	// Marshal our own digest — local and remote hashes will be identical.
 	local := c.Digest()
-	buf, _ := json.Marshal(local)
+	buf, _ := encodeJSONv2(local)
 
 	c.MergeRemoteState(buf, false)
 

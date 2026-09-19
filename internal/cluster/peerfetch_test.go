@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"sync"
@@ -39,15 +38,22 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	return nil
 }
 
+func encodePeerFetchRequest(req api.PeerFetchRequest) []byte {
+	body := make([]byte, 0, 18+len(req.VaryKey))
+	body = append(body, peerFetchBinaryVersion)
+	body = append(body, req.Key[:]...)
+	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // test input, VaryKey < 256 bytes
+	body = append(body, req.VaryKey...)
+	return body
+}
+
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *fasthttp.RequestCtx {
 	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err, "marshal")
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.Header.SetMethod("POST")
 	ctx.Request.SetRequestURI(PeerFetchPath)
-	ctx.Request.SetBody(body)
-	ctx.Request.Header.Set(header.ContentType, "application/json")
+	ctx.Request.SetBody(encodePeerFetchRequest(req))
+	ctx.Request.Header.Set(header.ContentType, "application/octet-stream")
 	if hop > 0 {
 		ctx.Request.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
 	}
@@ -759,7 +765,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 0)
 
-	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
+	reqBody := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -767,7 +773,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 		ctx.Request.Header.SetMethod("POST")
 		ctx.Request.SetRequestURI(PeerFetchPath)
 		ctx.Request.SetBody(reqBody)
-		ctx.Request.Header.Set(header.ContentType, "application/json")
+		ctx.Request.Header.Set(header.ContentType, "application/octet-stream")
 		h.Handle(ctx)
 		if ctx.Response.StatusCode() != 200 {
 			b.Fatalf("status=%d", ctx.Response.StatusCode())

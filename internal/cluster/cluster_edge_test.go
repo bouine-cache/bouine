@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -240,7 +239,7 @@ func TestNotifyUpdate_DelegatesToNotifyJoin(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	info := api.PeerInfo{Name: "new-node", Addr: "127.0.0.1:1234"}
-	meta, _ := json.Marshal(info)
+	meta, _ := encodeJSONv2(info)
 
 	node := &memberlist.Node{Name: "new-node", Meta: meta}
 	c.NotifyUpdate(node)
@@ -267,6 +266,6 @@ func TestNodeMeta_RoundTrip(t *testing.T) {
 	require.NotEmpty(t, meta)
 
 	var info api.PeerInfo
-	require.NoError(t, json.Unmarshal(meta, &info))
+	require.NoError(t, decodeJSONv2(meta, &info))
 	assert.Equal(t, "meta-test", info.Name)
 }

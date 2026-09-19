@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -152,7 +151,7 @@ func TestMergeRemoteState_PrunesDeadPeers(t *testing.T) {
 	require.Len(t, c2.Members(), 4)
 
 	remote := c1.Digest()
-	buf, err := json.Marshal(remote)
+	buf, err := encodeJSONv2(remote)
 	require.NoError(t, err)
 
 	c2.MergeRemoteState(buf, false)
@@ -195,7 +194,7 @@ func TestMergeRemoteState_AddsMissingPeers(t *testing.T) {
 	c2.removePeer("ms-node-a")
 	require.Len(t, c2.Members(), 1)
 
-	buf, err := json.Marshal(remote)
+	buf, err := encodeJSONv2(remote)
 	require.NoError(t, err)
 
 	c2.MergeRemoteState(buf, false)
@@ -235,7 +234,7 @@ func TestMergeRemoteState_SameHashKeepsLivePeers(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	local := c.Digest()
-	buf, _ := json.Marshal(local)
+	buf, _ := encodeJSONv2(local)
 	c.MergeRemoteState(buf, false)
 	require.Len(t, c.Members(), 1)
 }

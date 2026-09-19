@@ -24,6 +24,15 @@ the curated, human-readable summary.
 
 ### Changed
 
+- **Cluster wire format dropped unversioned JSON.** memberlist node
+  metadata (peer info) and push/pull state (ring digests) are now
+  framed with a magic + version envelope and encoded with
+  `encoding/json/v2`; receivers reject unversioned or unknown-version
+  frames. Peer-fetch requests no longer accept the legacy JSON body —
+  only the binary v2 format is served. Mixed-version clusters running
+  the previous build will fail to exchange meta/state during a rolling
+  upgrade; upgrade all nodes together.
+
 - **One negative-caching key.** The scalar `negative_ttl: 30s` and the
   new map form are the same setting written two ways; the scalar is
   shorthand for the default error set (404/405/410/501). There is no

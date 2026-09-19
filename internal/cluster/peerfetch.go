@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -31,8 +30,9 @@ var peerFetchEncodePool = sync.Pool{
 }
 
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
-// request format. v2 uses 16-byte (128-bit) keys. Must not collide with
-// JSON's '{' (0x7B).
+// request format. v2 uses 16-byte (128-bit) keys. This is the only
+// accepted format: the legacy JSON fallback was removed (retrocompat
+// drop).
 const peerFetchBinaryVersion = 2
 
 const (
@@ -834,30 +834,20 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger), metrics: metrics}
 }
 
-// parsePeerFetchBody decodes the peer-fetch request body: binary framing
-// (v2) or the legacy JSON fallback. ok=false maps to a 400 response.
+// parsePeerFetchBody decodes the binary peer-fetch request body (v2).
+// ok=false maps to a 400 response.
 func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	var req api.PeerFetchRequest
-	switch body[0] {
-	case peerFetchBinaryVersion:
-		if len(body) < 18 {
-			return req, false
-		}
-		copy(req.Key[:], body[1:17])
-		varyLen := int(body[17])
-		if len(body) < 18+varyLen {
-			return req, false
-		}
-		req.VaryKey = string(body[18 : 18+varyLen])
-		return req, true
-	case '{':
-		if err := json.Unmarshal(body, &req); err != nil {
-			return req, false
-		}
-		return req, true
-	default:
+	if body[0] != peerFetchBinaryVersion || len(body) < 18 {
 		return req, false
 	}
+	copy(req.Key[:], body[1:17])
+	varyLen := int(body[17])
+	if len(body) < 18+varyLen {
+		return req, false
+	}
+	req.VaryKey = string(body[18 : 18+varyLen])
+	return req, true
 }
 
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
@@ -1061,6 +1051,3 @@ func (h *PeerPutHandler) Handle(ctx *fasthttp.RequestCtx) {
 	h.logger.Debug("served peer put", "key", obj.Key)
 	ctx.SetStatusCode(fasthttp.StatusOK)
 }
-
-// Ensure unused imports are referenced for future use.
-var _ = json.Marshal

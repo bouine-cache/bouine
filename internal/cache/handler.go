@@ -2455,20 +2455,22 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 		}
 	}
 
-	// RFC 9111 §4.3.1: store POST response if it has explicit
-	// freshness and Content-Location matching the request URI.
+	// RFC 7234 §3: a POST response may be stored when it carries explicit
+	// freshness and its Content-Location matches the request URI. RFC 9111
+	// dropped this rule (no equivalent section), but the behavior is kept
+	// intentionally for Varnish parity.
 	h.maybeStorePostResponseFast(ctx, getRI, key, resp)
 }
 
 // maybeStorePostResponseFast stores a successful POST response under
 // the GET key when it has explicit freshness and a matching
-// Content-Location (RFC 9111 §4.3.1).
+// Content-Location (RFC 7234 §3; dropped by RFC 9111, kept by design).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
 	// Responses with Set-Cookie are client-specific and never stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return
 	}
-	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 9111 §4.3.1
+	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 7234 §3
 	if loc == "" {
 		return
 	}

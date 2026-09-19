@@ -11,6 +11,7 @@ import (
 
 // slogAdapter bridges memberlist's stdlib *log.Logger output into slog,
 // parsing [LEVEL] tokens and re-emitting with component=memberlist.
+
 // handlerQueueFullMsg is the exact substring memberlist logs when a
 // per-peer handoff queue overflows. Anchored to memberlist@v0.6.0
 // net.go:472:
@@ -27,6 +28,8 @@ const handlerQueueFullMsg = "handler queue full"
 // memberlist@v0.6.0 net.go / ping.go write-error paths.
 const closedConnMsg = "use of closed network connection"
 
+// slogAdapter bridges memberlist's stdlib *log.Logger output into slog,
+// parsing [LEVEL] tokens and re-emitting with component=memberlist.
 type slogAdapter struct {
 	logger observability.Logger
 	// metrics is read atomically so that SetMetrics can update it

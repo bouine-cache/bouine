@@ -10,6 +10,8 @@ import (
 // is dying, not degraded. Anchored to fasthttp@v1.74.0 server.go:2137:
 //
 //	s.logger().Printf("Permanent error when accepting new connections: %v", err)
+//
+// Matched with strings.HasPrefix (fasthttp appends the wrapped error).
 const fasthttpPermanentAcceptErr = "Permanent error when accepting new connections"
 
 // fasthttpPipelineErr is the prefix of the only message the

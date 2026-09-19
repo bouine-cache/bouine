@@ -966,7 +966,9 @@ func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, erro
 	return owned, nil
 }
 
-// key is gone or stale. Used by the scheduler's compaction pass.
+// lookupForRefresh returns the stored object for key when it is still
+// fresh; nil when the key is gone or stale. Used by the scheduler's
+// compaction pass.
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
 	defer cancel()
@@ -1320,18 +1322,6 @@ func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
 	h.invalidateAndProxy(ctx)
 }
 
-// handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
-// falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
-// Cluster peer-fetch: if this node does not own the key, ask the owner before
-// going to origin. The owner has a much higher hit rate for keys it owns
-// (consistent hashing concentrates fills there). On a peer hit the object
-// is served to the client but NOT stored locally — in strong mode only
-// the owner caches keys it owns, so the fleet cache is partitioned (3×
-// distinct keyspace) rather than redundant (3× same keys). The owner
-// refreshes stale objects; non-owners must not trigger revalidations for
-// keys they do not own (issue #509).
-// src is the storage-tier source from lookup (hot/warm); it is overridden
-// to "peer" on a successful peer hit.
 // peerVaryAssertion derives the Vary assertion sent with a peer fetch:
 // the stale/miss-side object's stored VaryKey when lookup found one
 // (variant miss), the primary-key object's otherwise, and "" on a plain
@@ -1399,6 +1389,19 @@ func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool
 		ctx.UserValue(api.OwnerGateRejectContextKey) == true
 }
 
+// handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
+// falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
+// Cluster peer-fetch: if this node does not own the key, ask the owner before
+// going to origin. The owner has a much higher hit rate for keys it owns
+// (consistent hashing concentrates fills there). On a peer hit the object
+// is served to the client but NOT stored locally — in strong mode only
+// the owner caches keys it owns, so the fleet cache is partitioned (3×
+// distinct keyspace) rather than redundant (3× same keys). The owner
+// refreshes stale objects; non-owners must not trigger revalidations for
+// keys they do not own (issue #509).
+// src is the storage-tier source from lookup (hot/warm); it is overridden
+// to "peer" on a successful peer hit.
+//
 //nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
@@ -1910,15 +1913,6 @@ func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
 }
 
-// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
-// serving the super-stale obj if the upstream is unavailable.
-// src is the original storage-tier source from lookup (hot/warm),
-// threaded to stale-fallback serveObject calls.
-// lookupKey is the key under which the stale object was found (may be a
-// Vary variant key); it is used for singleflight dedup so that different
-// Vary variants do not collapse into a single fetch.
-// primaryKey is the canonical key used for Vary variant storage in
-// writeAndMaybeStore.
 // writeBufferedResult writes a fetchResult to the client without
 // storing (the leader already stored it). Used by singleflight
 // followers in the streaming miss path.
@@ -1943,6 +1937,15 @@ func (h *Handler) writeBufferedResult(
 	h.applyResponseRewrites(dst)
 }
 
+// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
+// serving the super-stale obj if the upstream is unavailable.
+// src is the original storage-tier source from lookup (hot/warm),
+// threaded to stale-fallback serveObject calls.
+// lookupKey is the key under which the stale object was found (may be a
+// Vary variant key); it is used for singleflight dedup so that different
+// Vary variants do not collapse into a single fetch.
+// primaryKey is the canonical key used for Vary variant storage in
+// writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	if res.Err != nil {
@@ -3226,7 +3229,6 @@ func parseSurrogateKeys(h header.Map) []string {
 	return nil
 }
 
-// isInvalidating returns true for unsafe methods that should trigger
 // staleFallbackAllowed reports whether a stale object may be served as a
 // fallback when the upstream returns a 5xx or connection error. It returns
 // false when the stored response has must-revalidate, proxy-revalidate,

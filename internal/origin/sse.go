@@ -1,15 +1,17 @@
-// sse.go — origin fetch path for Server-Sent Events requests. A request
-// that announced SSE intent (Accept: text/event-stream) is fetched through
-// a dedicated pool client whose connections convert fasthttp's absolute
-// read deadline into a per-read idle deadline: fasthttp arms
-// min(fetch_timeout, response_header_timeout) once, before the response
-// headers, and that deadline persists into the streamed body — which would
-// cut every event stream after at most a few minutes. With idle semantics
-// the stream lives as long as the origin keeps sending bytes within the
-// idle budget, matching how streaming proxies (nginx proxy_read_timeout,
-// Varnish between_bytes_timeout) treat long-lived bodies.
+// sse.go handles the origin fetch path for Server-Sent Events requests.
+// A request that announced SSE intent (Accept: text/event-stream) is
+// fetched through a dedicated pool client whose connections convert
+// fasthttp's absolute read deadline into a per-read idle deadline:
+// fasthttp arms min(fetch_timeout, response_header_timeout) once, before
+// the response headers, and that deadline persists into the streamed
+// body — which would cut every event stream after at most a few minutes.
+// With idle semantics the stream lives as long as the origin keeps
+// sending bytes within the idle budget, matching how streaming proxies
+// (nginx proxy_read_timeout, Varnish between_bytes_timeout) treat
+// long-lived bodies.
 //
 // See ADR-0042 for the full contract.
+
 package origin
 
 import (

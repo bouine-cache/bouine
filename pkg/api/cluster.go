@@ -11,7 +11,7 @@ type PeerInfo struct {
 	JoinedAt time.Time `json:"joined_at"`
 	// Name is the unique node name, typically the pod name in K8s.
 	Name string `json:"name"`
-	// Addr is the peer-fetch address (host:port, mTLS HTTP/2).
+	// Addr is the peer-fetch address (host:port, mTLS HTTP/1.1, ADR-0035).
 	Addr string `json:"addr"`
 	// AdminAddr is the admin HTTP listener (for readiness probing).
 	AdminAddr string `json:"admin_addr"`

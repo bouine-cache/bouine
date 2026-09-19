@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-19
-- **Deciders**: @bouine-core
+- **Deciders**: @chri.dupin
 - **Phase**: observability
 - **References**: issue #707, AGENTS.md §9 (cardinality budget), ADR-0034 (fasthttp H1 stack), ADR-0041 (H1 reactor)
 
@@ -17,20 +17,11 @@ front-apps hitting an internal hostname). The data-plane metrics
 per-population caching analyses (hit ratio, latency percentiles,
 bandwidth saved) are impossible on the bouine side (issue #707).
 
-The distinguishing input is the requested Host. The two obvious
-mechanisms both fail:
-
-- **Raw `host` label** — the Host is user-controlled input. Routes
-  with an empty `host:` (match-all) accept any Host header, so a
-  hostile or buggy client mints unbounded label series, violating the
-  §9 cardinality budget. On the H1 fast path the Host string can alias
-  the connection read buffer, and the reactor metrics ring requires
-  all retained strings to be stable handler-owned values — copying the
-  Host per hit would allocate on the hit path (AGENTS.md §2.4).
-- **Splitting fleets** — the same fleet carries both populations; the
-  split must live inside one instance's metrics. Splitting deployments
-  is in fact the decision this data should inform, not a prerequisite
-  for it.
+The distinguishing input is the requested Host, but a raw `host` label
+is unusable: the Host is user-controlled input (unbounded series, §9
+budget violation) and copying it per hit would allocate on the hit
+path (AGENTS.md §2.4). Splitting fleets is the decision this data
+should inform, not a prerequisite for it.
 
 ## Decision
 
@@ -45,44 +36,32 @@ label on the three data-plane request metric families.
    (matches every host, so under first-match precedence every later
    class would be dead config). Names must match
    `^[a-z][a-z0-9_]{0,31}$`, be unique, and not be the reserved
-   `unclassified`. Declaration order is precedence. Matching is
-   case-insensitive with the port stripped, identical to route
-   matching. Note that a bare trailing `*` (e.g. `www.backmarket*`) is
-   a raw string prefix: it matches across label boundaries
-   (`www.backmarket-evil.example.com`) and the empty continuation
-   (`www.backmarket`). Prefer the `.*` form, which is anchored to the
-   label boundary.
+   `unclassified`. Declaration order is precedence. A bare trailing `*`
+   (e.g. `www.backmarket*`) is a raw string prefix: it crosses label
+   boundaries and matches the empty continuation — prefer the `.*`
+   form, anchored to the label boundary.
 
 2. **Label** (`traffic_class`, always present): values come
-   exclusively from the configured set plus the `unclassified`
-   fallback. The label is spoof-proof by construction — the request
-   Host can only select among config-owned strings, the same guarantee
-   pattern as `upstream_pool` (pinned by
-   `TestTrafficClass_LabelSpaceClosed`).
+   exclusively from the configured set plus the `unclassified` fallback
+   — the request Host can only select among config-owned strings, the
+   same guarantee pattern as `upstream_pool`.
 
-3. **One classifier, three call sites** (`internal/server`):
-   the slow path stamps the router's `X-Bouine-Traffic-Class`
-   UserValue (no-route 404s classified too — Host is known before
-   routing); the H1 fast path stamps
-   `api.FastPathResponse.TrafficClass` inside `RoutedFastPath.TryHit`
-   (a stable config-owned string, satisfying the reactor ring's
-   retain-safety contract); `RecordHit` and the reactor's
-   `hitMetricsRecord` carry the field to the metrics hook. Access logs
-   gain a `traffic_class` attribute.
+3. **Classification input is the Host, resolved once per request at
+   the server layer and carried as a stable config-owned string**
+   through the slow path, the H1 fast path, and the reactor metrics
+   ring (which requires retained strings to be stable — a config-owned
+   string satisfies it; a copied Host would not). Access logs gain a
+   `traffic_class` attribute.
 
-4. **Slot tables**: `poolMetrics` gains a traffic-class axis
-   (`metricClassSlots = 9`: unclassified + the 8-class cap), filled
-   lazily exactly like pools; `PreResolveTrafficClasses` joins
-   `PreResolveRoutes` and the builder passes both the same config
-   slice (pinned by `TestTrafficClass_ClassifierSubSetOfPreResolve`).
-   Unknown classes at record time fall back to slot 0, mirroring the
-   `_default` pool fallback.
+4. **Label-space closure is enforced, not assumed**: the classifier's
+   class names and the metrics pre-resolved set come from the same
+   config slice, so the label values on all three families are exactly
+   the configured classes plus `unclassified`, regardless of what a
+   client sends.
 
-5. **Zero hit-path cost**: patterns are lowercased once at compile
-   time; the request Host is never lowercased (`strings.ToLower`
-   allocates on any case change — the exact hazard that rules out the
-   raw-host label). Classification is map lookups and
-   length-bounded case-insensitive comparisons; gated by
+5. **Zero hit-path cost is a hard constraint**: patterns are compiled
+   once at boot (lowercased, port-stripped); no per-request lowering,
+   copying, or allocation — gated by
    `BenchmarkGate_RoutedFastPath_Hit_TrafficClass` and its
    mixed-case variant (0 allocs/op).
 
@@ -141,4 +120,3 @@ label on the three data-plane request metric families.
 - AGENTS.md §9 — cardinality budget and the exception recorded here.
 - docs/runbook/native-histogram.md — series arithmetic with the class
   axis and the `metric_relabel_configs` drop pattern.
-- docs/plans/traffic-class-metric-label.md — the design plan (rev 2).

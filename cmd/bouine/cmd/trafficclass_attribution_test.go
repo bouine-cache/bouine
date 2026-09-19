@@ -192,8 +192,9 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 	rfp.Release(fResp)
 }
 
-// TestTrafficClass_ClassifierSubSetOfPreResolve pins the ADR-0047 §2.4
-// invariant at the builder level: the classifier's outputs (its class
+// TestTrafficClass_ClassifierSubSetOfPreResolve pins the ADR-0047
+// label-space-closure invariant at the builder level: the classifier's
+// outputs (its class
 // names) must be a subset of PreResolveTrafficClasses inputs — both are
 // built from the same config slice, and the fallback (slot 0) exists
 // precisely because this "cannot diverge" assumption is what a wiring

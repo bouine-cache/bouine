@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -280,4 +281,11 @@ func BenchmarkCodec_DecodeMeta(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestPeerInfoMeta_RejectsOversizedString(t *testing.T) {
+	t.Parallel()
+	info := api.PeerInfo{Name: "n1", Version: strings.Repeat("v", maxStringLen+1)}
+	_, err := EncodePeerInfoMeta(info)
+	require.ErrorIs(t, err, errStringTooLong)
 }

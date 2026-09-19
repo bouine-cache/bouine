@@ -418,6 +418,11 @@ func GossipMsgType(msg []byte) byte {
 // binaryVersion; the channel implies the payload type, so no msgType
 // byte is spent.
 
+// peerInfoStrings returns the frame's string fields in wire order.
+func peerInfoStrings(info api.PeerInfo) []string {
+	return []string{info.Name, info.Addr, info.AdminAddr, info.DataAddr, info.Version}
+}
+
 func peerInfoPayloadLen(info api.PeerInfo) int {
 	return 8 + // JoinedAt (unix nanos, 0 = zero)
 		5*2 + // five length-prefixed strings
@@ -426,18 +431,17 @@ func peerInfoPayloadLen(info api.PeerInfo) int {
 		8 // Weight (float64)
 }
 
-func putPeerInfoPayload(buf []byte, off int, info api.PeerInfo) (int, error) {
+func putPeerInfoPayload(buf []byte, off int, info api.PeerInfo) int {
 	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(info.JoinedAt))) //nolint:gosec // wire format: uint64→int64 round-trip
 	off += 8
-	var err error
-	for _, s := range []string{info.Name, info.Addr, info.AdminAddr, info.DataAddr, info.Version} {
-		off, err = putString(buf, off, s)
-		if err != nil {
-			return off, err
-		}
+	for _, s := range peerInfoStrings(info) {
+		// String lengths are validated by EncodePeerInfoMeta; the
+		// buffer is sized to peerInfoPayloadLen, so putString cannot
+		// fail here.
+		off, _ = putString(buf, off, s)
 	}
 	binary.LittleEndian.PutUint64(buf[off:], math.Float64bits(info.Weight))
-	return off + 8, nil
+	return off + 8
 }
 
 func readPeerInfoPayload(buf []byte, off int) (api.PeerInfo, int, error) {
@@ -464,13 +468,15 @@ func readPeerInfoPayload(buf []byte, off int) (api.PeerInfo, int, error) {
 // EncodePeerInfoMeta serializes PeerInfo as the memberlist node meta
 // frame (binaryMagic + version + payload).
 func EncodePeerInfoMeta(info api.PeerInfo) ([]byte, error) {
-	total := binaryHdrLen + peerInfoPayloadLen(info)
-	buf := make([]byte, total)
+	for _, s := range peerInfoStrings(info) {
+		if len(s) > maxStringLen {
+			return nil, errStringTooLong
+		}
+	}
+	buf := make([]byte, binaryHdrLen+peerInfoPayloadLen(info))
 	buf[0] = binaryMagic
 	buf[1] = binaryVersion
-	if _, err := putPeerInfoPayload(buf, binaryHdrLen, info); err != nil {
-		return nil, err
-	}
+	putPeerInfoPayload(buf, binaryHdrLen, info)
 	return buf, nil
 }
 

@@ -151,9 +151,7 @@ func TestMergeRemoteState_PrunesDeadPeers(t *testing.T) {
 	require.Len(t, c2.Members(), 4)
 
 	remote := c1.Digest()
-	buf, err := encodeJSONv2(remote)
-	require.NoError(t, err)
-
+	buf := EncodeRingDigestState(remote)
 	c2.MergeRemoteState(buf, false)
 
 	members := c2.Members()
@@ -194,9 +192,7 @@ func TestMergeRemoteState_AddsMissingPeers(t *testing.T) {
 	c2.removePeer("ms-node-a")
 	require.Len(t, c2.Members(), 1)
 
-	buf, err := encodeJSONv2(remote)
-	require.NoError(t, err)
-
+	buf := EncodeRingDigestState(remote)
 	c2.MergeRemoteState(buf, false)
 
 	require.Eventually(t, func() bool {
@@ -234,7 +230,7 @@ func TestMergeRemoteState_SameHashKeepsLivePeers(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	local := c.Digest()
-	buf, _ := encodeJSONv2(local)
+	buf := EncodeRingDigestState(local)
 	c.MergeRemoteState(buf, false)
 	require.Len(t, c.Members(), 1)
 }

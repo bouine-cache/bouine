@@ -2,9 +2,9 @@ package cluster
 
 import (
 	"encoding/binary"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -411,40 +411,117 @@ func GossipMsgType(msg []byte) byte {
 	return msg[2]
 }
 
-const (
-	// metaMagic frames memberlist meta and push/pull state payloads
-	// (PeerInfo, RingDigest). It must not collide with binaryMagic
-	// (gossip frames) or '{' (legacy JSON), so traffic can be
-	// discriminated by the first byte.
-	metaMagic byte = 0xCA
-	// metaVersion is the current envelope version for meta/state
-	// payloads. Bump it on any wire-shape change; receivers reject
-	// other versions.
-	metaVersion byte = 1
-)
+// ---- meta / push-pull state frames (binary, no msgType byte) ----
+//
+// Meta carries PeerInfo (memberlist node metadata), state carries
+// RingDigest (push/pull sync). Both are framed with binaryMagic +
+// binaryVersion; the channel implies the payload type, so no msgType
+// byte is spent.
 
-var errBadMetaMagic = errors.New("cluster: bad meta/state magic byte")
-
-// encodeJSONv2 frames v with a magic + version envelope and marshals it
-// with encoding/json/v2. The envelope keeps memberlist meta and
-// push/pull state payloads self-describing and version-gated.
-func encodeJSONv2(v any) ([]byte, error) {
-	b, err := jsonv2.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	return append(append(make([]byte, 0, 2+len(b)), metaMagic, metaVersion), b...), nil
+func peerInfoPayloadLen(info api.PeerInfo) int {
+	return 8 + // JoinedAt (unix nanos, 0 = zero)
+		5*2 + // five length-prefixed strings
+		len(info.Name) + len(info.Addr) + len(info.AdminAddr) +
+		len(info.DataAddr) + len(info.Version) +
+		8 // Weight (float64)
 }
 
-// decodeJSONv2 validates the envelope and unmarshals the payload with
-// encoding/json/v2. Frames with an unknown magic or version are
-// rejected — there is no retrocompatibility with unversioned JSON.
-func decodeJSONv2(data []byte, v any) error {
-	if len(data) < 2 || data[0] != metaMagic {
-		return errBadMetaMagic
+func putPeerInfoPayload(buf []byte, off int, info api.PeerInfo) (int, error) {
+	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(info.JoinedAt))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	var err error
+	for _, s := range []string{info.Name, info.Addr, info.AdminAddr, info.DataAddr, info.Version} {
+		off, err = putString(buf, off, s)
+		if err != nil {
+			return off, err
+		}
 	}
-	if data[1] != metaVersion {
-		return fmt.Errorf("%w: got %d", errUnsupportedVer, data[1])
+	binary.LittleEndian.PutUint64(buf[off:], math.Float64bits(info.Weight))
+	return off + 8, nil
+}
+
+func readPeerInfoPayload(buf []byte, off int) (api.PeerInfo, int, error) {
+	var info api.PeerInfo
+	if off+8 > len(buf) {
+		return info, off, errShortFrame
 	}
-	return jsonv2.Unmarshal(data[2:], v)
+	info.JoinedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	var err error
+	for _, dst := range []*string{&info.Name, &info.Addr, &info.AdminAddr, &info.DataAddr, &info.Version} {
+		*dst, off, err = readString(buf, off)
+		if err != nil {
+			return info, off, err
+		}
+	}
+	if off+8 > len(buf) {
+		return info, off, errShortFrame
+	}
+	info.Weight = math.Float64frombits(binary.LittleEndian.Uint64(buf[off:]))
+	return info, off + 8, nil
+}
+
+// EncodePeerInfoMeta serializes PeerInfo as the memberlist node meta
+// frame (binaryMagic + version + payload).
+func EncodePeerInfoMeta(info api.PeerInfo) ([]byte, error) {
+	total := binaryHdrLen + peerInfoPayloadLen(info)
+	buf := make([]byte, total)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	if _, err := putPeerInfoPayload(buf, binaryHdrLen, info); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// DecodePeerInfoMeta decodes a PeerInfo from a memberlist meta frame.
+func DecodePeerInfoMeta(buf []byte) (api.PeerInfo, error) {
+	if len(buf) < binaryHdrLen {
+		return api.PeerInfo{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.PeerInfo{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.PeerInfo{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	info, _, err := readPeerInfoPayload(buf, binaryHdrLen)
+	return info, err
+}
+
+func encodeRingDigestPayload(buf []byte, off int, d api.RingDigest) int {
+	binary.LittleEndian.PutUint64(buf[off:], d.Hash)
+	binary.LittleEndian.PutUint64(buf[off+8:], uint64(d.Size)) //nolint:gosec // wire format: int size for LE encoding
+	binary.LittleEndian.PutUint64(buf[off+16:], d.Version)
+	return off + 24
+}
+
+// EncodeRingDigestState serializes the ring digest as the memberlist
+// push/pull state frame (binaryMagic + version + payload).
+func EncodeRingDigestState(d api.RingDigest) []byte {
+	buf := make([]byte, binaryHdrLen+24)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	encodeRingDigestPayload(buf, binaryHdrLen, d)
+	return buf
+}
+
+// DecodeRingDigestState decodes the ring digest from a push/pull state
+// frame.
+func DecodeRingDigestState(buf []byte) (api.RingDigest, error) {
+	if len(buf) < binaryHdrLen+24 {
+		return api.RingDigest{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.RingDigest{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.RingDigest{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	off := binaryHdrLen
+	return api.RingDigest{
+		Hash:    binary.LittleEndian.Uint64(buf[off:]),
+		Size:    int(binary.LittleEndian.Uint64(buf[off+8:])), //nolint:gosec // wire format: int size for LE encoding
+		Version: binary.LittleEndian.Uint64(buf[off+16:]),
+	}, nil
 }

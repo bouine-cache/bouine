@@ -46,8 +46,7 @@ func TestMergeRemoteState_PrunesStalePeerOnDigestMatch(t *testing.T) {
 	// Feed c1 its own digest, so local and remote hashes match — the
 	// equilibrium from issue #648.
 	localDigest := c1.Digest()
-	buf, err := encodeJSONv2(localDigest)
-	require.NoError(t, err)
+	buf := EncodeRingDigestState(localDigest)
 
 	// Before the fix, the digest shortcut returned early and the stale
 	// peer survived forever.
@@ -83,7 +82,7 @@ func TestMergeRemoteState_SameHashStillPrunesStalePeer(t *testing.T) {
 
 	// Marshal our own digest — local and remote hashes will be identical.
 	local := c.Digest()
-	buf, _ := encodeJSONv2(local)
+	buf := EncodeRingDigestState(local)
 
 	c.MergeRemoteState(buf, false)
 

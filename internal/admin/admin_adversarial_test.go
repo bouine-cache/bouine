@@ -128,9 +128,6 @@ func TestAdversarial_MalformedJSON_AllEndpoints(t *testing.T) {
 }
 
 // TestAdversarial_JSONDuplicateFields verifies that duplicate JSON keys
-// are handled deterministically. Go's encoding/json keeps the last
-// value, which is the standard behaviour.
-// TestAdversarial_JSONDuplicateFields verifies that duplicate JSON keys
 // are rejected: encoding/json/v2 rejects duplicate object members, so a
 // body containing the same member twice maps to a 400 and the handler
 // never fires.

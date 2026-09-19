@@ -838,7 +838,7 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 // ok=false maps to a 400 response.
 func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	var req api.PeerFetchRequest
-	if body[0] != peerFetchBinaryVersion || len(body) < 18 {
+	if len(body) < 18 || body[0] != peerFetchBinaryVersion {
 		return req, false
 	}
 	copy(req.Key[:], body[1:17])

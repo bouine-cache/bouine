@@ -133,7 +133,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		return nil, fmt.Errorf("origin fetch: %w", err)
 	}
 
-	// Check Content-Length against maxResponseBytes if available.
 	if h.maxResponseBytes > 0 {
 		if cl := resp.Header.ContentLength(); cl > 0 && int64(cl) > h.maxResponseBytes {
 			fasthttp.ReleaseRequest(req)
@@ -330,7 +329,6 @@ func (h *Handler) streamMiss(
 		return
 	}
 
-	// Set up response headers for the client.
 	dst := &ctx.Response.Header
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))

@@ -145,7 +145,6 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		return f.tryPeerFetch(ctx, req, key, now, reqCC)
 	}
 
-	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	lookupKey := key
 	if vary := obj.VaryValue; vary != "" {
 		vk := VariantKeyFromRaw(key, vary, req, f.policy)
@@ -440,7 +439,6 @@ func (f *FastPathHandler) composeResponse(req *api.RawRequest, obj *api.Object, 
 		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now), closeConn)
 	}
 
-	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date).
 	dateStr := f.getCachedDate(now)
 	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
 
@@ -635,7 +633,6 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 		// Oversized buffers are discarded (not returned to pool).
 		resp.BufPtr = nil
 	}
-	// Reset and return the response to its pool.
 	resp.HeaderBuf = nil
 	resp.BuffersArr = [3][]byte{}
 	resp.Buffers = nil

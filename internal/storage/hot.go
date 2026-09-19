@@ -603,7 +603,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		stillOver = true
 	}
 
-	// Remove old entry if replacing, return to pool.
 	if old, exists := s.entries[key]; exists {
 		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)

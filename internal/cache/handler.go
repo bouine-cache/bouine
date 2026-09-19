@@ -1721,7 +1721,6 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	fh := getOrComputeFastHeader(obj)
 	fh.CopyTo(dst)
 
-	// Set dynamic headers per request.
 	var ageBuf [16]byte
 	ageSeconds := int64(ComputeAge(obj, now).Seconds())
 	ageStr := strconv.AppendInt(ageBuf[:0], ageSeconds, 10)
@@ -1893,7 +1892,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
-		// Write the buffered result without re-storing (leader already stored).
+		// No re-store: the leader already stored.
 		h.writeBufferedResult(ctx, res, primaryKey, ri)
 		return
 	}
@@ -2436,7 +2435,6 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Write the captured response to the client.
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
 		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
@@ -2484,16 +2482,14 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 9111 §4.3.1).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
-	// Check for Set-Cookie — responses with Set-Cookie are not stored.
+	// Responses with Set-Cookie are client-specific and never stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return
 	}
-	// Check Content-Location matches request URI (RFC 9111 §4.3.1).
-	loc := string(resp.Header.Peek(header.ContentLocation))
+	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 9111 §4.3.1
 	if loc == "" {
 		return
 	}
-	// Build fetchResult from the fasthttp response for buildObject.
 	body := make([]byte, len(resp.Body()))
 	copy(body, resp.Body())
 	hdr := header.FromFastHTTP(&resp.Header)
@@ -2843,7 +2839,6 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
 	}
 
-	// Check for max response bytes.
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		fasthttp.ReleaseResponse(resp)
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}

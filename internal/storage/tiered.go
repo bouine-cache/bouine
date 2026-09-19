@@ -313,7 +313,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		}
 	}
 
-	// Start the warm sync goroutine if warm tier and sync are enabled.
 	if ts.warm != nil && warmSyncInterval > 0 {
 		ts.syncWg.Add(1)
 		go ts.warmSyncLoop()
@@ -328,7 +327,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		go ts.tombstoneDrainLoop()
 	}
 
-	// Start the checkpoint loop if warm tier and WAL are both enabled.
 	if ts.warm != nil && ts.wal != nil && ts.checkpointInterval > 0 {
 		ts.checkpointWg.Add(1)
 		go ts.checkpointLoop()

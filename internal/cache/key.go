@@ -140,7 +140,6 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	// Extract query from URI bytes — only convert to string if non-empty.
 	rawQuery := extractRawQueryBytes(uri)
 	if len(rawQuery) > 0 {
 		n = appendCanonicalQueryString(buf[:], n, string(rawQuery), policy)

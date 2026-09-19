@@ -164,7 +164,6 @@ func (m *multiTokenPurger) Purge(
 		return &cache.CachePurgeResponse{}, nil
 	}
 
-	// Check if this was a rate limit error — if so, mark the token.
 	var apiErr *cloudflare.Error
 	if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
 		var retryAfter time.Duration

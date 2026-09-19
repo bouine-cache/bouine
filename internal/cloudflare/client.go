@@ -67,7 +67,6 @@ func New(cfg Config) (*Client, error) {
 		return nil, &ZoneConfigError{Msg: "cloudflare: zone_id must not be empty"}
 	}
 
-	// Collect all tokens (primary + additional).
 	allTokens := []string{cfg.APIToken}
 	allTokens = append(allTokens, cfg.APITokens...)
 	allTokens = nonEmpty(allTokens)

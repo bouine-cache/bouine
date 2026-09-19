@@ -25,7 +25,9 @@ editing.
   If a reference exists, the content stays (it may move, with the reference
   updated in the same change).
 - ADR numbering is immutable: never renumber, renumber-gapped, or merge ADRs
-  into one another. New ADRs only via the normal process.
+  into one another. New ADRs only via the normal process. Sole exception
+  (user-approved 2026-09-19): duplicate numbers may be reassigned to the
+  next free number when two ADRs share one.
 - `CHANGELOG.md` is append-only; never touch existing entries.
 - Never weaken a rule: if a doc states a gate, budget, or invariant
   (benchmarks, coverage, security), the tightened version must enforce at

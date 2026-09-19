@@ -1,4 +1,4 @@
-# ADR-0032: Changelog automation
+# ADR-0047: Changelog automation
 
 - **Status**: Accepted
 - **Date**: 2026-08-18

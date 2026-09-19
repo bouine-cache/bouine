@@ -1,4 +1,4 @@
-# ADR-0045: PurgeEvent.VaryKey is metadata; receivers purge the primary key and all variants
+# ADR-0049: PurgeEvent.VaryKey is metadata; receivers purge the primary key and all variants
 
 - **Status**: Accepted
 - **Date**: 2026-09-15

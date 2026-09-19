@@ -30,8 +30,8 @@ field to `Superseded by ADR-NNNN`.
 | Number | Title                                              | Status   |
 |--------|----------------------------------------------------|----------|
 | 0001   | Record architecture decisions                      | Accepted |
-| 0002   | HTTP/3 via quic-go                                 | Accepted |
-| 0003   | Hand-rolled PROXY protocol parser                  | Accepted |
+| 0002   | HTTP/3 via quic-go                                 | Removed  |
+| 0003   | Hand-rolled PROXY protocol parser                  | Removed  |
 | 0004   | One *http.Server per listener                      | Accepted |
 | 0005   | Round-robin upstream selection via atomic counter  | Accepted |
 | 0006   | Drop Fiber, unify admin on net/http                | Accepted |
@@ -60,6 +60,21 @@ field to `Superseded by ADR-NNNN`.
 | 0029   | Dedicated tombstone drain goroutine                  | Accepted |
 | 0030   | 128-bit cache key via XXH128                         | Accepted |
 | 0031   | Pluggable eviction framework                         | Accepted |
-| 0032   | Changelog automation                                 | Accepted |
-| 0033   | RPS-based HPA autoscaling                            | Proposed |
-| 0045   | PurgeEvent.VaryKey is metadata; purge-all on receive | Accepted |
+| 0032   | Decouple hot SIEVE eviction from warm tombstone     | Accepted |
+| 0033   | RPS-based HPA autoscaling                           | Proposed |
+| 0034   | Reverse ADR-0006, adopt fasthttp as the sole HTTP stack | Accepted |
+| 0035   | Peer wire protocol is HTTP/1.1 over mTLS            | Accepted |
+| 0036   | Header type migration — local canonicalHeaderKey    | Accepted |
+| 0037   | Zero-copy origin response capture via fasthttp pooled response | Accepted |
+| 0038   | Streaming origin responses via fasthttp SetBodyStreamWriter | Accepted |
+| 0039   | HTTP/1.1 pipelining for peer fetch                  | Accepted |
+| 0040   | Re-enable the CI prek cache with a GO_VERSION_STAMP guard | Accepted |
+| 0041   | epoll reactor for batch hit-path serving            | Accepted |
+| 0042   | Server-Sent Events streaming semantics              | Accepted |
+| 0043   | Per-route origin timeout                            | Accepted |
+| 0044   | Batched cluster invalidation delivery with per-issuer sequence dedup | Accepted |
+| 0045   | Bounded peer-fetch shedding and the post-ban re-warm allowance | Accepted |
+| 0046   | Fold `cache.key.include_headers` into the stored Vary | Accepted |
+| 0047   | Changelog automation                                | Accepted |
+| 0048   | kubeconform validation of rendered Helm templates   | Accepted |
+| 0049   | PurgeEvent.VaryKey is metadata; receivers purge the primary key and all variants | Accepted |

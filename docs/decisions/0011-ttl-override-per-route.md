@@ -89,8 +89,9 @@ change and would silently alter behaviour for operators relying on
 ### Risks
 - A misconfigured large `ttl_override` (e.g. `ttl_override: 365d`) will
   serve stale content for a very long time. Mitigated by: the field is opt-in
-  (default 0 = disabled), jitter distributes expiry, and `make purge` / ban
-  are available for emergency invalidation.
+  (default 0 = disabled), jitter distributes expiry, and purge / ban
+  (see `docs/runbook/20-purge-ban.md`) are available for emergency
+  invalidation.
 
 ## References
 

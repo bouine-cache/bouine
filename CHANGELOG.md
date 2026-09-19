@@ -43,6 +43,13 @@ the curated, human-readable summary.
   covered by the negative-caching policy are never proactively
   refreshed, regardless of how they were cached. Statuses outside the
   policy (including all 2xx/3xx) refresh normally.
+- docs: condense documentation without losing knowledge — fixed stale
+  HTTP-stack facts in `README.md` and `docs/architecture.md`, removed
+  `full` cluster-mode content (removed in ADR-0025) from the
+  cluster-modes runbook, deduplicated the runbook index, replaced the
+  duplicated ADR-0016 draft in the refresh-before-expiry plan with a
+  pointer, condensed the refresh-prioritization revision history, and
+  repaired a dangling plan reference in ADR-0023.
 
 ## [0.5.21] - 2026-09-17
 

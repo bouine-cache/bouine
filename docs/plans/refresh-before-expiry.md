@@ -660,46 +660,9 @@ Add to `docs/security/threat-model.md`:
 
 ## 12. ADR-0016: Refresh-Before-Expiry Per Route
 
-**Status:** Proposed
-**Date:** 2026-07-01
-**Context:** Operators need a way to keep high-value routes perpetually
-fresh with minimal origin traffic. SWR handles TTL expiry reactively
-(client request triggers revalidation). Always-warm handles eviction
-reactively. Neither prevents the expiry event. The cache key is an
-irreversible hash, so the scheduler needs a handler-side registry to
-reconstruct origin requests.
-
-**Decision:** Per-route `refresh_before_expiry` opt-in. Handler-side
-min-heap scheduler fires at `TTL − margin`. Conditional revalidation
-via existing `collapsedFetch` path. Registry stores Vary-relevant
-request headers only. Lazy cancellation via `store.Get` on pop.
-
-**Alternatives considered:**
-1. **Per-object `time.AfterFunc`** — rejected: one goroutine per object,
-   unacceptable for 1M objects.
-2. **Scanner (like reaper)** — rejected: O(n) scan per interval, coarse
-   granularity, wastes CPU scanning non-refresh entries.
-3. **Store the URL in `api.Object`** — rejected: changes public API,
-   increases per-object memory for all objects, serializes to warm tier.
-4. **Integrate with reaper** — rejected: 30s granularity too coarse for
-   short TTLs. Mixing reaper (delete expired) and refresh (refresh
-   before expiry) in one scan complicates the lock discipline.
-5. **Always-warm (eviction-triggered)** — complementary, not
-   alternative. Always-warm handles memory pressure eviction;
-   refresh-before-expiry handles TTL expiry. Both can be enabled on the
-   same route.
-
-**Consequences:**
-- New per-route memory cost: ~232–482 B per scheduled object (heap +
-  registry).
-- One drainer goroutine per handler with refresh enabled.
-- Up to `refreshConcurrency` (8) refresh goroutines per route.
-- `Handler` gains `Close(ctx) error` and a `done` channel.
-- New config fields (5) with validation.
-- New metrics (6).
-- Zero storage-layer changes.
-- Zero hit-path impact.
-- ADR + threat model update + runbook entry.
+The decision record for this plan lives in
+[`docs/decisions/0016-refresh-before-expiry.md`](../decisions/0016-refresh-before-expiry.md);
+it is not duplicated here.
 
 ---
 

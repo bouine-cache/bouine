@@ -668,7 +668,7 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 			TTL:         FmtDuration(rc.Cache.TTLOverride),
 			SWR:         FmtDuration(rc.Cache.StaleWhileRevalidate),
 			SIE:         FmtDuration(rc.Cache.StaleIfError),
-			NegTTL:      FmtDuration(rc.Cache.NegativeTTL),
+			NegTTL:      negativeTTLLabel(rc.Cache),
 			StayinAlive: rc.Cache.StayinAlive,
 			Jitter:      jitterStr(rc.Cache.JitterPercent),
 			Methods:     methodsLabel(rc.Match.Methods),
@@ -832,8 +832,33 @@ func FmtAddrPort(addr string) string {
 	return addr
 }
 
+// negativeTTLLabel renders the neg_ttl dashboard cell from the
+// policy's entries: "404:30s, 5xx:10s" with zero entries shown as
+// "410:off". The scalar shorthand is already expanded, so a "30s"
+// route shows "404:30s, 405:30s, 410:30s, 501:30s" — the policy
+// actually in effect, never a shorthand that hides it.
+func negativeTTLLabel(c config.RouteCache) string {
+	entries := c.NegativeTTL.Policy().Entries()
+	if len(entries) == 0 {
+		return FmtDuration(0)
+	}
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.TTL == 0 {
+			parts = append(parts, e.Key+":off")
+			continue
+		}
+		parts = append(parts, e.Key+":"+FmtDuration(e.TTL))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func buildRouteCacheRows(rc config.Route) []ConfigRow {
-	rows := appendDurRow(nil, "negative_ttl", rc.Cache.NegativeTTL)
+	entries := rc.Cache.NegativeTTL.Policy().Entries()
+	rows := make([]ConfigRow, 0, len(entries)+8)
+	for _, e := range entries {
+		rows = append(rows, ConfigRow{Key: "negative_ttl[" + e.Key + "]", Value: FmtDuration(e.TTL), Kind: "dur"})
+	}
 	rows = appendDurRow(rows, "ttl_override", rc.Cache.TTLOverride)
 	rows = appendDurRow(rows, "stale_while_revalidate", rc.Cache.StaleWhileRevalidate)
 	rows = appendDurRow(rows, "stale_if_error", rc.Cache.StaleIfError)

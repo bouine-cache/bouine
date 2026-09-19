@@ -238,7 +238,7 @@ func ruleCacheNoNegTTL(data InsightData) *Insight {
 			continue
 		}
 		r := routeNameToConfig(data, rs.Route)
-		if r != nil && isCacheEnabled(r) && r.Cache.NegativeTTL == 0 {
+		if r != nil && isCacheEnabled(r) && !r.Cache.NegativeTTL.Policy().CoversAnything() {
 			triggered = append(triggered, rs.Route)
 		}
 	}

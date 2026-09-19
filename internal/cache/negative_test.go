@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -12,6 +13,7 @@ import (
 
 func TestIsNegativeCacheable(t *testing.T) {
 	t.Parallel()
+	// The default set a scalar negative_ttl expands to.
 	tests := []struct {
 		status int
 		want   bool
@@ -26,8 +28,8 @@ func TestIsNegativeCacheable(t *testing.T) {
 		{502, false},
 	}
 	for _, tt := range tests {
-		got := IsNegativeCacheable(tt.status)
-		assert.Equal(t, tt.want, got)
+		got := mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)).Cacheable(tt.status)
+		assert.Equal(t, tt.want, got, "status %d", tt.status)
 	}
 }
 
@@ -115,4 +117,15 @@ func TestSoftPurge_NegativeTTL(t *testing.T) {
 	SoftPurge(obj, now)
 	// TTL = now - StoredAt = -30s → clamped to 0.
 	assert.Equal(t, time.Duration(0), obj.TTL)
+}
+
+// mustStatusTTL builds a policy for tests: config.Validate's
+// construction path, with the error pinned to the test. Policy
+// resolution and key parsing are tested in pkg/api's own suite —
+// the cache package holds no second copy of that coverage.
+func mustStatusTTL(t *testing.T, m map[string]time.Duration) *StatusTTL {
+	t.Helper()
+	p, err := api.NewStatusTTLMap(m)
+	require.NoError(t, err)
+	return p
 }

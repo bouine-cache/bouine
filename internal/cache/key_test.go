@@ -144,50 +144,50 @@ func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
 func TestIsCacheable_BasicPositive(t *testing.T) {
 	t.Parallel()
 	resp := headerMap(header.CacheControl, "max-age=60")
-	require.True(t, IsCacheable(200, header.NewMap(0), resp))
+	require.True(t, IsCacheable(200, header.NewMap(0), resp, nil))
 }
 
 func TestIsCacheable_NoStore(t *testing.T) {
 	t.Parallel()
 	resp := headerMap(header.CacheControl, "no-store")
-	require.False(t, IsCacheable(200, header.NewMap(0), resp))
+	require.False(t, IsCacheable(200, header.NewMap(0), resp, nil))
 }
 
 func TestIsCacheable_Private(t *testing.T) {
 	t.Parallel()
 	resp := headerMap(header.CacheControl, "private, max-age=60")
-	require.False(t, IsCacheable(200, header.NewMap(0), resp))
+	require.False(t, IsCacheable(200, header.NewMap(0), resp, nil))
 }
 
 func TestIsCacheable_SetCookie(t *testing.T) {
 	t.Parallel()
 	// Set-Cookie WITHOUT explicit freshness blocks caching.
 	resp := headerMap(header.SetCookie, "sid=abc")
-	require.False(t, IsCacheable(200, header.NewMap(0), resp))
+	require.False(t, IsCacheable(200, header.NewMap(0), resp, nil))
 	// Set-Cookie WITH explicit max-age is cacheable (shared cache behavior).
 	resp2 := headerMap(header.CacheControl, "max-age=60", header.SetCookie, "sid=abc")
-	require.True(t, IsCacheable(200, header.NewMap(0), resp2))
+	require.True(t, IsCacheable(200, header.NewMap(0), resp2, nil))
 }
 
 func TestIsCacheable_Authorization(t *testing.T) {
 	t.Parallel()
 	req := headerMap(header.Authorization, "Bearer tok")
 	resp := headerMap(header.CacheControl, "max-age=60")
-	require.False(t, IsCacheable(200, req, resp))
+	require.False(t, IsCacheable(200, req, resp, nil))
 
 	resp2 := headerMap(header.CacheControl, "max-age=60, public")
-	require.True(t, IsCacheable(200, req, resp2))
+	require.True(t, IsCacheable(200, req, resp2, nil))
 }
 
 func TestIsCacheable_HeuristicStatus(t *testing.T) {
 	t.Parallel()
 	// 301 with Last-Modified is heuristically cacheable.
 	resp := headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
-	require.True(t, IsCacheable(301, header.NewMap(0), resp))
+	require.True(t, IsCacheable(301, header.NewMap(0), resp, nil))
 	// 301 without Last-Modified is NOT heuristically cacheable.
-	require.False(t, IsCacheable(301, header.NewMap(0), header.NewMap(0)))
+	require.False(t, IsCacheable(301, header.NewMap(0), header.NewMap(0), nil))
 	// 302 is never heuristically cacheable.
-	require.False(t, IsCacheable(302, header.NewMap(0), headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")))
+	require.False(t, IsCacheable(302, header.NewMap(0), headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT"), nil))
 }
 
 func TestBuildKeyFromURL_Empty(t *testing.T) {

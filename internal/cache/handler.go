@@ -262,6 +262,7 @@ type Handler struct {
 	flight        singleflight.Group
 	logger        observability.Logger
 	fastClient    FastClient
+	negTTL        *StatusTTL
 	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
 	// is deliberately NOT the foreground fetchSem: the refill exists to
 	// clear the post-ban miss backlog, and sharing the foreground budget
@@ -362,7 +363,6 @@ type Handler struct {
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
-	negativeTTL          time.Duration
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
 	stayinAlive          bool
@@ -391,6 +391,10 @@ type HandlerConfig struct {
 	RewarmFill interface{ Inc() }
 	Store      storage.Store
 	Logger     observability.Logger
+	// Negative resolves per-status negative-caching TTLs from the
+	// route's negative_ttl policy (both forms normalized to one map by
+	// the config layer). Nil disables negative caching.
+	Negative *StatusTTL
 	// FastClient is used by doFetch to fetch from the origin via
 	// fasthttp. The response is captured directly in a pooled
 	// *fasthttp.Response, eliminating intermediate header.Map and
@@ -504,8 +508,6 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
-	// NegativeTTL enables caching of 404/405/410/501 responses.
-	NegativeTTL time.Duration
 	// DefaultSIE is applied to every stored object when the origin does not
 	// send stale-if-error. Zero disables SIE fallback for this route.
 	DefaultSIE time.Duration
@@ -710,7 +712,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		pathRewrite:             cfg.PathRewrite,
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
-		negativeTTL:             cfg.NegativeTTL,
+		negTTL:                  cfg.Negative,
 		jitterPercent:           cfg.JitterPercent,
 		stayinAlive:             cfg.StayinAlive,
 		logCacheKeys:            cfg.LogCacheKeys,
@@ -1118,7 +1120,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	resMap := res.Header.ToMap()
-	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negativeTTL, h.defaultTTL) {
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negTTL, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -1127,7 +1129,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -2201,14 +2203,14 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgResMap := res.Header.ToMap()
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
-	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
+	if bgParsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) {
 		if !h.allowSetCookie && bgResMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, ri, res, bgResMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, bgResMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -2244,7 +2246,7 @@ func (h *Handler) writeAndMaybeStore(
 	// IsCacheableWithDefault re-parses again).
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
-	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
+	if parsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			return
 		}
@@ -2265,7 +2267,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -2498,7 +2500,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getRI, res, hdr, h.negativeTTL, h.defaultTTL, h.overrideTTL,
+	obj := buildObject(key, getRI, res, hdr, h.negTTL, h.defaultTTL, h.overrideTTL,
 		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
 	if obj == nil {
 		return
@@ -2564,7 +2566,10 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 	}
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
-		if IsNegativeCacheable(obj.StatusCode) {
+		// An error status covered by the negative-caching policy skips
+		// proactive refresh: re-fetching an origin already returning
+		// errors amplifies the outage.
+		if h.negTTL.Cacheable(obj.StatusCode) {
 			return
 		}
 		if !isRefresh && h.refreshReactiveFirst {
@@ -2713,12 +2718,12 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	// path's store gate (no client response is written here).
 	resMap := res.Header.ToMap()
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
-	if !parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) ||
+	if !parsed.isCacheableWithDefault(h.negTTL, h.defaultTTL) ||
 		(!h.allowSetCookie && resMap.Get(header.SetCookie) != "") ||
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
-	obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.negTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 	h.storeObject(ctx, key, obj, ri, true, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
@@ -3000,7 +3005,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
@@ -3030,7 +3035,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		}
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
-	ttl := computeTTL(resMap, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
+	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
 	// Route-level override wins over the upstream's freshness directives.
 	// Applied after computeTTL so jitter is seeded from the override value,
 	// not the origin's max-age. The stored object retains the unaltered
@@ -3150,20 +3155,32 @@ func serializeHead(obj *api.Object) []byte {
 	return buf
 }
 
-// computeTTL derives the freshness lifetime for a response, applying
-// explicit freshness, heuristic TTL, operator defaults, jitter, and
-// the origin Age adjustment.
+// computeTTL derives the freshness lifetime for a response. Precedence
+// when the origin sends no explicit freshness (max-age/s-maxage/valid
+// Expires): per-status negative TTL (negative_ttl) for the statuses it
+// covers > heuristic TTL (Last-Modified) > operator default TTL. The
+// per-status policy wins first for covered statuses: caching a 5xx for
+// hours because the origin echoes Last-Modified, or for ttl_default's
+// duration instead of the operator's 10s, is exactly what the policy
+// exists to prevent. Statuses it does not cover keep the pre-existing
+// resolution: heuristic freshness outranks ttl_default, as before this
+// feature. Jitter and the origin Age adjustment apply last.
 func computeTTL(hdr header.Map, status int, respCC Directives,
-	negativeTTL, defaultTTL time.Duration, jitterPct int,
+	neg *StatusTTL, defaultTTL time.Duration, jitterPct int,
 	originAge time.Duration, now time.Time) time.Duration {
 	ttl, explicit := FreshnessLifetimeH(respCC, hdr)
 	if !explicit {
-		ttl = HeuristicTTL(hdr, now)
-	}
-	if !explicit && ttl == 0 && defaultTTL > 0 {
-		ttl = defaultTTL
-	} else if !explicit && ttl == 0 && negativeTTL > 0 && IsNegativeCacheable(status) {
-		ttl = negativeTTL
+		// Per-status negative caching outranks every other implicit
+		// source (Cloudflare's "Cache TTL by status code" semantics),
+		// but only for the statuses it covers.
+		if negTTL := neg.TTL(status); negTTL > 0 {
+			ttl = negTTL
+		} else {
+			ttl = HeuristicTTL(hdr, now)
+			if ttl == 0 && defaultTTL > 0 {
+				ttl = defaultTTL
+			}
+		}
 	}
 	ttl = JitterTTL(ttl, jitterPct)
 	ttl -= originAge

@@ -10,6 +10,40 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- `routes[].cache.negative_ttl` now accepts a per-status map, mirroring
+  Cloudflare's "Cache TTL by status code": `negative_ttl: {404: 1m,
+  5xx: 10s, 410: 0}`. Keys are a single error status ("404") or a
+  class ("4xx", "5xx"); exact codes are limited to 400-599 (2xx/3xx
+  entries are rejected as configuration errors). An exact code shadows
+  its class ("blanket + exception": `5xx: 10s, 503: 30s`). Values are
+  durations; zero explicitly disables caching for that status. The
+  policy only applies when the origin sends no explicit freshness, and
+  RFC 9111 blocking directives still win.
+
+### Changed
+
+- **One negative-caching key.** The scalar `negative_ttl: 30s` and the
+  new map form are the same setting written two ways; the scalar is
+  shorthand for the default error set (404/405/410/501). There is no
+  separate `status_ttl` key and no fallback interaction: the map form
+  is the complete policy.
+- **Negative-caching TTL precedence.** A negative-caching policy now
+  outranks `ttl_default` and heuristic freshness (Last-Modified) — but
+  only for the statuses it covers. Previously, a route with both
+  `negative_ttl` and `ttl_default` cached 404s for the `ttl_default`
+  duration, and an error response echoing `Last-Modified` could be
+  heuristic-cached for far longer than the operator-configured negative
+  TTL. If you relied on the old shadowing, remove the negative-caching
+  entry for the affected statuses. Statuses the policy does not cover
+  keep the pre-existing resolution unchanged: heuristic freshness
+  (Last-Modified) still outranks `ttl_default`.
+- **Refresh exclusion is policy-driven.** Objects with an error status
+  covered by the negative-caching policy are never proactively
+  refreshed, regardless of how they were cached. Statuses outside the
+  policy (including all 2xx/3xx) refresh normally.
+
 ## [0.5.21] - 2026-09-17
 
 ### Changed

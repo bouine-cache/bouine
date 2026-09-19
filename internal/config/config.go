@@ -420,6 +420,11 @@ type ConnectPolicy struct {
 // A route must specify exactly one of Pool or Static.Root — the former
 // proxies to an upstream pool, the latter serves files from a local
 // directory.
+//
+// config grouping (match, request, response, static, cache) rather
+// than size order; the route table is cold, the padding is irrelevant.
+//
+//nolint:govet // fieldalignment: fields follow the operator-facing
 type Route struct {
 	// Name is the human-readable route label used in Prometheus metrics and
 	// the operator dashboard. Defaults to host:path_prefix when empty.
@@ -461,6 +466,11 @@ type RouteMatch struct {
 }
 
 // RouteCache is the per-route cache policy.
+//
+// operators read (toggles, key, refresh, TTLs) rather than size
+// order; the route table is cold, the padding is irrelevant.
+//
+//nolint:govet // fieldalignment: fields follow the config-file order
 type RouteCache struct {
 	// AllowSetCookie controls whether responses containing a Set-Cookie
 	// header are eligible for caching.
@@ -589,9 +599,26 @@ type RouteCache struct {
 	// refresh fetch. Default 10s. Range 5s-120s.
 	RefreshTimeout       time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
 	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate,omitempty" json:"stale_while_revalidate,omitempty"`
-	// NegativeTTL caches error responses (404, 405, 410, 501) for
-	// the configured duration. Zero disables negative caching.
-	NegativeTTL time.Duration `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
+	// NegativeTTL is the route's negative-caching policy, written as
+	// one key with two forms:
+	//
+	//	negative_ttl: 30s                        # default-set shorthand
+	//	negative_ttl: {404: 1m, 5xx: 10s, 410: 0} # per-status map
+	//
+	// Both forms are the same policy internally: the scalar expands to
+	// the default error set (404/405/410/501); the map is a complete
+	// per-status policy mirroring Cloudflare's "Cache TTL by status
+	// code" — keys are a single error status ("404") or a class
+	// ("4xx", "5xx"), with exact codes in 400-599 only (2xx/3xx
+	// entries are rejected: they would look like normal cache fills
+	// but skip proactive refresh). An exact code shadows its class,
+	// giving the "blanket + exception" idiom (5xx: 10s, 503: 30s).
+	// Values are durations; zero explicitly disables caching for
+	// that status. The policy only applies when the origin sends no
+	// explicit freshness, and outranks ttl_default and heuristic
+	// freshness for the statuses it covers; RFC 9111 blocking
+	// directives (no-store, private, Set-Cookie, ...) still win.
+	NegativeTTL NegativeTTLConfig `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
 	// RefreshMinScore is the minimum refresh priority score required for
 	// re-scheduling after a background refresh. The score is computed as
 	// staleHits × obj.BodySize, where staleHits is the per-window hit count
@@ -608,8 +635,11 @@ type RouteCache struct {
 	// clients always see cache hits. On 200, the object is replaced.
 	//
 	// Requires caching to be enabled. Objects with TTL < 5s are not
-	// scheduled. Negative-cached objects (404/405/410/501) are not
-	// refreshed.
+	// scheduled. Objects with an error status covered by the
+	// negative_ttl policy (default set, exact code, or class) are
+	// never refreshed — regardless of how the object was cached —
+	// because proactively re-fetching an origin that is already
+	// returning errors would amplify the outage.
 	RefreshBeforeExpiry bool `yaml:"refresh_before_expiry,omitempty" json:"refresh_before_expiry,omitempty"`
 	// RefreshReactiveFirst changes the refresh strategy from proactive to
 	// reactive for the initial TTL window. New objects are not scheduled

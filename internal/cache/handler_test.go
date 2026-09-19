@@ -2285,22 +2285,70 @@ func TestSourceSlice(t *testing.T) {
 func TestComputeTTL_NegativeTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 404, Directives{}, 30*time.Second, 0, 0, 0, time.Now())
+	ttl := computeTTL(h, 404, Directives{}, mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)), 0, 0, 0, time.Now())
 	assert.Equal(t, 30*time.Second, ttl)
 }
 
 func TestComputeTTL_HeuristicTTL(t *testing.T) {
 	t.Parallel()
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
-	ttl := computeTTL(h, 200, Directives{}, 0, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := computeTTL(h, 200, Directives{}, nil, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl)
 }
 
 func TestComputeTTL_DefaultTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 200, Directives{}, 0, 60*time.Second, 0, 0, time.Now())
+	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
 	assert.Equal(t, 60*time.Second, ttl)
+}
+
+func TestComputeTTL_StatusTTLOutranksDefaultTTL(t *testing.T) {
+	t.Parallel()
+	// The per-status policy is the operator's explicit statement about
+	// error responses; ttl_default must not extend a negative-cached
+	// 5xx past it (review finding: defaultTTL used to shadow the policy).
+	h := header.Map{}
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 503, Directives{}, neg, 60*time.Second, 0, 0, time.Now())
+	assert.Equal(t, 10*time.Second, ttl)
+}
+
+func TestComputeTTL_StatusTTLOutranksHeuristic(t *testing.T) {
+	t.Parallel()
+	// A 5xx echoing Last-Modified must not get age/10 (potentially
+	// hours) when the operator pinned 10s for the range.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 503, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 10*time.Second, ttl)
+}
+
+func TestComputeTTL_HeuristicStillAppliesToHeuristicStatuses(t *testing.T) {
+	t.Parallel()
+	// A negative_ttl policy for 5xx must not leak into a 404's heuristic
+	// or a 200's default TTL: statuses the policy does not cover keep
+	// the pre-existing resolution.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 404, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 876*time.Hour, ttl, "uncovered status keeps heuristic TTL")
+}
+
+func TestComputeTTL_HeuristicOutranksDefaultTTL(t *testing.T) {
+	t.Parallel()
+	// Pre-existing resolution, pinned since the negative_ttl work
+	// touched this chain: heuristic freshness (Last-Modified age/10)
+	// outranks ttl_default for any status the policy does not cover.
+	// Without this pin, ttl_default silently flips ordinary 200s with
+	// Last-Modified from hours of heuristic TTL to the operator default.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 876*time.Hour, ttl, "heuristic outranks ttl_default")
+
+	// No heuristic source at all: ttl_default applies.
+	ttl = computeTTL(header.Map{}, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
+	assert.Equal(t, 60*time.Second, ttl, "ttl_default applies without heuristic freshness")
 }
 
 func TestHandler_OnlyIfCachedBypass(t *testing.T) {
@@ -2348,7 +2396,7 @@ func TestBuildObject_CDNCacheControl(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 120*time.Second, obj.TTL)
 	assert.Contains(t, obj.CacheControl, "max-age=120")
@@ -2362,7 +2410,7 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -2375,7 +2423,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 		Body:       []byte("hello world"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
 }
@@ -2389,7 +2437,7 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, now)
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, now)
 	require.NotNil(t, obj)
 	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
@@ -2403,7 +2451,7 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.False(t, obj.LastModified.IsZero())
 }
@@ -2416,7 +2464,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -2429,7 +2477,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -2442,7 +2490,7 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	// VaryKey should be non-empty (the object has a Vary header).
 	assert.NotEqual(t, "", obj.VaryKey)
@@ -2815,7 +2863,12 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 
 func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	t.Parallel()
+	// A 404 covered by the negative-caching policy (here with explicit
+	// origin freshness, so the object was NOT stored via negative
+	// caching) must still skip proactive refresh: re-fetching an origin
+	// that is already returning errors amplifies the outage.
 	h := testRefreshHandler(t, 1)
+	h.negTTL = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
 	key := testkey.Key(11)
 	r := testCtx("GET", "http://example.com/404")
 	obj := &api.Object{
@@ -2828,7 +2881,52 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 		TTL:        30 * time.Second,
 	}
 	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
-	// Negative cacheable objects should NOT be scheduled for refresh.
+	// Negative-cached-eligible objects should NOT be scheduled for refresh.
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestStoreObject_HealthyStatusStillRefreshesWithoutPolicy(t *testing.T) {
+	t.Parallel()
+	// With no negative-caching policy at all, nothing is excluded from
+	// the refresh loop.
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(14)
+	r := testCtx("GET", "http://example.com/ok")
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=30"),
+		Body:       []byte("ok"),
+		BodySize:   2,
+		StoredAt:   time.Now(),
+		TTL:        30 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+}
+
+func TestStoreObject_StatusTTLCached5xxSkipRefresh(t *testing.T) {
+	t.Parallel()
+	// A 503 cached only via a negative_ttl class entry must not be
+	// scheduled for proactive refresh: re-fetching a failing origin
+	// amplifies the outage. Without the policy check in storeObject
+	// this state (refresh_before_expiry + negative_ttl 5xx) loops
+	// forever.
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	h := testRefreshHandler(t, 1)
+	h.negTTL = neg
+	key := testkey.Key(12)
+	r := testCtx("GET", "http://example.com/flaky")
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 503,
+		Header:     header.Map{},
+		Body:       []byte("overloaded"),
+		BodySize:   11,
+		StoredAt:   time.Now(),
+		TTL:        10 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
 
@@ -4647,4 +4745,85 @@ func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(otherWire))))
 	otherVK := BuildVaryKey(varyValue, headerFromCtx(&other), nil)
 	require.NotEqual(t, ownerVK, otherVK, "a different include-listed header value must fail the peer gate")
+}
+
+func TestHandler_StatusTTL(t *testing.T) {
+	t.Parallel()
+	newStatusHandler := func(neg *StatusTTL, upstream fasthttp.RequestHandler) *Handler {
+		t.Helper()
+		return NewHandler(HandlerConfig{
+			Upstream:   upstream,
+			FastClient: &testFastClient{handler: upstream},
+			Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+			Negative:   neg,
+		})
+	}
+	t.Run("range_caches_503", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(503)
+			_, _ = ctx.Write([]byte("overloaded"))
+		}
+		h := newStatusHandler(mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second}), upstream)
+		rr := testCtx("GET", "http://example.com/flaky")
+		h.ServeRequest(rr)
+		require.Equal(t, 503, respCode(rr))
+		require.Equal(t, "MISS", respHeader(rr, header.XCache))
+
+		rr2 := testCtx("GET", "http://example.com/flaky")
+		h.ServeRequest(rr2)
+		require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+		require.Equal(t, 1, originCalls)
+	})
+
+	t.Run("explicit_zero_blocks_even_with_legacy_ttl", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		h := newStatusHandler(mustStatusTTL(t, map[string]time.Duration{"404": 0}), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		require.Equal(t, 404, respCode(rr))
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "MISS", respHeader(rr2, header.XCache))
+		require.Equal(t, 2, originCalls)
+	})
+
+	t.Run("scalar_shorthand_caches_404", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		// negative_ttl: 30s decodes to the default error set.
+		h := newStatusHandler(mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+		require.Equal(t, 1, originCalls)
+	})
+	t.Run("no_policy_never_caches_404", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		h := newStatusHandler(mustStatusTTL(t, nil), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "MISS", respHeader(rr2, header.XCache))
+		require.Equal(t, 2, originCalls)
+	})
 }

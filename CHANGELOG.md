@@ -21,12 +21,6 @@ the curated, human-readable summary.
   durations; zero explicitly disables caching for that status. The
   policy only applies when the origin sends no explicit freshness, and
   RFC 9111 blocking directives still win.
-- docs: trim code comments across all packages (cache, storage, server,
-  cluster, origin, config, observability, cloudflare, dashboard, cmd,
-  pkg) to why-only statements: restatements of the next line or the
-  signature deleted, verbose godoc blocks condensed, RFC-clause
-  citations and non-obvious decisions kept. Adds the reusable
-  `docs/agents/code-comment-condensation.md` prompt.
 
 ### Changed
 

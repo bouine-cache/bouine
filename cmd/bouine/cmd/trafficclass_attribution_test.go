@@ -55,11 +55,44 @@ func fastGetWithHost(t *testing.T, addr, host, path string) error {
 	return nil
 }
 
+// gatherRequestClassCounts collects the bouine_requests_total label
+// tuples of one registry, keyed "cache_result|source|traffic_class",
+// with the sample count per tuple. Multiple status codes share a
+// tuple; only the tuple shapes matter here.
+func gatherRequestClassCounts(t *testing.T, reg prometheus.Gatherer) map[string]int {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	out := map[string]int{}
+	for _, mf := range families {
+		if mf.GetName() != "bouine_requests_total" {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			var result, source, class string
+			for _, lp := range mtr.GetLabel() {
+				switch lp.GetName() {
+				case "cache_result":
+					result = lp.GetValue()
+				case "source":
+					source = lp.GetValue()
+				case "traffic_class":
+					class = lp.GetValue()
+				}
+			}
+			out[result+"|"+source+"|"+class]++
+		}
+	}
+	return out
+}
+
 // TestTrafficClassAttribution_E2E is the issue #707 end-to-end
-// regression: with traffic classes configured, a request served by the
-// real engine wiring must land its hit in the traffic_class series of
-// the configured class — on the fast path (the request travels over a
-// real H1 connection) and on the slow path (RecordHit's series shape).
+// regression: with traffic classes configured, requests served by the
+// real engine wiring must land in the traffic_class series of the
+// configured class — the fast-path HIT (the request travels over a real
+// H1 connection, through the routed TryHit and the parser's metrics
+// hook) and the slow-path MISS (the middleware's attribution read of
+// the router UserValue) — both observed on the engine's own registry.
 func TestTrafficClassAttribution_E2E(t *testing.T) {
 	t.Parallel()
 	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
@@ -88,11 +121,13 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
+	// The classifier's contract requires validated config; validate
+	// before building the engine, mirroring the production boot order.
+	require.NoError(t, e.cfg.Validate())
 	seq := shutdown.NewSequencer(newTestLogger())
 	rs, _, err := e.initSubsystems(context.Background(), seq)
 	require.NoError(t, err)
 	handler := e.buildDataPlane(rs)
-	require.NoError(t, e.cfg.Validate())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -117,9 +152,33 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 	// Warm + hit over a real connection with a classified Host: the
 	// cache key is host-derived, so the Host must be the classified one
 	// on the wire too. This exercises the full production path —
-	// h1parser parse → routed TryHit → hit → metrics hook.
+	// h1parser parse → routed TryHit → hit → metrics hook. The MISS of
+	// the first pass travels the slow path (router UserValue →
+	// middleware attribution), the HIT of the second the fast path —
+	// both must carry the ssr class on the engine's own registry.
 	require.NoError(t, fastGetWithHost(t, addr, "api.example.com", "/api/x"))
 	require.NoError(t, fastGetWithHost(t, addr, "api.example.com", "/api/x"))
+
+	// The engine registry is the production wiring: the fast-path HIT
+	// (RecordHit via the parser's metrics hook) and the slow-path MISS
+	// (recordFastHTTPMetrics via the middleware) must both have landed
+	// in the pre-resolved ssr series, not the unclassified fallback.
+	// The hook is synchronous on the blocking parser path (no reactor
+	// in this config), but the observation is polled anyway so the
+	// test stays valid under a reactor-enabled shape.
+	poll.Eventually(t, 3*time.Second, 5*time.Millisecond, func() bool {
+		counts := gatherRequestClassCounts(t, e.metrics.Registry)
+		return counts["MISS|origin|ssr"] >= 1 && counts["HIT|hot|ssr"] >= 1
+	})
+	counts := gatherRequestClassCounts(t, e.metrics.Registry)
+	assert.GreaterOrEqual(t, counts["MISS|origin|ssr"], 1,
+		"the slow-path MISS must carry traffic_class=ssr on the engine registry")
+	assert.GreaterOrEqual(t, counts["HIT|hot|ssr"], 1,
+		"the fast-path HIT must carry traffic_class=ssr on the engine registry")
+	assert.Equal(t, 0, counts["MISS|origin|unclassified"],
+		"no classified request may fall back to unclassified")
+	assert.Equal(t, 0, counts["HIT|hot|unclassified"],
+		"no classified request may fall back to unclassified")
 
 	// The routed wrapper (what the parser holds) must stamp the class
 	// for the same Host — same route resolution, same classify.
@@ -131,44 +190,6 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "ssr", fResp.TrafficClass)
 	rfp.Release(fResp)
-
-	// RecordHit — the exact hook call the parser and reactor make for
-	// the response above — must land in the pre-resolved per-class
-	// series, not the fallback slot.
-	reg := prometheus.NewRegistry()
-	m := observability.NewDataPlaneMetrics(reg)
-	m.PreResolveRoutes([]string{"review-service"})
-	m.PreResolveTrafficClasses(rs.trafficClassify.ClassNames())
-	m.RecordHit("review-service", "ssr", "HIT", "hot", 200, 4, 500*time.Microsecond)
-	m.RecordHit("review-service", "", "HIT", "hot", 200, 4, 500*time.Microsecond)
-
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	var ssrFound, unclassFound bool
-	for _, mf := range families {
-		if mf.GetName() != "bouine_requests_total" {
-			continue
-		}
-		for _, mtr := range mf.GetMetric() {
-			var class, pool string
-			for _, lp := range mtr.GetLabel() {
-				switch lp.GetName() {
-				case "traffic_class":
-					class = lp.GetValue()
-				case "upstream_pool":
-					pool = lp.GetValue()
-				}
-			}
-			if class == "ssr" && pool == "review-service" {
-				ssrFound = true
-			}
-			if class == "unclassified" && pool == "review-service" {
-				unclassFound = true
-			}
-		}
-	}
-	assert.True(t, ssrFound, "ssr HIT series must exist on the pool")
-	assert.True(t, unclassFound, "empty class must fall back to unclassified")
 }
 
 // TestTrafficClass_ClassifierSubSetOfPreResolve pins the ADR-0047 §2.4

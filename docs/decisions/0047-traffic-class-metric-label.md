@@ -47,7 +47,11 @@ label on the three data-plane request metric families.
    `^[a-z][a-z0-9_]{0,31}$`, be unique, and not be the reserved
    `unclassified`. Declaration order is precedence. Matching is
    case-insensitive with the port stripped, identical to route
-   matching.
+   matching. Note that a bare trailing `*` (e.g. `www.backmarket*`) is
+   a raw string prefix: it matches across label boundaries
+   (`www.backmarket-evil.example.com`) and the empty continuation
+   (`www.backmarket`). Prefer the `.*` form, which is anchored to the
+   label boundary.
 
 2. **Label** (`traffic_class`, always present): values come
    exclusively from the configured set plus the `unclassified`

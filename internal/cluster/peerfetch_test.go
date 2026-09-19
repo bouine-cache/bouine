@@ -39,8 +39,7 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 }
 
 func encodePeerFetchRequest(req api.PeerFetchRequest) []byte {
-	body := make([]byte, 0, binaryHdrLen+16+1+len(req.VaryKey))
-	body = append(body, binaryMagic)
+	body := make([]byte, 0, 18+len(req.VaryKey))
 	body = append(body, peerFetchBinaryVersion)
 	body = append(body, req.Key[:]...)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // test input, VaryKey < 256 bytes
@@ -91,30 +90,22 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	}
 }
 
-// TestParsePeerFetchBody_RejectsNonEnvelopeBodies pins that the
-// peer-fetch frame requires the same magic + version header as all
-// other cluster binary frames — including the old version-only framing
-// this file's fixtures previously used.
-func TestParsePeerFetchBody_RejectsNonEnvelopeBodies(t *testing.T) {
+// TestParsePeerFetchBody_RejectsBadFraming pins the version-only v2
+// framing (shipped in v0.5.21; deliberately not the binaryMagic
+// envelope used by gossip/meta/state — the endpoint channel already
+// discriminates the format): wrong version byte and truncated bodies
+// must be rejected.
+func TestParsePeerFetchBody_RejectsBadFraming(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(1)
 	body := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
 
-	noMagic := append([]byte(nil), body[1:]...)
-	_, ok := parsePeerFetchBody(noMagic)
-	require.False(t, ok, "version-only frame (no magic) must be rejected")
-
-	badMagic := append([]byte(nil), body...)
-	badMagic[0] = 0x00
-	_, ok = parsePeerFetchBody(badMagic)
-	require.False(t, ok, "wrong magic byte must be rejected")
-
 	badVersion := append([]byte(nil), body...)
-	badVersion[1] = peerFetchBinaryVersion + 1
-	_, ok = parsePeerFetchBody(badVersion)
+	badVersion[0] = peerFetchBinaryVersion + 1
+	_, ok := parsePeerFetchBody(badVersion)
 	require.False(t, ok, "unknown version must be rejected")
 
-	short := body[:binaryHdrLen+16]
+	short := body[:17]
 	_, ok = parsePeerFetchBody(short)
 	require.False(t, ok, "truncated frame must be rejected")
 }

@@ -80,6 +80,21 @@ func TestTrafficClassifier_ClassNames(t *testing.T) {
 	assert.Equal(t, []string{"ssr", "csr"}, c.ClassNames())
 }
 
+// TestTrafficClassifier_BareStarCrossesLabels pins the raw-prefix
+// semantics of a bare trailing `*` (ADR-0047 Decision 1): unlike the
+// `.*` form it is not anchored to a label boundary, so it matches
+// across labels (`www.backmarket-evil.example.com`) and the empty
+// continuation (`www.backmarket` itself).
+func TestTrafficClassifier_BareStarCrossesLabels(t *testing.T) {
+	t.Parallel()
+	c := NewTrafficClassifier([]TrafficClassSpec{
+		{Name: "wide", Hosts: []string{"www.backmarket*"}},
+	})
+	assert.Equal(t, "wide", c.Classify("www.backmarket-evil.example.com"))
+	assert.Equal(t, "wide", c.Classify("www.backmarket"))
+	assert.Equal(t, "unclassified", c.Classify("shop.example.com"))
+}
+
 // TestRouter_SetsTrafficClassUserValue is the slow-path wiring proof:
 // ServeRequest stamps the classifier's value under the
 // XBouineTrafficClass UserValue — including on no-route 404s (Host is

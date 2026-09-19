@@ -50,13 +50,13 @@ With no classes configured the multiplier is exactly 1 — the label is
 present but single-valued, so deployments without the feature see no
 cardinality change.
 
-Per-family worst case at 33 pools (incl. `_default`) × classSlots:
+Per-family worst case at 33 pools (incl. `_default`) × 9 classSlots:
 
-| Family | Per (pool, class) | At classSlots 9 |
+| Family | Per (pool, class) | At 33 pools × 9 classSlots |
 |---|---|---|
-| `bouine_requests_total` | 7 status × 5 results × 5 sources = 175 | 15 575 |
-| `bouine_request_duration_seconds` (classic `_bucket`) | 6 classes × 5 results = 30 tuples | 2 670 tuples → 42 720 classic series |
-| `bouine_response_bytes_total` | 5 results × 5 sources = 25 | 2 025 |
+| `bouine_requests_total` | 7 status × 5 results × 5 sources = 175 | 51 975 |
+| `bouine_request_duration_seconds` (classic `_bucket`) | 6 status classes × 5 results = 30 tuples | 8 910 tuples → 142 560 classic series |
+| `bouine_response_bytes_total` | 5 results × 5 sources = 25 | 7 425 |
 
 Two operator guidelines follow:
 

@@ -429,7 +429,6 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		}
 	}
 
-	// Wrap in cache handler only when cache is explicitly enabled.
 	if cacheEnabled {
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,

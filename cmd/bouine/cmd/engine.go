@@ -260,7 +260,6 @@ func (e *engine) run(ctx context.Context) error {
 }
 
 // initSubsystems creates all subsystem instances and wires them together.
-// Returns the bundled state and a tracer shutdown func.
 func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*runState, func(), error) {
 	originMetrics := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(originMetrics)
@@ -286,8 +285,6 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	dpMetrics.SetAccessLog(e.logger, observability.DefaultKeySampleRate)
 
-	// Set tier budget gauges from config. These are set once at startup
-	// and never change during the process lifetime.
 	dpMetrics.HotStoreMaxBytes.Set(float64(e.cfg.Storage.HotMaxBytes.Bytes()))
 	dpMetrics.WarmStoreMaxBytes.Set(float64(e.cfg.Storage.WarmMaxBytes.Bytes()))
 	// Record that metrics were initialized. If the process restarts,

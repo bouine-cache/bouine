@@ -17,7 +17,6 @@ const eventStreamMediaType = "text/event-stream"
 // (RFC 9110 §8.3.1); parameters after ";" and surrounding OWS are ignored.
 // Zero allocations: the scan walks the input bytes directly.
 func IsEventStreamContentType(ct []byte) bool {
-	// Trim leading OWS.
 	for len(ct) > 0 && (ct[0] == ' ' || ct[0] == '\t') {
 		ct = ct[1:]
 	}
@@ -47,7 +46,6 @@ func IsEventStreamContentType(ct []byte) bool {
 // media type are ignored. Zero allocations.
 func AcceptsEventStream(accept []byte) bool {
 	for len(accept) > 0 {
-		// Find the end of this comma-separated media range.
 		end := 0
 		for end < len(accept) && accept[end] != ',' {
 			end++

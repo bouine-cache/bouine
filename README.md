@@ -35,8 +35,8 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 
 ## Highlights
 
-- **Protocols**: HTTP/1.1 and HTTP/2 on the data plane.
-  `net/http` on a separate admin port for the operator surface.
+- **Protocols**: HTTP/1.1 only on the data plane (fasthttp, ADR-0034);
+  the admin port runs on the same stack. HTTP/2 and HTTP/3 are not supported.
 - **Embedded storage**: sharded in-RAM hot tier + mmap warm tier. No
   external KV.
 - **Clustering**: gossip membership + consistent hash + peer fetch. K8s

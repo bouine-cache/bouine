@@ -21,6 +21,11 @@ the curated, human-readable summary.
   durations; zero explicitly disables caching for that status. The
   policy only applies when the origin sends no explicit freshness, and
   RFC 9111 blocking directives still win.
+- docs: trim code comments across the hot-path packages (cache, storage,
+  server, cluster, origin) to why-only statements: restatements of the
+  next line or the signature deleted, RFC-clause citations and
+  non-obvious decisions kept. Adds the reusable
+  `docs/agents/code-comment-condensation.md` prompt.
 
 ### Changed
 

@@ -700,7 +700,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 
 	head := rebuildRequestHead(req, excess)
 
-	// Check if the client requested Connection: close.
 	clientClose := isConnectionClose(req)
 
 	// Reset deadlines so the fallback handler manages its own timeouts.
@@ -742,7 +741,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// miss for the plain key). Cheap: only set when the peer branch ran.
 	transferOwnerMissHint(&ctx, req)
 
-	// Call the fallback handler.
 	p.fallback(&ctx)
 
 	// Propagate Connection: close from the request to the response so

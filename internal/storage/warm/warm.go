@@ -571,7 +571,6 @@ func NewStore(cfg Config) (*Store, error) {
 	if s.fdCache != nil && s.fdCache.capacity > len(s.segs) && len(s.segs) > 0 {
 		s.fdCache.capacity = len(s.segs)
 	}
-	// Set the max_bytes gauge once at construction. 0 means unlimited.
 	if s.metrics != nil {
 		s.metrics.SetMaxBytes(cfg.MaxBytes)
 	}

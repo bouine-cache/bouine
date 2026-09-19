@@ -155,7 +155,6 @@ func (r *RequestRing) RecordRequest(xCache string, statusCode int, durMs int64) 
 	r.liveDurSumMs.Add(durMs)
 	r.liveDurN.Add(1)
 	r.liveLatHist[latencyBucketIndex(durMs)].Add(1)
-	// Update max via CAS loop.
 	for {
 		old := r.liveP99MS.Load()
 		if durMs <= old {

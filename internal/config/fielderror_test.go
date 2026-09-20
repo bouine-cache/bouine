@@ -23,6 +23,16 @@ func fieldErrs(t *testing.T, err error) []*FieldError {
 	return out
 }
 
+// requireFieldError asserts err is a *FieldError at path with a
+// message containing msgContains.
+func requireFieldError(t *testing.T, err error, path, msgContains string) {
+	t.Helper()
+	fes := fieldErrs(t, err)
+	require.Len(t, fes, 1, "expected exactly one field error, got: %v", err)
+	require.Equal(t, path, fes[0].Path)
+	require.Contains(t, fes[0].Message, msgContains)
+}
+
 // validBase returns a minimal valid config each test mutates.
 func validBase() Config {
 	return Config{

@@ -30,21 +30,21 @@ type errCollector struct {
 
 // addf records a failure for the field at path, formatting the message
 // like fmt.Errorf.
-func (v *errCollector) addf(path, format string, args ...any) {
-	v.errs = append(v.errs, &FieldError{Path: path, Message: fmt.Sprintf(format, args...)})
+func (ec *errCollector) addf(path, format string, args ...any) {
+	ec.errs = append(ec.errs, &FieldError{Path: path, Message: fmt.Sprintf(format, args...)})
 }
 
 // err returns nil, the single FieldError, or errors.Join of all
 // collected errors.
-func (v *errCollector) err() error {
-	switch len(v.errs) {
+func (ec *errCollector) err() error {
+	switch len(ec.errs) {
 	case 0:
 		return nil
 	case 1:
-		return v.errs[0]
+		return ec.errs[0]
 	default:
-		errs := make([]error, len(v.errs))
-		for i, e := range v.errs {
+		errs := make([]error, len(ec.errs))
+		for i, e := range ec.errs {
 			errs[i] = e
 		}
 		return errors.Join(errs...)

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -612,10 +611,7 @@ func TestValidate_PathRewrite_MutuallyExclusiveWithStripPrefix(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	var fe *FieldError
-	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite" || !strings.Contains(fe.Message, "mutually exclusive with strip_prefix") {
-		t.Fatalf("expected strip_prefix/path_rewrite exclusivity error on request.path_rewrite, got %v", err)
-	}
+	requireFieldError(t, err, "routes[0].request.path_rewrite", "mutually exclusive with strip_prefix")
 }
 
 func TestValidate_PathRewrite_RejectsInvalidPattern(t *testing.T) {
@@ -626,10 +622,7 @@ func TestValidate_PathRewrite_RejectsInvalidPattern(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	var fe *FieldError
-	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.match" || !strings.Contains(fe.Message, "not a valid regular expression") {
-		t.Fatalf("expected invalid-pattern error on path_rewrite.match, got %v", err)
-	}
+	requireFieldError(t, err, "routes[0].request.path_rewrite.match", "not a valid regular expression")
 }
 
 func TestValidate_PathRewrite_RejectsOversizedPattern(t *testing.T) {
@@ -643,10 +636,7 @@ func TestValidate_PathRewrite_RejectsOversizedPattern(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	var fe *FieldError
-	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.match" || !strings.Contains(fe.Message, "exceeds") {
-		t.Fatalf("expected pattern size-cap error on path_rewrite.match, got %v", err)
-	}
+	requireFieldError(t, err, "routes[0].request.path_rewrite.match", "exceeds")
 }
 
 func TestValidate_PathRewrite_RejectsOversizedReplace(t *testing.T) {
@@ -660,10 +650,7 @@ func TestValidate_PathRewrite_RejectsOversizedReplace(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	var fe *FieldError
-	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.replace" || !strings.Contains(fe.Message, "exceeds") {
-		t.Fatalf("expected replace size-cap error on path_rewrite.replace, got %v", err)
-	}
+	requireFieldError(t, err, "routes[0].request.path_rewrite.replace", "exceeds")
 }
 
 func TestValidate_PathRewrite_AcceptedNearBoundary(t *testing.T) {

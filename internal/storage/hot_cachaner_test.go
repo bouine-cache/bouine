@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -15,7 +16,7 @@ func cachanerHotStore(t *testing.T, budget int64) *HotStore {
 	return NewHotStore(HotConfig{
 		MaxBytes:             budget,
 		NumShards:            1,
-		HotEvictionAlgorithm: "cachaner",
+		HotEvictionAlgorithm: config.EvictionCachaner,
 		ReaperInterval:       -1,
 	})
 }

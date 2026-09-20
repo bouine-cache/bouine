@@ -108,10 +108,17 @@ L4 → L7, /pkg/api
 L3 → L7, L2, L4, /pkg/api
 L2 → L7, /pkg/api
 L1 → L7, /pkg/api
+
+Shared kernels (importable by every layer): /pkg/api, /pkg/header,
+internal/observability, internal/config, internal/platform.
 ```
 
 - `pkg/api` and `pkg/bouineapi` are leaves; they import nothing from
   `internal/`.
+- `internal/config` and `internal/observability` are shared kernels:
+  every layer may import them directly (ADR-0050). They must stay
+  leaves — neither may import any `internal/*` package other than
+  themselves.
 - `internal/vcl` lowers to the same config tree consumed by `internal/config`;
   it must not call any other layer at runtime.
 - Cross-layer calls go through **interfaces declared in the consumer

@@ -23,6 +23,10 @@
 #
 # Cross-layer rule: a package may only depend on packages in lower
 # layers, through declared interfaces. Reverse imports are build errors.
+#
+# Shared kernels (ADR-0050): /pkg/api, /pkg/header, internal/config,
+# internal/observability — importable by every layer; config and
+# observability must stay leaves.
 
 rules:
   # Server (merged L1+L1) may depend on L7 + pkg/api.
@@ -32,6 +36,7 @@ rules:
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/server
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/internal/buildinfo
       - github.com/bouine-cache/bouine/internal/platform
@@ -41,13 +46,14 @@ rules:
       - golang.org/x/sync
       - golang.org/x/sys
 
-  # L2 may only depend on L7.
+  # L2 may depend on L7 and internal/config (shared kernel).
   storage:
     list-mode: strict
     files: ["**/internal/storage/**"]
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/internal/platform
       - github.com/bouine-cache/bouine/pkg/api
@@ -57,7 +63,7 @@ rules:
       - golang.org/x/sync
       - golang.org/x/sys
 
-  # L3 may depend on L2 (Store interface), L4 (Fetcher), L7.
+  # L3 may depend on L2 (Store interface), L4 (Fetcher), L7, internal/config.
   cache:
     list-mode: strict
     files: ["**/internal/cache/**"]
@@ -73,13 +79,14 @@ rules:
       - github.com/cespare/xxhash/v2
       - golang.org/x/sync
 
-  # L4 may only depend on L7.
+  # L4 may only depend on L7 and internal/config.
   origin:
     list-mode: strict
     files: ["**/internal/origin/**"]
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/origin
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/pkg/api
       - github.com/bouine-cache/bouine/pkg/header

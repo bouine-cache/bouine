@@ -113,6 +113,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/server
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/internal/buildinfo
             - github.com/bouine-cache/bouine/internal/platform
@@ -127,6 +128,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/storage
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/internal/platform
             - github.com/bouine-cache/bouine/pkg/api
@@ -141,6 +143,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/cache
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/storage
             - github.com/bouine-cache/bouine/internal/origin
             - github.com/bouine-cache/bouine/internal/observability
@@ -156,6 +159,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/origin
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header

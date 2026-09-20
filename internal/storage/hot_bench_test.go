@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -101,7 +102,7 @@ func BenchmarkGate_Cachaner_Access(b *testing.B) {
 	s := NewHotStore(HotConfig{
 		MaxBytes:             256 << 20,
 		NumShards:            1,
-		HotEvictionAlgorithm: "cachaner",
+		HotEvictionAlgorithm: config.EvictionCachaner,
 	})
 	defer func() { _ = s.Close(context.Background()) }()
 	k := testkey.Hash([]byte("cachaner-bench"))

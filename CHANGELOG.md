@@ -10,6 +10,15 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- `internal/config` is now a shared kernel (ADR-0050): every layer may
+  import it directly, and it stays a leaf. The `EvictionAlgorithm` enum
+  moved back from `pkg/api` to `internal/config`, ending the
+  alias indirection through the wire-stable `pkg/api` package; config
+  vocabulary types (`EvictionAlgorithm`, `ClusterMode`, `TLSVersion`)
+  now all live in one place.
+
 ### Added
 
 - `routes[].cache.negative_ttl` now accepts a per-status map, mirroring

@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -151,65 +150,64 @@ func Parse(b []byte) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate runs cross-field checks. It is called by Load/Parse but is
-// also useful from tests.
+// Validate runs cross-field checks, reporting every invalid field at
+// once (each failure is a *FieldError; multiple failures are joined
+// with errors.Join). It is called by Load/Parse but is also useful
+// from tests.
 //
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
 func (c *Config) Validate() error {
+	v := &errCollector{}
+
 	// At least one listener must be enabled. Admin is OK as a sole
 	// listener when no TLS is configured.
 	if c.Listen.HTTP == "" && c.Listen.HTTPS == "" &&
 		c.Listen.Admin == "" {
-		return errors.New("config: at least one listener must be configured")
+		v.addf("listen", "at least one listener must be configured")
 	}
 
 	// Upstream pool names must be unique.
 	seen := make(map[string]struct{}, len(c.UpstreamPools))
 	for i := range c.UpstreamPools {
 		p := &c.UpstreamPools[i]
+		path := fmt.Sprintf("upstream_pools[%d]", i)
 		if p.Name == "" {
-			return errors.New("config: upstream pool with empty name")
+			v.addf(path+".name", "must be non-empty")
+		} else if _, dup := seen[p.Name]; dup {
+			v.addf(path+".name", "is a duplicate (pool %q is declared twice)", p.Name)
+		} else {
+			seen[p.Name] = struct{}{}
 		}
-		if _, dup := seen[p.Name]; dup {
-			return fmt.Errorf("config: duplicate upstream pool %q", p.Name)
-		}
-		seen[p.Name] = struct{}{}
 		if len(p.Targets) == 0 {
-			return fmt.Errorf("config: upstream pool %q has no targets", p.Name)
+			v.addf(path+".targets", "must list at least one target (pool %q)", p.Name)
 		}
-		if err := validatePoolDurations(p); err != nil {
-			return err
-		}
+		validatePoolDurations(v, i, p)
 	}
 
 	// Every route must reference a declared pool.
 	for i := range c.Routes {
-		if err := c.validateRoute(i, seen); err != nil {
-			return err
-		}
+		c.validateRoute(v, i, seen)
 	}
 
 	// Cluster mode validation.
-	if err := c.validateCluster(); err != nil {
-		return err
-	}
+	c.validateCluster(v)
 
 	// SO_REUSEPORT is only supported on Linux. The config package is a
 	// leaf and cannot import internal/platform, so we check GOOS directly.
 	// platform.ReusePortSupported mirrors this check.
 	if c.Listen.ReusePort != nil && *c.Listen.ReusePort && runtime.GOOS != "linux" {
-		return errors.New("config: listen.reuse_port is only supported on Linux")
+		v.addf("listen.reuse_port", "is only supported on Linux")
 	}
 
 	if c.Listen.IdleTimeout < 0 {
-		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
+		v.addf("listen.idle_timeout", "must be >= 0, got %v", c.Listen.IdleTimeout)
 	}
 
 	if c.Listen.ReadTimeout < 0 {
-		return fmt.Errorf("config: listen.read_timeout must be >= 0, got %v", c.Listen.ReadTimeout)
+		v.addf("listen.read_timeout", "must be >= 0, got %v", c.Listen.ReadTimeout)
 	}
 	if c.Listen.ReadTimeout >= maxReadTimeout {
-		return fmt.Errorf("config: listen.read_timeout must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
+		v.addf("listen.read_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
 	}
 
 	// The reactor multiplexes fast-path hit serving; without the fast
@@ -218,24 +216,24 @@ func (c *Config) Validate() error {
 	// combination early at load time instead of logging a warning at
 	// startup.
 	if c.Experimental.H1Reactor && !c.Experimental.H1FastPath {
-		return errors.New("config: experimental.h1_reactor requires experimental.h1_fast_path")
+		v.addf("experimental.h1_reactor", "requires experimental.h1_fast_path")
 	}
 
 	// The peer branch only runs inside the fast path's TryHit; without
 	// h1_fast_path the flag would silently no-op. Reject early at load
 	// time instead of logging a warning at startup.
 	if c.Experimental.H1FastPeerPath && !c.Experimental.H1FastPath {
-		return errors.New("config: experimental.h1_fast_peer_path requires experimental.h1_fast_path")
+		v.addf("experimental.h1_fast_peer_path", "requires experimental.h1_fast_path")
 	}
 
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.
 	if c.GOGC != nil && *c.GOGC != -1 && *c.GOGC <= 0 {
-		return errors.New("config: gogc must be -1 (off) or a positive percentage")
+		v.addf("gogc", "must be -1 (off) or a positive percentage")
 	}
 
-	return nil
+	return v.err()
 }
 
 // expandEnvVars replaces ${VAR} and ${VAR:-default} patterns in the
@@ -397,27 +395,24 @@ func (c *RouteCache) ResolveMaxStreamingBufferBytes(goMemLimit string) {
 
 // validateRoute checks a single route entry and normalises its fields.
 // A route must specify exactly one of Pool or Static.Root.
-//
-//nolint:gocyclo // 16: flat checklist + name derivation, no sub-functions to extract
-func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
+func (c *Config) validateRoute(v *errCollector, i int, pools map[string]struct{}) {
 	r := &c.Routes[i]
+	prefix := fmt.Sprintf("routes[%d]", i)
 	hasPool := r.Pool != ""
 	hasStatic := r.Static.Root != ""
 	if hasPool && hasStatic {
-		return fmt.Errorf("config: route %d has both pool and static.root — specify exactly one", i)
+		v.addf(prefix, "has both pool and static.root — specify exactly one")
 	}
 	if !hasPool && !hasStatic {
-		return fmt.Errorf("config: route %d has no pool or static.root", i)
+		v.addf(prefix, "has no pool or static.root")
 	}
 	if hasPool {
 		if _, ok := pools[r.Pool]; !ok {
-			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+			v.addf(prefix+".pool", "references unknown pool %q", r.Pool)
 		}
 	}
 	if hasStatic {
-		if err := validateStatic(i, r.Static); err != nil {
-			return err
-		}
+		validateStatic(v, prefix+".static", r.Static)
 	}
 	// Auto-derive Route.Name when empty so Prometheus metrics and the
 	// dashboard have consistent route labels without requiring operators
@@ -435,17 +430,16 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	for j, m := range r.Match.Methods {
 		up := strings.ToUpper(strings.TrimSpace(m))
 		if !isKnownHTTPMethod(up) {
-			return fmt.Errorf("config: route %d methods[%d] unknown HTTP method %q", i, j, m)
+			v.addf(fmt.Sprintf("%s.match.methods[%d]", prefix, j), "unknown HTTP method %q", m)
+			continue
 		}
 		r.Match.Methods[j] = up
 	}
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
-		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
+		v.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
-	if err := validatePathRewrite(i, r.Request); err != nil {
-		return err
-	}
-	return validateRouteCache(i, &r.Cache)
+	validatePathRewrite(v, prefix+".request", r.Request)
+	validateRouteCache(v, prefix+".cache", &r.Cache)
 }
 
 // validatePathRewrite validates the request.path_rewrite block: both
@@ -455,35 +449,31 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 // compiled here so a bad pattern fails startup instead of the first
 // request, size-capped, free of raw control bytes, and every template
 // reference resolvable against the pattern's capture groups.
-//
-//nolint:gocyclo // 16: flat checklist mirroring validateRouteCache's structure
-func validatePathRewrite(i int, req RouteRequest) error {
+func validatePathRewrite(v *errCollector, reqPath string, req RouteRequest) {
 	pw := req.PathRewrite
 	if pw.Match == "" && pw.Replace == "" {
-		return nil
+		return
 	}
+	basePath := reqPath + ".path_rewrite"
 	if pw.Match == "" || pw.Replace == "" {
-		return fmt.Errorf("config: route %d path_rewrite requires both match and replace", i)
+		v.addf(basePath, "requires both match and replace")
+		return
 	}
 	if req.StripPrefix != "" {
-		return fmt.Errorf("config: route %d has both strip_prefix and path_rewrite — specify exactly one", i)
+		v.addf(basePath, "is mutually exclusive with strip_prefix — specify exactly one")
 	}
 	if len(pw.Match) > MaxPathRewritePatternBytes {
-		return fmt.Errorf("config: route %d path_rewrite.match exceeds %d bytes", i, MaxPathRewritePatternBytes)
+		v.addf(basePath+".match", "exceeds %d bytes", MaxPathRewritePatternBytes)
 	}
 	if len(pw.Replace) > MaxPathRewritePatternBytes {
-		return fmt.Errorf("config: route %d path_rewrite.replace exceeds %d bytes", i, MaxPathRewritePatternBytes)
+		v.addf(basePath+".replace", "exceeds %d bytes", MaxPathRewritePatternBytes)
 	}
 	// Raw control bytes can never appear in a request path (the data
 	// plane rejects them at parse time), so a template carrying them
 	// can only produce a corrupted origin request. Escaped forms in
 	// the pattern (`\x0d`) stay legal — they simply never match.
-	if err := rejectControlBytes("path_rewrite.match", i, pw.Match); err != nil {
-		return err
-	}
-	if err := rejectControlBytes("path_rewrite.replace", i, pw.Replace); err != nil {
-		return err
-	}
+	rejectControlBytes(v, basePath+".match", pw.Match)
+	rejectControlBytes(v, basePath+".replace", pw.Replace)
 	// The replace template is a literal, not a regex: bytes that cannot
 	// appear in an origin-form request-target can only corrupt the
 	// origin-bound request. A raw space breaks the request line
@@ -492,40 +482,35 @@ func validatePathRewrite(i int, req RouteRequest) error {
 	// a fragment marker. In the match pattern these stay legal (space
 	// and '?' are regex syntax there — a literal '?' in match simply
 	// never matches, since the query is split off first).
-	if err := rejectNonTargetBytes("path_rewrite.replace", i, pw.Replace); err != nil {
-		return err
-	}
+	rejectNonTargetBytes(v, basePath+".replace", pw.Replace)
 	// Compile now (RE2 — linear time, no backtracking, so an
 	// operator-supplied pattern cannot ReDoS the data plane). This is
 	// a correctness gate, not a compile-cache: cache.NewPathRewrite
 	// recompiles for the handler.
 	re, err := regexp.Compile(pw.Match)
 	if err != nil {
-		return fmt.Errorf("config: route %d path_rewrite.match is not a valid regular expression: %w", i, err)
+		v.addf(basePath+".match", "is not a valid regular expression: %v", err)
+		return
 	}
 	// Every $reference in the template must resolve to a group of the
 	// pattern. Go's Expand silently expands an unknown reference to
 	// the empty string — the classic `$1x` typo (reference to a group
 	// named "1x") would corrupt every rewritten path with no error
 	// anywhere. Reject it here, at config load.
-	if err := validateTemplateRefs(i, re, pw.Replace); err != nil {
-		return err
-	}
-	return nil
+	validateTemplateRefs(v, basePath+".replace", re, pw.Replace)
 }
 
 // rejectControlBytes rejects raw C0 control bytes in a path_rewrite
 // string. Escaped regex syntax is untouched: only literal bytes < 0x20
 // (plus DEL) are checked, which is exactly the set a request path
 // cannot carry.
-func rejectControlBytes(field string, i int, s string) error {
+func rejectControlBytes(v *errCollector, path, s string) {
 	for j := 0; j < len(s); j++ {
 		if s[j] < 0x20 || s[j] == 0x7f {
-			return fmt.Errorf("config: route %d %s contains a raw control byte (0x%02x) at offset %d — escape it or remove it",
-				i, field, s[j], j)
+			v.addf(path, "contains a raw control byte (0x%02x) at offset %d — escape it or remove it", s[j], j)
+			return
 		}
 	}
-	return nil
 }
 
 // rejectNonTargetBytes rejects raw bytes that cannot appear in an
@@ -534,14 +519,13 @@ func rejectControlBytes(field string, i int, s string) error {
 // '?' (the engine re-appends the original query itself, so a template
 // '?' splices a second delimiter into it), and '#' (fragment marker:
 // fasthttp drops it from the parsed path while sending it raw).
-func rejectNonTargetBytes(field string, i int, s string) error {
+func rejectNonTargetBytes(v *errCollector, path, s string) {
 	for j := 0; j < len(s); j++ {
 		if s[j] == ' ' || s[j] == '?' || s[j] == '#' {
-			return fmt.Errorf("config: route %d %s contains %q at offset %d — a request-target cannot carry it raw (write %%20 for a space; the query string is never modified by the template)",
-				i, field, s[j], j)
+			v.addf(path, "contains %q at offset %d — a request-target cannot carry it raw (write %%20 for a space; the query string is never modified by the template)", s[j], j)
+			return
 		}
 	}
-	return nil
 }
 
 // validateTemplateRefs checks every $-reference in the replace template
@@ -555,7 +539,7 @@ func rejectNonTargetBytes(field string, i int, s string) error {
 // Go's Expand takes the longest word-run after $ as the group name, so
 // `$1x` is a lookup of group "1x" — an unknown reference that expands
 // to the empty string. Fail loudly at load instead.
-func validateTemplateRefs(i int, re *regexp.Regexp, template string) error {
+func validateTemplateRefs(v *errCollector, path string, re *regexp.Regexp, template string) {
 	numGroups := re.NumSubexp()
 	names := re.SubexpNames() // index 0 = "", names for (?P<name>…) groups
 	for j := 0; j < len(template); j++ {
@@ -572,7 +556,8 @@ func validateTemplateRefs(i int, re *regexp.Regexp, template string) error {
 		if next < len(template) && template[next] == '{' {
 			end := strings.IndexByte(template[next:], '}')
 			if end < 0 {
-				return fmt.Errorf("config: route %d path_rewrite.replace has unterminated '${' reference at offset %d", i, j)
+				v.addf(path, "has unterminated '${' reference at offset %d", j)
+				return
 			}
 			ref, next = template[next+1:next+end], next+end+1
 		} else {
@@ -582,18 +567,16 @@ func validateTemplateRefs(i int, re *regexp.Regexp, template string) error {
 			ref = template[j+1 : next]
 		}
 		if ref == "" {
-			return fmt.Errorf("config: route %d path_rewrite.replace has a lone '$' at offset %d — use $$ for a literal dollar", i, j)
+			v.addf(path, "has a lone '$' at offset %d — use $$ for a literal dollar", j)
+			return
 		}
-		if err := resolveTemplateRef(i, ref, numGroups, names); err != nil {
-			return err
-		}
+		resolveTemplateRef(v, path, ref, numGroups, names)
 		j = next - 1
 	}
-	return nil
 }
 
 // resolveTemplateRef checks one parsed reference against the pattern.
-func resolveTemplateRef(i int, ref string, numGroups int, names []string) error {
+func resolveTemplateRef(v *errCollector, path, ref string, numGroups int, names []string) {
 	if allDigits(ref) {
 		// Go's Expand disallows leading-zero indexes: extract() marks
 		// them as names ("01" is a group name, not group 1), and an
@@ -601,23 +584,21 @@ func resolveTemplateRef(i int, ref string, numGroups int, names []string) error 
 		// form rather than silently dropping text from every rewritten
 		// path — the same failure class as an out-of-range index.
 		if len(ref) > 1 && ref[0] == '0' {
-			return fmt.Errorf("config: route %d path_rewrite.replace references $%s — leading-zero group indexes are not valid (Go expands them to the empty string); write the index without padding",
-				i, ref)
+			v.addf(path, "references $%s — leading-zero group indexes are not valid (Go expands them to the empty string); write the index without padding", ref)
+			return
 		}
 		n, err := strconv.Atoi(ref)
 		if err != nil || n > numGroups {
-			return fmt.Errorf("config: route %d path_rewrite.replace references group $%s but the pattern has only %d capture group(s)",
-				i, ref, numGroups)
+			v.addf(path, "references group $%s but the pattern has only %d capture group(s)", ref, numGroups)
 		}
-		return nil
+		return
 	}
 	for _, name := range names {
 		if name == ref {
-			return nil
+			return
 		}
 	}
-	return fmt.Errorf("config: route %d path_rewrite.replace references unknown group %q — the pattern defines no (?P<%s>...) group",
-		i, ref, ref)
+	v.addf(path, "references unknown group %q — the pattern defines no (?P<%s>...) group", ref, ref)
 }
 
 // isWordByte reports whether b is a byte that Go's Expand treats as
@@ -640,137 +621,127 @@ func allDigits(s string) bool {
 }
 
 // validateStatic validates a StaticConfig block.
-func validateStatic(i int, sc StaticConfig) error {
+func validateStatic(v *errCollector, path string, sc StaticConfig) {
 	if !filepath.IsAbs(sc.Root) {
-		return fmt.Errorf("config: route %d static.root must be an absolute path, got %q", i, sc.Root)
+		v.addf(path+".root", "must be an absolute path, got %q", sc.Root)
 	}
 	if sc.MaxFileSize < 0 {
-		return fmt.Errorf("config: route %d static.max_file_size must be >= 0, got %s", i, sc.MaxFileSize)
+		v.addf(path+".max_file_size", "must be >= 0, got %s", sc.MaxFileSize)
 	}
 	for j, idx := range sc.Index {
 		if strings.Contains(idx, "/") {
-			return fmt.Errorf("config: route %d static.index[%d] must not contain '/', got %q", i, j, idx)
+			v.addf(fmt.Sprintf("%s.index[%d]", path, j), "must not contain '/', got %q", idx)
 		}
 	}
-	return nil
 }
 
-//nolint:gocyclo // 17: flat checklist of independent fields
-func validateRouteCache(i int, rc *RouteCache) error {
+func validateRouteCache(v *errCollector, path string, rc *RouteCache) {
 	if rc.TTLOverride < 0 {
-		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, rc.TTLOverride)
+		v.addf(path+".ttl_override", "must be >= 0, got %v", rc.TTLOverride)
 	}
 	if rc.TTLDefault < 0 {
-		return fmt.Errorf("config: route %d ttl_default must be >= 0, got %v", i, rc.TTLDefault)
+		v.addf(path+".ttl_default", "must be >= 0, got %v", rc.TTLDefault)
 	}
 	if rc.StaleWhileRevalidate < 0 {
-		return fmt.Errorf("config: route %d stale_while_revalidate must be >= 0, got %v", i, rc.StaleWhileRevalidate)
+		v.addf(path+".stale_while_revalidate", "must be >= 0, got %v", rc.StaleWhileRevalidate)
 	}
 	if rc.StaleIfError < 0 {
-		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, rc.StaleIfError)
+		v.addf(path+".stale_if_error", "must be >= 0, got %v", rc.StaleIfError)
 	}
-	if err := validateStatusTTL(i, &rc.NegativeTTL); err != nil {
-		return err
-	}
+	validateStatusTTL(v, path+".negative_ttl", &rc.NegativeTTL)
 	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
-		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, rc.JitterPercent)
+		v.addf(path+".jitter_percent", "must be 0–50, got %d", rc.JitterPercent)
 	}
 	if rc.MaxResponseBytes < 0 {
-		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, rc.MaxResponseBytes)
+		v.addf(path+".max_response_bytes", "must be >= 0, got %s", rc.MaxResponseBytes)
 	}
 	if rc.MaxStreamingBufferBytes < 0 {
-		return fmt.Errorf("config: route %d max_streaming_buffer_bytes must be >= 0, got %s", i, rc.MaxStreamingBufferBytes)
+		v.addf(path+".max_streaming_buffer_bytes", "must be >= 0, got %s", rc.MaxStreamingBufferBytes)
 	}
 	if rc.MaxFetchConcurrency < 0 {
-		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)
+		v.addf(path+".max_fetch_concurrency", "must be >= 0, got %d", rc.MaxFetchConcurrency)
 	}
 	if rc.FetchTimeout < 0 {
-		return fmt.Errorf("config: route %d fetch_timeout must be >= 0, got %v", i, rc.FetchTimeout)
+		v.addf(path+".fetch_timeout", "must be >= 0, got %v", rc.FetchTimeout)
 	}
 	if rc.FetchTimeout >= maxFetchTimeout {
-		return fmt.Errorf("config: route %d fetch_timeout must be < %v (data plane safety-net WriteTimeout), got %v", i, maxFetchTimeout, rc.FetchTimeout)
+		v.addf(path+".fetch_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxFetchTimeout, rc.FetchTimeout)
 	}
 	if rc.FetchWaitTimeout < 0 {
-		return fmt.Errorf("config: route %d fetch_wait_timeout must be >= 0, got %v", i, rc.FetchWaitTimeout)
+		v.addf(path+".fetch_wait_timeout", "must be >= 0, got %v", rc.FetchWaitTimeout)
 	}
 	// An unbounded wait recreates the goroutine pileup this knob exists
 	// to prevent (issue #562): every handler parks holding a connection.
 	if rc.FetchWaitTimeout > maxFetchWaitTimeout {
-		return fmt.Errorf("config: route %d fetch_wait_timeout must be <= %v, got %v", i, maxFetchWaitTimeout, rc.FetchWaitTimeout)
+		v.addf(path+".fetch_wait_timeout", "must be <= %v, got %v", maxFetchWaitTimeout, rc.FetchWaitTimeout)
 	}
-	if err := validateRouteKey(i, rc.Key); err != nil {
-		return err
-	}
-	return validateRefreshConfig(i, *rc)
+	validateRouteKey(v, path+".key", rc.Key)
+	validateRefreshConfig(v, path, *rc)
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
-func validateRefreshConfig(i int, rc RouteCache) error {
+func validateRefreshConfig(v *errCollector, path string, rc RouteCache) {
 	if rc.RefreshBeforeExpiry {
 		if rc.TTLDefault <= 0 && rc.TTLOverride <= 0 {
-			return fmt.Errorf("config: route %d refresh_before_expiry requires ttl_default or ttl_override > 0", i)
+			v.addf(path+".refresh_before_expiry", "requires ttl_default or ttl_override > 0")
 		}
 	}
 	if rc.RefreshMarginPercent < 0 || rc.RefreshMarginPercent > 50 {
-		return fmt.Errorf("config: route %d refresh_margin_percent must be 0-50, got %d", i, rc.RefreshMarginPercent)
+		v.addf(path+".refresh_margin_percent", "must be 0-50, got %d", rc.RefreshMarginPercent)
 	}
 	if rc.RefreshConcurrency < 0 || rc.RefreshConcurrency > 64 {
-		return fmt.Errorf("config: route %d refresh_concurrency must be 0-64, got %d", i, rc.RefreshConcurrency)
+		v.addf(path+".refresh_concurrency", "must be 0-64, got %d", rc.RefreshConcurrency)
 	}
 	if rc.RefreshTimeout < 0 || rc.RefreshTimeout > 120*time.Second {
-		return fmt.Errorf("config: route %d refresh_timeout must be 0-120s, got %v", i, rc.RefreshTimeout)
+		v.addf(path+".refresh_timeout", "must be 0-120s, got %v", rc.RefreshTimeout)
 	}
 	if rc.RefreshMinHits < 0 {
-		return fmt.Errorf("config: route %d refresh_min_hits must be >= 0, got %d", i, rc.RefreshMinHits)
+		v.addf(path+".refresh_min_hits", "must be >= 0, got %d", rc.RefreshMinHits)
 	}
 	if rc.RefreshPersistCycles < 0 {
-		return fmt.Errorf("config: route %d refresh_persist_cycles must be >= 0, got %d", i, rc.RefreshPersistCycles)
+		v.addf(path+".refresh_persist_cycles", "must be >= 0, got %d", rc.RefreshPersistCycles)
 	}
 	if rc.RefreshPersistCycles > 0 && rc.RefreshMinHits <= 0 {
-		return fmt.Errorf("config: route %d refresh_persist_cycles requires refresh_min_hits > 0", i)
+		v.addf(path+".refresh_persist_cycles", "requires refresh_min_hits > 0")
 	}
 	if rc.RefreshMinScore < 0 {
-		return fmt.Errorf("config: route %d refresh_min_score must be >= 0, got %d", i, rc.RefreshMinScore)
+		v.addf(path+".refresh_min_score", "must be >= 0, got %d", rc.RefreshMinScore)
 	}
 	if rc.RefreshMinScore > 0 && rc.RefreshMinHits <= 0 {
-		return fmt.Errorf("config: route %d refresh_min_score requires refresh_min_hits > 0", i)
+		v.addf(path+".refresh_min_score", "requires refresh_min_hits > 0")
 	}
 	if rc.RefreshMaxRPS < 0 || rc.RefreshMaxRPS > 10000 {
-		return fmt.Errorf("config: route %d refresh_max_rps must be 0 or 1-10000, got %d", i, rc.RefreshMaxRPS)
+		v.addf(path+".refresh_max_rps", "must be 0 or 1-10000, got %d", rc.RefreshMaxRPS)
 	}
 	if rc.RefreshReactiveFirst {
 		if rc.StaleWhileRevalidate <= 0 {
-			return fmt.Errorf("config: route %d refresh_reactive_first requires stale_while_revalidate > 0", i)
+			v.addf(path+".refresh_reactive_first", "requires stale_while_revalidate > 0")
 		}
 		if rc.RefreshMinHits <= 0 {
-			return fmt.Errorf("config: route %d refresh_reactive_first requires refresh_min_hits > 0", i)
+			v.addf(path+".refresh_reactive_first", "requires refresh_min_hits > 0")
 		}
 	}
-	return nil
 }
 
 // validateRouteKey validates cache key construction fields on a route.
-func validateRouteKey(i int, rk RouteKey) error {
+func validateRouteKey(v *errCollector, path string, rk RouteKey) {
 	if len(rk.KeepQueryParams) > 0 {
 		if len(rk.StripQueryParams) > 0 {
-			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_params", i)
+			v.addf(path+".keep_query_params", "is mutually exclusive with strip_query_params")
 		}
 		if len(rk.StripQueryPrefix) > 0 {
-			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_prefix", i)
+			v.addf(path+".keep_query_params", "is mutually exclusive with strip_query_prefix")
 		}
 	}
 	if len(rk.StripQueryPrefix) > 16 {
-		return fmt.Errorf("config: route %d strip_query_prefix capped at 16 entries, got %d", i, len(rk.StripQueryPrefix))
+		v.addf(path+".strip_query_prefix", "capped at 16 entries, got %d", len(rk.StripQueryPrefix))
 	}
 	for j, p := range rk.StripQueryPrefix {
 		if p == "" {
-			return fmt.Errorf("config: route %d strip_query_prefix[%d] must be non-empty", i, j)
+			v.addf(fmt.Sprintf("%s.strip_query_prefix[%d]", path, j), "must be non-empty")
 		}
 	}
-	if err := validateIncludeHeaders(i, rk); err != nil {
-		return err
-	}
-	return nil
+	validateIncludeHeaders(v, path, rk)
 }
 
 // validateIncludeHeaders validates cache.key.include_headers: capped at
@@ -785,34 +756,38 @@ func validateRouteKey(i int, rk RouteKey) error {
 // variants. Every comparison runs on the trimmed entry: NewKeyPolicy
 // trims before storing, so " *", "x ", or " x,y" must be rejected here
 // or validation and the stored policy disagree (issue #632 review).
-func validateIncludeHeaders(i int, rk RouteKey) error {
+func validateIncludeHeaders(v *errCollector, path string, rk RouteKey) {
 	if len(rk.IncludeHeaders) > 16 {
-		return fmt.Errorf("config: route %d include_headers capped at 16 entries, got %d", i, len(rk.IncludeHeaders))
+		v.addf(path+".include_headers", "capped at 16 entries, got %d", len(rk.IncludeHeaders))
 	}
 	seen := make(map[string]bool, len(rk.IncludeHeaders))
 	for j, raw := range rk.IncludeHeaders {
 		h := strings.TrimSpace(raw)
+		entryPath := fmt.Sprintf("%s.include_headers[%d]", path, j)
 		if h == "" {
-			return fmt.Errorf("config: route %d include_headers[%d] must be a non-empty header name", i, j)
+			v.addf(entryPath, "must be a non-empty header name")
+			continue
 		}
 		lower := strings.ToLower(h)
 		if lower == "*" {
-			return fmt.Errorf("config: route %d include_headers[%d] must not be \"*\": a wildcard Vary is unkeyable (RFC 9111 §4.1)", i, j)
+			v.addf(entryPath, `must not be "*": a wildcard Vary is unkeyable (RFC 9111 §4.1)`)
+			continue
 		}
 		if !isHTTPToken(lower) {
-			return fmt.Errorf("config: route %d include_headers[%d] (%q) must be a single RFC 9110 §5.1 header name: one comma-free token, no whitespace or separators", i, j, h)
+			v.addf(entryPath, "(%q) must be a single RFC 9110 §5.1 header name: one comma-free token, no whitespace or separators", h)
+			continue
 		}
 		if seen[lower] {
-			return fmt.Errorf("config: route %d include_headers[%d] (%s) is a duplicate (comparison is case-insensitive)", i, j, h)
+			v.addf(entryPath, "(%s) is a duplicate (comparison is case-insensitive)", h)
+			continue
 		}
 		seen[lower] = true
 	}
 	for j, raw := range rk.ExcludeHeaders {
 		if seen[strings.ToLower(strings.TrimSpace(raw))] {
-			return fmt.Errorf("config: route %d exclude_headers[%d] (%s) is also listed in include_headers: an excluded header must not participate in the key", i, j, raw)
+			v.addf(fmt.Sprintf("%s.exclude_headers[%d]", path, j), "(%s) is also listed in include_headers: an excluded header must not participate in the key", raw)
 		}
 	}
-	return nil
 }
 
 // isHTTPToken reports whether s is a valid RFC 9110 §5.6.2 token:
@@ -858,27 +833,28 @@ var tcharTable = [256]bool{
 	'^': true, '_': true, '`': true, '|': true, '~': true,
 }
 
-func validatePoolDurations(p *UpstreamPool) error {
+func validatePoolDurations(v *errCollector, i int, p *UpstreamPool) {
+	base := fmt.Sprintf("upstream_pools[%d]", i)
 	if p.Health.Active.Interval < 0 {
-		return fmt.Errorf("config: upstream pool %q health.active.interval must be >= 0, got %v", p.Name, p.Health.Active.Interval)
+		v.addf(base+".health.active.interval", "pool %q: must be >= 0, got %v", p.Name, p.Health.Active.Interval)
 	}
 	if p.Health.Active.Timeout < 0 {
-		return fmt.Errorf("config: upstream pool %q health.active.timeout must be >= 0, got %v", p.Name, p.Health.Active.Timeout)
+		v.addf(base+".health.active.timeout", "pool %q: must be >= 0, got %v", p.Name, p.Health.Active.Timeout)
 	}
 	if p.Health.Passive.EjectFor < 0 {
-		return fmt.Errorf("config: upstream pool %q health.passive.eject_for must be >= 0, got %v", p.Name, p.Health.Passive.EjectFor)
+		v.addf(base+".health.passive.eject_for", "pool %q: must be >= 0, got %v", p.Name, p.Health.Passive.EjectFor)
 	}
 	if p.Connect.Timeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.timeout must be >= 0, got %v", p.Name, p.Connect.Timeout)
+		v.addf(base+".connect.timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.Timeout)
 	}
 	if p.Connect.KeepAlive < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.keep_alive must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
+		v.addf(base+".connect.keep_alive", "pool %q: must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
 	}
 	if p.Connect.MaxIdleConnDuration < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.max_idle_conn_duration must be >= 0, got %v", p.Name, p.Connect.MaxIdleConnDuration)
+		v.addf(base+".connect.max_idle_conn_duration", "pool %q: must be >= 0, got %v", p.Name, p.Connect.MaxIdleConnDuration)
 	}
 	if p.Connect.ResponseHeaderTimeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
+		v.addf(base+".connect.response_header_timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
 	}
 	// This knob is the fallback origin-fetch bound for every route on the
 	// pool that does not set its own cache.fetch_timeout. The same
@@ -887,20 +863,19 @@ func validatePoolDurations(p *UpstreamPool) error {
 	// must hold here, or an inherited default aborts the client
 	// connection before the origin wait gives up.
 	if p.Connect.ResponseHeaderTimeout >= maxFetchTimeout {
-		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be < %v (data plane safety-net WriteTimeout), got %v", p.Name, maxFetchTimeout, p.Connect.ResponseHeaderTimeout)
+		v.addf(base+".connect.response_header_timeout", "pool %q: must be < %v (data plane safety-net WriteTimeout), got %v", p.Name, maxFetchTimeout, p.Connect.ResponseHeaderTimeout)
 	}
 	if p.Connect.MaxConnections < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.max_connections must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
+		v.addf(base+".connect.max_connections", "pool %q: must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
 	}
 	if p.Connect.HedgeTimeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.hedge_timeout must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)
+		v.addf(base+".connect.hedge_timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)
 	}
-	return nil
 }
 
 // validateCluster checks and normalises cluster configuration. The
 // cluster is considered enabled when Listen.Cluster is non-empty.
-func (c *Config) validateCluster() error {
+func (c *Config) validateCluster(v *errCollector) {
 	if c.Listen.Cluster != "" {
 		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
 		switch c.Cluster.Mode {
@@ -909,87 +884,79 @@ func (c *Config) validateCluster() error {
 		case "":
 			c.Cluster.Mode = ClusterModeStrong
 		default:
-			return fmt.Errorf("config: cluster.mode must be %q or %q, got %q",
+			v.addf("cluster.mode", "must be %q or %q, got %q",
 				ClusterModeStrong, ClusterModeEventual, c.Cluster.Mode)
 		}
 	} else if c.Cluster.Mode != "" && c.Cluster.Mode != ClusterModeStrong {
-		return fmt.Errorf("config: cluster.mode %q requires listen.cluster to be set", c.Cluster.Mode)
+		v.addf("cluster.mode", "%q requires listen.cluster to be set", c.Cluster.Mode)
 	}
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
 	}
 	if c.Cluster.HandoffQueueDepth < 0 {
-		return fmt.Errorf("config: cluster.handoff_queue_depth must be >= 0 (0 = default), got %d",
+		v.addf("cluster.handoff_queue_depth", "must be >= 0 (0 = default), got %d",
 			c.Cluster.HandoffQueueDepth)
 	}
 	if c.Cluster.HandoffQueueDepth > maxHandoffQueueDepth {
-		return fmt.Errorf("config: cluster.handoff_queue_depth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
+		v.addf("cluster.handoff_queue_depth", "must be <= %d, got %d (each slot costs a pointer + message header per peer)",
 			maxHandoffQueueDepth, c.Cluster.HandoffQueueDepth)
 	}
-	if err := c.validatePeerFetchConfig(); err != nil {
-		return err
-	}
-	if err := c.validateClusterStorage(); err != nil {
-		return err
-	}
-	if err := validateEvictionAlgorithm(&c.Storage); err != nil {
-		return err
-	}
-	return nil
+	c.validatePeerFetchConfig(v)
+	c.validateClusterStorage(v)
+	validateEvictionAlgorithm(v, &c.Storage)
 }
 
 // validateClusterStorage checks the cluster storage sync settings.
 // Extracted from validateCluster to keep cyclomatic complexity under
 // the gocyclo limit.
-func (c *Config) validateClusterStorage() error {
+func (c *Config) validateClusterStorage(v *errCollector) {
 	if c.Storage.WarmSyncInterval < -1 {
-		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
+		v.addf("storage.warm_sync_interval", "must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}
 	if c.Storage.WarmSyncBatchSize < 0 {
-		return fmt.Errorf("config: storage.warm_sync_batch_size must be >= 0, got %v", c.Storage.WarmSyncBatchSize)
+		v.addf("storage.warm_sync_batch_size", "must be >= 0, got %v", c.Storage.WarmSyncBatchSize)
 	}
 	if c.Storage.WALSyncInterval < -1 {
-		return fmt.Errorf("config: storage.wal_sync_interval must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
+		v.addf("storage.wal_sync_interval", "must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
 	}
 	if c.Storage.TombstoneQueueSize < 0 {
-		return fmt.Errorf("config: storage.tombstone_queue_size must be >= 0 (0 = default 65536), got %v", c.Storage.TombstoneQueueSize)
+		v.addf("storage.tombstone_queue_size", "must be >= 0 (0 = default 65536), got %v", c.Storage.TombstoneQueueSize)
 	}
 	if c.Storage.TombstoneDrainInterval < -1 {
-		return fmt.Errorf("config: storage.tombstone_drain_interval must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
+		v.addf("storage.tombstone_drain_interval", "must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
 	}
-	return nil
 }
 
 // validatePeerFetchConfig checks the peer fetch pipelining settings
 // (ADR-0039). Extracted from validateCluster to keep cyclomatic
 // complexity under the gocyclo limit.
-func (c *Config) validatePeerFetchConfig() error {
+func (c *Config) validatePeerFetchConfig(v *errCollector) {
 	if c.Cluster.PeerMaxConnsPerHost < 0 {
-		return fmt.Errorf("config: cluster.peer_max_conns_per_host must be >= 0 (0 = default 8), got %d",
+		v.addf("cluster.peer_max_conns_per_host", "must be >= 0 (0 = default 8), got %d",
 			c.Cluster.PeerMaxConnsPerHost)
 	}
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {
-		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
+		v.addf("cluster.peer_max_idle_conn_duration", "must be >= 0 (0 = default 120s), got %v",
 			c.Cluster.PeerMaxIdleConnDuration)
 	}
 	if c.Cluster.PeerFetchConcurrency < 0 {
-		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be >= 0 (0 = default 4), got %d",
+		v.addf("cluster.peer_fetch_concurrency", "must be >= 0 (0 = default 4), got %d",
 			c.Cluster.PeerFetchConcurrency)
 	}
 	if c.Cluster.PeerFetchConcurrency > MaxPeerFetchConcurrency {
-		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be <= %d, got %d",
+		v.addf("cluster.peer_fetch_concurrency", "must be <= %d, got %d",
 			MaxPeerFetchConcurrency, c.Cluster.PeerFetchConcurrency)
 	}
 	if c.Cluster.BanTTL < 0 {
-		return fmt.Errorf("config: cluster.ban_ttl must be >= 0 (0 = default 24h), got %v",
+		v.addf("cluster.ban_ttl", "must be >= 0 (0 = default 24h), got %v",
 			c.Cluster.BanTTL)
 	}
 	if c.Cluster.BanTTL > 0 && c.Cluster.BanTTL < time.Second {
-		return fmt.Errorf("config: cluster.ban_ttl must be >= 1s when set, got %v",
+		v.addf("cluster.ban_ttl", "must be >= 1s when set, got %v",
 			c.Cluster.BanTTL)
 	}
 	if c.Admin.IdleTimeout < 0 {
-		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 300s), got %v",
+		v.addf("admin.idle_timeout", "must be >= 0 (0 = default 300s), got %v",
 			c.Admin.IdleTimeout)
 	}
 	// The peer client must close idle connections before the admin
@@ -1004,12 +971,11 @@ func (c *Config) validatePeerFetchConfig() error {
 			adminIdle = defaultAdminIdleTimeout
 		}
 		if id >= adminIdle {
-			return fmt.Errorf(
-				"config: cluster.peer_max_idle_conn_duration (%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
+			v.addf("cluster.peer_max_idle_conn_duration",
+				"(%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
 				id, adminIdle)
 		}
 	}
-	return nil
 }
 
 // validateEvictionAlgorithm checks the eviction policy selection for
@@ -1018,16 +984,22 @@ func (c *Config) validatePeerFetchConfig() error {
 // per-tier. All three accept "", "sieve", or "cachaner".
 //
 // This function is a pure check — it does not mutate s.
-func validateEvictionAlgorithm(s *Storage) error {
-	for _, algo := range []string{s.EvictionAlgorithm, s.HotEvictionAlgorithm, s.WarmEvictionAlgorithm} {
-		switch algo {
+func validateEvictionAlgorithm(v *errCollector, s *Storage) {
+	for _, algo := range []struct {
+		path  string
+		value string
+	}{
+		{"storage.eviction_algorithm", s.EvictionAlgorithm},
+		{"storage.hot_eviction_algorithm", s.HotEvictionAlgorithm},
+		{"storage.warm_eviction_algorithm", s.WarmEvictionAlgorithm},
+	} {
+		switch algo.value {
 		case "", "sieve", "cachaner":
 			// valid
 		default:
-			return fmt.Errorf("config: storage eviction_algorithm must be \"sieve\" or \"cachaner\", got %q", algo)
+			v.addf(algo.path, `must be "sieve" or "cachaner", got %q`, algo.value)
 		}
 	}
-	return nil
 }
 
 // isKnownHTTPMethod returns true for standard HTTP methods accepted in
@@ -1165,17 +1137,17 @@ func parseByteSize(s string) (int64, error) {
 // stored form: consumers (cache handler, builder, dashboard) read it
 // via Policy() and its enumeration methods; the raw map never escapes
 // the config layer.
-func validateStatusTTL(i int, n *NegativeTTLConfig) error {
+func validateStatusTTL(v *errCollector, path string, n *NegativeTTLConfig) {
 	if n.raw == nil {
-		return nil
+		return
 	}
 	p, err := api.NewStatusTTLMap(n.raw)
 	if err != nil {
-		return fmt.Errorf("config: route %d %w", i, err)
+		v.addf(path, "%v", err)
+		return
 	}
 	n.policy = p
 	n.raw = nil
-	return nil
 }
 
 // ---- negative_ttl YAML unmarshalling ----

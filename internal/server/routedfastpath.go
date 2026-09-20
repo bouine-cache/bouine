@@ -53,12 +53,22 @@ func NewRoutedFastPath(rt *Router, release api.FastPathHandler) *RoutedFastPath 
 // prefix, and methods) and delegates to the matched route's handler —
 // the same authority the router's ServeRequest has. Returns (nil,
 // false) when no route matches or the matched route has no fast path.
+// The traffic class is stamped on the response in the same pass: a
+// config-owned string, empty when no classifier is configured (read
+// as "unclassified" by the metrics consumer).
 func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
 	re := r.router.matchRoute(req.Host, req.Path, req.Method)
 	if re == nil || re.fastPath == nil {
 		return nil, false
 	}
-	return re.fastPath.TryHit(req, now)
+	resp, ok := re.fastPath.TryHit(req, now)
+	if !ok || resp == nil {
+		return resp, ok
+	}
+	if r.router.trafficClassify != nil {
+		resp.TrafficClass = r.router.trafficClassify.Classify(req.Host)
+	}
+	return resp, true
 }
 
 // Release implements api.FastPathHandler. The response may have been

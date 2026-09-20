@@ -212,6 +212,10 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 		poolNames = append(poolNames, pc.Name)
 	}
 	rs.dpMetrics.PreResolveRoutes(poolNames)
+	// The traffic-class slot table comes from the same config slice the
+	// classifier was compiled from, so classifier outputs always hit
+	// pre-resolved slots.
+	rs.dpMetrics.PreResolveTrafficClasses(rs.trafficClassify.ClassNames())
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
 	// Native fasthttp middleware chain: tracing → metrics → router.
@@ -220,6 +224,20 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	// after the handler returns is race-free.
 	metricsWrapped := rs.dpMetrics.FastHTTPMiddleware(router.ServeRequest)
 	return tracing.FastHTTPMiddleware("bouine.pipeline", metricsWrapped)
+}
+
+// trafficClassSpecs maps the config tree's traffic classes onto the
+// server layer's spec type so the server layer keeps its dependency
+// diet.
+func trafficClassSpecs(classes []config.TrafficClass) []server.TrafficClassSpec {
+	if len(classes) == 0 {
+		return nil
+	}
+	specs := make([]server.TrafficClassSpec, len(classes))
+	for i := range classes {
+		specs[i] = server.TrafficClassSpec{Name: classes[i].Name, Hosts: classes[i].Hosts}
+	}
+	return specs
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.
@@ -295,7 +313,17 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // All cache handlers are collected into rs.handlers; the engine
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
-	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
+	// The classifier is compiled once and shared by the router (slow
+	// path) and the routed fast path — both run the same classify over
+	// the same Host.
+	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
+	// Shadow detection is boot-only: a fully-shadowed later pattern can
+	// never select its class, so the dead config is surfaced at Error
+	// level while boot proceeds with declaration-order precedence.
+	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
+		e.logger.Error(msg)
+	}
+	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: rs.trafficClassify})
 	// The H1 fast path is per route: each cache-enabled route registers
 	// the FastPathHandler built from its own Handler, so hits carry the
 	// route's pool attribution and run under the route's KeyPolicy

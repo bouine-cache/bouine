@@ -235,7 +235,124 @@ func (c *Config) Validate() error {
 		return errors.New("config: gogc must be -1 (off) or a positive percentage")
 	}
 
+	if err := c.validateTrafficClasses(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// Traffic-class validation caps (ADR-0047): the closed label set is
+// bounded by construction — the classifier and the metrics slot table
+// are sized from these caps.
+const (
+	MaxTrafficClasses      = 8
+	MaxTrafficClassHosts   = 64
+	maxTrafficClassNameLen = 32 // ^[a-z][a-z0-9_]{0,31}$
+)
+
+// validateTrafficClasses checks the metrics.traffic_classes section:
+// the name must be a valid Prometheus label value shape and unique, the
+// reserved "unclassified" is rejected (it is the fallback, not a
+// configurable class), and host patterns must be the exact / leading
+// "*." / trailing ".*"|"*" glob forms — anything else is a typo today
+// and a dead class tomorrow.
+func (c *Config) validateTrafficClasses() error {
+	if len(c.Metrics.TrafficClasses) == 0 {
+		return nil
+	}
+	if len(c.Metrics.TrafficClasses) > MaxTrafficClasses {
+		return fmt.Errorf("config: metrics.traffic_classes: at most %d classes, got %d",
+			MaxTrafficClasses, len(c.Metrics.TrafficClasses))
+	}
+	seen := make(map[string]struct{}, len(c.Metrics.TrafficClasses))
+	for i := range c.Metrics.TrafficClasses {
+		tc := &c.Metrics.TrafficClasses[i]
+		if !validTrafficClassName(tc.Name) {
+			return fmt.Errorf("config: metrics.traffic_classes[%d]: name %q must match ^[a-z][a-z0-9_]{0,31}$",
+				i, tc.Name)
+		}
+		if tc.Name == "unclassified" {
+			return fmt.Errorf("config: metrics.traffic_classes[%d]: name %q is reserved (the no-match fallback)",
+				i, tc.Name)
+		}
+		if _, dup := seen[tc.Name]; dup {
+			return fmt.Errorf("config: metrics.traffic_classes[%d]: duplicate class name %q", i, tc.Name)
+		}
+		seen[tc.Name] = struct{}{}
+		if len(tc.Hosts) == 0 {
+			return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q has no hosts", i, tc.Name)
+		}
+		if len(tc.Hosts) > MaxTrafficClassHosts {
+			return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q has more than %d hosts",
+				i, tc.Name, MaxTrafficClassHosts)
+		}
+		for _, h := range tc.Hosts {
+			if !validTrafficClassHostPattern(h) {
+				return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q: invalid host pattern %q (exact host, leading \"*.\", or trailing \".*\"/\"*\" only)",
+					i, tc.Name, h)
+			}
+		}
+	}
+	return nil
+}
+
+// validTrafficClassName enforces ^[a-z][a-z0-9_]{0,31}$: a valid
+// Prometheus label value shape that keeps class names stable in
+// queries and safe to embed in slot-table indexes.
+func validTrafficClassName(name string) bool {
+	if name == "" || len(name) > maxTrafficClassNameLen {
+		return false
+	}
+	if name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		b := name[i]
+		if ('a' <= b && b <= 'z') || ('0' <= b && b <= '9') || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// validTrafficClassHostPattern accepts three glob forms: an exact
+// host, a single leading "*." (suffix match), or a single trailing
+// ".*" / "*" (prefix match). A bare "*" is rejected — it matches every
+// host and would silently dead-config every class declared after it
+// under first-match precedence. So are anchors without a single
+// alphanumeric byte (e.g. ".*" or "*."): they compile to a
+// prefix/suffix of "." that no real host matches, a dead class the
+// shadow detector can never report because nothing shadows it.
+func validTrafficClassHostPattern(pattern string) bool {
+	switch {
+	case pattern == "" || pattern == "*":
+		return false
+	case strings.HasPrefix(pattern, "*."):
+		return hasHostAnchor(pattern[2:]) && !strings.Contains(pattern[2:], "*")
+	case strings.HasSuffix(pattern, ".*"):
+		return hasHostAnchor(pattern[:len(pattern)-2]) && !strings.Contains(pattern[:len(pattern)-2], "*")
+	case strings.HasSuffix(pattern, "*"):
+		return len(pattern) > 1 && hasHostAnchor(pattern[:len(pattern)-1]) && !strings.Contains(pattern[:len(pattern)-1], "*")
+	default:
+		return hasHostAnchor(pattern) && !strings.Contains(pattern, "*")
+	}
+}
+
+// hasHostAnchor requires the pattern's fixed (non-glob) part to keep
+// at least one alphanumeric byte. Anchors reduced to "." (from ".*" or
+// "*.") compile to a prefix/suffix that no real host matches, so they
+// are dead config that survives both this validation and the boot-time
+// shadow report.
+func hasHostAnchor(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9') {
+			return true
+		}
+	}
+	return false
 }
 
 // expandEnvVars replaces ${VAR} and ${VAR:-default} patterns in the

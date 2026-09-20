@@ -32,6 +32,12 @@ type Config struct {
 	UpstreamPools []UpstreamPool `yaml:"upstream_pools,omitempty" json:"upstream_pools,omitempty"`
 	// Routes are matched in declaration order; the first match wins.
 	Routes []Route `yaml:"routes,omitempty" json:"routes,omitempty"`
+	// Metrics configures observability axes derived from the request
+	// Host. Empty = no traffic classes (all requests fall into the
+	// "unclassified" label value; the metric shape is unchanged).
+	// Grouped with the slice fields so the GC-scan region stays
+	// contiguous (fieldalignment).
+	Metrics MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
 	// Cluster controls peer discovery and fan-out.
@@ -50,6 +56,32 @@ type Config struct {
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
+}
+
+// MetricsConfig configures data-plane metric axes that need
+// operator-declared inputs (see ADR-0047).
+type MetricsConfig struct {
+	// TrafficClasses declares named traffic populations distinguished
+	// by the request Host. Declaration order is precedence. Capped at
+	// 8 classes, each with at most 64 host patterns (validated). The
+	// reserved name "unclassified" is rejected — it is the fallback
+	// for requests matching no class.
+	TrafficClasses []TrafficClass `yaml:"traffic_classes,omitempty" json:"traffic_classes,omitempty"`
+}
+
+// TrafficClass is one named traffic population matched by host
+// patterns. Class names carry no semantics — the csr/ssr-style meaning
+// is a deployment convention.
+type TrafficClass struct {
+	// Name is the Prometheus traffic_class label value: lowercase
+	// identifier, unique across classes, never the reserved
+	// "unclassified".
+	Name string `yaml:"name" json:"name"`
+	// Hosts holds the glob host patterns: an exact host, leading
+	// "*." (suffix match), or trailing ".*"/"*" (prefix match); a
+	// "*" anywhere else is a config error, as is a bare "*" (it would
+	// match every host and dead-config every later class).
+	Hosts []string `yaml:"hosts" json:"hosts"`
 }
 
 // ExperimentalConfig holds opt-in experimental features.

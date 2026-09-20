@@ -213,6 +213,12 @@ const (
 	// per-request header scan.
 	XBouinePool = "X-Bouine-Pool"
 
+	// XBouineTrafficClass — the router sets the request's traffic
+	// class under this name as a fasthttp UserValue (not a wire
+	// header); the value comes from the configured classifier, never
+	// from request input. The middleware reads the UserValue only.
+	XBouineTrafficClass = "X-Bouine-Traffic-Class"
+
 	// BouineHop — carries the current peer-fetch hop count for cluster
 	// loop detection.
 	BouineHop = "Bouine-Hop"

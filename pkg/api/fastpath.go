@@ -206,11 +206,16 @@ type FastPathResponse struct {
 	// Pool is the upstream pool serving the hit, consumed by the
 	// metrics hook as the upstream_pool label. It comes from the
 	// route's pool config, never from request input.
-	Pool       string
-	BuffersArr [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
-	Buffers    net.Buffers
-	HeaderBuf  []byte
-	StatusCode int
+	Pool string
+	// TrafficClass is the config-sourced traffic class of the
+	// request's Host, consumed by the metrics hook as the
+	// traffic_class label. Like Pool it is a config-owned string (safe
+	// to retain) and never request input; empty means "unclassified".
+	TrafficClass string
+	BuffersArr   [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
+	Buffers      net.Buffers
+	HeaderBuf    []byte
+	StatusCode   int
 	// StatusEnd splits BuffersArr[0] (status line) from [1] (header
 	// block): the offset of the first header byte inside HeaderBuf or
 	// the composed head. Stored so the composed-head cache can slice a
@@ -311,7 +316,10 @@ func ScanFlagForHeader(key, value string) RequestScanFlags {
 //
 // Unstable.
 type FastPathMetrics interface {
-	RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	// RecordHit records one fast-path hit. trafficClass is the
+	// config-sourced traffic class ("" = unclassified), from the
+	// classifier's stable strings — never request input.
+	RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	// IncrementSmugglingRejected is called when the h1parser detects an
 	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
 	// obs-fold). The implementation increments a Prometheus counter.

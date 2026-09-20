@@ -45,6 +45,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
@@ -410,7 +411,7 @@ type Store struct {
 	// evictionAlgorithm records the configured policy so compact can
 	// rebuild the correct list type. Stored separately from evictList
 	// because evictList is replaced during compaction.
-	evictionAlgorithm api.EvictionAlgorithm
+	evictionAlgorithm config.EvictionAlgorithm
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
@@ -448,7 +449,7 @@ type Store struct {
 // WarmEvictionAlgorithm == EvictionCachaner the list is a cachaner list,
 // mirroring the hot tier's dispatch.
 func newEvictList(cfg Config) evictor.List[api.Key] {
-	if cfg.WarmEvictionAlgorithm == api.EvictionCachaner {
+	if cfg.WarmEvictionAlgorithm == config.EvictionCachaner {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -494,7 +495,7 @@ type Config struct {
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	WarmEvictionAlgorithm api.EvictionAlgorithm
+	WarmEvictionAlgorithm config.EvictionAlgorithm
 	MaxBytes              int64
 	SegMax                int64 // per-segment max, default 64 MiB
 	// SegmentCacheSize caps the number of concurrently open segment

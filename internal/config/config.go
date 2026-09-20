@@ -8,8 +8,6 @@ package config
 
 import (
 	"time"
-
-	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // Config is the root of the bouine configuration tree.
@@ -152,29 +150,28 @@ type TLSCert struct {
 	SNI      []string `yaml:"sni,omitempty" json:"sni,omitempty"`
 }
 
-// EvictionAlgorithm selects a cache eviction policy. It is an alias of
-// api.EvictionAlgorithm so the config tree and internal/storage share
-// one type; pkg/api owns the values. The zero value means the
+// EvictionAlgorithm selects a cache eviction policy for the storage
+// tiers. Values are the wire strings used in the
+// storage.*_eviction_algorithm config fields; the zero value means the
 // documented default (EvictionSieve).
-type EvictionAlgorithm = api.EvictionAlgorithm
+type EvictionAlgorithm string
 
 const (
 	// EvictionSieve uses the SIEVE visited-bit sweep.
-	EvictionSieve = api.EvictionSieve
+	EvictionSieve EvictionAlgorithm = "sieve"
 	// EvictionCachaner uses SIEVE with a 3-bit frequency counter that
 	// gives hot objects up to 7 second chances (vs SIEVE's 1) before
 	// eviction.
-	EvictionCachaner = api.EvictionCachaner
+	EvictionCachaner EvictionAlgorithm = "cachaner"
 )
 
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	// EvictionAlgorithm selects the eviction policy for both tiers.
 	// "" and EvictionSieve (the default) use the SIEVE visited-bit
-	// sweep. EvictionCachaner uses SIEVE with a 3-bit frequency counter
-	// that gives hot objects up to 7 second chances (vs SIEVE's 1)
-	// before eviction. This is the shared default; per-tier fields
-	// below override it.
+	// sweep. This is the shared default; per-tier fields below
+	// override it. See the EvictionAlgorithm type for the supported
+	// values and their semantics.
 	EvictionAlgorithm EvictionAlgorithm `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
 	// WarmEvictionAlgorithm overrides the eviction policy for the warm
 	// tier only. When non-empty, it takes precedence over

@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
@@ -194,7 +195,7 @@ var hotEntryPool = sync.Pool{
 // evictor.List interface so the rest of the hot tier is agnostic to the
 // active policy. The warm tier has an identical dispatch function.
 func newEvictList(cfg HotConfig) evictor.List[api.Key] {
-	if cfg.HotEvictionAlgorithm == api.EvictionCachaner {
+	if cfg.HotEvictionAlgorithm == config.EvictionCachaner {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -300,7 +301,7 @@ type HotConfig struct {
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	HotEvictionAlgorithm api.EvictionAlgorithm
+	HotEvictionAlgorithm config.EvictionAlgorithm
 	// MaxBytes is the total memory budget across all shards.
 	MaxBytes int64
 	// NumShards overrides the default shard count. Zero means

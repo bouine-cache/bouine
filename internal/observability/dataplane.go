@@ -459,11 +459,12 @@ func (m *DataPlaneMetrics) PreResolveRoutes(poolNames []string) {
 	}
 }
 
-// classIDs maps a traffic-class name to its slot index. Index 0 is
-// "unclassified"; configured classes follow in PreResolveTrafficClasses
-// order. Written once at boot (before listeners accept), read on every
-// record; nil when PreResolveTrafficClasses has not run (tests,
-// minimal configs) — the record paths then fall back to WithLabelValues.
+// classSlotTable maps a traffic-class name to its slot index. Index 0
+// is "unclassified"; configured classes follow in
+// PreResolveTrafficClasses order. Written once at boot (before
+// listeners accept), read on every record; nil when
+// PreResolveTrafficClasses has not run (tests, minimal configs) — the
+// record paths then fall back to WithLabelValues.
 type classSlotTable struct {
 	ids   map[string]int
 	names [metricClassSlots]string // slot index -> label value, for slot fill
@@ -493,6 +494,11 @@ func (m *DataPlaneMetrics) PreResolveTrafficClasses(classNames []string) {
 // divergence "cannot happen" — the fallback exists precisely because
 // that assumption is what a bug would violate.
 func (t *classSlotTable) classIndex(name string) (int, string) {
+	// The -1 return happens only for a nil table (slot path not in
+	// use); callers treat it as "not on the slot path" and take the
+	// WithLabelValues fallback. A non-nil table always yields a usable
+	// slot: 0 for an unknown name (unclassified), i+1 otherwise — never
+	// a negative index.
 	if t == nil {
 		return -1, ""
 	}

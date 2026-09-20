@@ -246,9 +246,9 @@ func (c *Config) Validate() error {
 // bounded by construction — the classifier and the metrics slot table
 // are sized from these caps.
 const (
-	MaxTrafficClasses    = 8
-	MaxTrafficClassHosts = 64
-	trafficClassNameBits = 32 // ^[a-z][a-z0-9_]{0,31}$
+	MaxTrafficClasses      = 8
+	MaxTrafficClassHosts   = 64
+	maxTrafficClassNameLen = 32 // ^[a-z][a-z0-9_]{0,31}$
 )
 
 // validateTrafficClasses checks the metrics.traffic_classes section:
@@ -301,7 +301,7 @@ func (c *Config) validateTrafficClasses() error {
 // Prometheus label value shape that keeps class names stable in
 // queries and safe to embed in slot-table indexes.
 func validTrafficClassName(name string) bool {
-	if name == "" || len(name) > trafficClassNameBits {
+	if name == "" || len(name) > maxTrafficClassNameLen {
 		return false
 	}
 	if name[0] < 'a' || name[0] > 'z' {
@@ -321,20 +321,38 @@ func validTrafficClassName(name string) bool {
 // host, a single leading "*." (suffix match), or a single trailing
 // ".*" / "*" (prefix match). A bare "*" is rejected — it matches every
 // host and would silently dead-config every class declared after it
-// under first-match precedence.
+// under first-match precedence. So are anchors without a single
+// alphanumeric byte (e.g. ".*" or "*."): they compile to a
+// prefix/suffix of "." that no real host matches, a dead class the
+// shadow detector can never report because nothing shadows it.
 func validTrafficClassHostPattern(pattern string) bool {
 	switch {
 	case pattern == "" || pattern == "*":
 		return false
 	case strings.HasPrefix(pattern, "*."):
-		return !strings.Contains(pattern[2:], "*")
+		return hasHostAnchor(pattern[2:]) && !strings.Contains(pattern[2:], "*")
 	case strings.HasSuffix(pattern, ".*"):
-		return !strings.Contains(pattern[:len(pattern)-2], "*")
+		return hasHostAnchor(pattern[:len(pattern)-2]) && !strings.Contains(pattern[:len(pattern)-2], "*")
 	case strings.HasSuffix(pattern, "*"):
-		return len(pattern) > 1 && !strings.Contains(pattern[:len(pattern)-1], "*")
+		return len(pattern) > 1 && hasHostAnchor(pattern[:len(pattern)-1]) && !strings.Contains(pattern[:len(pattern)-1], "*")
 	default:
-		return !strings.Contains(pattern, "*")
+		return hasHostAnchor(pattern) && !strings.Contains(pattern, "*")
 	}
+}
+
+// hasHostAnchor requires the pattern's fixed (non-glob) part to keep
+// at least one alphanumeric byte. Anchors reduced to "." (from ".*" or
+// "*.") compile to a prefix/suffix that no real host matches, so they
+// are dead config that survives both this validation and the boot-time
+// shadow report.
+func hasHostAnchor(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9') {
+			return true
+		}
+	}
+	return false
 }
 
 // expandEnvVars replaces ${VAR} and ${VAR:-default} patterns in the

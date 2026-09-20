@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -58,11 +57,11 @@ func newServeCmd() *cobra.Command {
 
 func loadConfig(path string) (*config.Config, error) {
 	if path != "" {
-		cfg, err := config.Load(path)
-		if err != nil {
-			return nil, fmt.Errorf("config: %w", err)
-		}
-		return cfg, nil
+		// No "config:" prefix here: validation errors already carry
+		// path-anchored "config: field: ..." messages, and read/decode
+		// errors name the file. Prefixing again produced
+		// "config: config: cluster.mode: ...".
+		return config.Load(path)
 	}
 	d := config.Defaults()
 	// Resolve derived values for the no-config-file path too (Load does

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -137,37 +138,41 @@ func TestBoolDefault(t *testing.T) {
 func TestApplyRefreshConfig_Disabled(t *testing.T) {
 	t.Parallel()
 	cfg := &cache.HandlerConfig{}
-	applyRefreshConfig(cfg, config.RouteCache{})
+	applyRefreshConfig(cfg, &config.ResolvedRouteCache{})
 	assert.Equal(t, time.Duration(0), cfg.RefreshMargin)
 }
 
 func TestApplyRefreshConfig_WithDefaults(t *testing.T) {
 	t.Parallel()
 	cfg := &cache.HandlerConfig{}
-	rc := config.RouteCache{
-		RefreshBeforeExpiry: true,
-		TTLDefault:          100 * time.Second,
-	}
-	applyRefreshConfig(cfg, rc)
+	rc := resolvedRouteFor(config.Route{
+		Cache: config.RouteCache{
+			RefreshBeforeExpiry: true,
+			TTLDefault:          100 * time.Second,
+		},
+	})
+	applyRefreshConfig(cfg, &rc.Cache)
 	assert.Equal(t, 10*time.Second, cfg.RefreshMargin)
 }
 
 func TestApplyRefreshConfig_WithOverride(t *testing.T) {
 	t.Parallel()
 	cfg := &cache.HandlerConfig{}
-	rc := config.RouteCache{
-		RefreshBeforeExpiry:  true,
-		TTLOverride:          200 * time.Second,
-		RefreshMarginPercent: 25,
-		RefreshTimeout:       5 * time.Second,
-		RefreshConcurrency:   3,
-		RefreshMinHits:       10,
-		RefreshPersistCycles: 5,
-		RefreshMinScore:      1,
-		RefreshMaxRPS:        100,
-		RefreshReactiveFirst: true,
-	}
-	applyRefreshConfig(cfg, rc)
+	rc := resolvedRouteFor(config.Route{
+		Cache: config.RouteCache{
+			RefreshBeforeExpiry:  true,
+			TTLOverride:          200 * time.Second,
+			RefreshMarginPercent: 25,
+			RefreshTimeout:       5 * time.Second,
+			RefreshConcurrency:   3,
+			RefreshMinHits:       10,
+			RefreshPersistCycles: 5,
+			RefreshMinScore:      1,
+			RefreshMaxRPS:        100,
+			RefreshReactiveFirst: true,
+		},
+	})
+	applyRefreshConfig(cfg, &rc.Cache)
 	assert.Equal(t, 50*time.Second, cfg.RefreshMargin)
 	assert.Equal(t, 5*time.Second, cfg.RefreshTimeout)
 	assert.Equal(t, 3, cfg.RefreshConcurrency)
@@ -178,80 +183,79 @@ func TestApplyRefreshConfig_WithOverride(t *testing.T) {
 	assert.True(t, cfg.RefreshReactiveFirst)
 }
 
-func TestBuildHedgeTimeout_Defaults(t *testing.T) {
+// TestResolved_HedgeTimeout pins the hedge-timeout pass-through: the
+// pool's connect.hedge_timeout reaches the resolved pool verbatim.
+func TestResolved_HedgeTimeout(t *testing.T) {
 	t.Parallel()
-	pc := config.UpstreamPool{Name: "test"}
-	rt := buildHedgeTimeout(pc)
-	require.Equal(t, time.Duration(0), rt)
-}
-
-func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
-	t.Parallel()
-	pc := config.UpstreamPool{
-		Name:    "test",
-		Connect: config.ConnectPolicy{HedgeTimeout: 500 * time.Millisecond},
+	cfg := config.Config{
+		UpstreamPools: []config.UpstreamPool{
+			{Name: "test", Targets: []string{"127.0.0.1:1"}},
+			{Name: "hedged", Targets: []string{"127.0.0.1:1"}, Connect: config.ConnectPolicy{HedgeTimeout: 500 * time.Millisecond}},
+		},
 	}
-	rt := buildHedgeTimeout(pc)
-	require.Equal(t, 500*time.Millisecond, rt)
+	r := cfg.Resolve()
+	require.Zero(t, r.Pools[0].HedgeTimeout)
+	require.Equal(t, 500*time.Millisecond, r.Pools[1].HedgeTimeout)
 }
 
-// newTestPool builds an origin pool from an UpstreamPool config so the
-// resolveRouteFetchTimeout tests exercise the same resolution path
-// (buildPoolConfig → origin.NewPool → defaults) as the engine.
-func newTestPool(t *testing.T, pc config.UpstreamPool) *origin.Pool {
-	t.Helper()
-	p, err := origin.NewPool(buildPoolConfig(pc, newTestLogger(), nil))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Close(t.Context()) })
-	return p
+// resolvedRouteFor materializes a standalone route for builder tests.
+func resolvedRouteFor(rc config.Route) *config.ResolvedRoute {
+	cfg := config.Config{Routes: []config.Route{rc}}
+	r := cfg.Resolve()
+	return &r.Routes[0]
 }
 
-// TestResolveRouteFetchTimeout pins the per-route origin timeout
-// resolution order: an explicit route fetch_timeout wins; otherwise the
+// TestResolvedRoute_FetchTimeout pins the per-route origin timeout
+// resolution: an explicit route fetch_timeout wins; otherwise the
 // route inherits the pool's connect.response_header_timeout (with its
 // built-in default applied). The inheritance must not fall through to
 // cache.defaultFetchTimeout (60s), which would silently double the
-// historical 30s origin wait.
-func TestResolveRouteFetchTimeout(t *testing.T) {
+// historical 30s origin wait. Static routes fetch from disk and keep
+// the zero value.
+func TestResolvedRoute_FetchTimeout(t *testing.T) {
 	t.Parallel()
 
-	newPool := func(t *testing.T, headerTimeout time.Duration) *origin.Pool {
-		return newTestPool(t, config.UpstreamPool{
-			Name:    "app",
-			Targets: []string{"127.0.0.1:1"},
-			Connect: config.ConnectPolicy{ResponseHeaderTimeout: headerTimeout},
-		})
+	resolve := func(rc config.Route) time.Duration {
+		return resolvedRouteFor(rc).Cache.FetchTimeout
 	}
 
 	t.Run("explicit route timeout overrides the pool", func(t *testing.T) {
 		t.Parallel()
-		p := newPool(t, 20*time.Second)
-		rc := config.Route{Cache: config.RouteCache{FetchTimeout: 90 * time.Second}}
-		require.Equal(t, 90*time.Second, resolveRouteFetchTimeout(rc, p))
+		cfg := config.Config{
+			UpstreamPools: []config.UpstreamPool{{Name: "app", Targets: []string{"127.0.0.1:1"}, Connect: config.ConnectPolicy{ResponseHeaderTimeout: 20 * time.Second}}},
+			Routes:        []config.Route{{Name: "r", Pool: "app", Cache: config.RouteCache{FetchTimeout: 90 * time.Second}}},
+		}
+		require.Equal(t, 90*time.Second, cfg.Resolve().Routes[0].Cache.FetchTimeout)
 	})
 
 	t.Run("unset route inherits configured pool timeout", func(t *testing.T) {
 		t.Parallel()
-		p := newPool(t, 45*time.Second)
-		rc := config.Route{}
-		require.Equal(t, 45*time.Second, resolveRouteFetchTimeout(rc, p))
+		cfg := config.Config{
+			UpstreamPools: []config.UpstreamPool{{Name: "app", Targets: []string{"127.0.0.1:1"}, Connect: config.ConnectPolicy{ResponseHeaderTimeout: 45 * time.Second}}},
+			Routes:        []config.Route{{Name: "r", Pool: "app"}},
+		}
+		require.Equal(t, 45*time.Second, cfg.Resolve().Routes[0].Cache.FetchTimeout)
 	})
 
 	t.Run("unset route inherits pool default when pool unset too", func(t *testing.T) {
 		t.Parallel()
-		p := newPool(t, 0)
-		rc := config.Route{}
-		require.Equal(t, origin.DefaultResponseHeaderTimeout, resolveRouteFetchTimeout(rc, p))
+		cfg := config.Config{
+			UpstreamPools: []config.UpstreamPool{{Name: "app", Targets: []string{"127.0.0.1:1"}}},
+			Routes:        []config.Route{{Name: "r", Pool: "app"}},
+		}
+		require.Equal(t, config.DefaultResponseHeaderTimeout, cfg.Resolve().Routes[0].Cache.FetchTimeout)
 	})
 
-	t.Run("nil pool leaves the timeout unset", func(t *testing.T) {
+	t.Run("static route leaves the timeout unset", func(t *testing.T) {
 		t.Parallel()
-		rc := config.Route{}
-		require.Zero(t, resolveRouteFetchTimeout(rc, nil))
+		require.Zero(t, resolve(config.Route{Name: "s", Static: config.StaticConfig{Root: "/srv"}}))
 	})
 }
 
-func TestSanitizedConfig(t *testing.T) {
+// TestResolvedConfig_NoSecrets pins the /v1/config security contract:
+// the resolved tree served by the admin endpoint carries no admin or
+// Cloudflare tokens and no TLS cert/key paths.
+func TestResolvedConfig_NoSecrets(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{
 		Admin:      config.AdminConfig{Token: "secret-token"},
@@ -259,11 +263,29 @@ func TestSanitizedConfig(t *testing.T) {
 		TLS:        config.TLS{Certs: []config.TLSCert{{CertFile: "/cert.pem", KeyFile: "/key.pem"}}},
 		Cluster:    config.Cluster{TLS: config.ClusterTLS{CertFile: "/cluster.pem", KeyFile: "/cluster.key"}},
 	}
-	out := sanitizedConfig(cfg)
-	assert.Equal(t, "", out.Admin.Token)
-	assert.Equal(t, "", out.Cloudflare.APIToken)
-	assert.Empty(t, out.TLS.Certs)
-	assert.Equal(t, "", out.Cluster.TLS.CertFile)
+	out, err := json.Marshal(cfg.Resolve())
+	require.NoError(t, err)
+	s := string(out)
+	assert.NotContains(t, s, "secret-token")
+	assert.NotContains(t, s, "cf-secret")
+	assert.NotContains(t, s, "/cert.pem")
+	assert.NotContains(t, s, "/key.pem")
+	assert.NotContains(t, s, "/cluster.pem")
+	assert.NotContains(t, s, "/cluster.key")
+}
+
+// TestResolvedConfig_PreservesNonSecrets pins that non-secret config
+// surfaces (admin tuning, Cloudflare zone) survive into the resolved
+// tree served by /v1/config.
+func TestResolvedConfig_PreservesNonSecrets(t *testing.T) {
+	t.Parallel()
+	cfg := config.Config{
+		Admin:      config.AdminConfig{MaxBatchSize: 10},
+		Cloudflare: config.CloudflareConfig{ZoneID: "zone123"},
+	}
+	out := cfg.Resolve()
+	assert.Equal(t, 10, out.Admin.MaxBatchSize)
+	assert.Equal(t, "zone123", out.Cloudflare.ZoneID)
 }
 
 func TestLoadConfig_NoPath(t *testing.T) {
@@ -1178,17 +1200,6 @@ func TestBuildStore_WithEvictionAlgo(t *testing.T) {
 	require.NotNil(t, store)
 }
 
-func TestSanitizedConfig_PreservesNonSecrets(t *testing.T) {
-	t.Parallel()
-	cfg := config.Config{
-		Admin:      config.AdminConfig{MaxBatchSize: 10},
-		Cloudflare: config.CloudflareConfig{ZoneID: "zone123"},
-	}
-	out := sanitizedConfig(cfg)
-	assert.Equal(t, 10, out.Admin.MaxBatchSize)
-	assert.Equal(t, "zone123", out.Cloudflare.ZoneID)
-}
-
 func TestBuildStaticRoute_NoCache(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1204,7 +1215,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		Name:   "static",
 		Static: config.StaticConfig{Root: dir},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1230,7 +1241,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		Static: config.StaticConfig{Root: dir},
 		Cache:  config.RouteCache{Enabled: &cacheEnabled, TTLDefault: 60 * time.Second},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Len(t, rs.handlers, 1)
 }
 
@@ -1248,7 +1259,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		Name:   "bad",
 		Static: config.StaticConfig{Root: "/nonexistent/path/that/does/not/exist"},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1268,7 +1279,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		Static:  config.StaticConfig{Root: dir},
 		Request: config.RouteRequest{StripPrefix: "/assets"},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 }
 
 func TestBuildRouter_WithStaticRoute(t *testing.T) {
@@ -1486,7 +1497,7 @@ func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
 			Replace: "/$1",
 		}},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/assets/index.html")
@@ -1526,7 +1537,7 @@ func TestBuildStaticRoute_CachedPathRewriteAppliedOnce(t *testing.T) {
 			Replace: "/y/",
 		}},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/x/x/f")
@@ -1566,7 +1577,7 @@ func TestBuildStaticRoute_CachedStripPrefixAppliedOnce(t *testing.T) {
 		Cache:   config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
 		Request: config.RouteRequest{StripPrefix: "/api"},
 	}
-	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+	e.buildStaticRoute(router, rs, rc, resolvedRouteFor(rc), func(*cache.Handler) *cache.FastPathHandler { return nil })
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/api/api/f")

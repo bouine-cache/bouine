@@ -37,37 +37,30 @@ import (
 // walMetrics, when non-nil, is injected into the WAL log so it can
 // record write duration, queue depth, and write count metrics.
 func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) (storage.Store, error) {
-	hotAlgo := e.cfg.Storage.HotEvictionAlgorithm
-	if hotAlgo == "" {
-		hotAlgo = e.cfg.Storage.EvictionAlgorithm
-	}
-	warmAlgo := e.cfg.Storage.WarmEvictionAlgorithm
-	if warmAlgo == "" {
-		warmAlgo = e.cfg.Storage.EvictionAlgorithm
-	}
+	rs := e.resolvedConfig().Storage
 	hotCfg := storage.HotConfig{
-		MaxBytes:             e.cfg.Storage.HotMaxBytes.Bytes(),
-		Slab:                 e.cfg.Storage.HotMmapSlab,
-		HotEvictionAlgorithm: hotAlgo,
-		BanTTL:               e.cfg.Cluster.BanTTL,
+		MaxBytes:             rs.HotMaxBytes.Bytes(),
+		Slab:                 rs.HotMmapSlab,
+		HotEvictionAlgorithm: rs.HotEvictionAlgorithm,
+		BanTTL:               e.resolvedConfig().Cluster.BanTTL,
 	}
-	if e.cfg.Storage.WarmDir == "" {
+	if rs.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
 		Hot:                    hotCfg,
-		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), MaxEntries: e.cfg.Storage.WarmMaxEntries, SegmentCacheSize: e.cfg.Storage.SegmentCacheSize, MaxDiskBytes: e.cfg.Storage.WarmMaxDiskBytes.Bytes(), MinFreeDisk: e.cfg.Storage.MinFreeDisk.Bytes(), Preallocate: e.cfg.Storage.WarmPreallocate.Bytes(), WarmEvictionAlgorithm: warmAlgo},
-		WALDir:                 e.cfg.Storage.WarmDir + "/bouine.wal",
-		BodyThreshold:          e.cfg.Storage.BodyThreshold.Bytes(),
-		WarmSyncInterval:       e.cfg.Storage.WarmSyncInterval,
-		WarmSyncBatchSize:      e.cfg.Storage.WarmSyncBatchSize,
-		WALSyncInterval:        e.cfg.Storage.WALSyncInterval,
-		CompactStartupDelay:    e.cfg.Storage.CompactStartupDelay,
-		CompactInterval:        e.cfg.Storage.CompactInterval,
-		CheckpointInterval:     e.cfg.Storage.CheckpointInterval,
-		CheckpointWALThreshold: e.cfg.Storage.CheckpointWALThreshold,
-		TombstoneQueueSize:     e.cfg.Storage.TombstoneQueueSize,
-		TombstoneDrainInterval: e.cfg.Storage.TombstoneDrainInterval,
+		Warm:                   &warm.Config{Dir: rs.WarmDir, MaxBytes: rs.WarmMaxBytes.Bytes(), MaxEntries: rs.WarmMaxEntries, SegmentCacheSize: rs.SegmentCacheSize, MaxDiskBytes: rs.WarmMaxDiskBytes.Bytes(), MinFreeDisk: rs.MinFreeDisk.Bytes(), Preallocate: rs.WarmPreallocate.Bytes(), WarmEvictionAlgorithm: rs.WarmEvictionAlgorithm},
+		WALDir:                 rs.WarmDir + "/bouine.wal",
+		BodyThreshold:          rs.BodyThreshold.Bytes(),
+		WarmSyncInterval:       rs.WarmSyncInterval,
+		WarmSyncBatchSize:      rs.WarmSyncBatchSize,
+		WALSyncInterval:        rs.WALSyncInterval,
+		CompactStartupDelay:    rs.CompactStartupDelay,
+		CompactInterval:        rs.CompactInterval,
+		CheckpointInterval:     rs.CheckpointInterval,
+		CheckpointWALThreshold: rs.CheckpointWALThreshold,
+		TombstoneQueueSize:     rs.TombstoneQueueSize,
+		TombstoneDrainInterval: rs.TombstoneDrainInterval,
 		Logger:                 e.logger,
 		WarmMetrics:            warmMetrics,
 		WALMetrics:             walMetrics,
@@ -227,9 +220,10 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 // upstream. Pools are keyed by name and passed to buildRouter so each route can
 // reference its upstream by the name declared in config.
 func (e *engine) buildPools(metrics *origin.Metrics) (map[string]*origin.Pool, error) {
-	pools := make(map[string]*origin.Pool, len(e.cfg.UpstreamPools))
-	for _, pc := range e.cfg.UpstreamPools {
-		p, err := origin.NewPool(buildPoolConfig(pc, e.logger, metrics))
+	pools := make(map[string]*origin.Pool, len(e.resolvedConfig().Pools))
+	for i := range e.cfg.UpstreamPools {
+		pc := &e.cfg.UpstreamPools[i]
+		p, err := origin.NewPool(e.buildPoolConfig(*pc, e.logger, metrics))
 		if err != nil {
 			return nil, err
 		}
@@ -243,41 +237,48 @@ func (e *engine) buildPools(metrics *origin.Metrics) (map[string]*origin.Pool, e
 // keep-alive, per-host connection cap, idle duration, response header
 // timeout). Zero values are resolved to built-in defaults inside
 // origin.NewPool.
-func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metrics *origin.Metrics) origin.PoolConfig {
+func (e *engine) buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metrics *origin.Metrics) origin.PoolConfig {
+	rp := e.resolvedPool(pc.Name)
+	if rp == nil {
+		// Unreachable for pools built from a resolved config; fall back
+		// to zero values (origin.NewPool applies its own defaults).
+		rp = &config.ResolvedPool{Name: pc.Name}
+	}
 	return origin.PoolConfig{
 		Name:                  pc.Name,
 		Targets:               pc.Targets,
 		Logger:                logger,
-		Consecutive5xx:        pc.Health.Passive.Consecutive5xx,
-		EjectFor:              pc.Health.Passive.EjectFor,
-		HedgeTimeout:          buildHedgeTimeout(pc),
+		Consecutive5xx:        rp.Consecutive5xx,
+		EjectFor:              rp.EjectFor,
+		HedgeTimeout:          rp.HedgeTimeout,
 		Metrics:               metrics,
-		DialTimeout:           pc.Connect.Timeout,
-		KeepAlive:             pc.Connect.KeepAlive,
-		MaxConnsPerHost:       pc.Connect.MaxConnections,
-		MaxIdleConnDuration:   pc.Connect.MaxIdleConnDuration,
-		ResponseHeaderTimeout: pc.Connect.ResponseHeaderTimeout,
+		DialTimeout:           rp.DialTimeout,
+		KeepAlive:             rp.KeepAlive,
+		MaxConnsPerHost:       rp.MaxConnsPerHost,
+		MaxIdleConnDuration:   rp.MaxIdleConnDuration,
+		ResponseHeaderTimeout: rp.ResponseHeaderTimeout,
 	}
 }
 
-// resolveRouteFetchTimeout applies the per-route origin-fetch timeout
-// resolution order: an explicit cache.fetch_timeout wins; otherwise the
-// route inherits the pool's connect.response_header_timeout (resolved
-// with its built-in default by origin.NewPool), so a route without its
-// own knob keeps today's effective origin-wait bound. With the pool
-// client no longer carrying a client-level ReadTimeout cap (see
-// newOriginClient), this is the only defaulting site — an unset value
-// must never fall through to cache.defaultFetchTimeout (60s), which
-// would silently double the historical origin wait.
-func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
-	if rc.Cache.FetchTimeout > 0 {
-		return rc.Cache.FetchTimeout
+// resolvedPool returns the resolved pool matching the configured pool
+// name, or nil when the config contains no pool with that name (the
+// caller falls back to an unresolved placeholder).
+func (e *engine) resolvedPool(name string) *config.ResolvedPool {
+	for i := range e.resolvedConfig().Pools {
+		if e.resolvedConfig().Pools[i].Name == name {
+			return &e.resolvedConfig().Pools[i]
+		}
 	}
-	if p != nil {
-		return p.ResolvedClientConfig().ResponseHeaderTimeout
-	}
-	return 0
+	return nil
 }
+
+// The per-route origin-fetch timeout resolution (explicit
+// cache.fetch_timeout wins, else the pool's
+// connect.response_header_timeout with its built-in default, never
+// cache.defaultFetchTimeout) and the hedge-timeout pass-through moved
+// into the resolved layer (config.ResolvedRoute.FetchTimeout /
+// config.ResolvedPool.HedgeTimeout) so /v1/config shows the effective
+// values.
 
 // buildRouter constructs the server.Router by iterating over the route table
 // and wiring each route to its upstream pool and cache handler. For every route
@@ -306,15 +307,16 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		rs.fastPathHandlers = append(rs.fastPathHandlers, fp)
 		return fp
 	}
-	for _, rc := range e.cfg.Routes {
+	for i, rc := range e.cfg.Routes {
 		if rc.Static.Root != "" {
-			e.buildStaticRoute(router, rs, rc, buildRouteFP)
+			e.buildStaticRoute(router, rs, rc, &e.resolvedConfig().Routes[i], buildRouteFP)
 			continue
 		}
 		p := rs.pools[rc.Pool]
 		if p == nil {
 			continue
 		}
+		rrc := &e.resolvedConfig().Routes[i].Cache
 		cfg := cache.HandlerConfig{
 			Upstream:                p.FastHandler(0),
 			FastClient:              p.FastClient(),
@@ -326,33 +328,33 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			Negative:                rc.Cache.NegativeTTL.Policy(),
-			JitterPercent:           rc.Cache.JitterPercent,
-			StayinAlive:             rc.Cache.StayinAlive,
+			Negative:                rrc.NegativeTTL.Policy(),
+			JitterPercent:           rrc.JitterPercent,
+			StayinAlive:             rrc.StayinAlive,
 			LogCacheKeys:            true,
-			DefaultTTL:              rc.Cache.TTLDefault,
-			OverrideTTL:             rc.Cache.TTLOverride,
-			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
-			DefaultSIE:              rc.Cache.StaleIfError,
-			AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
-			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
-			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
-			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
-			FetchTimeout:            resolveRouteFetchTimeout(rc, p),
-			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
-			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+			DefaultTTL:              rrc.TTLDefault,
+			OverrideTTL:             rrc.TTLOverride,
+			DefaultSWR:              rrc.StaleWhileRevalidate,
+			DefaultSIE:              rrc.StaleIfError,
+			AllowSetCookie:          rrc.AllowSetCookie,
+			MaxObjectSize:           rrc.MaxObjectSize.Bytes(),
+			MaxResponseBytes:        rrc.MaxResponseBytes.Bytes(),
+			MaxFetchConcurrency:     rrc.MaxFetchConcurrency,
+			FetchTimeout:            rrc.FetchTimeout,
+			FetchWaitTimeout:        rrc.FetchWaitTimeout,
+			MaxStreamingBufferBytes: rrc.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:             rs.dpMetrics.VaryCapHits,
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
-			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
+			RefreshBeforeExpiry:     rrc.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
 			PoolName:                rc.Pool,
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
-		applyRefreshConfig(&cfg, rc.Cache)
+		applyRefreshConfig(&cfg, rrc)
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
 			cfg.OwnerFn = ownerFn
 			cfg.PeerFetch = peerFetchFn
@@ -390,7 +392,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 // and the OS page cache provides the hot caching layer.
 //
 //nolint:funlen // 84: the cached-static-route wiring mirrors the proxied-route block by design; splitting it would hide the symmetry
-func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route, buildRouteFP func(*cache.Handler) *cache.FastPathHandler) {
+func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route, rr *config.ResolvedRoute, buildRouteFP func(*cache.Handler) *cache.FastPathHandler) {
 	sh, err := staticfile.New(staticfile.Config{
 		Root:       rc.Static.Root,
 		IndexFiles: rc.Static.Index,
@@ -430,6 +432,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	}
 
 	if cacheEnabled {
+		rrc := &rr.Cache
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,
 			StripPrefix:             rc.Request.StripPrefix,
@@ -440,20 +443,20 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			Negative:                rc.Cache.NegativeTTL.Policy(),
-			JitterPercent:           rc.Cache.JitterPercent,
-			StayinAlive:             rc.Cache.StayinAlive,
+			Negative:                rrc.NegativeTTL.Policy(),
+			JitterPercent:           rrc.JitterPercent,
+			StayinAlive:             rrc.StayinAlive,
 			LogCacheKeys:            true,
-			DefaultTTL:              rc.Cache.TTLDefault,
-			OverrideTTL:             rc.Cache.TTLOverride,
-			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
-			DefaultSIE:              rc.Cache.StaleIfError,
-			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
-			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
-			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
-			FetchTimeout:            rc.Cache.FetchTimeout,
-			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
-			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+			DefaultTTL:              rrc.TTLDefault,
+			OverrideTTL:             rrc.TTLOverride,
+			DefaultSWR:              rrc.StaleWhileRevalidate,
+			DefaultSIE:              rrc.StaleIfError,
+			MaxObjectSize:           rrc.MaxObjectSize.Bytes(),
+			MaxResponseBytes:        rrc.MaxResponseBytes.Bytes(),
+			MaxFetchConcurrency:     rrc.MaxFetchConcurrency,
+			FetchTimeout:            rrc.FetchTimeout,
+			FetchWaitTimeout:        rrc.FetchWaitTimeout,
+			MaxStreamingBufferBytes: rrc.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:             rs.dpMetrics.VaryCapHits,
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
@@ -461,7 +464,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
 		}
-		applyRefreshConfig(&cfg, rc.Cache)
+		applyRefreshConfig(&cfg, rrc)
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
 			cfg.OwnerFn = ownerFn
 			cfg.PeerFetch = peerFetchFn
@@ -665,32 +668,27 @@ func buildExcludeHeaderSet(headers []string) map[string]bool {
 }
 
 // applyRefreshConfig sets the refresh-before-expiry timing fields on
-// the handler config from the route's cache policy. Called only when
-// RefreshBeforeExpiry is true.
-func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
-	if !rc.RefreshBeforeExpiry {
+// the handler config from the resolved route cache (the refresh margin
+// is precomputed there). Called only when RefreshBeforeExpiry is true.
+func applyRefreshConfig(cfg *cache.HandlerConfig, rrc *config.ResolvedRouteCache) {
+	if !rrc.RefreshBeforeExpiry {
 		return
 	}
-	ttlBasis := rc.TTLOverride
-	if ttlBasis <= 0 {
-		ttlBasis = rc.TTLDefault
-	}
-	marginPct := rc.RefreshMarginPercent
-	if marginPct <= 0 {
-		marginPct = 10
-	}
-	cfg.RefreshMargin = ttlBasis * time.Duration(marginPct) / 100
-	cfg.RefreshTimeout = rc.RefreshTimeout
-	cfg.RefreshConcurrency = rc.RefreshConcurrency
-	cfg.RefreshMinHits = rc.RefreshMinHits
-	cfg.RefreshPersistCycles = rc.RefreshPersistCycles
-	cfg.RefreshMinScore = rc.RefreshMinScore
-	cfg.RefreshMaxRPS = rc.RefreshMaxRPS
-	cfg.RefreshReactiveFirst = rc.RefreshReactiveFirst
+	cfg.RefreshMargin = rrc.RefreshMargin
+	cfg.RefreshTimeout = rrc.RefreshTimeout
+	cfg.RefreshConcurrency = rrc.RefreshConcurrency
+	cfg.RefreshMinHits = rrc.RefreshMinHits
+	cfg.RefreshPersistCycles = rrc.RefreshPersistCycles
+	cfg.RefreshMinScore = rrc.RefreshMinScore
+	cfg.RefreshMaxRPS = rrc.RefreshMaxRPS
+	cfg.RefreshReactiveFirst = rrc.RefreshReactiveFirst
 }
 
-// buildHedgeTimeout returns the hedge timeout from the pool config,
-// or 0 if hedging is not configured.
-func buildHedgeTimeout(pc config.UpstreamPool) time.Duration {
-	return pc.Connect.HedgeTimeout
+// resolvedConfig returns the materialized effective configuration,
+// computing it lazily for engines constructed without one (tests).
+func (e *engine) resolvedConfig() *config.Resolved {
+	if e.resolved == nil {
+		e.resolved = e.cfg.Resolve()
+	}
+	return e.resolved
 }

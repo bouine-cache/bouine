@@ -40,9 +40,13 @@ import (
 )
 
 type engine struct {
-	startTime  time.Time
-	logger     observability.Logger
-	cfg        *config.Config
+	startTime time.Time
+	logger    observability.Logger
+	cfg       *config.Config
+	// resolved is the materialized effective configuration (defaults
+	// applied, sentinels collapsed). The builders and /v1/config read
+	// it instead of re-implementing zero-defaults from cfg.
+	resolved   *config.Resolved
 	metrics    *observability.Metrics
 	configPath string
 }
@@ -50,6 +54,7 @@ type engine struct {
 func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engine {
 	return &engine{
 		cfg:        cfg,
+		resolved:   cfg.Resolve(),
 		configPath: configPath,
 		startTime:  time.Now(),
 		logger:     observability.NewSampledLogger(logger, observability.DefaultKeySampleRate),
@@ -602,16 +607,9 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 	})
 }
 
-// sanitizedConfig returns a deep copy of the config with secret fields
-// zeroed out so GET /v1/config never exposes credentials.
-func sanitizedConfig(cfg config.Config) config.Config {
-	out := cfg
-	out.Admin.Token = ""
-	out.Cloudflare.APIToken = ""
-	out.TLS = config.TLS{} // zero out cert/key file paths
-	out.Cluster.TLS = config.ClusterTLS{}
-	return out
-}
+// /v1/config serves the resolved configuration: defaults materialized,
+// disable sentinels collapsed to bools, and secret fields (admin token,
+// Cloudflare token, TLS cert/key paths) absent by construction.
 
 // cacheCheck inspects the cache decision for a URL. It builds the
 // cache key using the default key policy, looks up the store, and
@@ -768,7 +766,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return rs.cfProp.PropagateExternal(ctx, req)
 		},
 		StatsFn:  func() api.Stats { return rs.store.Stats() },
-		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
+		ConfigFn: func() any { return e.resolved },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
 		},

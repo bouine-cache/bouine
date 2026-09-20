@@ -300,7 +300,7 @@ type HotConfig struct {
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	HotEvictionAlgorithm string
+	HotEvictionAlgorithm api.EvictionAlgorithm
 	// MaxBytes is the total memory budget across all shards.
 	MaxBytes int64
 	// NumShards overrides the default shard count. Zero means

@@ -410,7 +410,7 @@ type Store struct {
 	// evictionAlgorithm records the configured policy so compact can
 	// rebuild the correct list type. Stored separately from evictList
 	// because evictList is replaced during compaction.
-	evictionAlgorithm string
+	evictionAlgorithm api.EvictionAlgorithm
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
@@ -494,7 +494,7 @@ type Config struct {
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	WarmEvictionAlgorithm string
+	WarmEvictionAlgorithm api.EvictionAlgorithm
 	MaxBytes              int64
 	SegMax                int64 // per-segment max, default 64 MiB
 	// SegmentCacheSize caps the number of concurrently open segment

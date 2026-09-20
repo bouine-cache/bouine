@@ -48,7 +48,7 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 	hotCfg := storage.HotConfig{
 		MaxBytes:             e.cfg.Storage.HotMaxBytes.Bytes(),
 		Slab:                 e.cfg.Storage.HotMmapSlab,
-		HotEvictionAlgorithm: string(hotAlgo),
+		HotEvictionAlgorithm: hotAlgo,
 		BanTTL:               e.cfg.Cluster.BanTTL,
 	}
 	if e.cfg.Storage.WarmDir == "" {
@@ -56,7 +56,7 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
 		Hot:                    hotCfg,
-		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), MaxEntries: e.cfg.Storage.WarmMaxEntries, SegmentCacheSize: e.cfg.Storage.SegmentCacheSize, MaxDiskBytes: e.cfg.Storage.WarmMaxDiskBytes.Bytes(), MinFreeDisk: e.cfg.Storage.MinFreeDisk.Bytes(), Preallocate: e.cfg.Storage.WarmPreallocate.Bytes(), WarmEvictionAlgorithm: string(warmAlgo)},
+		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), MaxEntries: e.cfg.Storage.WarmMaxEntries, SegmentCacheSize: e.cfg.Storage.SegmentCacheSize, MaxDiskBytes: e.cfg.Storage.WarmMaxDiskBytes.Bytes(), MinFreeDisk: e.cfg.Storage.MinFreeDisk.Bytes(), Preallocate: e.cfg.Storage.WarmPreallocate.Bytes(), WarmEvictionAlgorithm: warmAlgo},
 		WALDir:                 e.cfg.Storage.WarmDir + "/bouine.wal",
 		BodyThreshold:          e.cfg.Storage.BodyThreshold.Bytes(),
 		WarmSyncInterval:       e.cfg.Storage.WarmSyncInterval,

@@ -54,7 +54,7 @@ type Broadcaster struct {
 	batcher *invalidationBatcher
 	logger  observability.Logger
 	token   string
-	mode    config.ClusterMode // ClusterModeStrong | ClusterModeEventual
+	mode    config.ClusterMode
 	seq     atomic.Uint64
 }
 

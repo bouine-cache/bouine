@@ -6,7 +6,11 @@
 // major version bump.
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/bouine-cache/bouine/pkg/api"
+)
 
 // Config is the root of the bouine configuration tree.
 //
@@ -124,14 +128,14 @@ type Listen struct {
 // TLSVersion is the minimum TLS protocol version accepted on the
 // data-plane listener. Values are the wire strings used in
 // tls.min_version; the zero value means the documented default
-// (TLSVersion12).
+// (TLSVersion1_2).
 type TLSVersion string
 
 const (
-	// TLSVersion12 is TLS 1.2, the minimum supported version (AGENTS.md §6).
-	TLSVersion12 TLSVersion = "1.2"
-	// TLSVersion13 is TLS 1.3.
-	TLSVersion13 TLSVersion = "1.3"
+	// TLSVersion1_2 is TLS 1.2, the minimum supported version (AGENTS.md §6).
+	TLSVersion1_2 TLSVersion = "1.2"
+	// TLSVersion1_3 is TLS 1.3.
+	TLSVersion1_3 TLSVersion = "1.3"
 )
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
@@ -148,18 +152,19 @@ type TLSCert struct {
 	SNI      []string `yaml:"sni,omitempty" json:"sni,omitempty"`
 }
 
-// EvictionAlgorithm selects a cache eviction policy. Values are the
-// wire strings used in storage.*_eviction_algorithm; the zero value
-// means the documented default (EvictionSieve).
-type EvictionAlgorithm string
+// EvictionAlgorithm selects a cache eviction policy. It is an alias of
+// api.EvictionAlgorithm so the config tree and internal/storage share
+// one type; pkg/api owns the values. The zero value means the
+// documented default (EvictionSieve).
+type EvictionAlgorithm = api.EvictionAlgorithm
 
 const (
 	// EvictionSieve uses the SIEVE visited-bit sweep.
-	EvictionSieve EvictionAlgorithm = "sieve"
+	EvictionSieve = api.EvictionSieve
 	// EvictionCachaner uses SIEVE with a 3-bit frequency counter that
 	// gives hot objects up to 7 second chances (vs SIEVE's 1) before
 	// eviction.
-	EvictionCachaner EvictionAlgorithm = "cachaner"
+	EvictionCachaner = api.EvictionCachaner
 )
 
 // Storage controls embedded hot + warm tiers. Phase 2+.

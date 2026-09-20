@@ -60,7 +60,7 @@ func Defaults() Config {
 			Admin: ":9000",
 		},
 		TLS: TLS{
-			MinVersion: TLSVersion12,
+			MinVersion: TLSVersion1_2,
 		},
 		Cluster: Cluster{
 			Mode:     ClusterModeStrong,

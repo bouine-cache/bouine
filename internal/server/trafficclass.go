@@ -7,11 +7,9 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// TrafficClassPatterns are one class's host patterns, pre-compiled at
-// boot: exact hosts go into a map keyed on the lowercased pattern,
-// suffix ("*.example.com") and prefix ("www.example.*" /
-// "www.example*") globs go into ordered lists, all lowercased once.
-// Forms and counts were validated by config.Validate.
+// trafficClassPatterns are one class's host patterns, pre-compiled at
+// boot: exact hosts in a map keyed on the lowercased pattern, suffix
+// and prefix globs in ordered lists, all lowercased once.
 type trafficClassPatterns struct {
 	name   string
 	exact  map[string]struct{}
@@ -20,31 +18,22 @@ type trafficClassPatterns struct {
 }
 
 // TrafficClassSpec is one configured traffic class as seen by the
-// classifier: a name plus its host patterns. The engine passes
-// config.MetricsConfig.TrafficClasses values here; the server layer
-// takes the plain pair (not the config type) so L1 keeps its strict
-// dependency diet (depguard: server imports no other internal layer
-// besides observability/platform).
+// classifier. The engine maps the config type onto this plain pair so
+// the server layer keeps its dependency diet.
 type TrafficClassSpec struct {
 	Name  string
 	Hosts []string
 }
 
 // TrafficClassifier maps a request Host to a configured traffic-class
-// name (ADR-0047). Declaration order is precedence: the first class
-// whose host pattern matches wins. A nil classifier (no classes
-// configured) classifies everything as "unclassified" — the same label
-// every request carries when the feature is absent, so the metric shape
-// never changes between deployments.
-//
-// Returned names are the classifier's stable config-owned strings:
-// callers may retain them beyond the request lifetime (the reactor
-// metrics ring's retain-safety contract) and the Host input can only
-// select among them, never mint a new value — the same guarantee
-// pattern upstream_pool has. Matching is case-insensitive with the
-// port stripped, identical to route matching (matchRoute); the
-// request Host is never lowercased — strings.ToLower allocates on any
-// case change, and the hit path must not.
+// name. Declaration order is precedence; a nil classifier returns
+// "unclassified" for everything. Returned names are stable
+// config-owned strings: callers may retain them beyond the request
+// lifetime, and request input can only select among them, never mint a
+// new value. Matching is case-insensitive with the port stripped,
+// identical to matchRoute; the request Host is never lowercased
+// (strings.ToLower allocates on any case change, and the hit path
+// must not).
 type TrafficClassifier struct {
 	classes []trafficClassPatterns
 
@@ -54,9 +43,8 @@ type TrafficClassifier struct {
 	shadows []string
 }
 
-// NewTrafficClassifier compiles the configured traffic classes. The
-// slice must already have passed config.Validate (the engine runs
-// validation before any listener accepts). Returns nil for an empty
+// NewTrafficClassifier compiles the configured traffic classes; the
+// slice must have passed config.Validate. Returns nil for an empty
 // configuration — Classify on nil returns "unclassified".
 func NewTrafficClassifier(classes []TrafficClassSpec) *TrafficClassifier {
 	if len(classes) == 0 {
@@ -85,9 +73,8 @@ func NewTrafficClassifier(classes []TrafficClassSpec) *TrafficClassifier {
 
 // Classify returns the traffic-class name for host (which may carry a
 // port). Zero allocations: one uppercase scan gates the case-folded
-// comparisons, map lookups and length-bounded EqualFold over the
-// lowercased patterns — the same comparison matchRoute runs for route
-// hosts.
+// comparisons, so the common all-lowercase Host skips the fold path
+// entirely.
 func (c *TrafficClassifier) Classify(host string) string {
 	if c == nil {
 		return api.TrafficClassUnclassified
@@ -131,10 +118,10 @@ func (c *TrafficClassifier) Classify(host string) string {
 	return api.TrafficClassUnclassified
 }
 
-// ClassNames returns the configured class names in declaration order.
-// The engine passes the same slice to PreResolveTrafficClasses so the
-// classifier's outputs and the metrics slot table cannot diverge.
-// Returns nil for a nil classifier.
+// ClassNames returns the configured class names in declaration order,
+// or nil for a nil classifier. The engine passes the same names to
+// PreResolveTrafficClasses so classifier outputs and the metrics slot
+// table cannot diverge.
 func (c *TrafficClassifier) ClassNames() []string {
 	if c == nil {
 		return nil
@@ -147,11 +134,10 @@ func (c *TrafficClassifier) ClassNames() []string {
 }
 
 // ShadowedPatterns returns the boot-time shadow-detection findings:
-// one message per configured host pattern that an earlier class (see
-// ClassNames for the declaration-order contract) fully shadows, so the
-// pattern can never select its class and the operator's later class
-// silently receives no traffic for it. Detection runs once at compile
-// time; the returned slice is nil or non-empty, never empty-non-nil.
+// one message per configured host pattern that an earlier class fully
+// shadows, so it can never select its class (declaration order is
+// precedence). Detection runs once at compile time; the returned
+// slice is nil or non-empty, never empty-non-nil.
 func (c *TrafficClassifier) ShadowedPatterns() []string {
 	if c == nil {
 		return nil
@@ -160,8 +146,8 @@ func (c *TrafficClassifier) ShadowedPatterns() []string {
 }
 
 // trafficPattern is one compiled host pattern for shadow analysis:
-// the same lowercased forms the classifier matches on, kept next to
-// the original pattern string for operator-facing messages.
+// the same lowercased forms the classifier matches on, plus the raw
+// pattern for operator-facing messages.
 type trafficPattern struct {
 	match string
 	kind  patternKind
@@ -176,11 +162,9 @@ const (
 )
 
 // compileTrafficPattern lowercases and reduces a validated host
-// pattern (config.Validate already rejected malformed globs) to the
-// exact / suffix / prefix forms Classify matches. It is the single
-// source of the pattern-form reduction — NewTrafficClassifier and the
-// shadow detector both use it, so detection and matching can never
-// disagree about what a pattern means.
+// pattern to the exact / suffix / prefix forms Classify matches.
+// Shared by NewTrafficClassifier and the shadow detector, so matching
+// and detection can never disagree about what a pattern means.
 func compileTrafficPattern(p string) trafficPattern {
 	lh := strings.ToLower(p)
 	switch {
@@ -229,9 +213,8 @@ func patternShadows(a, b trafficPattern) bool {
 }
 
 // detectShadowedPatterns walks the classes in declaration order and
-// returns one message per later-class pattern fully shadowed by an
-// earlier class. Patterns inside the same class are skipped: they
-// resolve to the same label, so shadowing them changes nothing.
+// reports each later-class pattern fully shadowed by an earlier class.
+// Same-class patterns are skipped: they resolve to the same label.
 func detectShadowedPatterns(classes []TrafficClassSpec) []string {
 	type compiledClass struct {
 		name     string
@@ -274,7 +257,7 @@ func detectShadowedPatterns(classes []TrafficClassSpec) []string {
 
 // hasUppercase reports whether s contains an ASCII uppercase byte.
 // Hosts are ASCII (RFC 9110 §5.1); non-ASCII bytes cannot fold-match
-// the validated lowercase patterns either way.
+// the validated lowercase patterns.
 func hasUppercase(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 'A' && s[i] <= 'Z' {

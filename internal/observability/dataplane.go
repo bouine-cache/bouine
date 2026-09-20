@@ -94,9 +94,9 @@ type DataPlaneMetrics struct {
 	CFDLQRetried  *prometheus.CounterVec // labels: kind
 	Rings         *Rings                 // nil when dashboard is disabled
 	poolIDs       map[string]int
-	// classTable holds the traffic-class slot index (ADR-0047); nil
-	// when PreResolveTrafficClasses has not run — record paths then
-	// fall back to WithLabelValues.
+	// classTable holds the traffic-class slot index; nil when
+	// PreResolveTrafficClasses has not run — record paths then fall
+	// back to WithLabelValues.
 	classTable *classSlotTable
 	// Refresh-before-expiry metrics. Nil when no route enables the feature.
 	RefreshTotal        *prometheus.CounterVec // labels: route, result
@@ -135,7 +135,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		RequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "requests_total",
-			Help:      "Total number of requests processed by the data plane. Carries the exact status code; the duration histogram carries only the response class, so exact error codes stay queryable without extra series. traffic_class is the request's configured host-class (ADR-0047); unclassified covers requests matching no configured class.",
+			Help:      "Total number of requests processed by the data plane. Carries the exact status code; the duration histogram carries only the response class, so exact error codes stay queryable without extra series. traffic_class is the request's configured host-class; unclassified covers requests matching no configured class.",
 		}, []string{"status", "cache_result", "source", "upstream_pool", "traffic_class"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
@@ -290,11 +290,10 @@ const (
 	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
 	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
 	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
-	// metricClassSlots bounds the traffic_class axis (ADR-0047):
-	// "unclassified" (index 0, always present) + the config cap of 8
-	// classes (config.MaxTrafficClasses). Static array bound so the
-	// per-pool tables stay one allocation; unused slots cost nothing
-	// (lazy fill, same as pools).
+	// metricClassSlots bounds the traffic_class axis: "unclassified"
+	// (index 0) + the config cap of 8 classes. Static array bound so
+	// the per-pool tables stay one allocation; unused slots cost
+	// nothing (lazy fill, same as pools).
 	metricClassSlots = 9
 )
 
@@ -459,21 +458,19 @@ func (m *DataPlaneMetrics) PreResolveRoutes(poolNames []string) {
 	}
 }
 
-// classSlotTable maps a traffic-class name to its slot index. Index 0
-// is "unclassified"; configured classes follow in
-// PreResolveTrafficClasses order. Written once at boot (before
-// listeners accept), read on every record; nil when
-// PreResolveTrafficClasses has not run (tests, minimal configs) — the
-// record paths then fall back to WithLabelValues.
+// classSlotTable maps a traffic-class name to its slot index (0 is
+// "unclassified"). Written once at boot, read on every record; nil
+// when PreResolveTrafficClasses has not run — record paths then fall
+// back to WithLabelValues.
 type classSlotTable struct {
 	ids   map[string]int
 	names [metricClassSlots]string // slot index -> label value, for slot fill
 }
 
 // PreResolveTrafficClasses builds the traffic-class slot table from
-// the configured class names (the same slice the classifier was
-// compiled from, so their outputs cannot diverge). Like
-// PreResolveRoutes it is lazy: it only allocates the index, no series.
+// the configured class names — the same slice the classifier was
+// compiled from, so their outputs cannot diverge. Lazy like
+// PreResolveRoutes: it allocates only the index, no series.
 func (m *DataPlaneMetrics) PreResolveTrafficClasses(classNames []string) {
 	t := &classSlotTable{ids: make(map[string]int, len(classNames)+1)}
 	t.names[0] = api.TrafficClassUnclassified
@@ -488,17 +485,14 @@ func (m *DataPlaneMetrics) PreResolveTrafficClasses(classNames []string) {
 	m.classTable = t
 }
 
-// classIndex maps a traffic-class name to its slot. Unknown names fall
-// back to the "unclassified" slot 0, mirroring the _default pool
-// fallback: both structures are built from the same config slice, so
-// divergence "cannot happen" — the fallback exists precisely because
-// that assumption is what a bug would violate.
+// classIndex maps a traffic-class name to its slot. Unknown names map
+// to the "unclassified" slot 0, mirroring the _default pool fallback:
+// both structures come from the same config slice, so divergence
+// "cannot happen" — the fallback exists because that assumption is
+// what a bug would violate. The -1 return happens only for a nil
+// table; a non-nil table always yields a usable slot (0 for an unknown
+// name, i+1 otherwise), never a negative index.
 func (t *classSlotTable) classIndex(name string) (int, string) {
-	// The -1 return happens only for a nil table (slot path not in
-	// use); callers treat it as "not on the slot path" and take the
-	// WithLabelValues fallback. A non-nil table always yields a usable
-	// slot: 0 for an unknown name (unclassified), i+1 otherwise — never
-	// a negative index.
 	if t == nil {
 		return -1, ""
 	}
@@ -889,14 +883,9 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 }
 
 // attribution resolves the metric/ring labels from the UserValues the
-// router sets. The axes are independent and never fall back to each
-// other: pool feeds the upstream_pool Prometheus label from the
-// route's configured pool only (plus the _default fallback), so the
-// label set stays bounded by the pool configuration no matter how many
-// routes exist; route feeds the dashboard rings only; class feeds the
-// traffic_class Prometheus label from the configured classifier only
-// (plus the unclassified fallback), so its label set is bounded by the
-// class configuration no matter what Hosts arrive (ADR-0047).
+// router sets. Each axis is independent and bounded by its own
+// configuration, never by request input, so client input cannot mint
+// a label value (same guarantee as upstream_pool).
 func attribution(ctx *fasthttp.RequestCtx) (pool, route, class string) {
 	pool = "_default"
 	route = "_default"
@@ -956,9 +945,9 @@ func (m *DataPlaneMetrics) slotBytesCounter(pm *poolMetrics, ri, src, ci int, ca
 	return c
 }
 
-// recordFastHTTPMetrics increments the RED counters. The pool and
-// class arguments must be configured names or their fallbacks
-// ("_default" / "unclassified" — see attribution).
+// recordFastHTTPMetrics records the RED counters for one
+// middleware-attributed request. The pool and class arguments must be
+// configured names or their fallbacks (see attribution).
 func (m *DataPlaneMetrics) recordFastHTTPMetrics(code int, status, pool, class, cacheResult, source string, dur, bytesOut float64) {
 	if pm, ok := m.lookupPoolMetrics(pool); ok {
 		si := statusIndex(code)
@@ -982,9 +971,9 @@ func (m *DataPlaneMetrics) recordFastHTTPMetrics(code int, status, pool, class, 
 }
 
 // buildFastHTTPAccessLogAttrs constructs the structured-log attribute
-// slice for a fasthttp access log entry. traffic_class rides alongside
-// cache_status (ADR-0047): zero Prometheus cost, enables per-class log
-// queries and cross-checks the label in incident forensics.
+// slice for a fasthttp access log entry; traffic_class rides with
+// cache_status so per-class log queries stay possible at zero
+// Prometheus cost.
 func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx, cacheResult, trafficClass string, elapsed time.Duration, status int) []any {
 	attrs := []any{
 		"method", string(ctx.Method()),
@@ -1001,10 +990,10 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 	return attrs
 }
 
-// RecordHit implements api.FastPathMetrics. It increments the RED
-// counters for a fast-path hit without going through the middleware
-// chain. Called by the h1parser after serving a cache hit. trafficClass
-// is the response's config-sourced class ("" = unclassified).
+// RecordHit implements api.FastPathMetrics. It records a fast-path hit
+// without going through the middleware chain (called by the h1parser
+// after serving a cache hit). trafficClass is the response's
+// config-sourced class ("" = unclassified).
 func (m *DataPlaneMetrics) RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 	if pool == "" {
 		// Pool-less fast paths (cache-enabled static routes with no

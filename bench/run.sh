@@ -98,10 +98,9 @@ declare -A BUDGETS=(
     [H1Parse_Get]=0
     [Reactor_Hit]=0
     [Reactor_Hit_Metrics]=0
-    # Middleware_Miss: 12 baseline — the traffic_class access-log
-    # attribute (ADR-0047) grows the attrs slice past the 18-
-    # element small-array threshold: +1 alloc, +48 B/op, time-neutral
-    # (benchstat ~p=0.49). The metrics record path itself stays at 0.
+    # Middleware_Miss: 12 — the traffic_class access-log attribute
+    # grows the attrs slice past the small-array threshold: +1 alloc,
+    # time-neutral. The metrics record path itself stays at 0.
     [Middleware_Miss]=12
     [Middleware_Miss_NoLog]=0
     [Middleware_Miss_TrafficClass]=12

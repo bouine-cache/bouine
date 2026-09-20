@@ -213,10 +213,8 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	}
 	rs.dpMetrics.PreResolveRoutes(poolNames)
 	// The traffic-class slot table comes from the same config slice the
-	// classifier was compiled from (ADR-0047), so the classifier's
-	// outputs can only hit pre-resolved slots. Without classes the
-	// table still carries "unclassified" (slot 0) — the only value
-	// every request carries when the feature is absent.
+	// classifier was compiled from, so classifier outputs always hit
+	// pre-resolved slots.
 	rs.dpMetrics.PreResolveTrafficClasses(rs.trafficClassify.ClassNames())
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
@@ -229,8 +227,8 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 }
 
 // trafficClassSpecs maps the config tree's traffic classes onto the
-// server layer's spec type (see server.TrafficClassSpec for why the
-// plain pair, not the config type).
+// server layer's spec type so the server layer keeps its dependency
+// diet.
 func trafficClassSpecs(classes []config.TrafficClass) []server.TrafficClassSpec {
 	if len(classes) == 0 {
 		return nil
@@ -316,16 +314,12 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
 	// The classifier is compiled once and shared by the router (slow
-	// path, via UserValues) and the routed fast path (TryHit stamping) —
-	// both attribution paths run the same classify over the same Host.
-	// The config types are mapped to the server-layer spec so L1 keeps
-	// its strict dependency diet (depguard).
+	// path) and the routed fast path — both run the same classify over
+	// the same Host.
 	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
-	// Shadow detection is boot-only (compile-time analysis): a pattern
-	// an earlier class fully shadows can never select its class, so the
-	// operator's later class silently receives no traffic for it. Boot
-	// proceeds — declaration order stays the precedence — but the dead
-	// config is surfaced at Error level (action required).
+	// Shadow detection is boot-only: a fully-shadowed later pattern can
+	// never select its class, so the dead config is surfaced at Error
+	// level while boot proceeds with declaration-order precedence.
 	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
 		e.logger.Error(msg)
 	}

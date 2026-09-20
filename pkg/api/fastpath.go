@@ -207,12 +207,10 @@ type FastPathResponse struct {
 	// metrics hook as the upstream_pool label. It comes from the
 	// route's pool config, never from request input.
 	Pool string
-	// TrafficClass is the config-sourced traffic class of the request's
-	// Host, consumed by the metrics hook as the traffic_class label
-	// (ADR-0047). It is the classifier's stable config-owned string —
-	// never a request-derived copy — so it satisfies the reactor ring's
-	// retain-safety contract like Pool does. Empty means "unclassified"
-	// at the consumer (the metrics fallback mirrors the pool one).
+	// TrafficClass is the config-sourced traffic class of the
+	// request's Host, consumed by the metrics hook as the
+	// traffic_class label. Like Pool it is a config-owned string (safe
+	// to retain) and never request input; empty means "unclassified".
 	TrafficClass string
 	BuffersArr   [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
 	Buffers      net.Buffers

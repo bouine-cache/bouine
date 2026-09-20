@@ -150,10 +150,8 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Classified from the raw Host before route resolution so no-route
-	// 404s (Host known, route absent) carry the label too. With no
-	// classifier configured the UserValue stays absent and the
-	// middleware falls back to "unclassified", matching the _default
-	// pool fallback pattern.
+	// 404s carry the label too. With no classifier the UserValue stays
+	// absent and the middleware falls back to "unclassified".
 	if rt.trafficClassify != nil {
 		ctx.SetUserValue(header.XBouineTrafficClass, rt.trafficClassify.Classify(string(ctx.Host())))
 	}

@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/bouine-cache/bouine/internal/config"
 )
 
 // Metrics holds Prometheus counters for cluster-level events.
@@ -127,7 +129,7 @@ func (m *Metrics) SetMode(mode string) {
 	if m == nil || m.ModeInfo == nil {
 		return
 	}
-	for _, label := range []string{"strong", "eventual"} {
+	for _, label := range []string{string(config.ClusterModeStrong), string(config.ClusterModeEventual)} {
 		if label == mode {
 			m.ModeInfo.WithLabelValues(label).Set(1)
 		} else {

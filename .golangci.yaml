@@ -173,6 +173,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/staticfile
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/bouine-cache/xxhash/v3
@@ -219,6 +220,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/observability
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/transport
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
@@ -232,6 +234,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/ai
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/admin
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/api
@@ -270,6 +273,7 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/runtime
+            - github.com/bouine-cache/bouine/internal/config
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header

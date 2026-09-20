@@ -70,6 +70,7 @@ rules:
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/cache
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/storage
       - github.com/bouine-cache/bouine/internal/origin
       - github.com/bouine-cache/bouine/internal/observability
@@ -137,6 +138,7 @@ rules:
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/pkg/api
       - github.com/bouine-cache/bouine/pkg/header
       - github.com/prometheus/client_golang
@@ -149,6 +151,7 @@ rules:
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/ai
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/admin
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/pkg/api
@@ -187,6 +190,7 @@ rules:
     allow:
       - $gostd
       - github.com/bouine-cache/bouine/internal/runtime
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/pkg/api
       - golang.org/x/sync
 

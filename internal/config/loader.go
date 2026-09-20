@@ -60,7 +60,7 @@ func Defaults() Config {
 			Admin: ":9000",
 		},
 		TLS: TLS{
-			MinVersion: "1.2",
+			MinVersion: TLSVersion12,
 		},
 		Cluster: Cluster{
 			Mode:     ClusterModeStrong,
@@ -875,7 +875,7 @@ func validatePoolDurations(ec *errCollector, i int, p *UpstreamPool) {
 // cluster is considered enabled when Listen.Cluster is non-empty.
 func (c *Config) validateCluster(ec *errCollector) {
 	if c.Listen.Cluster != "" {
-		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
+		c.Cluster.Mode = ClusterMode(strings.TrimSpace(string(c.Cluster.Mode)))
 		switch c.Cluster.Mode {
 		case ClusterModeStrong, ClusterModeEventual:
 			// valid
@@ -979,23 +979,24 @@ func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 // validateEvictionAlgorithm checks the eviction policy selection for
 // both tiers. The shared EvictionAlgorithm sets the default for both
 // tiers; HotEvictionAlgorithm and WarmEvictionAlgorithm override it
-// per-tier. All three accept "", "sieve", or "cachaner".
+// per-tier. All three accept the zero value, EvictionSieve, or
+// EvictionCachaner.
 //
 // This function is a pure check — it does not mutate s.
 func validateEvictionAlgorithm(ec *errCollector, s *Storage) {
 	for _, algo := range []struct {
 		path  string
-		value string
+		value EvictionAlgorithm
 	}{
 		{"storage.eviction_algorithm", s.EvictionAlgorithm},
 		{"storage.hot_eviction_algorithm", s.HotEvictionAlgorithm},
 		{"storage.warm_eviction_algorithm", s.WarmEvictionAlgorithm},
 	} {
 		switch algo.value {
-		case "", "sieve", "cachaner":
+		case "", EvictionSieve, EvictionCachaner:
 			// valid
 		default:
-			ec.addf(algo.path, `must be "sieve" or "cachaner", got %q`, algo.value)
+			ec.addf(algo.path, `must be %q or %q, got %q`, EvictionSieve, EvictionCachaner, algo.value)
 		}
 	}
 }

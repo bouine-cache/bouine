@@ -318,7 +318,7 @@ func TestBuildTLSConfig_ValidMinVersions(t *testing.T) {
 			cfg := &config.Config{
 				TLS: config.TLS{
 					Certs:      []config.TLSCert{{CertFile: certPath, KeyFile: keyPath}},
-					MinVersion: version,
+					MinVersion: config.TLSVersion(version),
 				},
 			}
 			tlsCfg, err := buildTLSConfig(cfg)

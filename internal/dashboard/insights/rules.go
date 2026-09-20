@@ -708,7 +708,7 @@ func ruleConfigTLSBelow12(data InsightData) *Insight {
 	if mv == "" || data.Config.Listen.HTTPS == "" {
 		return nil
 	}
-	if mv == config.TLSVersion12 || mv == config.TLSVersion13 {
+	if mv == config.TLSVersion1_2 || mv == config.TLSVersion1_3 {
 		return nil
 	}
 	return &Insight{

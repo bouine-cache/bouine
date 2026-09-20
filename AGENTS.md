@@ -110,7 +110,7 @@ L2 → L7, /pkg/api
 L1 → L7, /pkg/api
 
 Shared kernels (importable by every layer): /pkg/api, /pkg/header,
-internal/observability, internal/config, internal/platform.
+internal/observability, internal/config.
 ```
 
 - `pkg/api` and `pkg/bouineapi` are leaves; they import nothing from

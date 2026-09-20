@@ -6,9 +6,7 @@
 // major version bump.
 package config
 
-import (
-	"time"
-)
+import "time"
 
 // Config is the root of the bouine configuration tree.
 //

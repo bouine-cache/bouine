@@ -41,6 +41,13 @@ label on the three data-plane request metric families.
    boundaries and matches the empty continuation — prefer the `.*`
    form, anchored to the label boundary.
 
+   Overlapping declarations stay legal (declaration order is
+   precedence), but a later class's pattern that an earlier class
+   **fully shadows** — every host it matches is already claimed, so it
+   can never select its class — is reported at Error level at boot.
+   Partial overlaps are not findings: a later pattern that still
+   matches hosts the earlier one misses is operator intent.
+
 2. **Label** (`traffic_class`, always present): values come
    exclusively from the configured set plus the `unclassified` fallback
    — the request Host can only select among config-owned strings, the

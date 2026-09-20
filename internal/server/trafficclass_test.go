@@ -58,6 +58,156 @@ func TestTrafficClassifier_FirstMatchWins(t *testing.T) {
 	assert.Equal(t, "first", c.Classify("api.example.com"))
 }
 
+// TestTrafficClassifier_ShadowedPatterns pins the boot-time shadow
+// analysis: a later class's pattern an earlier class fully shadows can
+// never match (declaration order is precedence, ADR-0047) and must be
+// reported so the dead config is not silent. Partial overlaps — where
+// the later pattern still matches hosts the earlier one misses — are
+// not findings.
+func TestTrafficClassifier_ShadowedPatterns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		classes []TrafficClassSpec
+		want    []string // substrings expected in the findings; nil = none
+	}{
+		{
+			name: "no overlap is silent",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www.backmarket.fr"}},
+				{Name: "ssr", Hosts: []string{"*.svc.cluster.local"}},
+			},
+		},
+		{
+			name: "identical exact pattern in a later class",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www.example.com"}},
+				{Name: "ssr", Hosts: []string{"www.example.com", "api.example.com"}},
+			},
+			want: []string{`"www.example.com" in class "ssr"`, `"www.example.com" in class "csr"`},
+		},
+		{
+			name: "exact host shadowed by an earlier suffix glob",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com"}},
+				{Name: "ssr", Hosts: []string{"api.example.com"}},
+			},
+			want: []string{`"api.example.com" in class "ssr"`, `"*.example.com" in class "csr"`},
+		},
+		{
+			name: "exact host shadowed by an earlier prefix glob",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www.example.*"}},
+				{Name: "ssr", Hosts: []string{"www.example.fr"}},
+			},
+			want: []string{`"www.example.fr" in class "ssr"`},
+		},
+		{
+			name: "exact host shadowed by a bare-star prefix (empty continuation)",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www*"}},
+				{Name: "ssr", Hosts: []string{"www"}},
+			},
+			want: []string{`"www" in class "ssr"`},
+		},
+		{
+			name: "narrower suffix shadowed by an earlier wider suffix",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com"}},
+				{Name: "ssr", Hosts: []string{"*.sub.example.com"}},
+			},
+			want: []string{`"*.sub.example.com" in class "ssr"`},
+		},
+		{
+			name: "identical suffix globs in a later class",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com"}},
+				{Name: "ssr", Hosts: []string{"*.example.com"}},
+			},
+			want: []string{`"*.example.com" in class "ssr"`},
+		},
+		{
+			name: "narrower prefix shadowed by an earlier wider prefix",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www.*"}},
+				{Name: "ssr", Hosts: []string{"www.api.*"}},
+			},
+			want: []string{`"www.api.*" in class "ssr"`},
+		},
+		{
+			name: "wider suffix after narrower is only a partial overlap",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.sub.example.com"}},
+				{Name: "ssr", Hosts: []string{"*.example.com"}},
+			},
+		},
+		{
+			name: "suffix vs prefix globs only partially overlap",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com"}},
+				{Name: "ssr", Hosts: []string{"api.*"}},
+			},
+		},
+		{
+			name: "wider prefix after narrower is only a partial overlap",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"www.api.*"}},
+				{Name: "ssr", Hosts: []string{"www.*"}},
+			},
+		},
+		{
+			name: "same-class shadowing changes nothing",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com", "api.example.com"}},
+			},
+		},
+		{
+			name: "first class is never shadowed",
+			classes: []TrafficClassSpec{
+				{Name: "csr", Hosts: []string{"*.example.com", "api.example.com"}},
+				{Name: "ssr", Hosts: []string{"*.other.net"}},
+			},
+		},
+		{
+			name: "distant shadowing: middle class does not lift the shadow",
+			classes: []TrafficClassSpec{
+				{Name: "a", Hosts: []string{"*.example.com"}},
+				{Name: "b", Hosts: []string{"*.other.net"}},
+				{Name: "c", Hosts: []string{"x.example.com"}},
+			},
+			want: []string{`"x.example.com" in class "c"`, `class "a"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := NewTrafficClassifier(tt.classes)
+			if tt.want == nil {
+				assert.Empty(t, c.ShadowedPatterns())
+				return
+			}
+			got := c.ShadowedPatterns()
+			require.Len(t, got, 1)
+			for _, sub := range tt.want {
+				assert.Contains(t, got[0], sub)
+			}
+		})
+	}
+}
+
+// TestTrafficClassifier_ShadowedPatterns_NilAndEmpty pins the absent
+// shapes: no configured classes yields a nil classifier and nil
+// findings — boot logging can iterate unconditionally.
+func TestTrafficClassifier_ShadowedPatterns_NilAndEmpty(t *testing.T) {
+	t.Parallel()
+	var nilC *TrafficClassifier
+	assert.Nil(t, nilC.ShadowedPatterns())
+	assert.Nil(t, NewTrafficClassifier(nil).ShadowedPatterns())
+	assert.Nil(t, NewTrafficClassifier([]TrafficClassSpec{}).ShadowedPatterns())
+}
+
 // TestTrafficClassifier_NilIsUnclassified pins the absent-config shape:
 // a nil classifier (the deployment default) classifies everything as
 // unclassified — the label value never changes shape, only multiplies.

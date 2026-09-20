@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -172,7 +173,7 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "invalid"}}
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cluster.mode must be")
+	require.Contains(t, err.Error(), "cluster.mode: must be")
 }
 
 func TestClusterHandoffQueueDepth_NegativeRejected(t *testing.T) {
@@ -611,8 +612,9 @@ func TestValidate_PathRewrite_MutuallyExclusiveWithStripPrefix(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "both strip_prefix and path_rewrite") {
-		t.Fatalf("expected strip_prefix/path_rewrite exclusivity error, got %v", err)
+	var fe *FieldError
+	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite" || !strings.Contains(fe.Message, "mutually exclusive with strip_prefix") {
+		t.Fatalf("expected strip_prefix/path_rewrite exclusivity error on request.path_rewrite, got %v", err)
 	}
 }
 
@@ -624,8 +626,9 @@ func TestValidate_PathRewrite_RejectsInvalidPattern(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "path_rewrite.match is not a valid regular expression") {
-		t.Fatalf("expected invalid-pattern error, got %v", err)
+	var fe *FieldError
+	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.match" || !strings.Contains(fe.Message, "not a valid regular expression") {
+		t.Fatalf("expected invalid-pattern error on path_rewrite.match, got %v", err)
 	}
 }
 
@@ -640,8 +643,9 @@ func TestValidate_PathRewrite_RejectsOversizedPattern(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "path_rewrite.match exceeds") {
-		t.Fatalf("expected pattern size-cap error, got %v", err)
+	var fe *FieldError
+	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.match" || !strings.Contains(fe.Message, "exceeds") {
+		t.Fatalf("expected pattern size-cap error on path_rewrite.match, got %v", err)
 	}
 }
 
@@ -656,8 +660,9 @@ func TestValidate_PathRewrite_RejectsOversizedReplace(t *testing.T) {
 	}}
 	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "path_rewrite.replace exceeds") {
-		t.Fatalf("expected replace size-cap error, got %v", err)
+	var fe *FieldError
+	if err == nil || !errors.As(err, &fe) || fe.Path != "routes[0].request.path_rewrite.replace" || !strings.Contains(fe.Message, "exceeds") {
+		t.Fatalf("expected replace size-cap error on path_rewrite.replace, got %v", err)
 	}
 }
 
@@ -929,7 +934,7 @@ func TestCluster_FullMode_Rejected(t *testing.T) {
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "full"}}
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cluster.mode must be")
+	require.Contains(t, err.Error(), "cluster.mode: must be")
 }
 
 func TestWALSyncInterval_NegativeRejected(t *testing.T) {
@@ -1298,7 +1303,7 @@ func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
 	cfg.Experimental.H1Reactor = true
 	err := cfg.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "h1_reactor requires experimental.h1_fast_path")
+	assert.Contains(t, err.Error(), "experimental.h1_reactor: requires experimental.h1_fast_path")
 
 	// With the fast path on, the same config validates.
 	cfg.Experimental.H1FastPath = true
@@ -1321,7 +1326,7 @@ func TestValidate_H1FastPeerPathRequiresFastPath(t *testing.T) {
 	cfg.Experimental.H1FastPeerPath = true
 	err := cfg.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "h1_fast_peer_path requires experimental.h1_fast_path")
+	assert.Contains(t, err.Error(), "experimental.h1_fast_peer_path: requires experimental.h1_fast_path")
 
 	// With the fast path on, the same config validates.
 	cfg.Experimental.H1FastPath = true
@@ -1438,9 +1443,9 @@ func TestValidate_IncludeHeaders_Rejections(t *testing.T) {
 		key  RouteKey
 		want string
 	}{
-		{"star is unkeyable", RouteKey{IncludeHeaders: []string{"Accept-Language", "*"}}, `include_headers[1] must not be "*"`},
+		{"star is unkeyable", RouteKey{IncludeHeaders: []string{"Accept-Language", "*"}}, `include_headers[1]: must not be "*"`},
 		{"padded star is still a star", RouteKey{IncludeHeaders: []string{" *"}}, `must not be "*"`},
-		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1] must be a non-empty header name"},
+		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1]: must be a non-empty header name"},
 		{"whitespace-only entry", RouteKey{IncludeHeaders: []string{" "}}, "must be a non-empty"},
 		{
 			"case-insensitive duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", "accept-language"}},

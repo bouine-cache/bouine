@@ -13,6 +13,7 @@ import (
 	"github.com/bouine-cache/xxhash/v3"
 	"github.com/hashicorp/memberlist"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -61,7 +62,7 @@ type Config struct {
 	// "strong" uses a consistent hash ring with peer fetch on miss.
 	// "eventual" caches locally with no peer fetch; invalidation by gossip.
 	// Defaults to "strong" for backward compatibility.
-	Mode string
+	Mode config.ClusterMode
 	// Join is the list of seed addresses for bootstrapping.
 	Join []string
 	// VirtualNodes is the number of virtual nodes per real node on
@@ -555,7 +556,7 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	//
 	// In eventual mode, there is no HTTP fan-out, so the direct
 	// SendBestEffort remains the primary delivery path.
-	if c.ml != nil && c.cfg.Mode != "strong" {
+	if c.ml != nil && c.cfg.Mode != config.ClusterModeStrong {
 		for _, n := range c.ml.Members() {
 			_ = c.ml.SendBestEffort(n, msg)
 		}
@@ -929,8 +930,9 @@ func (c *Cluster) Config() Config {
 	return c.cfg
 }
 
-// Mode returns the cluster consistency mode ("strong" or "eventual").
-func (c *Cluster) Mode() string { return c.cfg.Mode }
+// Mode returns the cluster consistency mode (ClusterModeStrong or
+// ClusterModeEventual).
+func (c *Cluster) Mode() config.ClusterMode { return c.cfg.Mode }
 
 // SetMetrics registers cluster-level Prometheus counters. Must be called
 // before Join. Nil receiver is a no-op. Safe to call concurrently with

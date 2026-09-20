@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -970,7 +971,7 @@ func TestCluster_Config(t *testing.T) {
 
 	got := c.Config()
 	assert.Equal(t, "cfg-test", got.NodeName)
-	assert.Equal(t, "strong", got.Mode)
+	assert.Equal(t, config.ClusterModeStrong, got.Mode)
 }
 
 func TestCluster_Mode(t *testing.T) {
@@ -980,7 +981,7 @@ func TestCluster_Mode(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	assert.Equal(t, "strong", c.Mode())
+	assert.Equal(t, config.ClusterModeStrong, c.Mode())
 }
 
 func TestMetrics_SetMode(t *testing.T) {

@@ -434,7 +434,7 @@ func (e *engine) initCluster(
 	}
 
 	clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
-	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
+	clusterMetrics.SetMode(string(e.cfg.Cluster.Mode))
 	clusterNode.SetMetrics(clusterMetrics)
 
 	peerFetcher := cluster.NewPeerFetcherWithConfig(cluster.PeerFetcherConfig{
@@ -1011,7 +1011,7 @@ func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 	if rs.clusterNode != nil {
 		nodeCfg := rs.clusterNode.Config()
 		meta.VirtualNodes = nodeCfg.VirtualNodes
-		meta.Mode = rs.clusterNode.Mode()
+		meta.Mode = string(rs.clusterNode.Mode())
 		if nodeCfg.PushPullInterval > 0 {
 			meta.GossipInterval = nodeCfg.PushPullInterval.String()
 		} else {

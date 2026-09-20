@@ -26,9 +26,9 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 
 	var minVer uint16
 	switch cfg.TLS.MinVersion {
-	case "1.3":
+	case config.TLSVersion13:
 		minVer = tls.VersionTLS13
-	case "1.2", "":
+	case config.TLSVersion12, "":
 		minVer = tls.VersionTLS12
 	default:
 		return nil, fmt.Errorf("tls: unsupported min_version %q", cfg.TLS.MinVersion)

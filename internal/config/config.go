@@ -121,11 +121,24 @@ type Listen struct {
 	ReadTimeout time.Duration `yaml:"read_timeout,omitempty" json:"read_timeout,omitempty"`
 }
 
+// TLSVersion is the minimum TLS protocol version accepted on the
+// data-plane listener. Values are the wire strings used in
+// tls.min_version; the zero value means the documented default
+// (TLSVersion12).
+type TLSVersion string
+
+const (
+	// TLSVersion12 is TLS 1.2, the minimum supported version (AGENTS.md §6).
+	TLSVersion12 TLSVersion = "1.2"
+	// TLSVersion13 is TLS 1.3.
+	TLSVersion13 TLSVersion = "1.3"
+)
+
 // TLS configures the data-plane TLS handshake. Multiple certs are
 // supported via SNI; the first matching cert wins.
 type TLS struct {
-	MinVersion string    `yaml:"min_version,omitempty" json:"min_version,omitempty"`
-	Certs      []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
+	MinVersion TLSVersion `yaml:"min_version,omitempty" json:"min_version,omitempty"`
+	Certs      []TLSCert  `yaml:"certs,omitempty" json:"certs,omitempty"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -135,24 +148,38 @@ type TLSCert struct {
 	SNI      []string `yaml:"sni,omitempty" json:"sni,omitempty"`
 }
 
+// EvictionAlgorithm selects a cache eviction policy. Values are the
+// wire strings used in storage.*_eviction_algorithm; the zero value
+// means the documented default (EvictionSieve).
+type EvictionAlgorithm string
+
+const (
+	// EvictionSieve uses the SIEVE visited-bit sweep.
+	EvictionSieve EvictionAlgorithm = "sieve"
+	// EvictionCachaner uses SIEVE with a 3-bit frequency counter that
+	// gives hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction.
+	EvictionCachaner EvictionAlgorithm = "cachaner"
+)
+
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	// EvictionAlgorithm selects the eviction policy for both tiers.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction. This is the shared default; per-tier fields below
-	// override it.
-	EvictionAlgorithm string `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
+	// "" and EvictionSieve (the default) use the SIEVE visited-bit
+	// sweep. EvictionCachaner uses SIEVE with a 3-bit frequency counter
+	// that gives hot objects up to 7 second chances (vs SIEVE's 1)
+	// before eviction. This is the shared default; per-tier fields
+	// below override it.
+	EvictionAlgorithm EvictionAlgorithm `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
 	// WarmEvictionAlgorithm overrides the eviction policy for the warm
 	// tier only. When non-empty, it takes precedence over
 	// EvictionAlgorithm. Accepts the same values.
-	WarmEvictionAlgorithm string `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
-	WarmDir               string `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
+	WarmEvictionAlgorithm EvictionAlgorithm `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
+	WarmDir               string            `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
 	// HotEvictionAlgorithm overrides the eviction policy for the hot
 	// tier only. When non-empty, it takes precedence over
 	// EvictionAlgorithm. Accepts the same values.
-	HotEvictionAlgorithm string `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
+	HotEvictionAlgorithm EvictionAlgorithm `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
 	// WarmSyncInterval controls how often the hot→warm background sync
 	// runs. Default 60s (applied when warm_dir is set and the field is
 	// zero). Set to -1 to explicitly disable the sync loop. Only
@@ -246,15 +273,20 @@ type Storage struct {
 	HotMmapSlab bool `yaml:"hot_mmap_slab,omitempty" json:"hot_mmap_slab,omitempty"`
 }
 
+// ClusterMode is the cluster consistency model. Values are the wire
+// strings used in cluster.mode; the zero value means the documented
+// default (ClusterModeStrong).
+type ClusterMode string
+
 // Cluster consistency modes. The mode controls how cache keys are
 // distributed across nodes and how invalidations propagate.
 const (
 	// ClusterModeStrong shards keys via consistent hash ring; peer fetch on
 	// miss; 1 copy per key; invalidation via HTTP fan-out + gossip.
-	ClusterModeStrong = "strong"
+	ClusterModeStrong ClusterMode = "strong"
 	// ClusterModeEventual caches locally with no peer fetch; N independent
 	// copies; invalidation via gossip only (eventual consistency).
-	ClusterModeEventual = "eventual"
+	ClusterModeEventual ClusterMode = "eventual"
 )
 
 // maxHandoffQueueDepth is the upper bound for cluster.handoff_queue_depth.
@@ -277,10 +309,10 @@ type Cluster struct {
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
 	//   "eventual"  — local cache, gossip invalidation, no peer fetch
-	// Empty defaults to "strong" for backward compatibility.
-	Mode     string   `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
-	HopLimit int      `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
+	// Empty defaults to ClusterModeStrong for backward compatibility.
+	Mode     ClusterMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Join     []string    `yaml:"join,omitempty" json:"join,omitempty"`
+	HopLimit int         `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
 	// JoinTimeout is the maximum time to wait for cluster join before
 	// giving up. In strong mode, the pod stays not-ready if join fails
 	// within this timeout. In eventual mode, the pod becomes ready and

@@ -159,7 +159,7 @@ func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 
 func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
+	for _, mode := range []ClusterMode{ClusterModeStrong, ClusterModeEventual} {
 		cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: mode}}
 		err := cfg.Validate()
 		assert.Nil(t, err)
@@ -1231,9 +1231,9 @@ func TestParse_HotEvictionAlgorithm_Default(t *testing.T) {
 	t.Parallel()
 	cfg, err := Parse(nil)
 	require.NoError(t, err)
-	require.Equal(t, "", cfg.Storage.HotEvictionAlgorithm)
-	require.Equal(t, "", cfg.Storage.WarmEvictionAlgorithm)
-	require.Equal(t, "", cfg.Storage.EvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.HotEvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.WarmEvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.EvictionAlgorithm)
 }
 
 func TestParse_EvictionAlgorithm_Invalid(t *testing.T) {
@@ -1255,7 +1255,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.HotEvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.HotEvictionAlgorithm)
 }
 
 func TestParse_SharedEvictionAlgorithm_Cachaner(t *testing.T) {
@@ -1266,7 +1266,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.EvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.EvictionAlgorithm)
 }
 
 func TestParse_WarmEvictionAlgorithm_Cachaner(t *testing.T) {
@@ -1277,7 +1277,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.WarmEvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.WarmEvictionAlgorithm)
 }
 
 // TestValidate_H1ReactorRequiresFastPath asserts that

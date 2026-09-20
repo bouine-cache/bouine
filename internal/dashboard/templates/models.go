@@ -418,13 +418,13 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 	clusterBadge := "disabled"
 	if cfg.Listen.Cluster != "" {
 		clusterBadgeKind = "g"
-		clusterBadge = cfg.Cluster.Mode
+		clusterBadge = string(cfg.Cluster.Mode)
 	}
 	modeHint := "strong: ring-sharded · eventual: local cache, gossip invalidation"
 	sections = append(sections, ConfigSection{
 		Icon: "◎", Title: "cluster", Badge: clusterBadge, BadgeKind: clusterBadgeKind,
 		Rows: []ConfigRow{
-			{Key: "mode", Value: cfg.Cluster.Mode, Kind: "str", Hint: modeHint},
+			{Key: "mode", Value: string(cfg.Cluster.Mode), Kind: "str", Hint: modeHint},
 			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops (strong only)"},
 			{Key: "peer_fetch_concurrency", Value: fmt.Sprintf("%d", cfg.Cluster.PeerFetchConcurrency), Kind: "num", Hint: "in-flight peer fetches/puts (0 = default)"},
 		},

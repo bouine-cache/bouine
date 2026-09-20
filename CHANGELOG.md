@@ -86,6 +86,10 @@ the curated, human-readable summary.
   logs gain a matching `traffic_class` attribute. Zero allocations on
   the hit path; the label set is closed and spoof-proof by
   construction.
+- **Boot-time traffic-class shadow detection (ADR-0047)** — a host
+  pattern in a later class that an earlier class fully shadows (it can
+  never match under declaration-order precedence) is reported at Error
+  level at startup; boot proceeds and first-match precedence is kept.
 - **Cardinality exception (ADR-0047)** — `bouine_requests_total`
   crosses the AGENTS.md §9 10 000-series line whenever
   `pools × (1 + #classes) > 57`; the overage is opt-in (no configured

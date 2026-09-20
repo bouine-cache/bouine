@@ -321,6 +321,14 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 	// The config types are mapped to the server-layer spec so L1 keeps
 	// its strict dependency diet (depguard).
 	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
+	// Shadow detection is boot-only (compile-time analysis): a pattern
+	// an earlier class fully shadows can never select its class, so the
+	// operator's later class silently receives no traffic for it. Boot
+	// proceeds — declaration order stays the precedence — but the dead
+	// config is surfaced at Error level (action required).
+	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
+		e.logger.Error(msg)
+	}
 	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: rs.trafficClassify})
 	// The H1 fast path is per route: each cache-enabled route registers
 	// the FastPathHandler built from its own Handler, so hits carry the

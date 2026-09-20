@@ -86,7 +86,7 @@ rules:
       - github.com/prometheus/client_golang
       - golang.org/x/sync
 
-  # L5 may depend on L2, L3, L7.
+  # L5 may depend on L2, L3, L7, internal/config, internal/transport.
   cluster:
     list-mode: strict
     files: ["**/internal/cluster/**"]
@@ -95,10 +95,15 @@ rules:
       - github.com/bouine-cache/bouine/internal/cluster
       - github.com/bouine-cache/bouine/internal/cache
       - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/config
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/pkg/api
       - github.com/bouine-cache/bouine/pkg/header
       - github.com/hashicorp/memberlist
+      - github.com/bouine-cache/xxhash/v3
+      - github.com/prometheus/client_golang
+      - github.com/valyala/fasthttp
+      - github.com/bouine-cache/bouine/internal/transport
       - golang.org/x/sync
 
   # L6 may depend on L2 (read-only), L3, L5, L7.

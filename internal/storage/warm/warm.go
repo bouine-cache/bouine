@@ -445,10 +445,10 @@ type Store struct {
 
 // newEvictList builds the warm-tier eviction list from the Config's
 // algorithm selection. SIEVE is the default (zero-value config). When
-// WarmEvictionAlgorithm == "cachaner" the list is a cachaner list,
+// WarmEvictionAlgorithm == EvictionCachaner the list is a cachaner list,
 // mirroring the hot tier's dispatch.
 func newEvictList(cfg Config) evictor.List[api.Key] {
-	if cfg.WarmEvictionAlgorithm == "cachaner" {
+	if cfg.WarmEvictionAlgorithm == api.EvictionCachaner {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()

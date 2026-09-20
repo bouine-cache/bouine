@@ -123,6 +123,9 @@ func TestTrafficClasses_HostPatternValidation(t *testing.T) {
 		{"www.*.com", false},
 		{"*.*", false},
 		{"**", false},
+		{".*", false},  // no anchor: compiles to a prefix no host matches
+		{"*.", false},  // no anchor: compiles to a suffix no real host matches
+		{"www.", true}, // exact host with a trailing dot still has an anchor
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.valid, validTrafficClassHostPattern(tt.pattern), tt.pattern)

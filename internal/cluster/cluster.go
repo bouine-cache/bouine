@@ -59,9 +59,10 @@ type Config struct {
 	// useful behind NAT or in K8s where the pod IP differs).
 	AdvertiseAddr string
 	// Mode determines how cache keys are distributed across the cluster.
-	// "strong" uses a consistent hash ring with peer fetch on miss.
-	// "eventual" caches locally with no peer fetch; invalidation by gossip.
-	// Defaults to "strong" for backward compatibility.
+	// ClusterModeStrong uses a consistent hash ring with peer fetch on
+	// miss. ClusterModeEventual caches locally with no peer fetch;
+	// invalidation by gossip. Defaults to ClusterModeStrong for
+	// backward compatibility.
 	Mode config.ClusterMode
 	// Join is the list of seed addresses for bootstrapping.
 	Join []string

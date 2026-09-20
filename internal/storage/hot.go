@@ -292,9 +292,8 @@ type HotConfig struct {
 	// lock-ordering cycle with warm.idxMu).
 	OnEvictDemoted func(key api.Key)
 	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before eviction.
+	// See the config.EvictionAlgorithm doc for the supported values and
+	// their semantics; "" means the documented default (EvictionSieve).
 	//
 	// This is the resolved per-tier value: builders copy either
 	// config.Storage.HotEvictionAlgorithm (when set) or the shared

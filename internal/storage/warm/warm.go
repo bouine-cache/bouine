@@ -485,10 +485,8 @@ type Config struct {
 	Metrics *Metrics
 	Dir     string
 	// WarmEvictionAlgorithm selects the eviction policy for the warm tier.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction.
+	// See the config.EvictionAlgorithm doc for the supported values and
+	// their semantics; "" means the documented default (EvictionSieve).
 	//
 	// This is the resolved per-tier value: builders copy either
 	// config.Storage.WarmEvictionAlgorithm (when set) or the shared

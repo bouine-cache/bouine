@@ -10,6 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- **`GET /v1/config` now serves the resolved configuration** (ADR-0050):
+  every zero-means-default knob is materialized to its effective value,
+  negative disable sentinels become explicit bools, and per-tier
+  eviction overrides / per-route fetch-timeout inheritance are
+  collapsed. Tokens and TLS cert/key paths are absent by construction
+  (previously zeroed by copy). Breaking for scripts that read the raw
+  response shape; the YAML config schema is unchanged.
+
+- Validation errors are path-anchored (`config: routes[2].cache.fetch_timeout: ...`)
+  and `Validate` reports all invalid fields at once (`errors.Join`)
+  instead of stopping at the first.
+
+- `EvictionAlgorithm`, `ClusterMode`, and TLS `min_version` are typed
+  string enums in the config layer; YAML/JSON wire values unchanged.
+
 ### Added
 
 - `routes[].cache.negative_ttl` now accepts a per-status map, mirroring

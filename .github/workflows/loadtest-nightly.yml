@@ -95,6 +95,7 @@ jobs:
           retention-days: 30
 
       - name: Check regressions
+        id: check-regressions
         run: |
           python3 bench/loadtest/analysis/report.py \
             --results-dir bench/loadtest/results \
@@ -135,7 +136,12 @@ jobs:
           EOF
 
       - name: Open issue on regression
-        if: failure()
+        # Only open a regression issue when the p99 gate itself failed.
+        # A bare `if: failure()` fires on any job failure — including
+        # infra/tooling breakage upstream of the gate (missing kubectl,
+        # plotly, etc.) — and the issue body then misreports an infra
+        # failure as a p99 budget breach (issues #694, #702, #706, #713).
+        if: steps.check-regressions.outcome == 'failure'
         uses: actions/github-script@v9
         with:
           script: |

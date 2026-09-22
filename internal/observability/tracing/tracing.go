@@ -28,6 +28,12 @@ import (
 
 const tracerName = "bouine"
 
+// otelUserValueKey is the RequestCtx user-value key under which
+// FastHTTPMiddleware stores the server span context. It is
+// Background-based, so it is safe to retain past handler return —
+// unlike the RequestCtx itself.
+const otelUserValueKey = "otel.ctx"
+
 // tracerEnabled is set to true when InitTracer configures a real exporter.
 // When false, StartSpan returns a no-op span without calling into the OTel
 // global tracer, avoiding ~3 allocations per fetch on the miss path.
@@ -70,9 +76,41 @@ func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.
 			),
 		)
 		defer span.End()
-		ctx.SetUserValue("otel.ctx", spanCtx)
+		ctx.SetUserValue(otelUserValueKey, spanCtx)
 		next(ctx)
 	}
+}
+
+// SpanContextFromRequest returns the span context stored by
+// FastHTTPMiddleware, or Background when the request never passed
+// through it (detached-root behavior). Never carries the RequestCtx.
+func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
+	if c, ok := ctx.UserValue(otelUserValueKey).(context.Context); ok {
+		return c
+	}
+	return context.Background()
+}
+
+// StartOriginSpan starts the "bouine.origin" span for an origin fetch,
+// parented on the client's trace (SpanContextFromRequest). method and
+// path are byte slices so the disabled-tracer path converts nothing.
+// The returned context never carries the RequestCtx and is safe to
+// retain past handler return.
+func StartOriginSpan(parent context.Context, method, path []byte, pool string) (context.Context, trace.Span) {
+	if !tracerEnabled.Load() {
+		return parent, trace.SpanFromContext(parent)
+	}
+	attrs := [3]attribute.KeyValue{
+		attribute.String("http.method", string(method)),
+		attribute.String("http.path", string(path)),
+	}
+	if pool != "" {
+		attrs[2] = attribute.String("upstream_pool", pool)
+	}
+	ctx, span := Tracer().Start(parent, "bouine.origin",
+		trace.WithAttributes(attrs[:]...),
+	)
+	return ctx, span
 }
 
 // StartSpan is a thin helper that starts a child span in ctx and

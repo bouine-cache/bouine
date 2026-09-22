@@ -7,11 +7,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // newTestTracerProvider installs a TracerProvider backed by sr (a span
@@ -219,4 +221,126 @@ func TestInitTracer_StripsSchemeFromEndpoint(t *testing.T) {
 	// We don't assert on err here because the OTLP exporter may fail to
 	// connect. The key point is that the scheme stripping doesn't cause
 	// a panic or a different error class.
+}
+
+func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
+	// Cannot use t.Parallel(): installs global OTel tracer provider.
+	sr := tracetest.NewSpanRecorder()
+	cleanup := newTestTracerProvider(t, sr)
+	defer cleanup()
+
+	var stored context.Context
+	h := FastHTTPMiddleware("bouine.pipeline", func(ctx *fasthttp.RequestCtx) {
+		stored = SpanContextFromRequest(ctx)
+	})
+	req := fasthttp.AcquireRequest()
+	req.Header.SetMethod("GET")
+	req.Header.SetRequestURI("http://example.com/foo")
+	rctx := &fasthttp.RequestCtx{}
+	rctx.Init(req, nil, nil)
+	h(rctx)
+
+	// The stored context must not be the RequestCtx: fetch paths retain
+	// it past handler return, when fasthttp resets the ctx.
+	require.NotNil(t, stored, "middleware must store the span context")
+	_, span := StartSpan(stored, "probe")
+	span.End()
+}
+
+func TestStartOriginSpan_LinkedToPipelineSpan(t *testing.T) {
+	// Cannot use t.Parallel(): installs global OTel tracer provider.
+	sr := tracetest.NewSpanRecorder()
+	cleanup := newTestTracerProvider(t, sr)
+	defer cleanup()
+
+	// Simulate the middleware's stored span context.
+	pipelineCtx, pipelineSpan := StartSpan(context.Background(), "bouine.pipeline")
+
+	fetchCtx, originSpan := StartOriginSpan(pipelineCtx, []byte("GET"), []byte("/foo"), "app")
+	originSpan.End()
+	pipelineSpan.End()
+
+	spans := sr.Ended()
+	require.Len(t, spans, 2)
+	var origin, pipeline sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		switch s.Name() {
+		case "bouine.origin":
+			origin = s
+		case "bouine.pipeline":
+			pipeline = s
+		}
+	}
+	require.NotNil(t, origin, "origin span must exist")
+	require.NotNil(t, pipeline, "pipeline span must exist")
+
+	assert.Equal(t, pipeline.SpanContext().TraceID(), origin.SpanContext().TraceID(),
+		"origin span must share the client trace ID")
+	assert.Equal(t, pipeline.SpanContext().SpanID(), origin.Parent().SpanID(),
+		"origin span must be a child of the pipeline span")
+	assert.False(t, origin.SpanContext().IsRemote(), "origin span is same-process")
+
+	assertAttrs(t, origin, map[string]string{
+		"http.method":   "GET",
+		"http.path":     "/foo",
+		"upstream_pool": "app",
+	})
+
+	// The returned ctx carries the origin span for InjectFastHTTP.
+	assert.Equal(t, origin.SpanContext().SpanID(),
+		trace.SpanContextFromContext(fetchCtx).SpanID(),
+		"fetch ctx must carry the origin span for traceparent injection")
+}
+
+func TestStartOriginSpan_BackgroundParentFallsBackToRoot(t *testing.T) {
+	// Cannot use t.Parallel(): installs global OTel tracer provider.
+	sr := tracetest.NewSpanRecorder()
+	cleanup := newTestTracerProvider(t, sr)
+	defer cleanup()
+
+	_, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "")
+	span.End()
+
+	spans := sr.Ended()
+	require.Len(t, spans, 1)
+	require.False(t, spans[0].Parent().IsValid(),
+		"Background parent (no middleware) must produce a root span, not panic")
+	assertAttrs(t, spans[0], map[string]string{
+		"http.method": "GET",
+		"http.path":   "/foo",
+	})
+	assert.Empty(t, lookupAttr(spans[0], "upstream_pool"),
+		"empty pool must not set the upstream_pool attribute")
+}
+
+func TestStartOriginSpan_TracerDisabledIsNoOp(t *testing.T) {
+	// Cannot use t.Parallel(): flips the global tracerEnabled toggle.
+	prev := tracerEnabled.Load()
+	tracerEnabled.Store(false)
+	t.Cleanup(func() { tracerEnabled.Store(prev) })
+
+	ctx, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "app")
+	assert.False(t, span.SpanContext().IsValid(), "disabled tracer must return a no-op span")
+	assert.Equal(t, context.Background(), ctx,
+		"disabled tracer must return the parent ctx unchanged (no allocations)")
+}
+
+func assertAttrs(t *testing.T, span sdktrace.ReadOnlySpan, want map[string]string) {
+	t.Helper()
+	got := make(map[string]string, len(span.Attributes()))
+	for _, kv := range span.Attributes() {
+		got[string(kv.Key)] = kv.Value.String()
+	}
+	for k, v := range want {
+		assert.Equal(t, v, got[k], "span attribute %s", k)
+	}
+}
+
+func lookupAttr(span sdktrace.ReadOnlySpan, key string) string {
+	for _, kv := range span.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.String()
+		}
+	}
+	return ""
 }

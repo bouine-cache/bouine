@@ -1976,7 +1976,10 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidateBg(context.Background(), revalReq, lookupKey)
+	// The stored span context parents the leader's bouine.origin span on
+	// the request's trace (CCC-32); followers resolve without a span
+	// (CCC-37).
+	res := h.collapsedRevalidateBg(tracing.SpanContextFromRequest(ctx), revalReq, lookupKey)
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
 	// the 5xx path use the same staleFallbackAllowed check so the policy
@@ -2378,8 +2381,12 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
-	bgCtx := context.Background()
-	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
+	// Linked to the client trace: the invalidating proxy's fetch is part
+	// of the request that triggered it (CCC-32).
+	fetchCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName,
+	)
 	defer span.End()
 
 	req := fasthttp.AcquireRequest()
@@ -2791,7 +2798,12 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	fetchCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
+	// Span context stored by the middleware — never the RequestCtx,
+	// whose lifetime ends at handler return (CCC-32).
+	fetchCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName,
+	)
 	defer span.End()
 
 	if err := h.acquireFetchSlot(); err != nil {

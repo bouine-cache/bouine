@@ -10,6 +10,21 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Origin-fetch spans now join the client trace** (CCC-32). On the
+  miss, revalidate, invalidating-proxy, bypass, and streaming paths,
+  the `bouine.origin` span is parented on the request's
+  `bouine.pipeline` span instead of starting a detached root trace,
+  and carries `http.method`, `http.path`, and `upstream_pool`
+  attributes so slow fetches are filterable by route in Tempo. The
+  span context comes from the middleware's stored value (built on
+  `context.Background()`), never the `*fasthttp.RequestCtx`, so the
+  transport goroutine can still safely outlive the request. Linked
+  spans inherit the root sampling decision, ending the 50/50 random
+  drop of detached origin traces under partial sampling. Background
+  fetches (SWR revalidation, shed refill) stay detached by design.
+
 ### Changed
 
 - `internal/config` is now a shared kernel (ADR-0050): every layer may

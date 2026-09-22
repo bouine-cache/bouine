@@ -85,7 +85,12 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		}
 		return nil, fmt.Errorf("no fast client configured")
 	}
-	spanCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
+	// Span context stored by the middleware, never the RequestCtx
+	// (see doFetchFast, CCC-32).
+	spanCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName,
+	)
 
 	if err := h.acquireFetchSlot(); err != nil {
 		span.End()

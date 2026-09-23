@@ -25,10 +25,11 @@ the curated, human-readable summary.
   decision, ending the 50/50 random drop of detached origin traces
   under partial sampling. Streaming fetches now also end their span
   (released with the body stream) instead of leaking it unended.
-  Background fetches (SWR revalidation, shed refill) are not linked to
-  a client trace — the triggering request's span is already ended by
-  the time they run — but now carry the same method/path/route/pool
-  attributes on their detached root spans.
+  Background fetches (SWR revalidation, shed refill, background
+  refresh) are not linked to a client trace — the triggering
+  request's span is already ended by the time they run — but now
+  carry the same method/path/route/pool attributes on their detached
+  root spans.
 
 ### Changed
 

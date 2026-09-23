@@ -1074,19 +1074,22 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	})
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
-	res := h.collapsedFetchBg(ctx, req, key)
+	// Detached root span, attribute-bearing (method/path/pool/route) so
+	// slow refresh fetches are filterable in Tempo. Every other
+	// collapsedFetchBg caller starts its own span since ownership moved
+	// out of doFetchBg — this one is no exception (it was simply missed).
+	spanCtx, span := tracing.StartOriginSpan(
+		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
+	)
+	defer span.End()
+
+	res := h.collapsedFetchBg(spanCtx, req, key)
 	if res.Err != nil {
-		h.refreshMetrics.IncTotal("error")
-		h.refreshMetrics.IncErrors(errorType(res.Err))
-		remaining := time.Until(stale.StoredAt.Add(stale.TTL))
-		if remaining <= 0 {
-			return
-		}
-		delay := min(h.refreshMargin, remaining/2)
-		if delay < time.Second {
-			delay = time.Second
-		}
-		h.scheduler.Schedule(key, time.Now().Add(delay))
+		// A failed refresh must not export as a clean span — the same
+		// error-recording standard the SWR revalidate and shed-refill
+		// owners uphold.
+		tracing.RecordError(span, res.Err)
+		h.scheduleRefreshRetry(key, stale, res.Err)
 		return
 	}
 
@@ -1120,6 +1123,24 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 	h.refreshMetrics.IncSkips("uncacheable")
+}
+
+// scheduleRefreshRetry counts the failed refresh against the error
+// metrics and re-schedules it with backoff: half the remaining TTL
+// (bounded by refresh_margin, floored at 1s). The refresh is not
+// retried at all once the object has fully expired.
+func (h *Handler) scheduleRefreshRetry(key api.Key, stale *api.Object, refreshErr error) {
+	h.refreshMetrics.IncTotal("error")
+	h.refreshMetrics.IncErrors(errorType(refreshErr))
+	remaining := time.Until(stale.StoredAt.Add(stale.TTL))
+	if remaining <= 0 {
+		return
+	}
+	delay := min(h.refreshMargin, remaining/2)
+	if delay < time.Second {
+		delay = time.Second
+	}
+	h.scheduler.Schedule(key, time.Now().Add(delay))
 }
 
 // errorType classifies a background refresh error for the

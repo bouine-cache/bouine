@@ -92,23 +92,31 @@ func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
 }
 
 // StartOriginSpan starts the "bouine.origin" span for an origin fetch,
-// parented on the client's trace (SpanContextFromRequest). method and
-// path are byte slices so the disabled-tracer path converts nothing.
+// parented on the client's trace (SpanContextFromRequest). method, path
+// are byte slices so the disabled-tracer path converts nothing; pool and
+// route are strings the caller already owns. route is the bounded route
+// label (http.route) — never the raw path. The slice is built
+// conditionally so empty values are omitted, not passed as zero-value
+// KeyValues the SDK counts as dropped attributes on every fetch.
 // The returned context never carries the RequestCtx and is safe to
 // retain past handler return.
-func StartOriginSpan(parent context.Context, method, path []byte, pool string) (context.Context, trace.Span) {
+func StartOriginSpan(parent context.Context, method, path []byte, pool, route string) (context.Context, trace.Span) {
 	if !tracerEnabled.Load() {
 		return parent, trace.SpanFromContext(parent)
 	}
-	attrs := [3]attribute.KeyValue{
+	attrs := make([]attribute.KeyValue, 0, 4)
+	attrs = append(attrs,
 		attribute.String("http.method", string(method)),
 		attribute.String("http.path", string(path)),
-	}
+	)
 	if pool != "" {
-		attrs[2] = attribute.String("upstream_pool", pool)
+		attrs = append(attrs, attribute.String("upstream_pool", pool))
+	}
+	if route != "" {
+		attrs = append(attrs, attribute.String("http.route", route))
 	}
 	ctx, span := Tracer().Start(parent, "bouine.origin",
-		trace.WithAttributes(attrs[:]...),
+		trace.WithAttributes(attrs...),
 	)
 	return ctx, span
 }

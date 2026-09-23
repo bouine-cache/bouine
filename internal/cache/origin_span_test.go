@@ -1,14 +1,10 @@
 package cache
 
 import (
-	"context"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	tracingtest "github.com/bouine-cache/bouine/internal/observability/tracing/tracingtest"
@@ -18,38 +14,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// spanSink is an in-memory sdktrace.SpanExporter (same shape as the
-// admin package's spanRecorder).
-type spanSink struct {
-	mu    sync.Mutex
-	spans []sdktrace.ReadOnlySpan
-}
-
-func (s *spanSink) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.spans = append(s.spans, spans...)
-	return nil
-}
-
-func (s *spanSink) Shutdown(_ context.Context) error { return nil }
-
-func (s *spanSink) named(name string) sdktrace.ReadOnlySpan {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, sp := range s.spans {
-		if sp.Name() == name {
-			return sp
-		}
-	}
-	return nil
-}
-
 // CCC-32: the bouine.origin span of a MISS served through the tracing
-// middleware must be a child of bouine.pipeline, with method/path/pool
-// attributes. No t.Parallel(): global OTel provider.
+// middleware must be a child of bouine.pipeline, with
+// method/path/pool/route attributes. No t.Parallel(): global OTel provider.
 func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
-	sink := &spanSink{}
+	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
 
 	h := NewHandler(HandlerConfig{
@@ -59,8 +28,9 @@ func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 			ctx.SetStatusCode(200)
 			_, _ = ctx.WriteString("miss-body")
 		}},
-		Store:    storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
-		PoolName: "product-page",
+		Store:     storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		PoolName:  "product-page",
+		RouteName: "products",
 	})
 	pipeline := tracing.FastHTTPMiddleware("bouine.pipeline", h.ServeRequest)
 
@@ -68,25 +38,29 @@ func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 	pipeline(rctx)
 	require.Equal(t, "MISS", respHeader(rctx, header.XCache))
 
-	origin := sink.named("bouine.origin")
+	origin := sink.Named("bouine.origin")
 	require.NotNil(t, origin, "miss must start a bouine.origin span")
-	pipe := sink.named("bouine.pipeline")
+	pipe := sink.Named("bouine.pipeline")
 	require.NotNil(t, pipe, "middleware must start a bouine.pipeline span")
 
 	assert.Equal(t, pipe.SpanContext().TraceID(), origin.SpanContext().TraceID(),
 		"origin span must share the client trace (no orphan root)")
 	assert.Equal(t, pipe.SpanContext().SpanID(), origin.Parent().SpanID(),
 		"origin span must be a child of bouine.pipeline")
-	assert.Equal(t, "GET", spanAttr(origin, "http.method"))
-	assert.Equal(t, "/product-page/products/42/pickers", spanAttr(origin, "http.path"),
+	assert.Equal(t, "GET", sink.Attr(origin, "http.method"))
+	assert.Equal(t, "/product-page/products/42/pickers", sink.Attr(origin, "http.path"),
 		"slow fetches must be filterable by route path")
-	assert.Equal(t, "product-page", spanAttr(origin, "upstream_pool"))
+	assert.Equal(t, "product-page", sink.Attr(origin, "upstream_pool"))
+	assert.Equal(t, "products", sink.Attr(origin, "http.route"),
+		"slow fetches must be filterable by the bounded route label")
 }
 
-// TestRevalidateOriginSpanIsChildOfPipeline covers the conditional-fetch
-// path. No t.Parallel(): global OTel provider.
+// CCC-32 on the conditional-fetch path: the revalidate fetch's span must
+// be a child of bouine.pipeline AND carry the CCC-32 attributes — the
+// acceptance criteria apply to every linked path, not just the miss.
+// No t.Parallel(): global OTel provider.
 func TestRevalidateOriginSpanIsChildOfPipeline(t *testing.T) {
-	sink := &spanSink{}
+	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
 
 	h := NewHandler(HandlerConfig{
@@ -124,25 +98,30 @@ func TestRevalidateOriginSpanIsChildOfPipeline(t *testing.T) {
 
 	// The warm-up MISS also produced a detached root origin span; assert
 	// on the one in the revalidate request's trace.
-	pipe := sink.named("bouine.pipeline")
+	pipe := sink.Named("bouine.pipeline")
 	require.NotNil(t, pipe)
-	var linked sdktrace.ReadOnlySpan
-	sink.mu.Lock()
-	for _, sp := range sink.spans {
-		if sp.Name() == "bouine.origin" && sp.SpanContext().TraceID() == pipe.SpanContext().TraceID() {
-			linked = sp
+	for _, sp := range sink.Ended() {
+		if sp.Name() != "bouine.origin" ||
+			sp.SpanContext().TraceID() != pipe.SpanContext().TraceID() {
+			continue
 		}
+		assert.Equal(t, pipe.SpanContext().SpanID(), sp.Parent().SpanID(),
+			"revalidate origin span must be a child of bouine.pipeline")
+		assert.Equal(t, "GET", sink.Attr(sp, "http.method"),
+			"revalidate origin span must carry method (CCC-32)")
+		assert.Equal(t, "/widget", sink.Attr(sp, "http.path"),
+			"revalidate origin span must carry path (CCC-32)")
+		assert.Equal(t, "app", sink.Attr(sp, "upstream_pool"),
+			"revalidate origin span must carry pool (CCC-32)")
+		return
 	}
-	sink.mu.Unlock()
-	require.NotNil(t, linked, "a bouine.origin span must exist inside the revalidate request's trace")
-	assert.Equal(t, pipe.SpanContext().SpanID(), linked.Parent().SpanID(),
-		"revalidate origin span must be a child of bouine.pipeline")
+	t.Fatal("no bouine.origin span found in the revalidate request's trace")
 }
 
 // CCC-32 on the invalidating-proxy path. No t.Parallel(): global
 // OTel provider.
 func TestInvalidatingProxyOriginSpanIsChildOfPipeline(t *testing.T) {
-	sink := &spanSink{}
+	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
 
 	h := NewHandler(HandlerConfig{
@@ -163,20 +142,22 @@ func TestInvalidatingProxyOriginSpanIsChildOfPipeline(t *testing.T) {
 	pipeline(rctx)
 	require.Equal(t, 200, respCode(rctx))
 
-	origin := sink.named("bouine.origin")
+	origin := sink.Named("bouine.origin")
 	require.NotNil(t, origin, "invalidating proxy must start a bouine.origin span")
-	pipe := sink.named("bouine.pipeline")
+	pipe := sink.Named("bouine.pipeline")
 	require.NotNil(t, pipe)
 	assert.Equal(t, pipe.SpanContext().TraceID(), origin.SpanContext().TraceID(),
 		"invalidating-proxy origin span must share the client trace")
 	assert.Equal(t, pipe.SpanContext().SpanID(), origin.Parent().SpanID())
-	assert.Equal(t, "POST", spanAttr(origin, "http.method"))
+	assert.Equal(t, "POST", sink.Attr(origin, "http.method"))
 }
 
-// CCC-32 on the BYPASS path (streamBypass → doFetchStream).
-// No t.Parallel(): global OTel provider.
+// CCC-32 on the BYPASS path (streamBypass → doFetchStream): the span is
+// a child of the pipeline and is actually ended (exported) when the
+// fetch is released, instead of leaking. No t.Parallel(): global
+// OTel provider.
 func TestBypassStreamOriginSpanIsChildOfPipeline(t *testing.T) {
-	sink := &spanSink{}
+	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
 
 	h := NewHandler(HandlerConfig{
@@ -195,21 +176,54 @@ func TestBypassStreamOriginSpanIsChildOfPipeline(t *testing.T) {
 	pipeline(rctx)
 	require.Equal(t, "BYPASS", respHeader(rctx, header.XCache))
 
-	origin := sink.named("bouine.origin")
+	origin := sink.Named("bouine.origin")
 	require.NotNil(t, origin, "bypass must start a bouine.origin span")
-	pipe := sink.named("bouine.pipeline")
+	pipe := sink.Named("bouine.pipeline")
 	require.NotNil(t, pipe)
 	assert.Equal(t, pipe.SpanContext().TraceID(), origin.SpanContext().TraceID(),
 		"bypass origin span must share the client trace")
 	assert.Equal(t, pipe.SpanContext().SpanID(), origin.Parent().SpanID())
-	assert.Equal(t, "/private", spanAttr(origin, "http.path"))
+	assert.Equal(t, "/private", sink.Attr(origin, "http.path"))
 }
 
-func spanAttr(span sdktrace.ReadOnlySpan, key string) string {
-	for _, kv := range span.Attributes() {
-		if string(kv.Key) == key {
-			return kv.Value.String()
-		}
-	}
-	return ""
+// CCC-32 regression: an unbuffered (streamed) bypass must end its
+// bouine.origin span. releaseStreamFetch, the funnel every streaming
+// exit takes, owns span.End; before the fix the unbuffered path never
+// ended the span, so the slowest fetches (SSE) were invisible in
+// Tempo. No t.Parallel(): global OTel provider.
+func TestStreamedOriginSpanIsEnded(t *testing.T) {
+	sink := &tracingtest.SpanRecorder{}
+	tracingtest.Setup(t, sink)
+
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {},
+		FastClient: &streamFastClient{handler: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "no-store")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.WriteString("streamed")
+		}},
+		Store:    storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		PoolName: "app",
+	})
+	pipeline := tracing.FastHTTPMiddleware("bouine.pipeline", h.ServeRequest)
+
+	rctx := testCtxWithHeader("GET", "http://example.com/live", header.CacheControl, "no-store")
+	pipeline(rctx)
+	require.Equal(t, "BYPASS", respHeader(rctx, header.XCache))
+	require.True(t, rctx.Response.IsBodyStream(),
+		"streamFastClient must produce an unbuffered body stream for this test to cover the streaming path")
+	// Drain the streamed body: the stream writer is what calls
+	// releaseStreamFetch (and thus ends the span) on the real path;
+	// BodyWriteTo runs it in-process here.
+	require.NoError(t, rctx.Response.BodyWriteTo(discardWriter{}))
+
+	origin := sink.Named("bouine.origin")
+	require.NotNil(t, origin, "streamed bypass must start a bouine.origin span")
+	require.False(t, origin.EndTime().IsZero(),
+		"the streamed fetch's origin span must be ended and exported, not leaked")
 }
+
+// discardWriter consumes a streamed body without inspecting it.
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }

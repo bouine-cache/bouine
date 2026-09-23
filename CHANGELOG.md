@@ -16,14 +16,19 @@ the curated, human-readable summary.
   miss, revalidate, invalidating-proxy, bypass, and streaming paths,
   the `bouine.origin` span is parented on the request's
   `bouine.pipeline` span instead of starting a detached root trace,
-  and carries `http.method`, `http.path`, and `upstream_pool`
-  attributes so slow fetches are filterable by route in Tempo. The
-  span context comes from the middleware's stored value (built on
-  `context.Background()`), never the `*fasthttp.RequestCtx`, so the
-  transport goroutine can still safely outlive the request. Linked
-  spans inherit the root sampling decision, ending the 50/50 random
-  drop of detached origin traces under partial sampling. Background
-  fetches (SWR revalidation, shed refill) stay detached by design.
+  and carries `http.method`, `http.path`, `http.route`,
+  `upstream_pool` attributes so slow fetches are filterable by route
+  (bounded label) and pool in Tempo. The span context comes from the
+  middleware's stored value (built on `context.Background()`), never
+  the `*fasthttp.RequestCtx`, so the transport goroutine can still
+  safely outlive the request. Linked spans inherit the root sampling
+  decision, ending the 50/50 random drop of detached origin traces
+  under partial sampling. Streaming fetches now also end their span
+  (released with the body stream) instead of leaking it unended.
+  Background fetches (SWR revalidation, shed refill) are not linked to
+  a client trace — the triggering request's span is already ended by
+  the time they run — but now carry the same method/path/route/pool
+  attributes on their detached root spans.
 
 ### Changed
 

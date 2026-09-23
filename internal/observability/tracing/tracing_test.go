@@ -241,8 +241,14 @@ func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
 	h(rctx)
 
 	// The stored context must not be the RequestCtx: fetch paths retain
-	// it past handler return, when fasthttp resets the ctx.
+	// it past handler return, when fasthttp resets the ctx. A *RequestCtx
+	// IS a context.Context, so this assertion is what actually fails if
+	// someone reverts ExtractFastHTTP(context.Background(), ...) back to
+	// passing the ctx (the original lifetime bug, CCC-32).
 	require.NotNil(t, stored, "middleware must store the span context")
+	_, isReqCtx := stored.(*fasthttp.RequestCtx)
+	assert.False(t, isReqCtx,
+		"stored context must be Background-based, never the RequestCtx")
 	_, span := StartSpan(stored, "probe")
 	span.End()
 }
@@ -256,7 +262,7 @@ func TestStartOriginSpan_LinkedToPipelineSpan(t *testing.T) {
 	// Simulate the middleware's stored span context.
 	pipelineCtx, pipelineSpan := StartSpan(context.Background(), "bouine.pipeline")
 
-	fetchCtx, originSpan := StartOriginSpan(pipelineCtx, []byte("GET"), []byte("/foo"), "app")
+	fetchCtx, originSpan := StartOriginSpan(pipelineCtx, []byte("GET"), []byte("/foo"), "app", "products")
 	originSpan.End()
 	pipelineSpan.End()
 
@@ -284,6 +290,7 @@ func TestStartOriginSpan_LinkedToPipelineSpan(t *testing.T) {
 		"http.method":   "GET",
 		"http.path":     "/foo",
 		"upstream_pool": "app",
+		"http.route":    "products",
 	})
 
 	// The returned ctx carries the origin span for InjectFastHTTP.
@@ -298,7 +305,7 @@ func TestStartOriginSpan_BackgroundParentFallsBackToRoot(t *testing.T) {
 	cleanup := newTestTracerProvider(t, sr)
 	defer cleanup()
 
-	_, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "")
+	_, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "", "")
 	span.End()
 
 	spans := sr.Ended()
@@ -311,6 +318,10 @@ func TestStartOriginSpan_BackgroundParentFallsBackToRoot(t *testing.T) {
 	})
 	assert.Empty(t, lookupAttr(spans[0], "upstream_pool"),
 		"empty pool must not set the upstream_pool attribute")
+	assert.Empty(t, lookupAttr(spans[0], "http.route"),
+		"empty route must not set the http.route attribute")
+	assert.Zero(t, spans[0].DroppedAttributes(),
+		"omitted attributes must not count as dropped (no zero-value KeyValues)")
 }
 
 func TestStartOriginSpan_TracerDisabledIsNoOp(t *testing.T) {
@@ -319,7 +330,7 @@ func TestStartOriginSpan_TracerDisabledIsNoOp(t *testing.T) {
 	tracerEnabled.Store(false)
 	t.Cleanup(func() { tracerEnabled.Store(prev) })
 
-	ctx, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "app")
+	ctx, span := StartOriginSpan(context.Background(), []byte("GET"), []byte("/foo"), "app", "products")
 	assert.False(t, span.SpanContext().IsValid(), "disabled tracer must return a no-op span")
 	assert.Equal(t, context.Background(), ctx,
 		"disabled tracer must return the parent ctx unchanged (no allocations)")

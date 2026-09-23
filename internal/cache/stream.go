@@ -28,6 +28,18 @@ var streamBufPool = sync.Pool{
 
 const maxStreamBufRetain = 1 << 20
 
+// spanEnder ends a tracing span. A local interface keeps the cache
+// layer free of go.opentelemetry.io imports (depguard: L3 reaches
+// tracing through the observability kernel only).
+type spanEnder interface{ End(opts ...struct{}) }
+
+// spanEndFunc adapts a tracing.Span to spanEnder. trace.Span.End takes
+// variadic options, so it cannot implement spanEnder directly.
+type spanEndFunc func()
+
+// End implements spanEnder.
+func (f spanEndFunc) End(...struct{}) { f() }
+
 // streamFetchResult carries the origin response state needed to stream
 // the body to the client while concurrently buffering it for the cache.
 // When buffered is true, the body is already in resp.Body() (the client
@@ -36,6 +48,7 @@ type streamFetchResult struct {
 	resp       *fasthttp.Response // body stream still open (or buffered); nil on the upstream-fallback path
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
+	span       spanEnder          // bouine.origin span; ended by releaseStreamFetch, the single funnel every exit path takes (CCC-32: unbuffered streams previously never ended it)
 	body       []byte             // upstream-fallback body; empty on the FastClient paths
 	Header     headerLookup
 	StatusCode int
@@ -86,10 +99,13 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		return nil, fmt.Errorf("no fast client configured")
 	}
 	// Span context stored by the middleware, never the RequestCtx
-	// (see doFetchFast, CCC-32).
+	// (see doFetchFast, CCC-32). The span is stored on the result and
+	// ended by releaseStreamFetch — every exit path (buffered serve,
+	// stream writer, error) funnels through it, so the unbuffered
+	// streaming path no longer leaks an unended span.
 	spanCtx, span := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
-		ctx.Method(), ctx.Path(), h.poolName,
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
 	)
 
 	if err := h.acquireFetchSlot(); err != nil {
@@ -154,12 +170,8 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		resp:       resp,
 		req:        req,
 		sem:        h.fetchSem,
+		span:       spanEndFunc(func() { span.End() }),
 		buffered:   !resp.IsBodyStream(),
-	}
-
-	// In buffered mode, the span ends now (no stream writer to end it later).
-	if sf.buffered {
-		span.End()
 	}
 
 	return sf, nil
@@ -176,6 +188,14 @@ func releaseStreamFetch(sf *streamFetchResult) {
 	}
 	if sf.sem != nil {
 		<-sf.sem
+	}
+	// The span ends here for both modes: buffered callers funnel through
+	// this release, and streaming callers release the body stream here.
+	// Span.End is idempotent, so an error-path release after
+	// doFetchStream already ended the span inline is safe. The nil guard
+	// covers test-constructed results that never started a span.
+	if sf.span != nil {
+		sf.span.End()
 	}
 }
 

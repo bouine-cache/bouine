@@ -28,6 +28,12 @@ import (
 
 const tracerName = "bouine"
 
+// Span re-exports otel's trace.Span so cache-layer (L3) code can hold
+// and end spans without importing go.opentelemetry.io directly
+// (depguard: L3 reaches this package through the observability kernel
+// only).
+type Span = trace.Span
+
 // otelUserValueKey is the RequestCtx user-value key under which
 // FastHTTPMiddleware stores the server span context. It is
 // Background-based, so it is safe to retain past handler return —

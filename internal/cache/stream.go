@@ -28,18 +28,6 @@ var streamBufPool = sync.Pool{
 
 const maxStreamBufRetain = 1 << 20
 
-// spanEnder ends a tracing span. A local interface keeps the cache
-// layer free of go.opentelemetry.io imports (depguard: L3 reaches
-// tracing through the observability kernel only).
-type spanEnder interface{ End(opts ...struct{}) }
-
-// spanEndFunc adapts a tracing.Span to spanEnder. trace.Span.End takes
-// variadic options, so it cannot implement spanEnder directly.
-type spanEndFunc func()
-
-// End implements spanEnder.
-func (f spanEndFunc) End(...struct{}) { f() }
-
 // streamFetchResult carries the origin response state needed to stream
 // the body to the client while concurrently buffering it for the cache.
 // When buffered is true, the body is already in resp.Body() (the client
@@ -48,7 +36,7 @@ type streamFetchResult struct {
 	resp       *fasthttp.Response // body stream still open (or buffered); nil on the upstream-fallback path
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
-	span       spanEnder          // bouine.origin span; ended by releaseStreamFetch, the single funnel every exit path takes (CCC-32: unbuffered streams previously never ended it)
+	span       tracing.Span       // bouine.origin span; ended by releaseStreamFetch, the single funnel every exit path takes (CCC-32: unbuffered streams previously never ended it)
 	body       []byte             // upstream-fallback body; empty on the FastClient paths
 	Header     headerLookup
 	StatusCode int
@@ -170,7 +158,7 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		resp:       resp,
 		req:        req,
 		sem:        h.fetchSem,
-		span:       spanEndFunc(func() { span.End() }),
+		span:       span,
 		buffered:   !resp.IsBodyStream(),
 	}
 

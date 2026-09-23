@@ -8,10 +8,8 @@ import (
 )
 
 // SpanRecorder is an in-memory sdktrace.SpanExporter for tests: every
-// exported span is retained for assertion. It replaces the per-package
-// copies of the same struct that had accumulated in admin and cache
-// tests. spans before mu satisfies fieldalignment: a 24-byte slice
-// header followed by an 8-byte mutex packs with zero padding.
+// exported span is retained for assertion. Field order satisfies
+// fieldalignment (24-byte slice header, then 8-byte mutex).
 type SpanRecorder struct {
 	spans []sdktrace.ReadOnlySpan
 	mu    sync.Mutex

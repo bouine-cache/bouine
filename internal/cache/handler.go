@@ -1074,10 +1074,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	})
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
-	// Detached root span, attribute-bearing (method/path/pool/route) so
-	// slow refresh fetches are filterable in Tempo. Every other
-	// collapsedFetchBg caller starts its own span since ownership moved
-	// out of doFetchBg — this one is no exception (it was simply missed).
+	// Detached root span: the triggering request is long gone, and its
+	// pipeline span already ended. Still attribute-bearing so slow
+	// refreshes are filterable in Tempo.
 	spanCtx, span := tracing.StartOriginSpan(
 		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
 	)
@@ -1085,9 +1084,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	res := h.collapsedFetchBg(spanCtx, req, key)
 	if res.Err != nil {
-		// A failed refresh must not export as a clean span — the same
-		// error-recording standard the SWR revalidate and shed-refill
-		// owners uphold.
+		// A failed fetch must not export as a clean span.
 		tracing.RecordError(span, res.Err)
 		h.scheduleRefreshRetry(key, stale, res.Err)
 		return
@@ -1125,10 +1122,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	h.refreshMetrics.IncSkips("uncacheable")
 }
 
-// scheduleRefreshRetry counts the failed refresh against the error
-// metrics and re-schedules it with backoff: half the remaining TTL
-// (bounded by refresh_margin, floored at 1s). The refresh is not
-// retried at all once the object has fully expired.
+// scheduleRefreshRetry records the failure metrics and re-schedules the
+// refresh with backoff: half the remaining TTL, bounded by refresh_margin
+// and floored at 1s. No retry once the object has fully expired.
 func (h *Handler) scheduleRefreshRetry(key api.Key, stale *api.Object, refreshErr error) {
 	h.refreshMetrics.IncTotal("error")
 	h.refreshMetrics.IncErrors(errorType(refreshErr))
@@ -1809,13 +1805,9 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	// The caller already started the bouine.origin span and passed its
-	// context down: revalidate starts it with this request's attributes
-	// and injects traceparent from it; the background SWR caller starts
-	// it detached. Only the span context is used here — the span itself
-	// is ended by its owner, and errors are recorded by the owner from
-	// the returned result (it sees res.Err; the transport error is not
-	// otherwise observable here without breaking the sharing contract).
+	// The caller already started the bouine.origin span and passes only
+	// its context down; the span's owner ends it and records errors from
+	// the returned result.
 	//
 	// Deadline-based timeout: transport.Client.Do maps ctx.Deadline() to
 	// fasthttp's kernel-level connection deadlines. The previous
@@ -2003,34 +1995,22 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	// The origin span starts here (not inside doFetchBg) so it carries
-	// this request's method/path/pool/route attributes: the caller holds
-	// the RequestCtx, the background fetcher only has the derived span
-	// context. Every caller starts its own span: the singleflight
-	// leader's transport work lands in the first caller's span, and
-	// followers' spans cover their wait for the leader's result
-	// (CCC-32; follower spans tracked in CCC-37).
+	// Start here, not inside doFetchBg, so the span carries this
+	// request's method/path/pool/route attributes; each caller owns its
+	// span.
 	revalCtx, revalSpan := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
 		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
 	)
-	// Parity with the other foreground fetches (doFetchFast,
-	// invalidateAndProxy, doFetchStream): the conditional request joins
-	// the client trace upstream. The singleflight leader's span context
-	// is what gets injected; followers' requests never leave (they share
-	// the leader's result).
+	// Join the client trace like the other foreground fetches; the
+	// singleflight leader's span context is what gets injected.
 	tracing.InjectFastHTTP(revalCtx, revalReq)
 	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey)
 	if res.Err != nil {
 		tracing.RecordError(revalSpan, res.Err)
 	}
-	// Not deferred, deliberately: a defer would extend the span past
-	// the fetch to cover the post-fetch serve block below (stale
-	// fallback, 304 merge, write), inflating bouine.origin's duration
-	// with work that is not the origin fetch. doFetchBg re-panics
-	// non-abort panics after this point; that bubble leaks the span —
-	// acceptable: it is never exported (only End exports) and the
-	// panic crashes the request anyway.
+	// Not deferred: a defer would extend the span over the post-fetch
+	// serve work below, which is not the origin fetch.
 	revalSpan.End()
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
@@ -2447,8 +2427,8 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
-	// Linked to the client trace: the invalidating proxy's fetch is part
-	// of the request that triggered it (CCC-32).
+	// Linked to the client trace: the fetch is part of the triggering
+	// request.
 	fetchCtx, span := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
 		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
@@ -2743,9 +2723,8 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	})
 
 	// Deadline-based timeout, mirroring doFetchBg's transport deadline.
-	// Detached root span, attribute-bearing (method/path/pool/route) so
-	// slow refills are filterable in Tempo (CCC-32 scope: background
-	// fetches are not linked to a client trace by design).
+	// Detached root span: no client trace to join, but attribute-bearing
+	// so slow refills are filterable in Tempo.
 	spanCtx, span := tracing.StartOriginSpan(
 		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
 	)
@@ -2869,8 +2848,8 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	// Span context stored by the middleware — never the RequestCtx,
-	// whose lifetime ends at handler return (CCC-32).
+	// Span context stored by the middleware, never the RequestCtx (whose
+	// lifetime ends at handler return).
 	fetchCtx, span := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
 		ctx.Method(), ctx.Path(), h.poolName, h.routeName,

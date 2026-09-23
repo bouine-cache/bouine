@@ -22,8 +22,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// CCC-32: the bouine.origin span of a MISS served through the tracing
-// middleware must be a child of bouine.pipeline, with
+// The MISS's origin span must be a child of bouine.pipeline, with
 // method/path/pool/route attributes. No t.Parallel(): global OTel provider.
 func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
@@ -63,10 +62,8 @@ func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 		"slow fetches must be filterable by the bounded route label")
 }
 
-// CCC-32 on the conditional-fetch path: the revalidate fetch's span must
-// be a child of bouine.pipeline AND carry the CCC-32 attributes — the
-// acceptance criteria apply to every linked path, not just the miss.
-// No t.Parallel(): global OTel provider.
+// The revalidate fetch's span must also be a child of the pipeline and
+// carry the same attributes. No t.Parallel(): global OTel provider.
 func TestRevalidateOriginSpanIsChildOfPipeline(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -116,17 +113,17 @@ func TestRevalidateOriginSpanIsChildOfPipeline(t *testing.T) {
 		assert.Equal(t, pipe.SpanContext().SpanID(), sp.Parent().SpanID(),
 			"revalidate origin span must be a child of bouine.pipeline")
 		assert.Equal(t, "GET", sink.Attr(sp, "http.method"),
-			"revalidate origin span must carry method (CCC-32)")
+			"revalidate origin span must carry method")
 		assert.Equal(t, "/widget", sink.Attr(sp, "http.path"),
-			"revalidate origin span must carry path (CCC-32)")
+			"revalidate origin span must carry path")
 		assert.Equal(t, "app", sink.Attr(sp, "upstream_pool"),
-			"revalidate origin span must carry pool (CCC-32)")
+			"revalidate origin span must carry pool")
 		return
 	}
 	t.Fatal("no bouine.origin span found in the revalidate request's trace")
 }
 
-// CCC-32 on the invalidating-proxy path. No t.Parallel(): global
+// Same criteria on the invalidating-proxy path. No t.Parallel(): global
 // OTel provider.
 func TestInvalidatingProxyOriginSpanIsChildOfPipeline(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
@@ -160,10 +157,8 @@ func TestInvalidatingProxyOriginSpanIsChildOfPipeline(t *testing.T) {
 	assert.Equal(t, "POST", sink.Attr(origin, "http.method"))
 }
 
-// CCC-32 on the BYPASS path (streamBypass → doFetchStream): the span is
-// a child of the pipeline and is actually ended (exported) when the
-// fetch is released, instead of leaking. No t.Parallel(): global
-// OTel provider.
+// The BYPASS path (streamBypass → doFetchStream) must link its origin
+// span to the pipeline. No t.Parallel(): global OTel provider.
 func TestBypassStreamOriginSpanIsChildOfPipeline(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -194,11 +189,8 @@ func TestBypassStreamOriginSpanIsChildOfPipeline(t *testing.T) {
 	assert.Equal(t, "/private", sink.Attr(origin, "http.path"))
 }
 
-// CCC-32 regression: an unbuffered (streamed) bypass must end its
-// bouine.origin span. releaseStreamFetch, the funnel every streaming
-// exit takes, owns span.End; before the fix the unbuffered path never
-// ended the span, so the slowest fetches (SSE) were invisible in
-// Tempo. No t.Parallel(): global OTel provider.
+// Regression: an unbuffered (streamed) bypass must end its origin span
+// via releaseStreamFetch. No t.Parallel(): global OTel provider.
 func TestStreamedOriginSpanIsEnded(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -249,10 +241,7 @@ func (failingFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Respon
 }
 
 // A failed revalidate fetch must record the error on its origin span
-// (Status Error): span ownership moved from doFetchBg to revalidate in
-// the CCC-32 restructure, and the recording was initially dropped —
-// failed fetches exported clean, green spans. No t.Parallel(): global
-// OTel provider.
+// (Status Error). No t.Parallel(): global OTel provider.
 func TestRevalidateOriginSpanRecordsError(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -285,19 +274,16 @@ func TestRevalidateOriginSpanRecordsError(t *testing.T) {
 	obj.StoredAt = obj.StoredAt.Add(-2 * obj.TTL)
 	require.NoError(t, h.store.Put(t.Context(), key, obj))
 
-	// Swap in a client whose transport always fails: Do's error is what
-	// sets res.Err on the fetch result — the path RecordError keys on
-	// (an origin 5xx is a *successful* transport and goes through the
-	// stale-on-error gate, not the span error).
+	// A transport failure is what sets res.Err — the path RecordError
+	// keys on. An origin 5xx is a successful transport and goes through
+	// the stale-on-error gate instead.
 	h.fastClient = failingFastClient{}
 
-	// Revalidate without the middleware: the assertion is about error
-	// recording, not linkage.
+	// No middleware: the assertion is about error recording, not linkage.
 	rctx := testCtx("GET", "http://example.com/widget")
 	h.ServeRequest(rctx)
 
-	// The revalidate fetch's span is the last bouine.origin span
-	// recorded (the warm-up MISS's span precedes it).
+	// The revalidate fetch's span is the last bouine.origin recorded.
 	spans := sink.Ended()
 	var revalSpan sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0; i-- {
@@ -319,11 +305,9 @@ func TestRevalidateOriginSpanRecordsError(t *testing.T) {
 	assert.True(t, found, "RecordError must add an exception event to the span")
 }
 
-// The conditional revalidate request carries the W3C traceparent of the
-// revalidate caller's origin span — parity with doFetchFast,
-// invalidateAndProxy, and doFetchStream (it was the only foreground
-// fetch that left bouine without one). No t.Parallel(): global OTel
-// provider.
+// The revalidate request carries the W3C traceparent of the revalidate
+// caller's origin span, like the other foreground fetches. No
+// t.Parallel(): global OTel provider.
 func TestRevalidateInjectsTraceparent(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -375,13 +359,8 @@ func TestRevalidateInjectsTraceparent(t *testing.T) {
 		"the injected traceparent must carry the client trace ID")
 }
 
-// The popularity-gated background refresh is the fourth caller of
-// collapsedFetchBg. When span ownership moved out of doFetchBg, it was
-// the one caller left without a bouine.origin span — its origin
-// fetches were invisible in Tempo. The fetch must produce a detached,
-// attribute-bearing root span (detached by design: the triggering
-// request's pipeline span is already ended when the refresh runs).
-// No t.Parallel(): global OTel provider.
+// The background refresh fetch must produce a detached, attribute-bearing
+// root span. No t.Parallel(): global OTel provider.
 func TestBackgroundRefreshOriginSpanIsStarted(t *testing.T) {
 	sink := &tracingtest.SpanRecorder{}
 	tracingtest.Setup(t, sink)
@@ -399,10 +378,8 @@ func TestBackgroundRefreshOriginSpanIsStarted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 
-	// The warm-up MISS produced its own origin span; scope the search to
-	// spans exported after this point so the refresh's span is
-	// unambiguously identified (the recorder accumulates, Ended() does
-	// not clear it).
+	// Scope the search to spans exported after the warm-up MISS so the
+	// refresh's span is unambiguously identified.
 	pre := len(sink.Ended())
 
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)

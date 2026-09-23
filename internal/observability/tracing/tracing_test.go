@@ -232,9 +232,7 @@ func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
 	var stored context.Context
 	rctx := &fasthttp.RequestCtx{}
 	h := FastHTTPMiddleware("bouine.pipeline", func(ctx *fasthttp.RequestCtx) {
-		// Probe user value set on the live RequestCtx before the handler
-		// returns; see the assertion below for why this must not be
-		// visible through the stored context.
+		// Probe user value on the live RequestCtx; see below.
 		ctx.SetUserValue("probe.requestctx", "sentinel")
 		stored = SpanContextFromRequest(ctx)
 	})
@@ -246,16 +244,9 @@ func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
 
 	// The stored context must never resolve through the RequestCtx:
 	// fetch paths retain it past handler return, when fasthttp resets
-	// the ctx (the original lifetime bug, CCC-32). A type assertion
-	// cannot pin this — t.Start returns a wrapper context even when the
-	// RequestCtx is the parent, so stored would not be *RequestCtx
-	// under the revert. The parent *chain* is what matters: probe it
-	// with a user value. RequestCtx.Value resolves user values through
-	// its userdata map; a Background-based context never sees them.
-	// Under the revert (ExtractFastHTTP(ctx, ...) instead of
-	// ExtractFastHTTP(context.Background(), ...)), the RequestCtx is
-	// the stored context's parent, the probe resolves, and this test
-	// fails.
+	// the ctx. A type assertion cannot pin this (t.Start returns a
+	// wrapper context either way); probing the parent chain is what
+	// fails under a revert to ExtractFastHTTP(ctx, ...).
 	require.NotNil(t, stored, "middleware must store the span context")
 	assert.Nil(t, stored.Value("probe.requestctx"),
 		"stored context must not resolve values through the RequestCtx: "+

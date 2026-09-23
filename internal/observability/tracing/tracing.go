@@ -28,16 +28,13 @@ import (
 
 const tracerName = "bouine"
 
-// Span re-exports otel's trace.Span so cache-layer (L3) code can hold
-// and end spans without importing go.opentelemetry.io directly
-// (depguard: L3 reaches this package through the observability kernel
-// only).
+// Span re-exports otel's trace.Span so L3 code can hold and end spans
+// without importing go.opentelemetry.io directly (depguard).
 type Span = trace.Span
 
-// otelUserValueKey is the RequestCtx user-value key under which
-// FastHTTPMiddleware stores the server span context. It is
-// Background-based, so it is safe to retain past handler return —
-// unlike the RequestCtx itself.
+// otelUserValueKey is where FastHTTPMiddleware stores the server span
+// context. It is Background-based, so it is safe to retain past handler
+// return, unlike the RequestCtx itself.
 const otelUserValueKey = "otel.ctx"
 
 // tracerEnabled is set to true when InitTracer configures a real exporter.
@@ -89,7 +86,7 @@ func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.
 
 // SpanContextFromRequest returns the span context stored by
 // FastHTTPMiddleware, or Background when the request never passed
-// through it (detached-root behavior). Never carries the RequestCtx.
+// through it. Never carries the RequestCtx.
 func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
 	if c, ok := ctx.UserValue(otelUserValueKey).(context.Context); ok {
 		return c
@@ -98,14 +95,11 @@ func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
 }
 
 // StartOriginSpan starts the "bouine.origin" span for an origin fetch,
-// parented on the client's trace (SpanContextFromRequest). method, path
-// are byte slices so the disabled-tracer path converts nothing; pool and
-// route are strings the caller already owns. route is the bounded route
-// label (http.route) — never the raw path. The slice is built
-// conditionally so empty values are omitted, not passed as zero-value
-// KeyValues the SDK counts as dropped attributes on every fetch.
-// The returned context never carries the RequestCtx and is safe to
-// retain past handler return.
+// parented on the client's trace. method and path are byte slices so the
+// disabled-tracer path converts nothing; route is the bounded route label
+// (http.route), never the raw path. Attributes are built conditionally so
+// empty pool/route values are omitted rather than counted as dropped
+// attributes by the SDK.
 func StartOriginSpan(parent context.Context, method, path []byte, pool, route string) (context.Context, trace.Span) {
 	if !tracerEnabled.Load() {
 		return parent, trace.SpanFromContext(parent)

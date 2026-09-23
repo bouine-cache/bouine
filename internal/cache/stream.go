@@ -36,7 +36,7 @@ type streamFetchResult struct {
 	resp       *fasthttp.Response // body stream still open (or buffered); nil on the upstream-fallback path
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
-	span       tracing.Span       // bouine.origin span; ended by releaseStreamFetch, the single funnel every exit path takes (CCC-32: unbuffered streams previously never ended it)
+	span       tracing.Span       // ended by releaseStreamFetch, the funnel every exit path takes
 	body       []byte             // upstream-fallback body; empty on the FastClient paths
 	Header     headerLookup
 	StatusCode int
@@ -86,11 +86,9 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		}
 		return nil, fmt.Errorf("no fast client configured")
 	}
-	// Span context stored by the middleware, never the RequestCtx
-	// (see doFetchFast, CCC-32). The span is stored on the result and
-	// ended by releaseStreamFetch — every exit path (buffered serve,
-	// stream writer, error) funnels through it, so the unbuffered
-	// streaming path no longer leaks an unended span.
+	// Span context stored by the middleware, never the RequestCtx. The
+	// span rides the result and ends in releaseStreamFetch, which every
+	// exit path funnels through.
 	spanCtx, span := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
 		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
@@ -177,11 +175,10 @@ func releaseStreamFetch(sf *streamFetchResult) {
 	if sf.sem != nil {
 		<-sf.sem
 	}
-	// The span ends here for both modes: buffered callers funnel through
-	// this release, and streaming callers release the body stream here.
-	// Span.End is idempotent, so an error-path release after
-	// doFetchStream already ended the span inline is safe. The nil guard
-	// covers test-constructed results that never started a span.
+	// The span ends here for both modes: every caller funnels through
+	// this release. Span.End is idempotent, so an earlier inline End on
+	// an error path is safe; the nil guard covers results that never
+	// started a span.
 	if sf.span != nil {
 		sf.span.End()
 	}

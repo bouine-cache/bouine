@@ -374,3 +374,51 @@ func TestRevalidateInjectsTraceparent(t *testing.T) {
 	assert.Equal(t, pipe.SpanContext().TraceID().String(), parts[1],
 		"the injected traceparent must carry the client trace ID")
 }
+
+// The popularity-gated background refresh is the fourth caller of
+// collapsedFetchBg. When span ownership moved out of doFetchBg, it was
+// the one caller left without a bouine.origin span — its origin
+// fetches were invisible in Tempo. The fetch must produce a detached,
+// attribute-bearing root span (detached by design: the triggering
+// request's pipeline span is already ended when the refresh runs).
+// No t.Parallel(): global OTel provider.
+func TestBackgroundRefreshOriginSpanIsStarted(t *testing.T) {
+	sink := &tracingtest.SpanRecorder{}
+	tracingtest.Setup(t, sink)
+
+	h := testRefreshHandler(t, 0)
+
+	// Store via the foreground path so the refresh registry has an
+	// entry for the key.
+	req := testCtx("GET", "http://example.com/page")
+	h.ServeRequest(req)
+	require.Equal(t, "MISS", respHeader(req, header.XCache))
+
+	key := h.buildKey(testCtx("GET", "http://example.com/page"))
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	// The warm-up MISS produced its own origin span; scope the search to
+	// spans exported after this point so the refresh's span is
+	// unambiguously identified (the recorder accumulates, Ended() does
+	// not clear it).
+	pre := len(sink.Ended())
+
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
+
+	var origin sdktrace.ReadOnlySpan
+	for _, sp := range sink.Ended()[pre:] {
+		if sp.Name() == "bouine.origin" {
+			origin = sp
+		}
+	}
+	require.NotNil(t, origin, "background refresh must start a bouine.origin span")
+	require.False(t, origin.Parent().IsValid(),
+		"background refresh span is detached by design (root span)")
+	assert.Equal(t, "GET", sink.Attr(origin, "http.method"))
+	assert.Equal(t, "/page", sink.Attr(origin, "http.path"),
+		"slow refresh fetches must be filterable by path")
+	require.False(t, origin.EndTime().IsZero(),
+		"the background refresh span must be ended and exported")
+}

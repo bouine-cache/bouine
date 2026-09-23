@@ -230,25 +230,36 @@ func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
 	defer cleanup()
 
 	var stored context.Context
+	rctx := &fasthttp.RequestCtx{}
 	h := FastHTTPMiddleware("bouine.pipeline", func(ctx *fasthttp.RequestCtx) {
+		// Probe user value set on the live RequestCtx before the handler
+		// returns; see the assertion below for why this must not be
+		// visible through the stored context.
+		ctx.SetUserValue("probe.requestctx", "sentinel")
 		stored = SpanContextFromRequest(ctx)
 	})
 	req := fasthttp.AcquireRequest()
 	req.Header.SetMethod("GET")
 	req.Header.SetRequestURI("http://example.com/foo")
-	rctx := &fasthttp.RequestCtx{}
 	rctx.Init(req, nil, nil)
 	h(rctx)
 
-	// The stored context must not be the RequestCtx: fetch paths retain
-	// it past handler return, when fasthttp resets the ctx. A *RequestCtx
-	// IS a context.Context, so this assertion is what actually fails if
-	// someone reverts ExtractFastHTTP(context.Background(), ...) back to
-	// passing the ctx (the original lifetime bug, CCC-32).
+	// The stored context must never resolve through the RequestCtx:
+	// fetch paths retain it past handler return, when fasthttp resets
+	// the ctx (the original lifetime bug, CCC-32). A type assertion
+	// cannot pin this — t.Start returns a wrapper context even when the
+	// RequestCtx is the parent, so stored would not be *RequestCtx
+	// under the revert. The parent *chain* is what matters: probe it
+	// with a user value. RequestCtx.Value resolves user values through
+	// its userdata map; a Background-based context never sees them.
+	// Under the revert (ExtractFastHTTP(ctx, ...) instead of
+	// ExtractFastHTTP(context.Background(), ...)), the RequestCtx is
+	// the stored context's parent, the probe resolves, and this test
+	// fails.
 	require.NotNil(t, stored, "middleware must store the span context")
-	_, isReqCtx := stored.(*fasthttp.RequestCtx)
-	assert.False(t, isReqCtx,
-		"stored context must be Background-based, never the RequestCtx")
+	assert.Nil(t, stored.Value("probe.requestctx"),
+		"stored context must not resolve values through the RequestCtx: "+
+			"the RequestCtx must not be in its parent chain (Background-based extraction was reverted)")
 	_, span := StartSpan(stored, "probe")
 	span.End()
 }

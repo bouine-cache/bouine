@@ -1,10 +1,8 @@
 package admin
 
 import (
-	"context"
 	"io"
 	"log/slog"
-	"sync"
 	"testing"
 
 	tracingtest "github.com/bouine-cache/bouine/internal/observability/tracing/tracingtest"
@@ -16,26 +14,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// spanRecorder is an in-memory sdktrace.SpanExporter for tests.
-type spanRecorder struct {
-	mu    sync.Mutex
-	spans []sdktrace.ReadOnlySpan
-}
-
-func (r *spanRecorder) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.spans = append(r.spans, spans...)
-	return nil
-}
-
-func (r *spanRecorder) Shutdown(_ context.Context) error { return nil }
-
 // TestAdmin_PropagatesTraceContext verifies the admin server joins the
 // incoming W3C trace: the span started for POST /v1/ban inherits the
 // traceparent sent by the invalidation caller (cache-lifecycle).
 func TestAdmin_PropagatesTraceContext(t *testing.T) {
-	rec := &spanRecorder{}
+	rec := &tracingtest.SpanRecorder{}
 	setupTracingForTest(t, rec)
 
 	s := New(Config{
@@ -52,13 +35,11 @@ func TestAdmin_PropagatesTraceContext(t *testing.T) {
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 
 	var adminSpan sdktrace.ReadOnlySpan
-	rec.mu.Lock()
-	for _, sd := range rec.spans {
+	for _, sd := range rec.Ended() {
 		if sd.Name() == "bouine.admin" {
 			adminSpan = sd
 		}
 	}
-	rec.mu.Unlock()
 	require.NotNil(t, adminSpan, "expected a bouine.admin span")
 	require.Equal(t, "11111111111111111111111111111111", adminSpan.SpanContext().TraceID().String(),
 		"admin span must join the caller's trace")
@@ -67,7 +48,7 @@ func TestAdmin_PropagatesTraceContext(t *testing.T) {
 // setupTracingForTest swaps the global tracer provider and the W3C propagator
 // for the test so spans are actually created and exported, and restores both
 // when the test ends (tracing's own defaults stay untouched for other tests).
-func setupTracingForTest(t *testing.T, rec *spanRecorder) {
+func setupTracingForTest(t *testing.T, rec *tracingtest.SpanRecorder) {
 	t.Helper()
 	tracingtest.Setup(t, rec)
 }

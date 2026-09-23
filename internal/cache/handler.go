@@ -1789,12 +1789,12 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
 	// The caller already started the bouine.origin span and passed its
-	// context down (revalidate starts it with this request's attributes;
-	// SWR and shed-refill start it detached). Only the span context is
-	// used here — the span itself is ended by its owner. No traceparent
-	// injection: background requests must not join a dead client trace,
-	// and the foreground revalidate caller injects from its own fetch
-	// context.
+	// context down: revalidate starts it with this request's attributes
+	// and injects traceparent from it; the background SWR caller starts
+	// it detached. Only the span context is used here — the span itself
+	// is ended by its owner, and errors are recorded by the owner from
+	// the returned result (it sees res.Err; the transport error is not
+	// otherwise observable here without breaking the sharing contract).
 	//
 	// Deadline-based timeout: transport.Client.Do maps ctx.Deadline() to
 	// fasthttp's kernel-level connection deadlines. The previous
@@ -1985,14 +1985,31 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// The origin span starts here (not inside doFetchBg) so it carries
 	// this request's method/path/pool/route attributes: the caller holds
 	// the RequestCtx, the background fetcher only has the derived span
-	// context. The stored span context parents the leader's bouine.origin
-	// span on the request's trace (CCC-32); followers resolve without a
-	// span (CCC-37).
+	// context. Every caller starts its own span: the singleflight
+	// leader's transport work lands in the first caller's span, and
+	// followers' spans cover their wait for the leader's result
+	// (CCC-32; follower spans tracked in CCC-37).
 	revalCtx, revalSpan := tracing.StartOriginSpan(
 		tracing.SpanContextFromRequest(ctx),
 		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
 	)
+	// Parity with the other foreground fetches (doFetchFast,
+	// invalidateAndProxy, doFetchStream): the conditional request joins
+	// the client trace upstream. The singleflight leader's span context
+	// is what gets injected; followers' requests never leave (they share
+	// the leader's result).
+	tracing.InjectFastHTTP(revalCtx, revalReq)
 	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey)
+	if res.Err != nil {
+		tracing.RecordError(revalSpan, res.Err)
+	}
+	// Not deferred, deliberately: a defer would extend the span past
+	// the fetch to cover the post-fetch serve block below (stale
+	// fallback, 304 merge, write), inflating bouine.origin's duration
+	// with work that is not the origin fetch. doFetchBg re-panics
+	// non-abort panics after this point; that bubble leaks the span —
+	// acceptable: it is never exported (only End exports) and the
+	// panic crashes the request anyway.
 	revalSpan.End()
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
@@ -2199,6 +2216,10 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 
 	res := h.collapsedFetchBg(spanCtx, revalReq, key)
 	if res.Err != nil {
+		// The owner of the span records the failure: a fetch that never
+		// succeeded must not export as a clean span (the revalidate
+		// caller records its own; errors were silently green before).
+		tracing.RecordError(span, res.Err)
 		return
 	}
 

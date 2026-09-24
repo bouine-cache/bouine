@@ -121,7 +121,7 @@ func TestCluster_TwoNodeJoin(t *testing.T) {
 
 	// Wait for gossip to propagate.
 	for range 50 {
-		if len(c1.ml.Members()) == 2 {
+		if len(c1.liveMembers()) == 2 {
 			break
 		}
 		// slight pause

@@ -20,6 +20,9 @@ spec:
     {{- if eq (.Values.updateStrategy.type | default "RollingUpdate") "RollingUpdate" }}
     rollingUpdate:
       maxUnavailable: {{ .Values.updateStrategy.maxUnavailable | default 1 }}
+      # Rendered explicitly (0 is the apiserver default for RollingUpdate
+      # StatefulSets) so GitOps diffs stay clean; raise to stage canaries.
+      partition: {{ .Values.updateStrategy.partition | default 0 }}
     {{- end }}
   selector:
     matchLabels:

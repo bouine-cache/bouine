@@ -675,6 +675,11 @@
           "type": "integer",
           "minimum": 0,
           "default": 1
+        },
+        "partition": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
         }
       }
     },

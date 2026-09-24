@@ -116,9 +116,13 @@ type Cluster struct {
 	local  api.PeerInfo
 	inv    Invalidator
 	logger observability.Logger
-	ml     *memberlist.Memberlist
-	ring   *ring
-	peers  map[string]*Member // keyed by NodeName
+	// ml is stored atomically: memberlist.Create starts the stream/UDP
+	// listeners (and with them the delegate callbacks) before New
+	// returns, so an inbound merge can invoke a delegate before the
+	// assignment lands. Same pattern as metrics below.
+	ml    atomic.Pointer[memberlist.Memberlist]
+	ring  *ring
+	peers map[string]*Member // keyed by NodeName
 	// metrics is stored atomically: memberlist goroutines (gossip
 	// dispatch, reconcile loop) read it and memberlist.Create starts
 	// them before SetMetrics can be called — the same reason the
@@ -134,16 +138,12 @@ type Cluster struct {
 	// ADR-0044: strong mode double-delivers (HTTP + gossip) and both
 	// paths share this tracker so each event applies exactly once.
 	seqs *seqTracker
-	// onPeerRetired, when set, receives peer addresses that stopped
-	// being current (peer left, or restarted at a new address). Set
-	// via SetOnPeerRetired before Join.
-	onPeerRetired func(addr string)
-	// onPeerUnretired, when set, receives an address the moment the
-	// ring learns it is current again (a peer added or re-added at
-	// that address). The PeerFetcher uses it to lift a previous
-	// retirement so fetches dial the address again. Set via
-	// SetOnPeerRetired before Join.
-	onPeerUnretired func(addr string)
+	// retireHooks holds the peer-retirement callbacks behind an atomic
+	// pointer: memberlist delivers NotifyJoin/NotifyLeave on its own
+	// goroutines as soon as the memberlist exists — even before the
+	// engine calls Join — so plain fields would race with the
+	// SetOnPeerRetired call that follows buildCluster in the engine.
+	retireHooks atomic.Pointer[peerRetireHooks]
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue   []gossipBroadcast
@@ -239,7 +239,7 @@ func New(cfg Config) (*Cluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cluster: create memberlist: %w", err)
 	}
-	c.ml = ml
+	c.ml.Store(ml)
 	c.addPeer(cfg.NodeName, cfg.PeerInfo)
 	c.startReconcileLoop(cfg.ReconcileInterval)
 	return c, nil
@@ -264,7 +264,8 @@ func (c *Cluster) Join(seeds []string) (int, error) {
 	if len(seeds) == 0 {
 		return 0, nil
 	}
-	n, err := c.ml.Join(seeds)
+	ml := c.ml.Load()
+	n, err := ml.Join(seeds)
 	if err != nil {
 		return n, fmt.Errorf("cluster: join %v: %w", seeds, err)
 	}
@@ -321,10 +322,16 @@ func (c *Cluster) Leave(ctx context.Context) error {
 	c.closeOnce.Do(func() { close(c.done) })
 	c.reconcileWg.Wait()
 	c.adapter.markClosing()
-	if err := c.ml.Leave(0); err != nil {
+	ml := c.ml.Load()
+	if ml == nil {
+		// memberlist was never created (constructor failed earlier);
+		// nothing to leave.
+		return nil
+	}
+	if err := ml.Leave(0); err != nil {
 		c.logger.Warn("cluster leave error", "error", err)
 	}
-	return c.ml.Shutdown()
+	return ml.Shutdown()
 }
 
 // ---- memberlist.Delegate interface ----
@@ -557,9 +564,9 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	//
 	// In eventual mode, there is no HTTP fan-out, so the direct
 	// SendBestEffort remains the primary delivery path.
-	if c.ml != nil && c.cfg.Mode != config.ClusterModeStrong {
-		for _, n := range c.ml.Members() {
-			_ = c.ml.SendBestEffort(n, msg)
+	if ml := c.ml.Load(); ml != nil && c.cfg.Mode != config.ClusterModeStrong {
+		for _, n := range ml.Members() {
+			_ = ml.SendBestEffort(n, msg)
 		}
 	}
 }
@@ -601,6 +608,18 @@ func (c *Cluster) LocalState(_ bool) []byte {
 	return EncodeRingDigestState(digest)
 }
 
+// liveMembers returns memberlist's live member set, or nil while the
+// memberlist is still being created: an inbound push/pull merge can
+// reach a delegate before New assigns the memberlist pointer. In that
+// window there is no local liveness view yet, so callers skip the
+// prune and rely on later merges and the reconcile loop to converge.
+func (c *Cluster) liveMembers() []*memberlist.Node {
+	if ml := c.ml.Load(); ml != nil {
+		return ml.Members()
+	}
+	return nil
+}
+
 // MergeRemoteState reconciles a remote node's ring digest with the
 // local peer table. It does two things:
 //
@@ -626,7 +645,13 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 		c.logger.Debug("cluster: bad remote state", "error", err)
 		return
 	}
-	liveMembers := c.ml.Members()
+	liveMembers := c.liveMembers()
+	if liveMembers == nil {
+		// Still inside the New boot window: there is no local liveness
+		// view to prune against (pruning on a nil set would evict every
+		// peer). Later merges and the reconcile loop converge the ring.
+		return
+	}
 	local := c.Digest()
 	if local.Hash != remote.Hash {
 		c.logger.Debug("cluster: ring digest mismatch, re-syncing",
@@ -684,7 +709,7 @@ func (c *Cluster) pruneStalePeers(liveMembers []*memberlist.Node) {
 //     a dead IP indefinitely). The entry is re-read from the
 //     memberlist node metadata and refreshed in place.
 func (c *Cluster) reconcileOnce() {
-	liveMembers := c.ml.Members()
+	liveMembers := c.liveMembers()
 	c.pruneStalePeers(liveMembers)
 	for _, n := range liveMembers {
 		info, err := DecodePeerInfoMeta(n.Meta)
@@ -790,16 +815,20 @@ func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	// a retirement may be lifted: a fetch can hold a stale owner
 	// PeerInfo from before a ring change, and clearing the mark from
 	// the fetch path would resurrect a client for a dead address.
-	if addr := peerAddr(info); addr != "" && c.onPeerUnretired != nil {
-		c.onPeerUnretired(addr)
+	if h := c.retireHooks.Load(); h != nil && h.unretire != nil {
+		if addr := peerAddr(info); addr != "" {
+			h.unretire(addr)
+		}
 	}
 	// A peer restarting at a new address leaves its old address dead:
 	// retire the old PipelineClient so its worker stops dialing it
 	// (fasthttp cannot stop a worker whose dial fails — see
 	// PeerFetcher.RetireAddress).
-	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+	if existed && name != c.cfg.NodeName {
 		if oldAddr, newAddr := peerAddr(old.Info), peerAddr(info); oldAddr != "" && oldAddr != newAddr {
-			c.onPeerRetired(oldAddr)
+			if h := c.retireHooks.Load(); h != nil && h.retire != nil {
+				h.retire(oldAddr)
+			}
 		}
 	}
 }
@@ -810,9 +839,11 @@ func (c *Cluster) removePeer(name string) {
 	delete(c.peers, name)
 	c.ring.remove(name)
 	c.mu.Unlock()
-	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+	if existed && name != c.cfg.NodeName {
 		if addr := peerAddr(old.Info); addr != "" {
-			c.onPeerRetired(addr)
+			if hooks := c.retireHooks.Load(); hooks != nil && hooks.retire != nil {
+				hooks.retire(addr)
+			}
 		}
 	}
 }
@@ -956,10 +987,16 @@ func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
 // (fasthttp's worker would otherwise re-dial the dead address
 // forever). unretire is invoked when the ring learns an address is
 // current again (a peer added or re-added at that address), so a
-// previous retirement is lifted and fetches dial it normally. Must be
-// called before Join. The callbacks must not call back into the
-// Cluster.
+// previous retirement is lifted and fetches dial it normally. The
+// callbacks must not call back into the Cluster.
+//
+// The pair is published via atomic.Pointer: memberlist can deliver a
+// join event from an inbound TCP merge before Join is ever called, so
+// the hooks must be safe to read concurrently with registration.
+type peerRetireHooks struct {
+	retire, unretire func(addr string)
+}
+
 func (c *Cluster) SetOnPeerRetired(retire, unretire func(addr string)) {
-	c.onPeerRetired = retire
-	c.onPeerUnretired = unretire
+	c.retireHooks.Store(&peerRetireHooks{retire: retire, unretire: unretire})
 }

@@ -801,6 +801,24 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	}
 }
 
+// BenchmarkPeerFetch_BuildRequest pins the allocation budget of the
+// peer-fetch request construction (the miss-path client encode): body
+// into a stack array + SetBody copy into the pooled request's buffer,
+// strconv header value, and a path-only URI (host via SetHost into the
+// pooled request's header buffer). Must stay at 0 allocs/op.
+func BenchmarkPeerFetch_BuildRequest(b *testing.B) {
+	peer := api.PeerInfo{Addr: "10.0.0.1:8080"}
+	// Synthetic VaryKey (a hex-hash assertion in production, never a secret).
+	req := api.PeerFetchRequest{Key: testkey.Key(1), VaryKey: "ushashushash12", Hops: 1} // gitleaks:allow
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		httpReq := buildPeerRequest(peer, req)
+		fasthttp.ReleaseRequest(httpReq)
+	}
+}
+
 func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{

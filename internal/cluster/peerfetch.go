@@ -595,29 +595,43 @@ func (f *PeerFetcher) updateBlacklistedLocked() {
 }
 
 // buildPeerRequest constructs a fasthttp.Request for a peer-fetch RPC.
-func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) *fasthttp.Request {
+//
+// Zero-alloc: the URI is the package constant PeerFetchPath (stored
+// as-is, no concat), the host is copied into the pooled request's own
+// header buffer, and the body is encoded into a stack array before
+// SetBody copies it into the pooled request's internal buffer. The
+// scheme needs no representation in the URI — the PipelineClient's
+// IsTLS flag (fixed at fetcher construction) selects TLS; the request
+// line carries only the path.
+func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Request {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
 		fetchAddr = peer.Addr
 	}
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
-	uri := scheme + "://" + fetchAddr + PeerFetchPath
 
-	body := make([]byte, 0, 18+len(req.VaryKey))
-	body = append(body, peerFetchBinaryVersion)
-	body = append(body, req.Key[:]...)
-	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
-	body = append(body, req.VaryKey...)
+	// Encode into a stack array (max body = 1+16+1+255 = 273 bytes) and
+	// let SetBody copy into the pooled request's internal buffer
+	// (bytebufferpool), which ReleaseRequest returns for reuse. The
+	// previous make'd slice + SetBodyRaw allocated on every fetch;
+	// steady-state peer fetches now allocate nothing for the request
+	// body. The wire format is fully rewritten from byte 0 on every
+	// call, so no reset of the stack buffer is needed.
+	var body [273]byte
+	n := 0
+	body[n] = peerFetchBinaryVersion
+	n++
+	n += copy(body[n:], req.Key[:])
+	body[n] = byte(len(req.VaryKey)) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
+	n++
+	n += copy(body[n:], req.VaryKey)
 
 	httpReq := fasthttp.AcquireRequest()
 	httpReq.Header.SetMethod(fasthttp.MethodPost)
-	httpReq.SetRequestURI(uri)
-	httpReq.SetBodyRaw(body)
+	httpReq.SetRequestURI(PeerFetchPath)
+	httpReq.SetHost(fetchAddr)
+	httpReq.SetBody(body[:n])
 	httpReq.Header.Set(header.ContentType, "application/octet-stream")
-	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
+	httpReq.Header.Set(BouineHopHeader, strconv.Itoa(req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 	return httpReq
 }
@@ -723,7 +737,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	httpReq := buildPeerRequest(peer, req, f.useTLS)
+	httpReq := buildPeerRequest(peer, req)
 	defer fasthttp.ReleaseRequest(httpReq)
 
 	addr := peerAddr(peer)
@@ -957,18 +971,14 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	defer func() { <-f.putSem }()
-	fetchAddr := addr
-	scheme := "http"
-	if f.useTLS {
-		scheme = "https"
-	}
-	uri := scheme + "://" + fetchAddr + PeerPutPath
-
 	body := storage.EncodeObject(obj)
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(fasthttp.MethodPost)
-	req.SetRequestURI(uri)
+	// Path-only URI + Host header: zero per-RPC URI allocation; the
+	// PipelineClient's IsTLS flag selects the scheme (see buildPeerRequest).
+	req.SetRequestURI(PeerPutPath)
+	req.SetHost(addr)
 	req.SetBodyRaw(body)
 	req.Header.Set(header.ContentType, "application/octet-stream")
 	req.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)

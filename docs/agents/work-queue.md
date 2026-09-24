@@ -18,6 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
+- [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
 - [WIP] crush — release 0.5.21 (changelog curation + promotion, chart bump) — started: 2026-09-17 — ETA: same day
 
 ## fasthttp migration — phase claims

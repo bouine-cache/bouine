@@ -110,7 +110,10 @@ func TestStrong_PurgePropagation(t *testing.T) {
 func TestStrong_BanPropagation(t *testing.T) {
 	s := sharedCluster(t, "strong")
 
-	path := "/hit?x=strong-ban"
+	// /unique is this test's dedicated origin route: bans are lazy
+	// predicates that persist for the lifetime of the shared cluster, so
+	// the ban must be scoped to a path no other test caches.
+	path := "/unique?x=strong-ban"
 
 	// Prime all alive nodes.
 	for _, i := range s.AliveNodes() {
@@ -119,10 +122,9 @@ func TestStrong_BanPropagation(t *testing.T) {
 		s.Get(t, i, path) // make sure it's a HIT before banning
 	}
 
-	// Issue ban from node 0 with a host_regex that matches the empty string
-	// stored in cached object headers (workaround: ".*" matches "").
-	// This effectively bans all currently cached objects.
-	s.Ban(t, 0, ".*", "")
+	// Ban by literal path (empty host_regex means "any host"). The
+	// object's X-Bouine-Path is the request path without query.
+	s.Ban(t, 0, "", "/unique")
 
 	// In strong mode, HTTP fan-out is synchronous: all peers receive the ban
 	// immediately (no gossip wait needed).

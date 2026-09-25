@@ -23,6 +23,7 @@ type batchCodec[E any] struct {
 	payloadLen func(E) int
 	put        func(buf []byte, off int, evt E) (int, error)
 	decodeOne  func(buf []byte, off int) (E, int, error) // bounded: returns offset past the event
+	kind       string                                    // human-readable name for decode-error messages
 	msgType    byte                                      // 0 for HTTP frames (no msgType byte)
 	gossip     bool                                      // true for gossip frames (msgType byte present)
 }
@@ -58,7 +59,7 @@ func (c batchCodec[E]) decode(buf []byte) ([]E, error) {
 		}
 		count := int(binary.LittleEndian.Uint32(buf[off:])) //nolint:gosec // width fixed by batchCountLen
 		if count > batchMaxEvents {
-			return fmt.Errorf("cluster: batch count %d exceeds %d", count, batchMaxEvents)
+			return fmt.Errorf("cluster: %s count %d exceeds %d", c.kind, count, batchMaxEvents)
 		}
 		evts = make([]E, 0, count)
 		off += batchCountLen
@@ -71,7 +72,7 @@ func (c batchCodec[E]) decode(buf []byte) ([]E, error) {
 			off = next
 		}
 		if off != len(buf) {
-			return fmt.Errorf("cluster: batch has %d trailing bytes", len(buf)-off)
+			return fmt.Errorf("cluster: %s has %d trailing bytes", c.kind, len(buf)-off)
 		}
 		return nil
 	})
@@ -82,25 +83,25 @@ func (c batchCodec[E]) decode(buf []byte) ([]E, error) {
 // batches; refresh follows the same pattern.
 var (
 	purgeBatchGossip = batchCodec[api.PurgeEvent]{
-		msgType: msgTypePurgeBatch, gossip: true,
+		msgType: msgTypePurgeBatch, gossip: true, kind: "purge batch",
 		payloadLen: purgePayloadLen,
 		put:        putPurgePayload,
 		decodeOne:  decodePurgePayloadBounded,
 	}
 	purgeBatchHTTP = batchCodec[api.PurgeEvent]{
-		msgType: 0, gossip: false,
+		msgType: 0, gossip: false, kind: "purge batch",
 		payloadLen: purgePayloadLen,
 		put:        putPurgePayload,
 		decodeOne:  decodePurgePayloadBounded,
 	}
 	refreshBatchGossip = batchCodec[api.RefreshEvent]{
-		msgType: msgTypeRefreshBatch, gossip: true,
+		msgType: msgTypeRefreshBatch, gossip: true, kind: "refresh batch",
 		payloadLen: refreshPayloadLen,
 		put:        putRefreshPayload,
 		decodeOne:  decodeRefreshPayloadBounded,
 	}
 	refreshBatchHTTP = batchCodec[api.RefreshEvent]{
-		msgType: 0, gossip: false,
+		msgType: 0, gossip: false, kind: "refresh batch",
 		payloadLen: refreshPayloadLen,
 		put:        putRefreshPayload,
 		decodeOne:  decodeRefreshPayloadBounded,

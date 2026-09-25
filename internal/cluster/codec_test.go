@@ -208,6 +208,17 @@ func TestGossipMsgType_Refresh(t *testing.T) {
 	require.Equal(t, msgTypeRefresh, GossipMsgType(buf))
 }
 
+// TestMsgTypes_NonZero pins the encodeFrame/decodeFrame sentinel: 0
+// means "HTTP frame, no msgType byte", so no gossip msgType may be 0 —
+// a zero-valued type would silently emit HTTP-framed bytes on the
+// gossip channel.
+func TestMsgTypes_NonZero(t *testing.T) {
+	t.Parallel()
+	for _, mt := range []byte{msgTypePurge, msgTypeBan, msgTypeRefresh, msgTypePurgeBatch, msgTypeRefreshBatch} {
+		require.NotZero(t, mt, "msgType 0 is reserved for HTTP frames")
+	}
+}
+
 func TestPeerInfoMeta_RoundTrip(t *testing.T) {
 	t.Parallel()
 	info := api.PeerInfo{Name: "n1", Addr: "127.0.0.1:1", Weight: 2, JoinedAt: time.Now()}

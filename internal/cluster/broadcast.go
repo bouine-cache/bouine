@@ -224,11 +224,12 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 		Seq:       b.seq.Add(1),
 	}
 
-	body, err := EncodeBanHTTP(evt)
-	if err != nil {
-		b.metrics.IncBroadcastFailure("ban", "marshal")
-	} else {
-		b.broadcastEvent(fanoutCtx, "ban", "/v1/peer/ban", body)
+	if b.mode == config.ClusterModeStrong {
+		if body, err := EncodeBanHTTP(evt); err != nil {
+			b.metrics.IncBroadcastFailure("ban", "marshal")
+		} else {
+			b.broadcastEvent(fanoutCtx, "ban", "/v1/peer/ban", body)
+		}
 	}
 
 	// All modes: enqueue via gossip.
@@ -276,11 +277,8 @@ func (b *Broadcaster) flushPurgeBatch(evts []api.PurgeEvent) {
 	if len(evts) == 0 {
 		return
 	}
-	b.flushBatch("purge_batch", "/v1/peer/purge/batch",
-		func() ([]byte, error) { return EncodePurgeBatchHTTP(evts) },
-		func() ([]byte, error) { return EncodePurgeBatchGossip(evts) },
-		len(evts), evts[0].Issuer,
-	)
+	flushBatch(b, "purge_batch", "/v1/peer/purge/batch", evts, evts[0].Issuer,
+		EncodePurgeBatchHTTP, EncodePurgeBatchGossip)
 }
 
 // flushRefreshBatch delivers one batch of refresh events, mirroring
@@ -291,25 +289,22 @@ func (b *Broadcaster) flushRefreshBatch(evts []api.RefreshEvent) {
 	if len(evts) == 0 {
 		return
 	}
-	b.flushBatch("refresh_batch", "/v1/peer/refresh/batch",
-		func() ([]byte, error) { return EncodeRefreshBatchHTTP(evts) },
-		func() ([]byte, error) { return EncodeRefreshBatchGossip(evts) },
-		len(evts), evts[0].Issuer,
-	)
+	flushBatch(b, "refresh_batch", "/v1/peer/refresh/batch", evts, evts[0].Issuer,
+		EncodeRefreshBatchHTTP, EncodeRefreshBatchGossip)
 }
 
 // flushBatch delivers one batch of invalidation events: one batch frame
 // posted to each live peer (strong mode) plus one gossip batch frame.
-// httpEncode/gossipEncode are deferred so encoding happens at most once
+// Each encoder is called at most once, so encoding happens at most once
 // per delivery path. Fan-out is detached from request contexts by
 // design: batch events may originate from many request goroutines and
 // must survive their cancellation; postBinary bounds each call by
 // broadcastTimeout internally.
-func (b *Broadcaster) flushBatch(typ, path string, httpEncode, gossipEncode func() ([]byte, error), n int, issuer string) {
+func flushBatch[E any](b *Broadcaster, typ, path string, evts []E, issuer string, httpEncode, gossipEncode func([]E) ([]byte, error)) {
 	// Detached fan-out context; see comment above.
 	fanoutCtx := context.WithoutCancel(context.Background())
-	if body, err := httpEncode(); err != nil {
-		b.logger.Warn(typ+" encode failed", "error", err, "events", n)
+	if body, err := httpEncode(evts); err != nil {
+		b.logger.Warn(typ+" encode failed", "error", err, "events", len(evts))
 		b.metrics.IncBroadcastFailure(typ, "marshal")
 	} else {
 		b.broadcastEvent(fanoutCtx, typ, path, body)
@@ -318,11 +313,11 @@ func (b *Broadcaster) flushBatch(typ, path string, httpEncode, gossipEncode func
 	// All modes: enqueue via gossip. In strong mode this is redundant
 	// delivery (peer admin may be temporarily unreachable). In eventual
 	// mode this is the sole delivery path for invalidations.
-	if body, err := gossipEncode(); err == nil {
+	if body, err := gossipEncode(evts); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
 	b.logger.Info("gossiped "+typ+" to peers",
-		"events", n,
+		"events", len(evts),
 		"issuer", issuer,
 		"peers", countPeers(b.cluster.Members()),
 	)

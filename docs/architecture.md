@@ -203,6 +203,19 @@ default port stripped) → path (percent-decoded, re-encoded canonically) →
 query (parameters sorted lexicographically) → method (GET and HEAD share
 key space).
 
+A route may drop the host segment (`cache.key.include_host: false`): the key
+then resolves the same URL+query to one entry regardless of the request
+Host, emitting the empty segment (`scheme||path|...`). Requests are still
+forwarded with their original Host — only key computation changes. This is
+an operator-verified claim about the origin (it must be host-blind: no
+redirects, no absolute links, no host-keyed behaviour); collapsing two hosts
+the origin serves differently is a wrong-body bug, not a miss. Stored
+`X-Bouine-Host` metadata keeps the filling request's host, so host-regex ban
+predicates match only the fragment that filled each entry — prefer path or
+surrogate-key bans on such routes. The flag must be identical on every
+cluster node serving the route, and validation rejects combining it with
+`match.host`.
+
 The secondary key (Vary) is derived from headers listed in the response's
 `Vary`. Headers participate in the cache key **only** via `Vary` or an
 explicit per-route allow-list — never implicitly. This is the primary

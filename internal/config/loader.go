@@ -433,11 +433,24 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 		}
 		r.Match.Methods[j] = up
 	}
+	validateRouteKeyHostSelector(ec, prefix, r)
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		ec.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
 	validatePathRewrite(ec, prefix+".request", r.Request)
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
+}
+
+// validateRouteKeyHostSelector rejects include_host: false on a route
+// that sets match.host: the host selector no longer separates what the
+// key just merged, and a second route with the same prefix but no host
+// selector would shadow it for the host-agnostic key space.
+func validateRouteKeyHostSelector(ec *errCollector, prefix string, r *Route) {
+	if r.Cache.Key.IncludeHost == nil || *r.Cache.Key.IncludeHost || r.Match.Host == "" {
+		return
+	}
+	ec.addf(prefix+".cache.key.include_host",
+		"cannot be false on a route that sets match.host — the host selector and a host-agnostic key disagree")
 }
 
 // validatePathRewrite validates the request.path_rewrite block: both

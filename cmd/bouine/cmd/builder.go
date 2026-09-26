@@ -601,7 +601,7 @@ func (r *staticHeaderRewriter) wrap(next fasthttp.RequestHandler) fasthttp.Reque
 }
 
 // buildKeyPolicy compiles the route's cache key config into a
-// pre-compiled KeyPolicy. Returns nil when no query/header policy
+// pre-compiled KeyPolicy. Returns nil when no query/header/host policy
 // is active (no allocation).
 func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	if !hasKeyPolicy(rk) {
@@ -615,7 +615,15 @@ func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 		rk.StripEmptyParams,
 		rk.DedupQueryParams,
 		rk.IncludeHeaders,
+		excludeHost(rk),
 	)
+}
+
+// excludeHost resolves cache.key.include_host's tri-state: nil/true
+// keep host in the key (the default since the field was added); only an
+// explicit false produces a host-agnostic key.
+func excludeHost(rk config.RouteKey) bool {
+	return rk.IncludeHost != nil && !*rk.IncludeHost
 }
 
 func buildKeepSet(params []string) map[string]bool {
@@ -629,12 +637,13 @@ func buildKeepSet(params []string) map[string]bool {
 	return m
 }
 
-// hasKeyPolicy checks the query/header fields only.
+// hasKeyPolicy checks the query/header/host fields only.
 func hasKeyPolicy(rk config.RouteKey) bool {
 	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
 		len(rk.IncludeHeaders) > 0 ||
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
-		rk.StripEmptyParams || rk.DedupQueryParams
+		rk.StripEmptyParams || rk.DedupQueryParams ||
+		excludeHost(rk)
 }
 
 // buildStripSet converts a config []string into a map for O(1) lookup.

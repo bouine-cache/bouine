@@ -124,6 +124,34 @@ func TestHasKeyPolicy(t *testing.T) {
 	assert.True(t, hasKeyPolicy(config.RouteKey{DedupQueryParams: true}))
 }
 
+func TestBuildKeyPolicy_IncludeHost(t *testing.T) {
+	t.Parallel()
+	// Absent (nil) and true keep today's nil-policy fast path: a route
+	// with no other key fields must not allocate a policy just because
+	// the field exists.
+	assert.Nil(t, buildKeyPolicy(config.RouteKey{}))
+	yes := true
+	assert.Nil(t, buildKeyPolicy(config.RouteKey{IncludeHost: &yes}))
+
+	// Explicit false compiles a policy that collapses hosts in the
+	// key — the observable behaviour NewKeyPolicy's excludeHost flag
+	// produces.
+	no := false
+	p := buildKeyPolicy(config.RouteKey{IncludeHost: &no})
+	require.NotNil(t, p)
+	assert.Equal(t,
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "a.example.com", Path: "/x"}, p),
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "b.example.com", Path: "/x"}, p))
+	assert.True(t, hasKeyPolicy(config.RouteKey{IncludeHost: &no}))
+
+	// Combined with query policy both flags survive in one policy.
+	p2 := buildKeyPolicy(config.RouteKey{IncludeHost: &no, StripQueryParams: []string{"utm"}})
+	require.NotNil(t, p2)
+	assert.Equal(t,
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "a.example.com", Path: "/x", URI: "/x?utm=1"}, p2),
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "b.example.com", Path: "/x", URI: "/x?utm=1"}, p2))
+}
+
 func TestBoolDefault(t *testing.T) {
 	t.Parallel()
 	assert.True(t, boolDefault(nil, true))
@@ -1461,6 +1489,78 @@ func TestBuildRouter_PathRewriteWired(t *testing.T) {
 	// pinned by internal/cache/path_rewrite_route_test.go and the
 	// test/integration/path_rewrite_test.go cluster regression; this
 	// builder test only proves the wiring reaches the handler.
+}
+
+// TestPolicyForURL wires a real router and proves the admin plane's
+// URL→policy resolution: a route with include_host: false must be
+// found for URLs under its prefix (any host — that is the point), and
+// the policy it reports is the one its handler serves with. Unmatched
+// URLs and a nil router fall back to nil (host-ful default key).
+func TestPolicyForURL(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
+	defer originSrv.Close()
+
+	no := false
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "echo", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{
+					Name:  "pp",
+					Pool:  "echo",
+					Match: config.RouteMatch{PathPrefix: "/product-page/"},
+					Cache: config.RouteCache{Key: config.RouteKey{IncludeHost: &no}},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	rs.router = router
+	require.Len(t, rs.handlers, 1)
+
+	// Any host under the route prefix resolves to the host-agnostic
+	// policy: the admin purge path builds the key the data plane does.
+	pol := policyForURL(rs, "http://internal.example.com/product-page/p?x=1")
+	require.NotNil(t, pol)
+	k1 := cache.BuildKeyFromURL("http://internal.example.com/product-page/p?x=1", pol)
+	k2 := cache.BuildKeyFromURL("http://www.example.com/product-page/p?x=1", pol)
+	require.Equal(t, k1, k2, "the resolved policy must be host-agnostic")
+	pol2 := policyForURL(rs, "http://www.example.com/product-page/p")
+	require.NotNil(t, pol2)
+
+	// Same policy instance the handler serves with — not a recompile.
+	require.Same(t, rs.handlers[0].KeyPolicy(), pol)
+
+	// Unmatched URL, no-host URL, invalid URL, and nil router all fall
+	// back to nil (the default host-ful key).
+	assert.Nil(t, policyForURL(rs, "http://example.com/other"))
+	assert.Nil(t, policyForURL(rs, "/relative"))
+	assert.Nil(t, policyForURL(rs, "ht\x00tp://bad"))
+	assert.Nil(t, policyForURL(nil, "http://example.com/product-page/p"))
+
+	// The resolved policy produces the shared key the data plane uses:
+	// two hosts, one key — the property admin purges rely on.
+	k3 := cache.BuildKeyFromURL("http://internal.example.com/product-page/p?x=1", pol)
+	k4 := cache.BuildKeyFromURL("http://public.example.com/product-page/p?x=1", pol)
+	assert.Equal(t, k3, k4)
 }
 
 // TestBuildStaticRoute_WithPathRewrite covers the non-cached static

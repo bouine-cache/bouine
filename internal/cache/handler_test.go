@@ -3058,7 +3058,7 @@ func TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy(t *testing.T) {
 		// A query-param-stripping policy: BuildKey drops "utm_foo", so
 		// the slow path's lookup key differs from the fast path's
 		// nil-policy key for the same URL.
-		Policy: NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil),
+		Policy: NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
@@ -3080,7 +3080,7 @@ func TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy(t *testing.T) {
 	assert.Equal(t, int32(1), originCalls.Load())
 	if len(peerFetchKeys) == 1 {
 		want := BuildKey(requestInfoFromURL("GET", "http://example.com/policied?utm_foo=x"),
-			NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil))
+			NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false))
 		assert.Equal(t, want, peerFetchKeys[0], "peer RPC must use the policied (stripped) key")
 	}
 }
@@ -3145,7 +3145,7 @@ func TestHandleCacheMiss_GateRejectHintIgnoredWithKeyPolicy(t *testing.T) {
 		Upstream:   originUpstream,
 		FastClient: &testFastClient{handler: originUpstream},
 		Store:      store,
-		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil),
+		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
@@ -3491,7 +3491,7 @@ func TestLookup_VaryVariantMiss(t *testing.T) {
 func TestAppendCanonicalQueryString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [256]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	// "q=test&utm=x" → should strip utm, keep q.
 	n := appendCanonicalQueryString(buf[:], 0, "q=test&utm=x", policy)
 	result := string(buf[:n])
@@ -3520,7 +3520,7 @@ func TestAppendCanonicalQueryString_MoreThan8Params(t *testing.T) {
 func TestAppendCanonicalQuerySlowString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [512]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	n := appendCanonicalQuerySlowString(buf[:], 0, "q=test&utm=x&fbclid=123", policy)
 	result := string(buf[:n])
 	assert.Contains(t, result, "q=test")
@@ -4514,7 +4514,7 @@ func TestIncludeHeaders_OriginNoVary(t *testing.T) {
 		Upstream:   upstream,
 		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
-		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}),
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false),
 	})
 
 	serve := func(al string) *fasthttp.RequestCtx {
@@ -4582,7 +4582,7 @@ func TestIncludeHeaders_MixedWithOriginVary(t *testing.T) {
 		Upstream:   upstream,
 		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
-		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}),
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false),
 	})
 
 	serve := func(enc, lang string) *fasthttp.RequestCtx {
@@ -4618,7 +4618,7 @@ func TestIncludeHeaders_MixedWithOriginVary(t *testing.T) {
 func TestIncludeHeaders_304RefreshKeepsUnion(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"})
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false)
 
 	// A stored object whose origin sent no Vary: the union is the
 	// include list alone.
@@ -4669,7 +4669,7 @@ func TestIncludeHeaders_304RefreshKeepsUnion(t *testing.T) {
 func TestIncludeHeaders_304VaryStarFailsSafe(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"})
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false)
 
 	storedHeader := headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`)
 	stale := &api.Object{
@@ -4706,7 +4706,7 @@ func TestIncludeHeaders_304VaryStarFailsSafe(t *testing.T) {
 // resolve instead of rejecting every peer hit.
 func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "BM-Market"})
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "BM-Market"}, false)
 
 	wire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nBM-Market: US\r\n\r\n"
 
@@ -4826,4 +4826,93 @@ func TestHandler_StatusTTL(t *testing.T) {
 		require.Equal(t, "MISS", respHeader(rr2, header.XCache))
 		require.Equal(t, 2, originCalls)
 	})
+}
+
+// --- cache.key.include_host: false (host-agnostic keys) ---
+
+// TestExcludeHost_TwoHostsShareEntry is the end-to-end acceptance test
+// for include_host: false: two requests differing only in Host share
+// one stored entry — the second host's request is a HIT on the first
+// host's fill, and the origin sees exactly one fetch. The stored
+// X-Bouine-Host metadata keeps the filler's host (the value ban
+// predicates match), pinned below.
+func TestExcludeHost_TwoHostsShareEntry(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true),
+	})
+
+	serve := func(url string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", url)
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	r1 := serve("http://internal.example.com/p?q=1")
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	r2 := serve("http://public.example.com/p?q=1")
+	require.Equal(t, "HIT", respHeader(r2, header.XCache),
+		"a request under a different Host must hit the entry the first Host filled")
+	require.Equal(t, "body", respBody(r2))
+	require.Equal(t, int32(1), originCalls.Load(), "one entry means one origin fetch")
+
+	// The stored metadata keeps the filler's host — what ban predicates
+	// see. Fetch it via the handler's own key computation.
+	key := BuildKeyFromURL("http://internal.example.com/p?q=1",
+		NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true))
+	obj, src, err := store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	require.Equal(t, api.SourceHot, src)
+	require.Equal(t, "internal.example.com", obj.Header.Get(header.XBouineHost),
+		"X-Bouine-Host records the filler's host, not the requester's")
+
+	// Default (host-keyed) routes on the same handler pair still split.
+	// A nil-policy handler over the same store keeps two entries.
+	hDefault := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+	d1 := testCtx("GET", "http://internal.example.com/other")
+	hDefault.ServeRequest(d1)
+	d2 := testCtx("GET", "http://public.example.com/other")
+	hDefault.ServeRequest(d2)
+	require.Equal(t, "MISS", respHeader(d2, header.XCache), "nil policy keeps host in the key")
+}
+
+// TestExcludeHost_HostStillForwarded pins that only key computation
+// changes: the origin-bound request carries the client's original
+// Host, so an upstream that *is* host-sensitive still sees correct
+// input (it is the operator's contract that it isn't).
+func TestExcludeHost_HostStillForwarded(t *testing.T) {
+	t.Parallel()
+	var seenHost atomic.Value
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		seenHost.Store(string(ctx.Host()))
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("b"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true),
+	})
+	ctx := testCtx("GET", "http://kept.example.com/x")
+	h.ServeRequest(ctx)
+	require.Equal(t, "kept.example.com", seenHost.Load().(string),
+		"include_host: false must not rewrite the origin-bound Host")
 }

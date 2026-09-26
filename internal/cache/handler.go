@@ -1175,6 +1175,16 @@ func (h *Handler) RouteName() string {
 	return h.routeName
 }
 
+// KeyPolicy returns the route's compiled cache key policy, or nil when
+// the route has none. The engine uses it to rebuild keys from raw URLs
+// in the admin plane (purge/refresh/cachecheck): those surfaces must
+// compute the key the same way the data plane does, or a route whose
+// key differs from the default (e.g. include_host: false) would purge
+// and inspect keys that were never stored.
+func (h *Handler) KeyPolicy() *KeyPolicy {
+	return h.policy
+}
+
 // RefreshEnabled reports whether this handler was configured with
 // refresh-before-expiry. Used by the engine to filter handlers for
 // shutdown drain and refresh-metric polling without maintaining a

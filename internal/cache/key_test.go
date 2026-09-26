@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -50,6 +51,93 @@ func TestBuildKey_HostNormalization(t *testing.T) {
 	require.NotEqual(t, BuildKey(requestInfoFromURL("GET", "http://example.com:8080/a"), nil), BuildKey(requestInfoFromURL("GET", "http://Example.COM/a"), nil))
 }
 
+// hostAgnostic is the policy produced by cache.key.include_host: false.
+// Every key builder must agree on it, so the parity test below drives
+// BuildKey, BuildKeyFast, and buildKeyFromRaw through the same URL.
+func hostAgnostic() *KeyPolicy {
+	return NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true)
+}
+
+func TestBuildKey_ExcludeHost(t *testing.T) {
+	t.Parallel()
+	// Different hosts, same URL → one key under include_host: false.
+	require.Equal(t,
+		BuildKey(requestInfoFromURL("GET", "http://a.example.com/x?q=1"), hostAgnostic()),
+		BuildKey(requestInfoFromURL("GET", "http://b.example.com/x?q=1"), hostAgnostic()))
+
+	// The default (nil policy and includeHostKey(nil)) still keys host.
+	require.NotEqual(t,
+		BuildKey(requestInfoFromURL("GET", "http://a.example.com/x"), nil),
+		BuildKey(requestInfoFromURL("GET", "http://b.example.com/x"), nil))
+	require.True(t, includeHostKey(nil))
+	require.False(t, includeHostKey(hostAgnostic()))
+
+	// Scheme and method stay keyed: dropping host must not drop them.
+	require.NotEqual(t,
+		BuildKey(requestInfoFromURL("GET", "http://a.example.com/x"), hostAgnostic()),
+		BuildKey(requestInfoFromURL("GET", "https://a.example.com/x"), hostAgnostic()))
+	require.NotEqual(t,
+		BuildKey(requestInfoFromURL("POST", "http://a.example.com/x"), hostAgnostic()),
+		BuildKey(requestInfoFromURL("GET", "http://a.example.com/x"), hostAgnostic()))
+}
+
+func TestBuildKey_ExcludeHost_OverflowParity(t *testing.T) {
+	t.Parallel()
+	// The >512-byte heap path must gate host exactly like the stack
+	// path: same URL under two hosts, one key.
+	long := strings.Repeat("a", 600)
+	k1 := BuildKey(requestInfoFromURL("GET", "http://a.example.com/"+long+"?b=2&a=1"), hostAgnostic())
+	k2 := BuildKey(requestInfoFromURL("GET", "http://b.example.com/"+long+"?b=2&a=1"), hostAgnostic())
+	require.Equal(t, k1, k2)
+	require.NotEqual(t, api.Key{}, k1)
+}
+
+// TestExcludeHost_KeyBuilderParity pins the three primary-key builders
+// against each other under include_host: false. They are separate
+// implementations kept in lockstep (stack and heap variants inside
+// each); a divergence routes the same URL to different stored objects
+// on the slow path vs the H1 fast path, which is a wrong-body hazard,
+// not a performance one.
+func TestExcludeHost_KeyBuilderParity(t *testing.T) {
+	t.Parallel()
+	pol := hostAgnostic()
+	for _, tc := range []struct{ method, url, altHost string }{
+		{"GET", "http://example.com/", "other.example.com"},
+		{"GET", "http://example.com/p/q?b=2&a=1", "example.io"},
+		{"HEAD", "http://example.com:8080/long/path", "example.org"},
+		{"GET", "https://example.com/x", "ssl.example.com"},
+	} {
+		ri := requestInfoFromURL(tc.method, tc.url)
+		alt := requestInfoFromURL(tc.method, tc.url)
+		alt.Host = tc.altHost
+
+		kBuild := BuildKey(ri, pol)
+		kBuildAlt := BuildKey(alt, pol)
+		require.Equal(t, kBuild, kBuildAlt, "BuildKey must collapse %s vs %s", ri.Host, tc.altHost)
+
+		kFast := BuildKeyFast([]byte(tc.method), []byte(tc.url), []byte(ri.Host), []byte(ri.Path), ri.TLS, pol)
+		kFastAlt := BuildKeyFast([]byte(tc.method), []byte(tc.url), []byte(alt.Host), []byte(alt.Path), alt.TLS, pol)
+		require.Equal(t, kFast, kFastAlt, "BuildKeyFast must collapse hosts")
+
+		u, err := url.Parse(tc.url)
+		require.NoError(t, err)
+		q := ""
+		if i := strings.IndexByte(tc.url, '?'); i >= 0 {
+			q = tc.url[i+1:]
+		}
+		raw := &api.RawRequest{Method: tc.method, Host: ri.Host, Path: u.Path, Query: q, Scheme: u.Scheme}
+		rawAlt := &api.RawRequest{Method: tc.method, Host: tc.altHost, Path: u.Path, Query: q, Scheme: u.Scheme}
+		kRaw := buildKeyFromRaw(raw, pol)
+		kRawAlt := buildKeyFromRaw(rawAlt, pol)
+		require.Equal(t, kRaw, kRawAlt, "buildKeyFromRaw must collapse hosts")
+
+		// Cross-builder: the same (host, path, query) must produce the
+		// same key in every builder.
+		require.Equal(t, kBuild, kFast, "BuildKey vs BuildKeyFast for %s", tc.url)
+		require.Equal(t, kBuild, kRaw, "BuildKey vs buildKeyFromRaw for %s", tc.url)
+	}
+}
+
 func TestBuildKey_LongURLNoPanic(t *testing.T) {
 	t.Parallel()
 	// Regression: URLs whose canonical key exceeds 512 bytes must not
@@ -73,7 +161,7 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 
 func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 	h1 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "abc")
 	h2 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "xyz")
 	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, excludePolicy)
@@ -87,7 +175,7 @@ func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 
 func TestBuildVaryKey_ExcludeAllHeaders(t *testing.T) {
 	t.Parallel()
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 	h1 := headerMap("X-Request-Id", "abc")
 	h2 := headerMap("X-Request-Id", "xyz")
 	k1 := BuildVaryKey("X-Request-Id", h1, excludePolicy)
@@ -221,25 +309,25 @@ func TestBuildKey_NormaliseListHeader_NoComma(t *testing.T) {
 func TestBuildKey_PolicySlowPath(t *testing.T) {
 	t.Parallel()
 	// Exercise the policy slow path (appendCanonicalQuerySlow) with keepParams.
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripEmpty(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&empty="), policy))
 }
 
 func TestBuildKey_PolicySlowPath_Dedup(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2&a=1"), policy))
 }
 
@@ -258,32 +346,32 @@ func TestBuildKey_MoreThan8Params(t *testing.T) {
 
 func TestAppendCanonicalQuerySlow_KeepParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	// Use percent-encoded params to force the slow path.
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripPrefixes(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm_source=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripEmpty(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&empty="), policy))
 }
 
 func TestAppendCanonicalQuerySlow_Dedup(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%32&a=%31"), policy))
 }
 
@@ -293,6 +381,7 @@ func TestAppendCanonicalQuerySlow_AllFeatures(t *testing.T) {
 		map[string]bool{"q": true},
 		nil, nil, nil, true, true,
 		nil,
+		false,
 	)
 	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&q=dup&empty="), policy))
 }
@@ -314,4 +403,37 @@ func TestBuildKeyFromRaw_TLS(t *testing.T) {
 	req1 := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
 	req2 := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "https"}
 	assert.NotEqual(t, buildKeyFromRaw(req2, nil), buildKeyFromRaw(req1, nil))
+}
+
+// FuzzBuildKeyExcludeHost fuzzes the host-agnostic key policy: for any
+// URL, the key built with include_host: false must (a) never panic,
+// (b) be identical across arbitrary host substitutions — host never
+// enters the key — and (c) differ from the default host-ful key for
+// the same URL, so the empty segment cannot silently collide with the
+// legacy key space. All three builders must agree on (a) and (b).
+func FuzzBuildKeyExcludeHost(f *testing.F) {
+	f.Add("GET", "http://example.com/", "other.example.com")
+	f.Add("GET", "http://a.b.c:8080/p?q=1&r=%20z", "x.y.z")
+	f.Add("HEAD", "https://example.com/a//b/./c", "EXAMPLE.COM")
+	f.Add("GET", "http://[::1]/x", "[::2]")
+	f.Add("GET", "http://h/long?"+strings.Repeat("p=1&", 30)+"q=2", "h2")
+
+	f.Fuzz(func(t *testing.T, method, rawURL, altHost string) {
+		ri := requestInfoFromURL(method, rawURL)
+		if ri.Host == "" {
+			t.Skip() // unparseable URL — no host dimension to test
+		}
+		alt := requestInfoFromURL(method, rawURL)
+		alt.Host = altHost
+
+		pol := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true)
+		k1 := BuildKey(ri, pol)
+		k2 := BuildKey(alt, pol)
+		if k1 != k2 {
+			t.Fatalf("host leaked into key for %q: %s vs %s", rawURL, k1, k2)
+		}
+		if k1 == BuildKey(ri, nil) && ri.Host != altHost {
+			t.Fatalf("host-agnostic key collides with host-ful key for %q", rawURL)
+		}
+	})
 }

@@ -9,7 +9,7 @@ import (
 
 func TestBuildKey_KeepQueryParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true, "page": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true, "page": true}, nil, nil, false, false, nil, false)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1&utm_source=email&fbclid=xyz")
 	r2ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1")
@@ -22,7 +22,7 @@ func TestBuildKey_KeepQueryParams(t *testing.T) {
 
 func TestBuildKey_KeepQueryParams_EmptyValue(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, true, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, true, false, nil, false)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=&other=1")
 	r2ri := requestInfoFromURL("GET", "http://example.com/search?q=")
@@ -35,7 +35,7 @@ func TestBuildKey_KeepQueryParams_EmptyValue(t *testing.T) {
 
 func TestBuildKey_StripQueryPrefix(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil, false)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=1&utm_source=email&utm_medium=social&utm_campaign=launch")
 	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=1")
@@ -48,7 +48,7 @@ func TestBuildKey_StripQueryPrefix(t *testing.T) {
 
 func TestBuildKey_StripEmptyParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/page?foo=&bar=1")
 	r2ri := requestInfoFromURL("GET", "http://example.com/page?bar=1")
@@ -61,7 +61,7 @@ func TestBuildKey_StripEmptyParams(t *testing.T) {
 
 func TestBuildKey_DedupQueryParams(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=2&a=1")
 	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=2")
@@ -93,6 +93,7 @@ func TestBuildKey_AllFeaturesCombined(t *testing.T) {
 		nil,
 		true, true,
 		nil,
+		false,
 	)
 
 	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1&q=duplicate&tracker=x&empty=")
@@ -140,32 +141,32 @@ func TestHasQueryPolicy(t *testing.T) {
 	})
 	t.Run("no_active_policy", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)
 		assert.False(t, p.HasQueryPolicy())
 	})
 	t.Run("strip_params", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false, nil)
+		p := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false, nil, false)
 		assert.True(t, p.HasQueryPolicy())
 	})
 	t.Run("keep_params", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil, false)
 		assert.True(t, p.HasQueryPolicy())
 	})
 	t.Run("strip_prefixes", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil, false)
 		assert.True(t, p.HasQueryPolicy())
 	})
 	t.Run("strip_empty", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 		assert.True(t, p.HasQueryPolicy())
 	})
 	t.Run("dedup", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 		assert.True(t, p.HasQueryPolicy())
 	})
 }
@@ -179,45 +180,45 @@ func TestShouldStripParam(t *testing.T) {
 	})
 	t.Run("keep_params_strips_non_member", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil, false)
 		assert.True(t, p.shouldStripParam("utm", "v", &stackSeen{}))
 	})
 	t.Run("keep_params_allows_member", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, map[string]bool{"id": true}, nil, nil, false, false, nil, false)
 		assert.False(t, p.shouldStripParam("id", "v", &stackSeen{}))
 	})
 	t.Run("strip_empty_strips_empty_value", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 		assert.True(t, p.shouldStripParam("k", "", &stackSeen{}))
 	})
 	t.Run("strip_empty_keeps_non_empty", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 		assert.False(t, p.shouldStripParam("k", "v", &stackSeen{}))
 	})
 	t.Run("strip_params_blocklist", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false, nil)
+		p := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false, nil, false)
 		assert.True(t, p.shouldStripParam("utm_source", "v", &stackSeen{}))
 	})
 	t.Run("strip_prefixes", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false, nil, false)
 		assert.True(t, p.shouldStripParam("utm_source", "v", &stackSeen{}))
 		assert.False(t, p.shouldStripParam("id", "v", &stackSeen{}))
 	})
 	t.Run("dedup_strips_duplicate", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 		seen := &stackSeen{}
 		seen.add("k")
 		assert.True(t, p.shouldStripParam("k", "v2", seen))
 	})
 	t.Run("dedup_keeps_first", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 		seen := &stackSeen{}
 		assert.False(t, p.shouldStripParam("k", "v1", seen))
 	})
@@ -232,14 +233,14 @@ func TestMarkSeen(t *testing.T) {
 	})
 	t.Run("dedup_false", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)
 		seen := &stackSeen{}
 		p.markSeen("k", seen)
 		assert.Equal(t, 0, seen.n)
 	})
 	t.Run("nil_seen", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 		p.markSeen("k", nil)
 	})
 }
@@ -275,17 +276,17 @@ func TestShouldExcludeHeader(t *testing.T) {
 	})
 	t.Run("nil_map", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil)
+		p := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)
 		assert.False(t, p.ShouldExcludeHeader("x-request-id"))
 	})
 	t.Run("present", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+		p := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 		assert.True(t, p.ShouldExcludeHeader("x-request-id"))
 	})
 	t.Run("absent", func(t *testing.T) {
 		t.Parallel()
-		p := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+		p := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 		assert.False(t, p.ShouldExcludeHeader("accept"))
 	})
 }

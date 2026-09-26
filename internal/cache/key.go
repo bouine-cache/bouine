@@ -56,8 +56,13 @@ func BuildKey(ri RequestInfo, policy *KeyPolicy) api.Key {
 		n += copyOverflow(buf[:], n, "http|")
 	}
 
-	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, ri.GetHost())
+	// Host (canonical). include_host: false emits the empty segment
+	// ("http||/") instead of removing the delimiter so the canonical
+	// form stays unambiguous against paths carrying '|' and the
+	// overflow-length arithmetic is unchanged.
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(buf[:], n, ri.GetHost())
+	}
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
@@ -95,7 +100,9 @@ func buildKeyHeap(ri RequestInfo, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, "http|")
 	}
 
-	n = appendCanonicalHost(heap, n, ri.GetHost())
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(heap, n, ri.GetHost())
+	}
 	n = appendByte(heap, n, '|')
 
 	n = appendCanonicalPathString(heap, n, ri.GetPath())
@@ -131,8 +138,11 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 		n += copyOverflowBytes(buf[:], n, sHTTP)
 	}
 
-	// Host (canonical).
-	n = appendCanonicalHostBytes(buf[:], n, host)
+	// Host (canonical), unless the route opts out (include_host: false
+	// emits the empty segment — see BuildKey).
+	if includeHostKey(policy) {
+		n = appendCanonicalHostBytes(buf[:], n, host)
+	}
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
@@ -165,7 +175,9 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 	} else {
 		n += copyOverflowBytes(heap, n, sHTTP)
 	}
-	n = appendCanonicalHostBytes(heap, n, host)
+	if includeHostKey(policy) {
+		n = appendCanonicalHostBytes(heap, n, host)
+	}
 	n = appendByte(heap, n, '|')
 	n = appendCanonicalPathBytes(heap, n, path)
 	n = appendByte(heap, n, '|')

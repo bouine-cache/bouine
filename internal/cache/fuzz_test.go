@@ -246,7 +246,7 @@ func FuzzEffectiveVary(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, vary, include string) {
 		fields := strings.Split(include, ",")
-		policy := NewKeyPolicy(nil, nil, nil, nil, false, false, fields)
+		policy := NewKeyPolicy(nil, nil, nil, nil, false, false, fields, false)
 
 		v1 := effectiveVary(headerMap(header.Vary, vary), policy)
 		v2 := effectiveVary(headerMap(header.Vary, vary), policy)

@@ -786,7 +786,7 @@ func TestVariantKeyFromRaw_DifferentHeaders(t *testing.T) {
 func TestVariantKeyFromRaw_PolicyExclusion(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	policy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 	req1 := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req1.Headers[0] = api.RawHeader{Key: "X-Request-Id", Value: "abc"}
 	req1.NHeaders = 1
@@ -1290,7 +1290,7 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 func TestFastPathHandler_VarySameKey(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
-	policy := NewKeyPolicy(nil, nil, map[string]bool{"x-trace-id": true}, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"x-trace-id": true}, nil, false, false, nil, false)
 	fp := &FastPathHandler{store: store, policy: policy}
 
 	reqBase := &api.RawRequest{

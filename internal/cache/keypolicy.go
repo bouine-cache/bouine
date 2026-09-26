@@ -26,6 +26,10 @@ type KeyPolicy struct {
 	stripPrefixes  []string // prefix patterns to strip, capped at 16
 	stripEmpty     bool     // strip params with empty values
 	dedup          bool     // keep first value (in request order) for duplicate params
+	// excludeHost, when true, omits the host segment from the primary
+	// key (cache.key.include_host: false). Read on every key build; the
+	// default (false) is today's behaviour. See includeHostKey.
+	excludeHost bool
 }
 
 // shouldStripParam returns true if the query param should be excluded
@@ -113,13 +117,23 @@ func (p *KeyPolicy) HasQueryPolicy() bool {
 		len(p.stripPrefixes) > 0 || p.stripEmpty || p.dedup
 }
 
+// includeHostKey reports whether the primary key must carry the host
+// segment. nil policy (the common case) keeps host keyed: the admin
+// purge/refresh paths build keys with a nil policy, and a nil-safe
+// default of "include host" is what every existing route does today.
+func includeHostKey(p *KeyPolicy) bool {
+	return p == nil || !p.excludeHost
+}
+
 // NewKeyPolicy constructs a KeyPolicy from the given parameters.
 // All maps are pre-allocated; the returned policy is read-only.
 // includeHeaders is trimmed, lowercased, and sorted here: config
 // validation guarantees no duplicates, so the canonical form makes the
 // stored union deterministic and lets effectiveVary dedupe a field the
 // origin also lists in Vary (its own trims must match).
-func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool, includeHeaders []string) *KeyPolicy {
+// excludeHost carries cache.key.include_host: false — the one field
+// that is true by default, hence an inverted "exclude" parameter.
+func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool, includeHeaders []string, excludeHost bool) *KeyPolicy {
 	if len(includeHeaders) > 0 {
 		lowered := make([]string, 0, len(includeHeaders))
 		for _, h := range includeHeaders {
@@ -144,6 +158,7 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 		dedup:          dedup,
 		excludeHeaders: excludeHeaders,
 		includeHeaders: includeHeaders,
+		excludeHost:    excludeHost,
 	}
 }
 

@@ -37,6 +37,7 @@ This document maps NGINX `proxy_cache` directives to bouine config.
 - **Purge and ban**: bouine's admin API (`POST /v1/purge`, `POST /v1/ban`) replaces NGINX's cache purge module. Ban supports predicate-based invalidation (regex on host/path, surrogate keys).
 - **Soft-purge (refresh)**: `POST /v1/refresh` marks an object stale and triggers background revalidation on next access, similar to NGINX's `proxy_cache_purge` with a grace period.
 - **Query-param stripping**: `routes[].cache.key.strip_query_params: [utm_source, fbclid]` drops tracking params from the cache key while still forwarding them to the origin.
+- **Host-agnostic keys**: `routes[].cache.key.include_host: false` drops the Host from the cache key (NGINX equivalent: a `proxy_cache_key` without `$host`), for routes where the same URL is requested under several Hosts and the origin is host-blind. Absent keeps the host keyed.
 
 ## Example: API gateway
 

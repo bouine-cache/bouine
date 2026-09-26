@@ -14,7 +14,7 @@ func BenchmarkBuildKey_NoPolicy(b *testing.B) {
 }
 
 func BenchmarkBuildKey_KeepParams(b *testing.B) {
-	policy := NewKeyPolicy(nil, map[string]bool{"a": true, "b": true}, nil, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, map[string]bool{"a": true, "b": true}, nil, nil, false, false, nil, false)
 	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -24,7 +24,7 @@ func BenchmarkBuildKey_KeepParams(b *testing.B) {
 }
 
 func BenchmarkBuildKey_StripPrefix(b *testing.B) {
-	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_", "fbclid", "gclid", "_ga"}, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_", "fbclid", "gclid", "_ga"}, false, false, nil, false)
 	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -34,7 +34,7 @@ func BenchmarkBuildKey_StripPrefix(b *testing.B) {
 }
 
 func BenchmarkBuildKey_StripEmpty(b *testing.B) {
-	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, true, false, nil, false)
 	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=&c=3&d=4&e=")
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -44,7 +44,7 @@ func BenchmarkBuildKey_StripEmpty(b *testing.B) {
 }
 
 func BenchmarkBuildKey_Dedup(b *testing.B) {
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, true, nil, false)
 	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3&a=4&d=5")
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -61,8 +61,19 @@ func BenchmarkBuildKey_AllPolicies(b *testing.B) {
 		[]string{"utm_", "fbclid"},
 		true, true,
 		nil,
+		false,
 	)
 	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&a=4&tracker=x&d=")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = BuildKey(ri, policy)
+	}
+}
+
+func BenchmarkBuildKey_ExcludeHost(b *testing.B) {
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {

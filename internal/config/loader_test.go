@@ -1495,6 +1495,100 @@ func TestValidate_IncludeHeaders_Accepted(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+// --- cache.key.include_host (host-agnostic keys) ---
+
+// TestParse_IncludeHost pins the strict decoder accepting the new
+// field and the pointer's tri-state round-trip: false loads as a
+// non-nil *false, and absence leaves nil (host stays keyed — the
+// default that every existing config depends on).
+func TestParse_IncludeHost(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_host: false
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept include_host")
+	require.NotNil(t, cfg.Routes[0].Cache.Key.IncludeHost)
+	require.False(t, *cfg.Routes[0].Cache.Key.IncludeHost)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestParse_IncludeHost_AbsentIsNil(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        strip_query_params: [utm_source]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Nil(t, cfg.Routes[0].Cache.Key.IncludeHost,
+		"absent include_host must load as nil, never a false zero value")
+}
+
+func TestParse_IncludeHost_True(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_host: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Routes[0].Cache.Key.IncludeHost)
+	require.True(t, *cfg.Routes[0].Cache.Key.IncludeHost)
+	require.NoError(t, cfg.Validate())
+}
+
+// TestValidate_IncludeHost_HostMatchConflict pins the one validation
+// rule: a route that selects on match.host and then drops host from
+// the key merges exactly what its selector distinguishes, and a
+// same-prefix route without a host selector would shadow it in the
+// host-agnostic key space.
+func TestValidate_IncludeHost_HostMatchConflict(t *testing.T) {
+	t.Parallel()
+	no := false
+	cfg := validBase()
+	cfg.Routes[0].Match.Host = "api.example.com"
+	cfg.Routes[0].Cache.Key.IncludeHost = &no
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].cache.key.include_host", "match.host")
+}
+
+func TestValidate_IncludeHost_Accepted(t *testing.T) {
+	t.Parallel()
+	no := false
+	cfg := validBase()
+	cfg.Routes[0].Cache.Key.IncludeHost = &no
+	require.NoError(t, cfg.Validate())
+}
+
 // TestParse_DocsArchitectureExample pins the regression that filed
 // issue #632: the flagship config example in docs/architecture.md §9
 // uses cache.key.include_headers and must parse under the strict

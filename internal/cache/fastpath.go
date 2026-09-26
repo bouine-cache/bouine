@@ -751,8 +751,11 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n += copyOverflow(buf[:], n, scheme)
 	n = appendByte(buf[:], n, '|')
 
-	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, req.Host)
+	// Host (canonical), unless the route opts out (include_host: false
+	// emits the empty segment — see BuildKey).
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(buf[:], n, req.Host)
+	}
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
@@ -779,7 +782,9 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n = 0
 	n += copyOverflow(heap, n, scheme)
 	n = appendByte(heap, n, '|')
-	n = appendCanonicalHost(heap, n, req.Host)
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(heap, n, req.Host)
+	}
 	n = appendByte(heap, n, '|')
 	n = appendCanonicalPathString(heap, n, req.Path)
 	n = appendByte(heap, n, '|')

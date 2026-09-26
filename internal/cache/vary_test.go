@@ -67,7 +67,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	require.Equal(t, primary, VariantKey(primary, "*", header.Map{}, nil))
 
 	// Policy exclusions don't change the result — still primary.
-	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false, nil)
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false, nil, false)
 	require.Equal(t, primary, VariantKey(primary, "*", h1, policy))
 }
 
@@ -77,7 +77,7 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	// Exclude map uses lowercase; Vary header uses mixed case.
 	// VariantKey lowercases Vary fields before lookup, so this should
 	// match.
-	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil)
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false, nil, false)
 	h1 := headerMap("X-Request-ID", "abc")
 	h2 := headerMap("X-Request-ID", "xyz")
 	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
@@ -515,7 +515,7 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 // includePolicy builds a KeyPolicy with only an include_headers list,
 // the shape a route with no other key knobs produces.
 func includePolicy(include ...string) *KeyPolicy {
-	return NewKeyPolicy(nil, nil, nil, nil, false, false, include)
+	return NewKeyPolicy(nil, nil, nil, nil, false, false, include, false)
 }
 
 // TestNewKeyPolicy_IncludeHeadersNormalized pins the constructor's
@@ -527,7 +527,7 @@ func TestNewKeyPolicy_IncludeHeadersNormalized(t *testing.T) {
 	t.Parallel()
 	m := headerMap(header.ContentType, "text/html")
 	got := effectiveVary(m, NewKeyPolicy(nil, nil, nil, nil, false, false,
-		[]string{" X-Geo-Region ", "accept-language"}))
+		[]string{" X-Geo-Region ", "accept-language"}, false))
 	require.Equal(t, "accept-language, x-geo-region", got)
 }
 

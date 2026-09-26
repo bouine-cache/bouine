@@ -51,6 +51,30 @@ the curated, human-readable summary.
   durations; zero explicitly disables caching for that status. The
   policy only applies when the origin sends no explicit freshness, and
   RFC 9111 blocking directives still win.
+- `cache.key.include_host` (issue #700) — an explicitly-false value drops
+  the host segment from the primary cache key, so the same URL+query
+  resolves to one entry regardless of the request Host. Motivated by
+  routes fronted by a router that forwards both an internal service
+  host and public site hosts to the same cache (same bytes, two
+  entries, each fed by only part of the URL's traffic). Absent and
+  `true` keep today's `scheme|host|path|query|method` key byte-for-byte
+  — the field is a `*bool` precisely so the default cannot silently
+  re-key existing deployments. Requests are still forwarded with the
+  client's original Host; only key computation changes. All three
+  primary-key builders (`BuildKey`, `BuildKeyFast`, `buildKeyFromRaw`,
+  stack and heap variants) gate the host segment identically, pinned
+  by a cross-builder parity test; scheme and method stay keyed. The
+  admin URL-key surfaces (`/v1/purge`, `/v1/purge/batch`,
+  `/v1/refresh`, `/v1/cachecheck`) now resolve the matching route's
+  compiled key policy before rebuilding keys from raw URLs — a
+  host-agnostic route would otherwise purge and inspect keys that were
+  never stored. Stored `X-Bouine-Host` metadata keeps the filling
+  request's host, so host-regex ban predicates match only the fragment
+  that filled an entry; prefer path-regex or surrogate-key bans on
+  such routes. Validation rejects `include_host: false` on a route
+  that sets `match.host`, and — like `include_headers`/`exclude_headers`
+  — the flag must be identical on every cluster node serving the
+  route or ownership of the merged keyspace splits across the ring.
 
 ### Changed
 

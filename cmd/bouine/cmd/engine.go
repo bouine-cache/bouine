@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -613,11 +614,41 @@ func sanitizedConfig(cfg config.Config) config.Config {
 	return out
 }
 
+// policyForURL resolves the cache key policy the data plane would apply
+// to a URL: the first route matching the URL's host+path, via the same
+// first-match-wins router the data plane uses. Returns nil when no
+// route matches (the caller then builds the default host-ful key —
+// and an unmatched URL is by definition un-stored, so the mismatch is
+// harmless). Admin purge/refresh/cachecheck must compute keys this
+// way or routes whose key form differs from the default (include_host:
+// false, strip_query_params, ...) would invalidate and inspect keys
+// that were never stored.
+func policyForURL(rs *runState, rawURL string) *cache.KeyPolicy {
+	if rs == nil || rs.router == nil {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	label := rs.router.MatchByHostPath(u.Host, u.Path)
+	if label == "" {
+		return nil
+	}
+	for _, h := range rs.handlers {
+		if h.RouteName() == label {
+			return h.KeyPolicy()
+		}
+	}
+	return nil
+}
+
 // cacheCheck inspects the cache decision for a URL. It builds the
-// cache key using the default key policy, looks up the store, and
-// returns what the cache engine would do with this request.
+// cache key with the matching route's key policy (so host-agnostic
+// routes report the key the data plane actually computes), falling
+// back to the default all-off policy when no route matches.
 func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheCheckResult {
-	policy := cache.NewKeyPolicy(nil, nil, nil, nil, false, false, nil)
+	policy := policyForURL(rs, rawURL)
 	key := cache.BuildKeyFromURL(rawURL, policy)
 	result := admin.CacheCheckResult{
 		URL:    rawURL,
@@ -708,7 +739,7 @@ func (rs *runState) purgeKeysBatch(ctx context.Context, keys []api.Key) (purged,
 func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalidationOps {
 	return invalidationOps{
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr, nil)
+			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
 			if err := rs.purgeKey(dCtx, key); err != nil {
 				return err
 			}
@@ -731,7 +762,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr, nil)
+			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
 			if err := rs.softPurgeKey(dCtx, key); err != nil {
 				return err
 			}
@@ -850,7 +881,7 @@ func (e *engine) purgeBatchFn(rs *runState, ctx context.Context) func(urls []str
 	return func(urls []string) (int, int) {
 		keys := make([]api.Key, len(urls))
 		for i, u := range urls {
-			keys[i] = cache.BuildKeyFromURL(u, nil)
+			keys[i] = cache.BuildKeyFromURL(u, policyForURL(rs, u))
 		}
 		purged, failed, ok := rs.purgeKeysBatch(ctx, keys)
 		for i, u := range urls {

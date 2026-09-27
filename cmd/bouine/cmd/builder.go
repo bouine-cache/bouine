@@ -373,12 +373,33 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 					}
 				}()
 			}
+			applyCoalesceConfig(&cfg, e, rs, rc.Name)
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
+		if rs.routeFetchers != nil {
+			rs.routeFetchers[rc.Name] = cached
+		}
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
 	}
 	return router
+}
+
+// applyCoalesceConfig wires the origin shield (cluster.peer_fetch_coalesce)
+// onto a strong-mode cache handler: the non-owner waits on the owner's
+// coalesced origin fetch instead of fetching origin itself. The route
+// registry lets the owner resolve the route that owns the key on
+// coalesced misses.
+func applyCoalesceConfig(cfg *cache.HandlerConfig, e *engine, rs *runState, routeName string) {
+	coalesceFn := clusterCoalesceClosure(e, rs, routeName)
+	if coalesceFn == nil {
+		return
+	}
+	cfg.PeerFetchCoalesce = coalesceFn
+	cfg.PeerBackfillProbability = resolveBackfillProbability(e.cfg.Cluster.PeerFetchBackfillProbability)
+	cfg.OnCoalescedSaved = func() {
+		rs.clusterMetrics.IncCoalescedFetch("waiter")
+	}
 }
 
 // buildStaticRoute wires a route that serves files from a local directory
@@ -525,6 +546,34 @@ func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner 
 		return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
 	}
 	return ownerFn, peerFetch
+}
+
+// clusterCoalesceClosure builds the origin-shield closure for one route
+// (strong mode + cluster.peer_fetch_coalesce only): a coalesced
+// peer-fetch carrying the OriginRequest envelope. nil when disabled.
+func clusterCoalesceClosure(e *engine, rs *runState, routeName string) func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error) {
+	if rs.peerFetcher == nil || e.cfg.Cluster.Mode != config.ClusterModeStrong || !e.cfg.Cluster.PeerFetchCoalesce {
+		return nil
+	}
+	return func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error) {
+		return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{
+			Key:           key,
+			VaryKey:       varyKey,
+			Coalesce:      true,
+			Route:         routeName,
+			OriginRequest: *originReq,
+		})
+	}
+}
+
+// resolveBackfillProbability applies the default for
+// cluster.peer_fetch_backfill_probability: unset (nil) stores every
+// coalesced object (1.0), per the origin-shield plan's default.
+func resolveBackfillProbability(p *float64) float64 {
+	if p == nil {
+		return 1.0
+	}
+	return *p
 }
 
 // staticHeaderRewriter applies a route's header rewrite directives around

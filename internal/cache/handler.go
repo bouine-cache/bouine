@@ -272,6 +272,16 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// peerFetchCoalesce, when non-nil, enables cluster-coordinated origin
+	// shielding (origin shield): on a hard miss the non-owner asks the
+	// owner to drive its own collapsed origin fetch on its behalf, and
+	// waits for the answer instead of fetching origin itself. The extra
+	// OriginRequest parameter carries the upstream request context the
+	// owner needs to replay the fetch. Nil when disabled (default).
+	peerFetchCoalesce func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error)
+	// onCoalescedSaved counts waiters that received an authoritative
+	// coalesced answer and avoided an origin request (nil-safe).
+	onCoalescedSaved func()
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
@@ -344,19 +354,23 @@ type Handler struct {
 	// the synchronous buffered path to prevent OOMKill under slow-origin
 	// conditions (see status-0-investigation.md).
 	refreshPersistCycles int
-	refreshMinScore      int64
-	refreshTimeout       time.Duration
-	refreshMargin        time.Duration
-	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
-	jitterPercent        int
-	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
-	refreshMinHits       int
-	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
-	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
-	closeOnce            sync.Once
-	variantMu            sync.Mutex
-	stayinAlive          bool
+	// peerBackfillProbability is the probability that a coalesced object
+	// received from the owner is also stored locally (0.0–1.0). The
+	// owner always stores its own fill regardless of the knob.
+	peerBackfillProbability float64
+	refreshMinScore         int64
+	refreshTimeout          time.Duration
+	refreshMargin           time.Duration
+	defaultSWR              time.Duration // operator-level stale-while-revalidate floor
+	jitterPercent           int
+	maxResponseBytes        int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
+	overrideTTL             time.Duration // operator override; wins over origin max-age/Expires when > 0
+	refreshMinHits          int
+	fetchTimeout            time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
+	fetchWaitTimeout        time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
+	closeOnce               sync.Once
+	variantMu               sync.Mutex
+	stayinAlive             bool
 	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
@@ -425,6 +439,18 @@ type HandlerConfig struct {
 	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// PeerFetchCoalesce, when non-nil, enables cluster-coordinated origin
+	// shielding on the hard-miss path: instead of falling back to origin
+	// after the owner's cache-only 404, the non-owner sends the owner an
+	// OriginRequest envelope and waits. A successful peer answer is
+	// authoritative — the waiter does NOT fetch origin. Errors (owner
+	// down, timeout, shed) fall back to origin, preserving availability.
+	// Only wired in strong mode with cluster.peer_fetch_coalesce on.
+	PeerFetchCoalesce func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error)
+	// OnCoalescedSaved, if non-nil, is called when a waiter serves a
+	// coalesced owner answer and avoids an origin request (the
+	// origin-requests-saved metric). Nil-safe.
+	OnCoalescedSaved func()
 	// OnPeerVariantMismatch, if non-nil, is called when the handler
 	// rejects a peer-fetched object because its stored variant does
 	// not select this request (RFC 9111 §4.1 assertion re-verified on
@@ -474,6 +500,12 @@ type HandlerConfig struct {
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
+	// PeerBackfillProbability is the probability (0.0–1.0) that a
+	// coalesced object is also stored on the non-owner that received it.
+	// 1.0 stores every coalesced object; 0.0 keeps the strict
+	// owner-only partition of issue #509. Ignored (inert) while
+	// PeerFetchCoalesce is nil.
+	PeerBackfillProbability float64
 	// RefreshMinScore is the minimum refresh priority score (staleHits ×
 	// BodySize) required for re-scheduling. Zero disables the score gate.
 	RefreshMinScore int64
@@ -719,6 +751,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		RewarmFillInc:           cfg.RewarmFill,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
+		peerFetchCoalesce:       cfg.PeerFetchCoalesce,
+		onCoalescedSaved:        cfg.OnCoalescedSaved,
+		peerBackfillProbability: cfg.PeerBackfillProbability,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,
 		allowSetCookie:          cfg.AllowSetCookie,
@@ -1439,13 +1474,25 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
 	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
-				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
-					return
+			// Origin-shield path: on a hard miss (no locally usable
+			// object) and a cacheable method, the coalesced owner call
+			// REPLACES the plain peer fetch — the owner either answers
+			// authoritatively or fails, and both outcomes fall through
+			// to the origin fetch below on failure (availability
+			// preserved). Stale-usable objects keep today's plain
+			// peer-fetch semantics (no coordinated revalidation).
+			if h.coalesceWait(ctx, owner, lookupKey, obj, now, ri) {
+				return
+			}
+			if !h.coalesceApplies(obj, ctx.Method()) {
+				if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
+					if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
+						return
+					}
+				} else if err != nil {
+					h.logger.Debug("peer fetch error, falling back to origin",
+						"peer", owner.Addr, "key", lookupKey, "error", err)
 				}
-			} else if err != nil {
-				h.logger.Debug("peer fetch error, falling back to origin",
-					"peer", owner.Addr, "key", lookupKey, "error", err)
 			}
 		}
 	}
@@ -2604,12 +2651,21 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 	// forwarded to the owner via the write-to-owner RPC (peerPut) so
 	// subsequent peer-fetches hit. Without this gate every pod caches
 	// the same hot keys, the consistent-hash ring is decorative, and
-	// peer fetch has 0% hit rate (issue #509).
+	// peer fetch has 0% hit rate (issue #509). The origin-shield
+	// backfill knob deliberately relaxes this for coalesced objects —
+	// see backfillPeerObject, which calls storeObjectLocal directly.
 	if h.ownerFn != nil {
 		if _, isLocal := h.ownerFn(key); !isLocal {
 			return
 		}
 	}
+	h.storeObjectLocal(ctx, key, obj, ri, isRefresh, staleHits)
+}
+
+// storeObjectLocal is storeObject without the cluster ownership gate:
+// it stores and runs the refresh-before-expiry bookkeeping. Callers
+// must have decided the object should live on THIS node.
+func (h *Handler) storeObjectLocal(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
 		// An error status covered by the negative-caching policy skips

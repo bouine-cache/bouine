@@ -51,6 +51,17 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
+	// CoalescedFetch counts cluster-coordinated origin-shield fetches,
+	// labelled by role: "owner" (a coalesced fetch served by the key
+	// owner), "waiter" (a non-owner that avoided origin — the headline
+	// "origin requests saved" number), or "failure" (the owner's flight
+	// failed; the waiter falls back to origin).
+	CoalescedFetch *prometheus.CounterVec
+	// CoalescedShed counts coalesced RPCs shed at the owner's coalesced
+	// lane semaphore (mirrors the peer_fetch_shed_total pattern; a
+	// saturated coalesced lane must be visible, not inferred from
+	// latency).
+	CoalescedShed prometheus.Counter
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -109,6 +120,16 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "peer_fetch_variant_mismatch_total",
 			Help:      "Peer-fetch RPCs rejected by the RFC 9111 variant-assertion gate, by side (server, consumer). Sustained non-zero rate indicates a mixed-version fleet or a peer serving wrong-variant content.",
 		}, []string{"side"}),
+		CoalescedFetch: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "coalesced_fetch_total",
+			Help:      "Cluster-coordinated origin-shield fetches by role: owner (served by the key owner), waiter (origin request saved), failure (waiter falls back to origin).",
+		}, []string{"role"}),
+		CoalescedShed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "coalesced_fetch_shed_total",
+			Help:      "Coalesced fetches shed at the owner's coalesced-lane semaphore; a saturated lane sheds waiters back to origin.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -119,6 +140,8 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.RingEmpty,
 		m.BroadcastOverflows,
 		m.PeerFetchVariantMismatch,
+		m.CoalescedFetch,
+		m.CoalescedShed,
 	)
 	return m
 }
@@ -193,6 +216,25 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 	}
 	m.PeerFetchVariantMismatch.WithLabelValues(side).Inc()
 	m.peerFetchVariantMismatchTotal.Add(1)
+}
+
+// IncCoalescedFetch increments the coalesced origin-shield counter for
+// the given role: "owner" (served a peer's flight), "waiter" (served
+// from the owner's answer), or "failure". Nil-safe: single-node mode
+// never registers the vec.
+func (m *Metrics) IncCoalescedFetch(role string) {
+	if m == nil || m.CoalescedFetch == nil {
+		return
+	}
+	m.CoalescedFetch.WithLabelValues(role).Inc()
+}
+
+// IncCoalescedShed increments the coalesced-lane shed counter. Nil-safe.
+func (m *Metrics) IncCoalescedShed() {
+	if m == nil || m.CoalescedShed == nil {
+		return
+	}
+	m.CoalescedShed.Inc()
 }
 
 // PeerFetchVariantMismatchCount returns the total number of variant

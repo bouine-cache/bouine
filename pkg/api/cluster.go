@@ -103,14 +103,58 @@ type RefreshEvent struct {
 	Key Key `json:"key"`
 }
 
+// PeerHeader is one forwarded request header (name/value pair) inside
+// an OriginRequest envelope.
+//
+// Stable.
+type PeerHeader struct {
+	// Name is the canonical header name.
+	Name string `json:"name"`
+	// Value is the raw header value.
+	Value string `json:"value"`
+}
+
+// OriginRequest is the minimal envelope a non-owner sends so the owner
+// can rebuild an upstream request and drive its own collapsed origin
+// fetch on the requester's behalf (cluster-coordinated origin shield).
+// Only headers that participate in response identity are carried: Host,
+// Accept-Encoding, and every header the route's cache-key policy
+// consults. Everything else is dropped — an open-ended forward is how
+// variant mismatches ship to production.
+//
+// Stable.
+type OriginRequest struct {
+	// Method is the upstream method: GET or HEAD only.
+	Method string `json:"method,omitempty"`
+	// URI is the origin-bound request URI (path + query).
+	URI string `json:"uri,omitempty"`
+	// Host is the upstream Host authority.
+	Host string `json:"host,omitempty"`
+	// Headers are the forwarded request headers.
+	Headers []PeerHeader `json:"headers,omitempty"`
+}
+
 // PeerFetchRequest is the HTTP request body for a peer cache lookup.
 //
 // Stable.
 type PeerFetchRequest struct {
 	// VaryKey is the variant key (empty = any variant).
 	VaryKey string `json:"vary_key,omitempty"`
+	// Route is the route name the requester resolved the key under.
+	// The owner looks the route's handler up in its registry; an
+	// unknown route answers 404 as today (ring churn, config skew).
+	Route string `json:"route,omitempty"`
+	// OriginRequest carries the upstream request context used when
+	// Coalesce triggers an owner-side fetch. Ignored without Coalesce.
+	OriginRequest OriginRequest `json:"origin_request,omitempty"`
 	// Hops is the number of peers already traversed (T36 loop guard).
 	Hops int `json:"hops"`
 	// Key is the cache key being requested.
 	Key Key `json:"key"`
+	// Coalesce requests that, on a hard miss, the owner drive its own
+	// collapsed origin fetch on the requester's behalf instead of
+	// answering 404 (origin-shield mode). Wire format v3; an owner
+	// that does not understand v3 answers 400 and the requester falls
+	// back to origin.
+	Coalesce bool `json:"coalesce,omitempty"`
 }

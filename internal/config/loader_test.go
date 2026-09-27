@@ -252,6 +252,37 @@ func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "must be <=")
 }
 
+func TestClusterBackfillProbability_Bounds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		p       *float64
+		wantErr bool
+	}{
+		{name: "nil_defaults", p: nil},
+		{name: "zero_strict", p: ptrFloat(0.0)},
+		{name: "one_always", p: ptrFloat(1.0)},
+		{name: "negative_rejected", p: ptrFloat(-0.1), wantErr: true},
+		{name: "above_one_rejected", p: ptrFloat(1.1), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+				Cluster: Cluster{PeerFetchBackfillProbability: tc.p},
+			}
+			err := cfg.Validate()
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "peer_fetch_backfill_probability")
+			require.Contains(t, err.Error(), "must be within")
+		})
+	}
+}
+
 func TestClusterBanTTL_NegativeRejected(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
@@ -1136,6 +1167,8 @@ func TestValidate_GOGC(t *testing.T) {
 }
 
 func ptrInt(v int) *int { return &v }
+
+func ptrFloat(v float64) *float64 { return &v }
 
 func TestExpandEnvVars_Simple(t *testing.T) {
 	t.Setenv("BOUINE_TEST_HOST", "api.example.com")

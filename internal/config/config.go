@@ -297,6 +297,8 @@ const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
+//
+//nolint:govet // fieldalignment: pointer fields already grouped; the tool's "optimal" order conflicts with its own -fix suggestion
 type Cluster struct {
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
@@ -305,13 +307,21 @@ type Cluster struct {
 	// NodeName overrides the hostname used for gossip membership. When
 	// empty, defaults to os.Hostname(). Required when running multiple
 	// nodes on the same host (e.g. integration tests).
-	NodeName string `yaml:"node_name,omitempty" json:"node_name,omitempty"`
+	NodeName string   `yaml:"node_name,omitempty" json:"node_name,omitempty"`
+	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
+	// PeerFetchBackfillProbability is the probability (0.0–1.0) that a
+	// coalesced object received from the owner is also stored on the
+	// non-owner that received it. Unset (nil) defaults to 1.0 (store
+	// every coalesced object); 0.0 keeps the strict owner-only
+	// partition (issue #509). Lower values trade local hit rate for
+	// tier capacity. The owner always stores its own fill regardless
+	// of the knob. Ignored while peer_fetch_coalesce is off.
+	PeerFetchBackfillProbability *float64 `yaml:"peer_fetch_backfill_probability,omitempty" json:"peer_fetch_backfill_probability,omitempty"`
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
 	//   "eventual"  — local cache, gossip invalidation, no peer fetch
 	// Empty defaults to ClusterModeStrong for backward compatibility.
 	Mode     ClusterMode `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Join     []string    `yaml:"join,omitempty" json:"join,omitempty"`
 	HopLimit int         `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
 	// JoinTimeout is the maximum time to wait for cluster join before
 	// giving up. In strong mode, the pod stays not-ready if join fails
@@ -366,6 +376,16 @@ type Cluster struct {
 	// Zero applies the default; negative values and values below 1s are
 	// rejected by validatePeerFetchConfig.
 	BanTTL time.Duration `yaml:"ban_ttl,omitempty" json:"ban_ttl,omitempty"`
+	// PeerFetchCoalesce enables cluster-coordinated origin shielding
+	// (strong mode only): when the key owner receives a peer fetch for
+	// a key it does not have cached, it drives its own collapsed origin
+	// fetch on behalf of the asker and returns the object, instead of
+	// answering 404. All peer waiters plus the owner's own client
+	// requests collapse into exactly one origin fetch, so a cold key
+	// costs one origin request for the whole cluster. Default off.
+	// Inert outside strong mode; the backfill knob below is inert
+	// while this is off.
+	PeerFetchCoalesce bool `yaml:"peer_fetch_coalesce,omitempty" json:"peer_fetch_coalesce,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.

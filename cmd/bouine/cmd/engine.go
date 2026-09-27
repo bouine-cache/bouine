@@ -97,6 +97,11 @@ type runState struct {
 	broadcaster    *cluster.Broadcaster
 	peersFn        func() []api.PeerInfo
 	clusterMetrics *cluster.Metrics
+	// routeFetchers maps route name → the route's coalesced origin
+	// fetch hook (origin shield). Populated by buildRouter in strong
+	// mode with cluster.peer_fetch_coalesce on; handed to the
+	// PeerFetchHandler so the owner can resolve coalesced fetches.
+	routeFetchers map[string]cluster.OriginFetcher
 
 	warmMetrics    *warm.Metrics
 	walMetrics     *wal.Metrics
@@ -294,22 +299,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 
 	startupMetrics := observability.NewStartupMetrics(e.metrics.Registry)
 
-	// Fall back to OTEL_EXPORTER_OTLP_ENDPOINT env var when the YAML
-	// config doesn't set tracing.endpoint. The chassis chart injects
-	// this env var pointing at the node-local OTel collector agent.
-	endpoint := e.cfg.Tracing.Endpoint
-	if endpoint == "" {
-		endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	}
-
-	shutdownTracer, err := tracing.InitTracer(ctx, tracing.TracingConfig{
-		Endpoint:     endpoint,
-		ServiceName:  e.cfg.Tracing.ServiceName,
-		SamplingRate: e.cfg.Tracing.SamplingRate,
-	})
-	if err != nil {
-		e.logger.Warn("tracing init failed, continuing without traces", "error", err)
-	}
+	shutdownTracer := e.initTracing(ctx)
 
 	token := e.resolveAdminToken()
 	rings, snapshotPath := e.initRings()
@@ -336,6 +326,11 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		broadcaster:    broadcaster,
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
+		// Pre-allocate the origin-shield route registry even when the
+		// feature is off: buildRouter populates it only in strong mode
+		// with coalescing on, and the PeerFetchHandler's registry
+		// setter needs a non-nil map either way.
+		routeFetchers:  map[string]cluster.OriginFetcher{},
 		warmMetrics:    warmMetrics,
 		walMetrics:     walMetrics,
 		startupMetrics: startupMetrics,
@@ -371,6 +366,26 @@ func updateStartupMetrics(seq *shutdown.Sequencer, m *observability.StartupMetri
 	for _, c := range seq.Gate().Conditions() {
 		m.SetCondition(c.Name, c.Ready)
 	}
+}
+
+// initTracing initializes the OTel tracer. Falls back to the
+// OTEL_EXPORTER_OTLP_ENDPOINT env var when the YAML config doesn't set
+// tracing.endpoint: the chassis chart injects it pointing at the
+// node-local OTel collector agent. Failure is non-fatal.
+func (e *engine) initTracing(ctx context.Context) func() {
+	endpoint := e.cfg.Tracing.Endpoint
+	if endpoint == "" {
+		endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	shutdownTracer, err := tracing.InitTracer(ctx, tracing.TracingConfig{
+		Endpoint:     endpoint,
+		ServiceName:  e.cfg.Tracing.ServiceName,
+		SamplingRate: e.cfg.Tracing.SamplingRate,
+	})
+	if err != nil {
+		e.logger.Warn("tracing init failed, continuing without traces", "error", err)
+	}
+	return shutdownTracer
 }
 
 func (e *engine) resolveAdminToken() string {
@@ -788,6 +803,9 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	ops := e.buildInvalidationOps(ctx, rs)
 	dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
 
+	peerFetchHandler := cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics)
+	peerFetchHandler.SetOriginFetchers(rs.routeFetchers)
+
 	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
 		Addr:       addr,
 		Token:      rs.token,
@@ -851,7 +869,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
 		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
 		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
-		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
+		PeerFetchHandler:        peerFetchHandler.Handle,
 		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:        dashMux,
@@ -1232,6 +1250,10 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+		// With origin shielding on, the fast path must not set the
+		// OwnerMiss hint: the slow path's coalesced owner call can
+		// still produce an authoritative object.
+		fp.WithCoalesce(e.cfg.Cluster.PeerFetchCoalesce)
 	}
 	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
 }

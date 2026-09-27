@@ -966,6 +966,9 @@ func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 		ec.addf("cluster.ban_ttl", "must be >= 1s when set, got %v",
 			c.Cluster.BanTTL)
 	}
+	if p := c.Cluster.PeerFetchBackfillProbability; p != nil && (*p < 0 || *p > 1) {
+		ec.addf("cluster.peer_fetch_backfill_probability", "must be within [0.0, 1.0], got %v", *p)
+	}
 	if c.Admin.IdleTimeout < 0 {
 		ec.addf("admin.idle_timeout", "must be >= 0 (0 = default 300s), got %v",
 			c.Admin.IdleTimeout)

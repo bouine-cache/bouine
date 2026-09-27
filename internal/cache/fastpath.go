@@ -52,12 +52,16 @@ type FastPathHandler struct {
 	// and whether it is local; peerFetch asks that owner for the object.
 	// Nil in single-node and eventual modes — the peer branch then never
 	// runs and TryHit behaves exactly as before.
-	ownerFn        func(key api.Key) (owner api.PeerInfo, isLocal bool)
-	peerFetch      func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	policy         *KeyPolicy // nil = no query/header policy
-	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
-	cachedDate     atomic.Pointer[string]
-	poolName       string
+	ownerFn    func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	peerFetch  func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	policy     *KeyPolicy // nil = no query/header policy
+	onStale    func(req *api.RawRequest, key api.Key, stale *api.Object)
+	cachedDate atomic.Pointer[string]
+	poolName   string
+	// coalesce mirrors cluster.peer_fetch_coalesce: when on, a fast-path
+	// owner miss must NOT set the OwnerMiss hint — the slow path retries
+	// with a coalesced owner call that drives the owner's origin fetch.
+	coalesce       bool
 	cachedDateUnix atomic.Int64
 }
 
@@ -119,6 +123,15 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool), peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) *FastPathHandler {
 	f.ownerFn = ownerFn
 	f.peerFetch = peerFetch
+	return f
+}
+
+// WithCoalesce marks the fast path as serving a route with
+// cluster.peer_fetch_coalesce on: a fast-path owner miss leaves the
+// OwnerMiss hint unset so the slow path's coalesced owner call (which
+// can still produce an authoritative object) is not skipped.
+func (f *FastPathHandler) WithCoalesce(on bool) *FastPathHandler {
+	f.coalesce = on
 	return f
 }
 
@@ -231,11 +244,13 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err != nil || peerObj == nil {
-		if err == nil {
+		if err == nil && !f.coalesce {
 			// Definitive owner miss: the owner answered (no error) with no
 			// object for the plain key. Flag the request so the slow path
 			// skips its duplicate owner lookup + peer RPC and goes straight
-			// to origin. Errors keep the slow-path retry.
+			// to origin. Errors keep the slow-path retry. With origin
+			// shielding on, the hint is withheld: the slow path's coalesced
+			// owner call can still produce an authoritative object.
 			req.OwnerMiss = true
 		}
 		return nil, false

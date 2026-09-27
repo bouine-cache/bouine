@@ -70,11 +70,21 @@ Every browser in practical circulation sends one of:
 | `identity` / empty / absent | `identity` |
 
 Rule: pick the highest-preference coding (by q-value, ties broken
-zstd > br > gzip) among the three compressions bouine keys on; an
-absent/empty AE hashes to `identity`. Q-value `0` excludes.
+br > zstd > gzip — the sharing-maximizing order, so the two dominant
+browser spellings, zstd-bearing and zstd-less, share the `br` bucket)
+among the three compressions bouine keys on; an absent/empty AE hashes
+to `identity`. Q-value `0` excludes.
 **Deliberately NOT bucketed:** `deflate`, `identity`, and any other
-token (see §1.2). The probe's 8 strings collapse to **2** buckets
-(`br`, `gzip`) — matching the documented `br|zstd|gzip|identity` model.
+token (see §1.2). Honest accounting of the probe's 8 strings: they
+collapse to **3** buckets (`br` for all five br-capable spellings,
+`gzip`, `identity`) — the zstd-bearing spellings no longer fork a
+fourth variant. Variant count per resource is capped at the number of
+distinct negotiated codings (≤ 4), independent of spelling zoo.
+
+(The initial implementation shipped with zstd-preference ties and the
+prose claimed 8→2; both were corrected post-estimate — the 2 ignored
+the correctly-separate gzip and identity buckets, and zstd-preference
+preserved the zstd/br fork that bucketing exists to collapse.)
 
 ### 1.2 Review correction: unknown codings are NOT "ignored"
 
@@ -195,9 +205,10 @@ buffer-overflow paths already exist (`variantKeySlow`) and stay.
 // encodingBucket reduces an Accept-Encoding header value to a single
 // negotiated content coding: "br", "zstd", "gzip", or "identity".
 // Zero-allocation: scans the value in place on the stack.
-// Selection: highest q-value wins among {zstd, br, gzip}; ties broken
-// zstd > br > gzip. q=0 excludes. deflate/identity/unknown tokens
-// contribute nothing (§1.2). Empty input -> "identity".
+// Selection: highest q-value wins among {br, zstd, gzip}; ties broken
+// br > zstd > gzip (sharing-maximizing; see §1.1). q=0 excludes.
+// deflate/identity/unknown tokens contribute nothing (§1.2).
+// Empty input -> "identity".
 func encodingBucket(v string) string
 ```
 

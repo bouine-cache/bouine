@@ -47,8 +47,12 @@ Two structural constraints shaped the decision:
 ## Decision
 
 1. **`encodingBucket(v string) string`** reduces an AE header value to
-   one of `zstd | br | gzip | identity`: the highest-weight coding among
-   the three compressions wins (ties broken zstd > br > gzip), `q=0`
+   one of `br | zstd | gzip | identity`: the highest-weight coding among
+   the three compressions wins, ties broken **br > zstd > gzip** (the
+   sharing-maximizing order — preferring br collapses the two dominant
+   browser spellings, the zstd-bearing and the zstd-less, into one
+   variant; preferring zstd would split exactly the population
+   bucketing exists to unify), `q=0`
    excludes (RFC 9110 §12.5.3), absent weight is 1 (§5.2.1), and every
    other token — `deflate`, `identity`, unknown — contributes nothing.
    No-acceptable-coding input yields `identity`; bouine never
@@ -81,8 +85,12 @@ Two structural constraints shaped the decision:
 ## Consequences
 
 ### Positive
-- One stored variant per negotiated coding per resource: six AE
-  dialects become two variants (br, zstd) where they were six.
+- Variant count per resource becomes the number of distinct negotiated
+  codings, capped at four. For the probe's eight realistic dialects:
+  four variants where there were six; every br-capable browser —
+  zstd spelling or not — shares one variant, so a pure
+  modern-browser route collapses to one compressed variant plus
+  identity for compressionless clients.
 - Cheaper than the old path on the hit-path key computation: 2
   allocs/200ns versus 4 allocs/275ns for the legacy sort (the
   `FastPath_PeerHitVary` gate benchmark's AE-bearing cousin,
@@ -105,8 +113,8 @@ Two structural constraints shaped the decision:
 
 ## Alternatives considered
 
-- **Sort-only normalization (status quo)**: leaves the zstd/identity
-  fork and the six-dialect fragmentation; rejected — the whole point.
+- **Sort-only normalization (status quo)**: leaves the
+  spelling-level fragmentation; rejected — the whole point.
 - **Bucket without the outbound rewrite**: rejected as incorrect, not
   merely suboptimal — the deflate-only-origin case stores a coding the
   bucket cannot honor.

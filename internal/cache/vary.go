@@ -257,8 +257,8 @@ func varyHeaderValue(field, value string, policy *KeyPolicy) string {
 // outcome, not the token set — "gzip, deflate, br" and "br, gzip" both
 // produce "br", so one stored variant serves both request populations.
 //
-// Selection: the highest-weight coding among {zstd, br, gzip} wins
-// (ties broken zstd > br > gzip, the coding-quality order). A weight
+// Selection: the highest-weight coding among {br, zstd, gzip} wins
+// (ties broken br > zstd > gzip). A weight
 // of 0 excludes (RFC 9110 §12.5.3). deflate, identity, and unknown
 // tokens contribute nothing: the bucket set is exactly the codings
 // bouine re-serves verbatim, and the origin-bound request carries the
@@ -306,7 +306,7 @@ func encodingBucket(v string) string {
 			continue
 		}
 		// Strictly-better wins: higher weight, or equal weight at a
-		// better rank (zstd > br > gzip). Rank ties keep the first
+		// better rank (br > zstd > gzip). Rank ties keep the first
 		// token; any of them names the same bucket, so order is moot.
 		if q > bestQ || (q == bestQ && rank > bestRank) {
 			bestRank, bestQ = rank, q
@@ -314,9 +314,9 @@ func encodingBucket(v string) string {
 	}
 	switch bestRank {
 	case 3:
-		return "zstd"
-	case 2:
 		return "br"
+	case 2:
+		return "zstd"
 	case 1:
 		return "gzip"
 	default:
@@ -325,14 +325,25 @@ func encodingBucket(v string) string {
 }
 
 // aeRank maps a content-coding token to its position in the bucket
-// order (zstd > br > gzip). ok=false for every other coding — deflate,
+// order (br > zstd > gzip). ok=false for every other coding — deflate,
 // identity, and unknown tokens do not participate in bucketing; the
 // bucket set is exactly the codings bouine re-serves verbatim.
+//
+// br outranks zstd despite zstd's better compression ratio: the
+// bucket exists to maximize variant sharing, and the two dominant
+// browser spellings ("...br, zstd" and "...br" without zstd) share
+// the br bucket when ties prefer br. Preferring zstd would split the
+// modern-browser population into two variants that fetch identical
+// bodies from any origin that serves both — the one case bucketing
+// exists to collapse. The Varnish builtin VCL makes the same choice
+// for the same reason. An origin that serves only zstd still gets
+// asked for br and falls back to identity for the whole bucket —
+// consistent bytes at the cost of compression on that route.
 func aeRank(coding string) (rank int, ok bool) {
 	switch coding {
-	case "zstd":
-		return 3, true
 	case "br":
+		return 3, true
+	case "zstd":
 		return 2, true
 	case "gzip":
 		return 1, true

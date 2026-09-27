@@ -506,3 +506,120 @@ acceptable per §2.2 and worth the runbook line, not a blocker).
    `make integration` (§16 table for `internal/cache`).
 
 All items land in **one PR** (§6.0).
+
+---
+
+## 10. Follow-up: Accept-Language bucketing (layer 1)
+
+Status: Draft
+Branch: `feat/accept-language-bucketing` (follow-up to this plan's PR)
+Depends on: this plan (the dispatch points), ADR-0051 (the pairing
+hazard analysis), upstream `cache-tests` `vary-normalise-lang-select`
+
+### 10.1 Problem
+
+`Vary: Accept-Language` fragments the same way AE did, worse: real
+browsers send full q-cascades (`fr-FR,fr;q=0.9,en;q=0.8`), so a route
+serving N locales across a multilingual population stores one variant
+per distinct chain spelling — 10-40 per URL on EU-heavy routes where
+the origin only ever produces one of 5-15 distinct representations.
+
+The upstream conformance suite already specifies the target behavior
+in `vary-normalise-lang-select` (kind: optimal, currently FAILING for
+bouine): fill with `Accept-Language: en, de` where the origin serves
+`Content-Language: de`; a later `fr;q=0.5, de;q=1.0` must be served
+from cache. Selection is by q-value.
+
+### 10.2 Design: `langBucket` (zero config)
+
+Same negotiation-outcome model as `encodingBucket`, wired into the
+same two dispatch functions (`varyHeaderValue`, `varyAssertionValue`):
+
+- Parse the list; drop `q=0`; the winner is the highest-q tag,
+  preserving its subtag verbatim (`fr-FR` stays `fr-FR`).
+- **Ties resolve lexicographically** (smallest tag wins). This is the
+  one structural difference from AE: AE's bucket set is closed
+  (4 codings) so ties could be policy-ranked; AL's is open, so the
+  tie rule must be a pure function of the candidate set — otherwise
+  fill and lookup disagree across spellings, and the passing
+  `vary-normalise-lang-order` test breaks.
+- `*` or unparseable input → fall back to the legacy sorted-string
+  key (deterministic from the request alone; never `*` itself, which
+  Vary semantics treat as unmatchable).
+- Absent/empty → empty string (same as today: an absent header hashes
+  as one variant).
+
+What collapses: the chain zoo behind one winner. What deliberately
+does NOT collapse in layer 1: subtags and scripts (`en-US` vs
+`en-GB`, `zh-CN` vs `zh-TW`) — merging them would serve region-variant
+bodies from origins that key on subtags, the wrong-body class. The
+winner keeps its full tag; collapse beyond that is layer 2.
+
+### 10.3 Wrong-body safety on ties
+
+Serving the `de` variant to a client that tied `en, de` serves a
+language the client declared acceptable at top q — the exact
+behavior the upstream suite blesses as optimal. Real browsers send
+distinct q cascades and never tie.
+
+### 10.4 Outbound rewrite: required (design correction)
+
+The original draft of this section claimed no rewrite was needed —
+that whatever body the origin returns keys consistently under the
+request's bucket. A pinning test disproved it mid-implementation:
+`TestIncludeHeaders_OriginNoVary`'s upstream echoes the raw chain into
+the body, so `Accept-Language: en, de` and `de, en` — same winner
+bucket `de` — would store *different bodies* (`lang=en, de` vs
+`lang=de, en`) under one bucket. Chain-echoing origins are common in
+i18n (rendered pages that vary by the full chain), so the bucket must
+pair with the winner-tag rewrite exactly like AE's canonical-token
+rewrite: `rewriteOutboundAE` sets `Accept-Language: <winner>` on every
+fill, revalidate, and refill.
+
+Unbucketable chains (absent, `*`, malformed, all q=0) are left
+untouched — they key via the legacy normalization and see the same
+origin spelling the legacy keying always saw.
+
+Origin-facing consequence: an origin that receives `Accept-Language:
+de` sees a normalized header where it previously saw full cascades.
+Origins that negotiate properly select the same language either way
+(q-values select `de` in both spellings). An origin that keys on the
+raw chain *against* RFC 9110 §12.5.4 selection semantics — rendering
+differently for "de, en;q=0.5" vs "de" — loses that signal; that is
+the same trade-off AE's verbatim escape hatch exists for, and the
+designated "max one" config field (a `verbatim_lang` bool, §10.7)
+covers it if it ever turns out to be a real population.
+
+### 10.5 Layer 2 (deferred, separate PR): Content-Language anchoring
+
+Subtag/script fragmentation is collapse the origin can *license*:
+when it declares `Content-Language: fr`, every request it answers
+with that body gets identical bytes regardless of subtag. Store the
+filled object under both its computed bucket and the declared tag
+(dual-key, same body; `variantSets` purge bookkeeping already covers
+multi-key). No outbound rewrite — the anchor learns from the origin.
+Touches the store path (`buildObject`/VaryKey), so it ships as its
+own PR with its own tests.
+
+### 10.6 Tests
+
+- `langBucket` table tests: q-selection, tie rule, subtag
+  preservation, q=0 exclusion, `*` fallback, malformed input, empty.
+- Parity across all four construction paths (extend
+  `TestVaryKeyEncodingBucket_ParityAcrossPaths`'s sibling with AL
+  rows): map/fast/slow/assertion paths must agree.
+- Handler e2e: `en, de` fill then `de;q=1.0, fr;q=0.5` HIT (the
+  upstream `vary-normalise-lang-select` scenario, replayed locally);
+  `en-US` vs `en-GB` must NOT collapse.
+- Gate benchmark `BenchmarkGate_VaryKey_AcceptLanguageBucket`
+  (BUDGETS: 2 — the winner substring vs the legacy sort's 3-4 allocs).
+- Conformance: `vary-normalise-lang-select` flips fail→pass
+  (score 336→337); order/case/space stay green under the
+  deterministic tie rule.
+
+### 10.7 Config
+
+Zero fields. If an operator ever needs verbatim AL keying, a
+`verbatim_lang` knob is the designated "max one more" — not built
+until someone asks, unlike the AE case where origins that vary bodies
+by the full AE string are a real (if rare) population.

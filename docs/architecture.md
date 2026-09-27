@@ -221,6 +221,16 @@ The secondary key (Vary) is derived from headers listed in the response's
 explicit per-route allow-list — never implicitly. This is the primary
 defense against cache-poisoning via unkeyed input (threat T06, T07).
 
+`Accept-Encoding` and `Accept-Language` are additionally reduced to
+their negotiation outcome before keying (ADR-0051): AE to the coding
+bouine negotiates (see §3.3), AL to the highest-weight language tag —
+subtag preserved, ties resolved lexicographically so the winner is
+order-independent, unbucketable chains (absent, `*`, malformed, all
+q=0) falling back to the sorted-string key. Origin-bound requests
+carry the bucket token / winner tag, so a stored variant always
+matches what its key claims; an origin that cannot honor the
+selection falls back consistently for the whole bucket.
+
 ### 3.3 Compression policy
 
 Store responses in the encoding the origin produced. `Accept-Encoding`

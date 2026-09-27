@@ -228,21 +228,36 @@ func normalizeHeaderValue(v string) string {
 //
 // Accept-Encoding is bucketed by encodingBucket unless the policy pins
 // verbatim (verbatim_encoding: true) — docs/plans/
-// accept-encoding-bucketing.md §3.2, ADR-0051. Every other field keeps
-// this path's legacy lowercase+sort normalization (RFC 9111 §4.1
-// permits normalizing "in a way that is known to have identical
-// semantics"; the pre-bucketing behavior lowercased all values).
+// accept-encoding-bucketing.md §3.2, ADR-0051. Accept-Language is
+// bucketed by langBucket (plan §10) — no config: an unbucketable value
+// (absent, "*", malformed, all q=0) falls back to the legacy
+// normalization, so degenerate chains keep today's keying exactly.
+// Every other field keeps this path's legacy lowercase+sort
+// normalization (RFC 9111 §4.1 permits normalizing "in a way that is
+// known to have identical semantics"; the pre-bucketing behavior
+// lowercased all values).
 //
 // NOTE: this is deliberately NOT the same dispatch as
 // varyAssertionValue (key.go) — the two paths had different non-AE
 // semantics before bucketing (this one normalized every field, the
 // assertion path only the four list-valued headers) and changing
 // either would silently rekey every stored variant on routes with
-// custom Vary headers. Only the AE rule is shared, and it is pinned
-// identical across both by TestVaryKeyEncodingBucket_ParityAcrossPaths.
+// custom Vary headers. Only the bucketing rules are shared, and they
+// are pinned identical across both by
+// TestVaryKeyEncodingBucket_ParityAcrossPaths.
 func varyHeaderValue(field, value string, policy *KeyPolicy) string {
-	if field == "accept-encoding" && !policy.verbatimEncoding() {
-		return encodingBucket(value)
+	switch field {
+	case "accept-encoding":
+		if !policy.verbatimEncoding() {
+			return encodingBucket(value)
+		}
+	case "accept-language":
+		if tag, ok := langBucket(value); ok {
+			// The key lowercases (tags are case-insensitive and the
+			// key must be canonical); the outbound rewrite keeps the
+			// original casing.
+			return strings.ToLower(tag)
+		}
 	}
 	return normalizeHeaderValue(value)
 }
@@ -370,4 +385,156 @@ func parseAEWeight(params string) (float64, bool) {
 		return q, true
 	}
 	return 0, false
+}
+
+// langBucket reduces an Accept-Language field value (RFC 9110 §12.5.4)
+// to the single language tag a conformant origin would select: the
+// highest-weight tag, in the client's original casing (tags are
+// case-insensitive per RFC 9110 §12.5.4; the KEY lowercases it, but
+// the outbound rewrite preserves the conventional casing — origins
+// that string-compare locale lists expect "fr-FR", not "fr-fr").
+// Same negotiation-outcome model as
+// encodingBucket (docs/plans/accept-encoding-bucketing.md §10):
+// "fr-FR,fr;q=0.9,en;q=0.8" and "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+// both produce "fr-fr", so one stored variant serves both chains.
+//
+// Ties resolve lexicographically (smallest tag wins). Unlike AE — a
+// closed four-coding set where ties could be policy-ranked — AL's tag
+// set is open, so the tie rule must be a pure function of the
+// candidate set: otherwise fill and lookup disagree across chain
+// spellings and the cross-variant body-swap bug class returns. The
+// deterministic rule also keeps the suite's order- and
+// case-normalisation tests passing.
+//
+// Wrong-body safety on ties: serving the "de" variant to a client that
+// tied "en, de" serves a language the client declared acceptable at
+// top weight — the behavior the upstream cache-tests
+// vary-normalise-lang-select test (kind: optimal) specifies. Real
+// browsers send distinct q-cascades and never tie.
+//
+// ok=false for absent, empty, or unparseable input and for inputs
+// with no acceptable tag (only "*", or every tag at q=0): the caller
+// falls back to the legacy normalization, which preserves today's
+// keying exactly for those degenerate values. Layer 1 deliberately
+// does NOT collapse subtags or scripts (en-US vs en-GB, zh-CN vs
+// zh-TW) — merging them would serve region-variant bodies from
+// origins that key on subtags; that collapse is the
+// Content-Language-anchored layer 2 (plan §10.5).
+//
+// Zero allocations in langBucket itself (comparisons are allocation-
+// free ASCII folds); the dispatch lowercases the winner once for the
+// key. Versus the legacy sort path's 3-4 allocs on multi-token values.
+func langBucket(v string) (bucket string, ok bool) {
+	// The winner's tag is kept in its original casing and lowercased
+	// once at the end — per-item ToLower allocates per tag, which the
+	// gate benchmark caught at 4 allocs/op. All comparisons below are
+	// case-insensitive (language tags are ASCII; strings.EqualFold
+	// and langTagLess do not allocate).
+	best, bestQ := "", float64(-1)
+	rest := strings.TrimSpace(v)
+	for rest != "" {
+		var item string
+		item, rest, _ = strings.Cut(rest, ",")
+		tag, params, _ := strings.Cut(strings.TrimSpace(item), ";")
+		tag = strings.TrimSpace(tag)
+		if !isLanguageTag(tag) {
+			// Empty, "*", or malformed tags never participate in
+			// selection. A wildcard matches any language and cannot
+			// name a bucket: a chain with real tags always has a tag
+			// to serve, and a chain without one falls back to the
+			// legacy key (ok=false).
+			continue
+		}
+		q := 1.0 // absent weight = 1 (RFC 9110 §5.2.1 default)
+		if params != "" {
+			if qv, parsed := parseAEWeight(params); parsed {
+				q = qv
+			}
+		}
+		// RFC 9110 §12.5.4: a weight of 0 means "not acceptable".
+		if q <= 0 {
+			continue
+		}
+		switch {
+		case q > bestQ:
+			best, bestQ = tag, q
+		case q == bestQ && strings.EqualFold(tag, best):
+			// The same tag spelled again.
+		case q == bestQ && langTagLess(tag, best):
+			// Order independence: bestQ only ever increases, so once
+			// the maximum weight is seen, every equal-weight tag
+			// competes by lexicographic minimum and lower weights
+			// never displace it. The winner is therefore a pure
+			// function of the candidate set, not chain order.
+			best = tag
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
+// langTagLess reports whether a < b case-insensitively for ASCII
+// language tags (shorter-prefix rule included), without allocating.
+func langTagLess(a, b string) bool {
+	n := min(len(a), len(b))
+	for i := 0; i < n; i++ {
+		ca, cb := foldASCII(a[i]), foldASCII(b[i])
+		if ca != cb {
+			return ca < cb
+		}
+	}
+	return len(a) < len(b)
+}
+
+// foldASCII lowercases one ASCII byte.
+func foldASCII(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+// isLanguageTag reports whether the token is a well-formed BCP 47
+// language tag shape, case-insensitively: an alphanumeric primary
+// subtag (2-8 chars), optionally followed by hyphen-separated
+// alphanumeric subtags. "*" and malformed tokens ("!!!") are rejected;
+// the full BCP 47 grammar (script/region/variant positions, singleton
+// rules) is deliberately not enforced — the check exists to keep
+// garbage out of bucket selection, not to validate i18n data.
+func isLanguageTag(tag string) bool {
+	if tag == "" || tag == "*" {
+		return false
+	}
+	segStart, segLen := 0, 0
+	segs := 0
+	for i := 0; i <= len(tag); i++ {
+		if i == len(tag) || tag[i] == '-' {
+			if segLen == 0 || segLen > 8 {
+				return false
+			}
+			for j := segStart; j < segStart+segLen; j++ {
+				if !isTagChar(tag[j]) {
+					return false
+				}
+			}
+			segs++
+			segStart, segLen = i+1, 0
+			continue
+		}
+		segLen++
+	}
+	// 1-8 subtags total; more is not a tag anyone negotiates with.
+	return segs >= 1 && segs <= 8
+}
+
+// isTagChar reports whether c is an alphanumeric tag character
+// (case-insensitive; BCP 47 primaries and subtags).
+func isTagChar(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return false
 }

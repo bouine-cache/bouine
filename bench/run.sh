@@ -97,6 +97,7 @@ declare -A BUDGETS=(
     [FastPath_PeerHitVary]=7
     [VaryKey_AcceptEncodingBucket]=2
     [VaryKey_AcceptEncodingBucketVerbatim]=4
+    [VaryKey_AcceptLanguageBucket]=3
     [H1Parse_Get]=0
     [Reactor_Hit]=0
     [Reactor_Hit_Metrics]=0

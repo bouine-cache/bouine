@@ -565,13 +565,17 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 }
 
 // Put stores an object in the hot tier and, for large objects, also
-// in the warm tier (with a WAL record).
+// in the warm tier (with a WAL record). KeepGrace objects (stayin_alive
+// routes, ADR-0051) are eagerly warm-backed regardless of
+// BodyThreshold: a warm copy turns hot SIEVE pressure into a demotion
+// instead of a deletion, and Protect shields the copy from warm
+// eviction while the hot tier holds it.
 func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) error {
 	if err := t.hot.Put(ctx, key, obj); err != nil {
 		return err
 	}
 
-	if t.warm != nil && obj.BodySize > t.bodyThreshold {
+	if t.warm != nil && (obj.BodySize > t.bodyThreshold || obj.KeepGrace) {
 		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(key, body) //nolint:gosec // segID fits int32
 		if err != nil {

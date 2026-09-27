@@ -1113,7 +1113,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -2084,6 +2084,13 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestInfo, now time.Time) *api.Object {
 	refreshed := stale.CloneForRefresh()
 	refreshed.StoredAt = now
+	// Restamp the grace-retention pair from the route's CURRENT config
+	// (ADR-0051): the refreshed object replaces the stored one, so the
+	// flag must track the route's stayin_alive setting as of now —
+	// inheriting the stale object's value would pin (or unpin) retention
+	// based on the config at the original fill.
+	refreshed.KeepGrace = h.stayinAlive
+	refreshed.Pool = h.poolName
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
@@ -2253,7 +2260,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -2310,7 +2317,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -2547,7 +2554,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 	}
 	now := time.Now()
 	obj := buildObject(key, getRI, res, hdr, h.neg, h.defaultTTL, h.overrideTTL,
-		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
+		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, now)
 	if obj == nil {
 		return
 	}
@@ -2773,7 +2780,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 	h.storeObject(ctx, key, obj, ri, true, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
@@ -3059,7 +3066,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, stayinAlive bool, poolName string, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
@@ -3124,6 +3131,13 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		VaryValue:          effectiveVary(resMap, policy),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
+		// P1b grace retention stamp (ADR-0051): the object carries the
+		// route's stayin_alive intent so the storage layer can gate
+		// time-based reaping on origin-pool health without any route
+		// knowledge. Two field assignments on the miss path; zero hit
+		// path cost.
+		KeepGrace: stayinAlive,
+		Pool:      poolName,
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).

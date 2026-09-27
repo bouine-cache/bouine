@@ -68,6 +68,10 @@ type DataPlaneMetrics struct {
 	// at startup from config. Enables fill ratio computation:
 	// hot_store_bytes / hot_store_max_bytes.
 	HotStoreMaxBytes prometheus.Gauge
+	// HotStoreReaperGraceHolds counts TTL-reaper passes that withheld
+	// an expired stayin_alive entry because its origin pool had no
+	// healthy target (ADR-0051).
+	HotStoreReaperGraceHolds prometheus.Counter
 	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
 	WarmStoreBytes     prometheus.Gauge
 	WarmStoreEntries   prometheus.Gauge
@@ -156,21 +160,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		}),
 	}
 	m.initCFPurgeMetrics()
-	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_bytes",
-		Help:      "Estimated bytes used by the hot in-memory cache tier for eviction budgeting (body + headers + struct + map overhead). Not a runtime memory metric; for heap usage see go_memstats_heap_alloc_bytes.",
-	})
-	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_entries",
-		Help:      "Current number of objects stored in the hot in-memory cache tier.",
-	})
-	m.HotStoreEvictions = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_evictions_total",
-		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
-	})
+	m.initHotStoreMetrics()
 	m.WarmStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "warm_store_bytes",
@@ -185,11 +175,6 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Namespace: "bouine",
 		Name:      "warm_store_self_heals_total",
 		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
-	})
-	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_max_bytes",
-		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
 	})
 	m.WarmStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
@@ -217,6 +202,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.CFCircuitRejected, m.CFCircuitState,
 		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions, m.HotStoreMaxBytes,
+		m.HotStoreReaperGraceHolds,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals, m.WarmStoreMaxBytes,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
@@ -226,6 +212,38 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
 		m.RewarmFillTotal)
 	return m
+}
+
+// initHotStoreMetrics creates the hot-tier gauges, the eviction
+// counter, and the TTL-reaper grace-hold counter (ADR-0051). Called by
+// NewDataPlaneMetrics; extracted like initShedMetrics to keep
+// NewDataPlaneMetrics under the funlen limit.
+func (m *DataPlaneMetrics) initHotStoreMetrics() {
+	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_bytes",
+		Help:      "Estimated bytes used by the hot in-memory cache tier for eviction budgeting (body + headers + struct + map overhead). Not a runtime memory metric; for heap usage see go_memstats_heap_alloc_bytes.",
+	})
+	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_entries",
+		Help:      "Current number of objects stored in the hot in-memory cache tier.",
+	})
+	m.HotStoreEvictions = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_evictions_total",
+		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
+	})
+	m.HotStoreReaperGraceHolds = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_reaper_grace_holds_total",
+		Help:      "Total number of TTL-reaper passes that withheld an expired stayin_alive (KeepGrace) entry because its origin pool had no healthy target (ADR-0051). A persistently non-zero rate during an outage is the grace retention working; non-zero while all pools report healthy indicates a stale ejection — check the origin pool health state.",
+	})
+	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_max_bytes",
+		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
+	})
 }
 
 // initShedMetrics creates the fetch-shed and re-warm-fill counters

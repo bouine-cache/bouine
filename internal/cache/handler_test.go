@@ -344,7 +344,69 @@ func testHandlerStayinAlive(t *testing.T, upstream fasthttp.RequestHandler) *Han
 		FastClient:  &testFastClient{handler: upstream},
 		Store:       store,
 		StayinAlive: true,
+		PoolName:    "origin-main",
 	})
+}
+
+// TestHandler_StayinAlive_StampsGraceOnFill pins the P1b stamping half
+// (ADR-0051): objects filled on a stayin_alive route carry KeepGrace and
+// the route's pool name, so the storage layer can gate time-based reaping
+// on origin availability without knowing anything about routes. Objects
+// on ordinary routes stay ungraced.
+func TestHandler_StayinAlive_StampsGraceOnFill(t *testing.T) {
+	t.Parallel()
+	upstream := origin200(`{"ok":true}`)
+	h := testHandlerStayinAlive(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/grace-fill")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr), "fill status")
+
+	stored, _, err := h.store.Get(context.Background(), h.buildKey(rr))
+	require.NoError(t, err, "store get")
+	require.NotNil(t, stored, "object must be stored after fill")
+	require.True(t, stored.KeepGrace, "stayin_alive fill must stamp KeepGrace")
+	require.Equal(t, "origin-main", stored.Pool, "stayin_alive fill must stamp the pool name")
+
+	// Control: an ordinary route's fill is ungraced.
+	plain := testHandler(t, upstream)
+	rr2 := testCtx("GET", "http://example.com/plain-fill")
+	plain.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "plain fill status")
+	stored2, _, err := plain.store.Get(context.Background(), plain.buildKey(rr2))
+	require.NoError(t, err, "store get plain")
+	require.NotNil(t, stored2, "plain object must be stored")
+	require.False(t, stored2.KeepGrace, "non-stayin_alive fill must not stamp KeepGrace")
+}
+
+// TestHandler_StayinAlive_RefreshFrom304RestampsGrace pins W1: a 304
+// revalidation on a stayin_alive route must restamp KeepGrace/Pool from
+// the route's current config — the refreshed object replaces the stored
+// one, so inheriting a stale (or missing) flag would silently re-open the
+// reaper hole mid-life.
+func TestHandler_StayinAlive_RefreshFrom304RestampsGrace(t *testing.T) {
+	t.Parallel()
+	h := testHandlerStayinAlive(t, origin200("body"))
+
+	now := time.Now()
+	stale := &api.Object{
+		Key:        testkey.Hash([]byte("304-grace")),
+		StatusCode: 200,
+		Header:     headerMap(header.ContentType, "text/plain"),
+		Body:       []byte("stale body"),
+		BodySize:   10,
+		StoredAt:   now.Add(-2 * time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+	}
+	stale.Header.Set(header.ETag, `"v1"`)
+
+	res := fetchResult{StatusCode: 304}
+	res.Header = fromHeaderMap(headerMap(header.ETag, `"v1"`))
+
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromCtx(testCtx("GET", "http://example.com/x")), now)
+	require.True(t, refreshed.KeepGrace, "304 refresh on a stayin_alive route must restamp KeepGrace")
+	require.Equal(t, "origin-main", refreshed.Pool, "304 refresh must restamp the pool name")
 }
 
 func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
@@ -2396,7 +2458,7 @@ func TestBuildObject_CDNCacheControl(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 120*time.Second, obj.TTL)
 	assert.Contains(t, obj.CacheControl, "max-age=120")
@@ -2410,7 +2472,7 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -2423,7 +2485,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 		Body:       []byte("hello world"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
 }
@@ -2437,7 +2499,7 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, now)
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", now)
 	require.NotNil(t, obj)
 	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
@@ -2451,7 +2513,7 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.False(t, obj.LastModified.IsZero())
 }
@@ -2464,7 +2526,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -2477,7 +2539,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -2490,7 +2552,7 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	// VaryKey should be non-empty (the object has a Vary header).
 	assert.NotEqual(t, "", obj.VaryKey)

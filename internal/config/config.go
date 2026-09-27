@@ -687,7 +687,13 @@ type RouteCache struct {
 	// StayinAlive enables emergency stale mode: when the upstream is
 	// unreachable or returns 5xx, serve the cached object regardless
 	// of how long ago it expired. Keeps the route alive until the
-	// upstream recovers.
+	// upstream recovers. The TTL reaper also withholds this route's
+	// expired entries while the route's origin pool has no healthy
+	// target, so the promise survives outages longer than
+	// TTL + SWR + SIE (ADR-0051). Full protection requires the pool
+	// to have passive (health.passive.consecutive_5xx) or active
+	// health checks configured — without a health signal the reaper
+	// keeps its normal schedule.
 	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
 }
 

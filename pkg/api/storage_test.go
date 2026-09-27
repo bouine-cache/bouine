@@ -131,6 +131,8 @@ func TestObject_CloneForReturn(t *testing.T) {
 		ETag:         "abc",
 		Hits:         5,
 		CacheControl: "max-age=10",
+		KeepGrace:    true,
+		Pool:         "origin-main",
 	}
 	clone := obj.CloneForReturn([]byte("cloned"))
 	require.NotSame(t, obj, clone)
@@ -143,6 +145,11 @@ func TestObject_CloneForReturn(t *testing.T) {
 	assert.Equal(t, obj.ETag, clone.ETag)
 	assert.Equal(t, obj.Hits, clone.Hits)
 	assert.Equal(t, obj.CacheControl, clone.CacheControl)
+	// Grace retention fields must survive the clone: the hot tier serves
+	// clones on Get (detachBody) and re-puts them after warm promotion —
+	// losing the flag there silently flips retention semantics mid-life.
+	assert.Equal(t, obj.KeepGrace, clone.KeepGrace)
+	assert.Equal(t, obj.Pool, clone.Pool)
 }
 
 func TestObject_CloneForReturn_PreservesSerializedHead(t *testing.T) {
@@ -170,6 +177,8 @@ func TestObject_CloneForRefresh(t *testing.T) {
 		ETag:         "abc",
 		Hits:         5,
 		CacheControl: "max-age=10",
+		KeepGrace:    true,
+		Pool:         "origin-main",
 	}
 	clone := obj.CloneForRefresh()
 	require.NotSame(t, obj, clone)
@@ -182,6 +191,10 @@ func TestObject_CloneForRefresh(t *testing.T) {
 	assert.Equal(t, obj.ETag, clone.ETag)
 	assert.Equal(t, obj.Hits, clone.Hits)
 	assert.Equal(t, obj.CacheControl, clone.CacheControl)
+	// A 304 refresh must not drop grace retention: the refreshed object
+	// replaces the stored one, so a lost flag re-opens the reaper hole.
+	assert.Equal(t, obj.KeepGrace, clone.KeepGrace)
+	assert.Equal(t, obj.Pool, clone.Pool)
 }
 
 func TestObject_CloneForRefresh_NoSerializedHead(t *testing.T) {

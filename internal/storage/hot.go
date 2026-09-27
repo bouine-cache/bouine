@@ -63,6 +63,9 @@ type HotStore struct {
 	// Unprotect (not Delete) the warm copy — demoting it to
 	// SIEVE-managed without destroying it (#484).
 	onEvictDemoted func(key api.Key)
+	// mayReap gates the TTL reaper for expired KeepGrace entries
+	// (ADR-0051). Set via HotConfig.MayReap; nil reaps everything.
+	mayReap func(obj *api.Object) bool
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
@@ -242,9 +245,10 @@ func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason st
 }
 
 type hotStats struct {
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
+	hits       atomic.Int64
+	misses     atomic.Int64
+	evictions  atomic.Int64
+	graceHolds atomic.Int64
 }
 
 // evictReason classifies the caller of notifyEvict so the OnEvict
@@ -291,6 +295,18 @@ type HotConfig struct {
 	// to a warmUnprotectQueue drained outside the hot lock to avoid a
 	// lock-ordering cycle with warm.idxMu).
 	OnEvictDemoted func(key api.Key)
+	// MayReap gates the TTL reaper for expired entries whose object
+	// requested grace retention (KeepGrace, set by stayin_alive routes
+	// at fill time). Returning false holds the entry for the next
+	// reaper pass; true reaps it on the normal schedule. Only consulted
+	// for expired KeepGrace entries; non-graced entries are reaped
+	// without a callback. Nil keeps the historical behavior: every
+	// expired entry is reaped — grace cannot engage without wiring.
+	//
+	// CONSTRAINT: invoked while the shard write lock is held. It must
+	// be O(1), non-blocking, no I/O, no calls back into HotStore —
+	// same constraint family as OnEvict.
+	MayReap func(obj *api.Object) bool
 	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
 	// See the config.EvictionAlgorithm doc for the supported values and
 	// their semantics; "" means the documented default (EvictionSieve).
@@ -357,6 +373,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		evictSignal:    make(chan int, n),
 		reaperInterval: reaperInterval,
 		banTTL:         banTTL,
+		mayReap:        cfg.MayReap,
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
@@ -682,6 +699,18 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		}
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
+			// Grace-gated reaping (ADR-0051): a stayin_alive object is
+			// held while its origin pool cannot refill a miss — deleting
+			// it would break the route's serve-stale-while-outage
+			// contract. The gate is only consulted for expired KeepGrace
+			// entries; nil (unwired) keeps the historical reap so a
+			// bare HotStore never pins memory. Capacity eviction
+			// (SIEVE, warm budget) is NOT gated — bounded resources
+			// always win.
+			if e.obj.KeepGrace && h.mayReap != nil && !h.mayReap(e.obj) {
+				h.stats.graceHolds.Add(1)
+				continue
+			}
 			recordEviction(&logs, key, e, "expired")
 			h.notifyEvict(key, e, &slabFrees, evictReasonReaper)
 			s.bytes -= objSize(e.obj)
@@ -1015,11 +1044,12 @@ func (h *HotStore) Stats() api.Stats {
 		s.mu.RUnlock()
 	}
 	return api.Stats{
-		HotEntries: hotEntries,
-		HotBytes:   hotBytes,
-		Hits:       h.stats.hits.Load(),
-		Misses:     h.stats.misses.Load(),
-		Evictions:  h.stats.evictions.Load(),
+		HotEntries:       hotEntries,
+		HotBytes:         hotBytes,
+		Hits:             h.stats.hits.Load(),
+		Misses:           h.stats.misses.Load(),
+		Evictions:        h.stats.evictions.Load(),
+		ReaperGraceHolds: h.stats.graceHolds.Load(),
 	}
 }
 
@@ -1221,7 +1251,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 320 // unsafe.Sizeof(api.Object{}) — 312 → 320: composedHeadPtr, the per-second fast-path response-head cache (PR #567). Update when fields are added.
+	objectStructSize    int64 = 336 // unsafe.Sizeof(api.Object{}) — 320 → 336: KeepGrace + Pool, the stayin_alive grace-retention stamps (ADR-0051). Update when fields are added.
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.

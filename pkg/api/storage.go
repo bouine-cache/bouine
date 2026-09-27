@@ -40,6 +40,12 @@ type Object struct {
 	composedHeadPtr atomic.Pointer[composedHead] `json:"-"`
 	// ETag is the strong or weak entity tag from the origin.
 	ETag string `json:"etag,omitempty"`
+	// Pool is the name of the origin pool the storing route fetches
+	// from — the identity MayReap resolves to a health check. Only
+	// meaningful alongside KeepGrace; empty for non-graced objects
+	// (and for pool-less routes, whose grace cannot be health-gated
+	// and therefore never engages).
+	Pool string `json:"pool,omitempty"`
 	// VaryKey is the secondary key derived from Vary headers. Empty
 	// string if the response does not Vary.
 	VaryKey string `json:"vary_key,omitempty"`
@@ -106,6 +112,14 @@ type Object struct {
 	// RespMustRevalidate indicates the response Cache-Control has
 	// must-revalidate or proxy-revalidate. Pre-computed at build time.
 	RespMustRevalidate bool `json:"-"`
+	// KeepGrace marks an object from a stayin_alive route: the TTL
+	// reaper must not remove it by time alone while its origin pool
+	// cannot refill a miss. The HotStore consults the injected
+	// MayReap gate for expired entries carrying this flag; capacity
+	// pressure (SIEVE, warm budget) still applies — grace suppresses
+	// time-based deletion only, never bounded-resource eviction.
+	// Stamped at cache-fill time together with Pool.
+	KeepGrace bool `json:"keep_grace,omitempty"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -220,6 +234,8 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		VaryValue:          o.VaryValue,
 		RespNoCache:        o.RespNoCache,
 		RespMustRevalidate: o.RespMustRevalidate,
+		KeepGrace:          o.KeepGrace,
+		Pool:               o.Pool,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -299,6 +315,8 @@ func (o *Object) CloneForRefresh() *Object {
 		VaryValue:          o.VaryValue,
 		RespNoCache:        o.RespNoCache,
 		RespMustRevalidate: o.RespMustRevalidate,
+		KeepGrace:          o.KeepGrace,
+		Pool:               o.Pool,
 	}
 }
 
@@ -399,4 +417,8 @@ type Stats struct {
 	Misses int64 `json:"misses"`
 	// Evictions is the total number of evictions since boot.
 	Evictions int64 `json:"evictions"`
+	// ReaperGraceHolds is the number of times the TTL reaper skipped
+	// an expired KeepGrace entry because the MayReap gate withheld it
+	// (origin pool unable to refill) since boot.
+	ReaperGraceHolds int64 `json:"reaper_grace_holds"`
 }

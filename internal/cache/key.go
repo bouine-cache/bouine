@@ -420,14 +420,33 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 		}
 		n += copyOverflow(dst, n, f)
 		n = appendByte(dst, n, '=')
-		val := reqHeader.Get(f)
-		if isListValuedVaryField(f) {
-			val = normaliseListHeader(val)
-		}
+		val := varyAssertionValue(f, reqHeader.Get(f), policy)
 		n += copyOverflow(dst, n, val)
 		n = appendByte(dst, n, ';')
 	}
 	return n
+}
+
+// varyAssertionValue normalizes one Vary-nominated request header value
+// for the stored-assertion hash (BuildVaryKey — the hex stored on
+// objects and compared by the peer gates). Accept-Encoding is bucketed
+// by encodingBucket unless the policy pins verbatim — the AE rule MUST
+// match varyHeaderValue (vary.go) or the peer gates reject every
+// AE-variant exchange (ADR-0051; pinned by
+// TestVaryKeyEncodingBucket_ParityAcrossPaths). Every other field keeps
+// this path's legacy semantics: the four list-valued headers are
+// lowercase+sorted, all other field values pass through verbatim —
+// NOT the normalize-everything rule of varyHeaderValue. The two paths
+// already disagreed before bucketing; unifying them would silently
+// rekey every stored variant on routes with custom Vary headers.
+func varyAssertionValue(field, value string, policy *KeyPolicy) string {
+	if field == "accept-encoding" && !policy.verbatimEncoding() {
+		return encodingBucket(value)
+	}
+	if isListValuedVaryField(field) {
+		return normaliseListHeader(value)
+	}
+	return value
 }
 
 // isListValuedVaryField reports whether a Vary field name contains a

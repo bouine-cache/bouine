@@ -743,6 +743,21 @@ type RouteKey struct {
 	// (matches Varnish qs.unique()). Values are NOT sorted when dedup
 	// is enabled.
 	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
+	// VerbatimEncoding selects how the Accept-Encoding request header
+	// participates in the cache key (docs/architecture.md §3.3).
+	// false (default, bucket) — the header value is reduced to the
+	// negotiated coding (zstd > br > gzip by q-value; absent or no
+	// acceptable coding -> identity) and origin-bound requests carry
+	// the canonical token, so all clients that accept the same best
+	// coding share one stored variant. true (verbatim) — the raw
+	// value is lowercased+sorted (pre-bucketing behavior) and
+	// forwarded to the upstream unchanged; use only when the origin
+	// varies response bodies by the full AE string — it re-fragments
+	// the variant space. Like include_headers, this must be identical
+	// across all cluster nodes serving the route: a node with a
+	// different policy stores and resolves variants under different
+	// keys. Peer gates fail safe (miss, never a wrong body).
+	VerbatimEncoding bool `yaml:"verbatim_encoding,omitempty" json:"verbatim_encoding,omitempty"`
 }
 
 // RouteRequest is the per-route request-side rewrite block.

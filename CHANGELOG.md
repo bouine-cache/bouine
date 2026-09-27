@@ -10,6 +10,24 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- **Accept-Encoding now keys variants by negotiation bucket**
+  (ADR-0051). The header value is reduced to the coding bouine
+  negotiates (`zstd | br | gzip`, highest q-value wins, `q=0`
+  excludes; absent or no acceptable coding -> `identity`), and
+  origin-bound requests carry the canonical bucket token instead of
+  the client's raw dialect. Six realistic browser AE dialects that
+  previously produced six distinct stored variants now share two.
+  This finally implements the behavior `docs/architecture.md` §3.3
+  has claimed since v1.0. Expect a one-TTL miss-rate step on
+  `Vary: Accept-Encoding` routes after upgrading (old variant keys
+  become unreachable); mixed-version clusters cannot share AE
+  variants until the rollout completes (peer gates fail safe — miss,
+  never a wrong body). Origins that genuinely vary bodies by the
+  full AE string can restore the old behavior with
+  `cache.key.verbatim_encoding: true`.
+
 ### Fixed
 
 - **Origin-fetch spans now join the client trace** (CCC-32). On the

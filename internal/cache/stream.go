@@ -109,6 +109,11 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token: the tee branch of this fetch
+	// stores via buildObject, so the stored variant must match the
+	// key's bucket claim (see rewriteOutboundAE). The SSE-only branch
+	// never stores; the rewrite is harmless there.
+	h.rewriteOutboundAE(&req.Header)
 	// Forward the request body (POST-style SSE carries the prompt/payload
 	// in the body). The pooled request outlives the handler on streaming
 	// paths (released inside the body-stream writer), so the body is

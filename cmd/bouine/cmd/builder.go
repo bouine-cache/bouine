@@ -602,12 +602,13 @@ func (r *staticHeaderRewriter) wrap(next fasthttp.RequestHandler) fasthttp.Reque
 
 // buildKeyPolicy compiles the route's cache key config into a
 // pre-compiled KeyPolicy. Returns nil when no query/header policy
-// is active (no allocation).
+// is active (no allocation). A verbatim encoding_policy constructs a
+// policy on its own: bucketing is the KeyPolicy zero value.
 func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	if !hasKeyPolicy(rk) {
 		return nil
 	}
-	return cache.NewKeyPolicy(
+	p := cache.NewKeyPolicy(
 		buildStripSet(rk.StripQueryParams),
 		buildKeepSet(rk.KeepQueryParams),
 		buildExcludeHeaderSet(rk.ExcludeHeaders),
@@ -616,6 +617,8 @@ func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 		rk.DedupQueryParams,
 		rk.IncludeHeaders,
 	)
+	p.SetVerbatimAE(rk.VerbatimEncoding)
+	return p
 }
 
 func buildKeepSet(params []string) map[string]bool {
@@ -634,7 +637,8 @@ func hasKeyPolicy(rk config.RouteKey) bool {
 	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
 		len(rk.IncludeHeaders) > 0 ||
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
-		rk.StripEmptyParams || rk.DedupQueryParams
+		rk.StripEmptyParams || rk.DedupQueryParams ||
+		rk.VerbatimEncoding
 }
 
 // buildStripSet converts a config []string into a map for O(1) lookup.

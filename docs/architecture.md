@@ -210,11 +210,31 @@ defense against cache-poisoning via unkeyed input (threat T06, T07).
 
 ### 3.3 Compression policy
 
-Store responses in the encoding the origin produced. Bucket `Accept-Encoding`
-into `br | zstd | gzip | identity` to bound variant count.
+Store responses in the encoding the origin produced. `Accept-Encoding`
+participates in the variant key as a **negotiation bucket**, not as the
+raw header value: the highest-weight coding among `zstd | br | gzip`
+wins (ties broken in that order, `q=0` excludes), and an absent or
+no-acceptable-coding request buckets to `identity`. All clients that
+negotiate the same best coding share one stored variant —
+`gzip, deflate, br` and `br, gzip` are the `br` bucket.
+
+Bucketing has a pairing rule without which it would serve wrong bytes:
+origin-bound requests carry the canonical bucket token
+(`Accept-Encoding: br`), never the client's raw dialect. The stored
+variant then always matches the bucket its key claims, and an origin
+that cannot produce the coding falls back to identity for the whole
+bucket. Identity-bucket requests have the header removed rather than
+set to `identity` (some origins read a bare identity token as "client
+refuses compression"). The rewrite applies on every fill, revalidate,
+and refill path; the hit path never touches it. See ADR-0051.
 
 - `passthrough` (default) — store as-is, one variant per encoding-bucket.
-- `normalize_identity` — request `identity` from origin, recompress on egress.
+- `verbatim_encoding: true` (`cache.key`) — restore the pre-bucketing
+  key (lowercased+sorted raw value) and verbatim origin forwarding, for
+  origins that genuinely vary bodies by the full AE string. Like
+  `include_headers`, the setting must be identical across cluster nodes.
+- `normalize_identity` — request `identity` from origin, recompress on
+  egress (backlog; would break the zero-alloc egress path).
   Forbidden on routes serving secrets (mitigates BREACH-class oracles, T25).
 
 ### 3.4 Cookie & authorization policy

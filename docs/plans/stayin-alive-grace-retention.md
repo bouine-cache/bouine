@@ -29,7 +29,9 @@ Key facts from the analysis:
 **P1b — health-gated grace.** The *object* carries the policy intent; the
 *store* implements a generic mechanism; the *wiring* supplies origin health.
 
-- `api.Object` gains two additive JSON fields, stamped at fill time:
+- `api.Object` gains two additive fields, stamped at fill time and
+  carried through the binary object codec (v5) so every serialized hop
+  (warm tier, peer wire) keeps them:
   - `KeepGrace bool` (`keep_grace`) — true when the route has `stayin_alive`.
   - `Pool string` (`pool`) — the origin pool name (set when KeepGrace is set).
 - `HotConfig.MayReap func(obj *api.Object) bool` — a reap gate invoked by the
@@ -61,7 +63,8 @@ outages, and fail-fast picks once all targets are ejected.
   manual `MarkHealthy` — existing semantics, unchanged.
 - Capacity (SIEVE + warm budget) always wins; grace only suppresses
   time-based deletion.
-- Pre-PR warm blobs decode without the new fields → reaped as today.
+- Pre-v5 warm blobs (v4 and older) decode without the new fields → reaped
+  as today; rewritten in v5 on the next Put.
 
 ## Definition of Done
 

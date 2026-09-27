@@ -339,6 +339,12 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 		BodySize:   15,
 		TTL:        60 * time.Second,
 		StoredAt:   time.Now(),
+		// ADR-0051: a stayin_alive fill forwarded from a non-owner must
+		// keep its grace-retention stamps on the owner, or the owner's
+		// reaper deletes it mid-outage — in strong mode most entries are
+		// stored exactly this way, so the stamps must survive the wire.
+		KeepGrace: true,
+		Pool:      "origin-main",
 	}
 	encoded := storage.EncodeObject(obj)
 	ctx := postPut(t, h, encoded, "POST")
@@ -347,6 +353,8 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	assert.Equal(t, obj.Body, stored.Body)
+	assert.True(t, stored.KeepGrace, "peer put must preserve KeepGrace on the owner")
+	assert.Equal(t, "origin-main", stored.Pool, "peer put must preserve Pool on the owner")
 }
 
 func TestPeerPutHandler_OnStoreCallback(t *testing.T) {

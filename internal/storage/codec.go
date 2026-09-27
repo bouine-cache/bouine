@@ -15,17 +15,25 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-// Version 4 adds VaryValue to the wire format: the peer-fetch protocol
-// needs the origin's Vary list to recompute the variant dimension of a
-// peer-delivered object (servePeerHit's cross-variant gate); without it
-// the gate silently skips and a non-owner serves the first fill's body
-// to a request selecting a different variant. v3 blobs (warm tier
-// written before this version) decode unchanged with an empty VaryValue.
-const objCodecVersion byte = 4
+// Version 5 adds the grace-retention stamps (ADR-0051) after ETag:
+// KeepGrace + Pool. They must survive every serialized hop — the warm
+// tier (SIEVE demote → Get re-promote must keep the entry grace-gated)
+// and the peer-fetch/peer-put wire (in strong cluster mode the owner
+// stores what the fetching node encoded; dropping the stamps there
+// silently disables grace retention for most of the fleet). v4 blobs
+// decode with KeepGrace=false and Pool="" — grace cannot engage on
+// them, matching their pre-upgrade reap behavior. v3 blobs additionally
+// decode with an empty VaryValue.
+const objCodecVersion byte = 5
 
-// objCodecVersionV3 is the previous encoding version, still accepted by
-// the decoder so warm-tier blobs written before the VaryValue field
-// survive an upgrade. New writes always use objCodecVersion.
+// objCodecVersionV4 is the previous encoding version, still accepted by
+// the decoder so warm-tier blobs written before the grace-retention
+// stamps survive an upgrade. New writes always use objCodecVersion.
+const objCodecVersionV4 byte = 4
+
+// objCodecVersionV3 is the encoding version before VaryValue was added to
+// the wire format. Still accepted: v3 blobs decode with an empty
+// VaryValue (re-derivable from the stored headers on load).
 const objCodecVersionV3 byte = 3
 
 // errCorrupt is returned when an encoded object blob is truncated or
@@ -99,6 +107,15 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	// read must pair with the increment's atomic store (issue #218).
 	buf = binary.AppendUvarint(buf, atomic.LoadUint64(&obj.Hits))
 	buf = appendString(buf, obj.ETag)
+	// Grace-retention stamps (ADR-0051, codec v5): 1-byte KeepGrace flag
+	// followed by the Pool name. Written for every object (graced or
+	// not) so the field position is version-stable.
+	if obj.KeepGrace {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	buf = appendString(buf, obj.Pool)
 
 	// Header map: count, then (key, value) per entry.
 	buf = binary.AppendUvarint(buf, uint64(obj.Header.Len())) //nolint:gosec // Len() returns int len of a slice, always non-negative and bounded by memory
@@ -135,14 +152,17 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	// v4 adds VaryValue after VaryKey; v3 blobs (pre-upgrade warm tier)
 	// decode unchanged with an empty VaryValue — the field is re-derivable
 	// from the stored headers on load, matching the v3 behavior.
-	if ver != objCodecVersion && ver != objCodecVersionV3 {
+	// v5 adds the grace-retention stamps after ETag; v4 and v3 blobs
+	// decode with KeepGrace=false and Pool="" — grace cannot engage on
+	// them, matching their pre-upgrade reap behavior (ADR-0051).
+	if ver != objCodecVersion && ver != objCodecVersionV4 && ver != objCodecVersionV3 {
 		return nil, fmt.Errorf("storage: unknown object codec version %d", ver)
 	}
 
 	obj := &api.Object{}
 	copy(obj.Key[:], r.bytes(16))
 	obj.VaryKey = r.str()
-	if ver >= objCodecVersion {
+	if ver >= objCodecVersionV4 {
 		obj.VaryValue = r.str()
 	}
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder
@@ -153,6 +173,10 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	obj.LastModified = r.time()
 	obj.Hits = r.uvarint()
 	obj.ETag = r.str()
+	if ver >= objCodecVersion {
+		obj.KeepGrace = r.byte() == 1
+		obj.Pool = r.str()
+	}
 
 	if nh := r.count(); nh > 0 {
 		hm := header.NewMap(min(nh, 32))

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,9 +22,14 @@ import (
 )
 
 // encodeCoalescePeerFetchRequest encodes a v3 (coalescing) request body
-// the way buildPeerRequest emits it.
+// the way buildPeerRequest emits it. Test fixtures stay far below the
+// 64 KiB wire caps, so an encode failure is a bug in the fixture.
 func encodeCoalescePeerFetchRequest(req api.PeerFetchRequest) []byte {
-	return encodePeerFetchBody(nil, req)
+	body, ok := encodePeerFetchBody(nil, req)
+	if !ok {
+		panic("test fixture exceeds the 64 KiB wire cap")
+	}
+	return body
 }
 
 type stubOriginFetcher struct {
@@ -197,11 +203,14 @@ func TestPeerFetchHandler_CoalesceRejectsNonGet(t *testing.T) {
 // A lane at capacity sheds with a dedicated status instead of parking
 // the RPC behind a slow origin. Runs against a real server: the shed
 // path reads the request context's done channel, which only a served
-// RequestCtx has.
+// RequestCtx has. The shed answer is 503 + Retry-After (the origin was
+// never contacted), written exactly once by handleCoalesce — never the
+// 502 of a failed origin flight.
 func TestPeerFetchHandler_CoalesceShed(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(14)
 	release := make(chan struct{})
+	defer close(release)
 	blocking := &blockingFetcher{release: release}
 	h := NewPeerFetchHandler(&stubStore{}, 0)
 	for range defaultCoalesceConcurrency {
@@ -212,17 +221,17 @@ func TestPeerFetchHandler_CoalesceShed(t *testing.T) {
 	srv := fasthttptest.NewServer(t, h.Handle)
 	defer srv.Close()
 
-	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
-	defer f.Close(context.Background())
-
-	errc := make(chan error, 1)
-	go func() {
-		_, err := f.Fetch(context.Background(), api.PeerInfo{AdminAddr: srv.Addr}, coalesceReq(key))
-		errc <- err
-	}()
-	err := <-errc
-	close(release)
-	require.Error(t, err, "a shed coalesced fetch must map to a peer error so the waiter falls back to origin")
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+	req.Header.SetMethod("POST")
+	req.SetRequestURI("http://" + srv.Addr + PeerFetchPath)
+	req.SetBody(encodeCoalescePeerFetchRequest(coalesceReq(key)))
+	require.NoError(t, fasthttp.Do(req, resp))
+	assert.Equal(t, fasthttp.StatusServiceUnavailable, resp.StatusCode(),
+		"a shed coalesced fetch must answer 503, not the 502 of a failed flight")
+	assert.Equal(t, "1", string(resp.Header.Peek("Retry-After")))
 }
 
 type blockingFetcher struct {
@@ -261,4 +270,22 @@ func TestPeerFetchHandler_CoalesceConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	assert.EqualValues(t, 8, fetcher.calls.Load())
+}
+
+// An envelope field above the 64 KiB wire cap rejects the request
+// construction instead of truncating: a silently shortened URI would
+// make the owner fetch — and cache — the wrong origin resource.
+func TestEncodePeerFetchBody_RejectsOversized(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(17)
+	req := coalesceReq(key)
+	req.OriginRequest.URI = strings.Repeat("a", maxStringLen+1)
+	_, ok := encodePeerFetchBody(nil, req)
+	assert.False(t, ok, "an over-cap envelope URI must be rejected, not truncated")
+
+	// The caller surfaces it as a fetch error, not a silent short URI.
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+	_, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "127.0.0.1:1"}, req)
+	require.Error(t, err, "an over-cap envelope must fail request construction, not send a truncated URI")
 }

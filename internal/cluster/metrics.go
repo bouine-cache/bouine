@@ -55,8 +55,11 @@ type Metrics struct {
 	// CoalescedFetch counts cluster-coordinated origin-shield fetches,
 	// labelled by role: "owner" (a coalesced fetch served by the key
 	// owner), "waiter" (a non-owner that avoided origin — the headline
-	// "origin requests saved" number), or "failure" (the owner's flight
-	// failed; the waiter falls back to origin).
+	// "origin requests saved" number), "failure" (the owner's flight
+	// failed; the waiter falls back to origin), and "fallback" (a
+	// waiter-side wait failed — owner down, timeout, shed, or
+	// variant-gate rejection — and the waiter fetched origin itself;
+	// owner-side counters cannot see these events).
 	CoalescedFetch *prometheus.CounterVec
 	// CoalescedShed counts coalesced RPCs shed at the owner's coalesced
 	// lane semaphore (mirrors the peer_fetch_shed_total pattern; a
@@ -135,7 +138,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		CoalescedFetch: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "coalesced_fetch_total",
-			Help:      "Cluster-coordinated origin-shield fetches by role: owner (served by the key owner), waiter (origin request saved), failure (waiter falls back to origin).",
+			Help:      "Cluster-coordinated origin-shield fetches by role: owner (served by the key owner), waiter (origin request saved), failure (owner's flight failed), fallback (waiter-side wait failed; waiter fetched origin itself).",
 		}, []string{"role"}),
 		CoalescedShed: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
@@ -251,8 +254,9 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 
 // IncCoalescedFetch increments the coalesced origin-shield counter for
 // the given role: "owner" (served a peer's flight), "waiter" (served
-// from the owner's answer), or "failure". A waiter increment also
-// counts one origin request saved (same event, two views). Nil-safe:
+// from the owner's answer), "failure" (owner-side flight failure), or
+// "fallback" (waiter-side wait failed). A waiter increment also counts
+// one origin request saved (same event, two views). Nil-safe:
 // single-node mode never registers the vec.
 func (m *Metrics) IncCoalescedFetch(role string) {
 	if m == nil || m.CoalescedFetch == nil {

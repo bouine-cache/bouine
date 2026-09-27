@@ -103,6 +103,14 @@ type RefreshEvent struct {
 	Key Key `json:"key"`
 }
 
+// CoalesceFetchTimeout bounds a coalesced peer-fetch (origin shield) on
+// both the waiter (RPC wait) and the owner's requester-side lane. It
+// must stay strictly below the origin fetch budget (default
+// fetch_timeout 60s) so a waiter that gives up still has time to run
+// its own origin fetch inside its request budget. Both the cache and
+// cluster packages consume this single constant — do not duplicate it.
+const CoalesceFetchTimeout = 30 * time.Second
+
 // PeerHeader is one forwarded request header (name/value pair) inside
 // an OriginRequest envelope.
 //

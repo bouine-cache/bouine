@@ -24,13 +24,9 @@ var errCoalesceMethod = errors.New("coalesced fetch: method is not GET/HEAD")
 
 // coalesceWaitTimeout bounds how long a waiter waits on the owner's
 // coalesced origin fetch before giving up and falling back to its own
-// origin fetch. It must stay strictly below the origin fetch budget
-// (default fetch_timeout 60s) so a waiter that gives up still has time
-// to run its own fetch inside its request budget. Mirrors
-// cluster.CoalesceFetchTimeout (the requester-side RPC bound); the
-// cache package cannot import internal/cluster (layer rules), so the
-// two constants must be changed together.
-const coalesceWaitTimeout = 30 * time.Second
+// origin fetch. It is the same constant the cluster package bounds the
+// RPC with (api.CoalesceFetchTimeout) — one definition, two consumers.
+const coalesceWaitTimeout = api.CoalesceFetchTimeout
 
 // coalesceApplies reports whether the coalesced owner call applies to
 // this miss: origin shielding is GET/HEAD-only (the only cacheable
@@ -66,11 +62,17 @@ func (h *Handler) coalesceWait(ctx *fasthttp.RequestCtx, owner api.PeerInfo, loo
 	if err != nil || peerObj == nil {
 		h.logger.Debug("coalesced peer fetch failed, falling back to origin",
 			"peer", owner.Addr, "key", lookupKey, "error", err)
+		if h.onCoalescedFallback != nil {
+			h.onCoalescedFallback()
+		}
 		return false
 	}
 	if !h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 		// Variant gate rejection or not fresh enough: fall back to
 		// origin rather than serve doubtful content.
+		if h.onCoalescedFallback != nil {
+			h.onCoalescedFallback()
+		}
 		return false
 	}
 	if h.onCoalescedSaved != nil {
@@ -82,8 +84,10 @@ func (h *Handler) coalesceWait(ctx *fasthttp.RequestCtx, owner api.PeerInfo, loo
 
 // originEnvelope builds the OriginRequest the owner needs to replay the
 // upstream fetch: method, request URI, host, and the closed set of
-// headers that participate in response identity — Accept-Encoding (body
-// identity) and every header the route's cache-key policy consults
+// headers that change the origin's ANSWER — Accept-Encoding (body
+// identity), Authorization (the response is only cacheable with the
+// shared-cache opt-in the local path applies to the same header), and
+// every header the route's cache-key policy consults
 // (cache.key.include_headers). Everything else is dropped. An
 // origin-declared Vary header that is NOT in the envelope is caught
 // downstream: the owner computes the object's VaryKey from the envelope
@@ -91,14 +95,24 @@ func (h *Handler) coalesceWait(ctx *fasthttp.RequestCtx, owner api.PeerInfo, loo
 // a mismatch is rejected into the origin fallback — degraded hit rate,
 // never wrong-variant content.
 func (h *Handler) originEnvelope(ctx *fasthttp.RequestCtx) *api.OriginRequest {
+	// HEAD→GET: keys are canonicalized HEAD→GET everywhere else (the
+	// local miss path never stores a HEAD fill, stream.go's isHEAD
+	// gate), and a HEAD origin fetch would return an empty body the
+	// owner would cache under the GET key. The waiter suppresses the
+	// body at write time (serveObject's HEAD check), so a GET replay
+	// answers HEAD clients correctly.
+	method := string(ctx.Method())
+	if method == fasthttp.MethodHead {
+		method = fasthttp.MethodGet
+	}
 	oreq := &api.OriginRequest{
-		Method: string(ctx.Method()),
+		Method: method,
 		URI:    string(ctx.RequestURI()),
 		Host:   string(ctx.Host()),
 	}
 	for k, v := range ctx.Request.Header.All() {
 		name := strings.ToLower(string(k))
-		if name == "accept-encoding" || h.policyIncludesHeader(name) {
+		if name == "accept-encoding" || name == "authorization" || h.policyIncludesHeader(name) {
 			oreq.Headers = append(oreq.Headers, api.PeerHeader{Name: string(k), Value: string(v)})
 		}
 	}
@@ -122,6 +136,13 @@ func (h *Handler) policyIncludesHeader(name string) bool {
 // fills through its own fetch path, never through backfill.
 func (h *Handler) maybeBackfill(ctx *fasthttp.RequestCtx, lookupKey api.Key, obj *api.Object) {
 	if h.peerBackfillProbability <= 0 {
+		return
+	}
+	// Same storage admission as the local fill path (stream.go): a body
+	// larger than the route's max_object_size must not enter the local
+	// store, coalesced or not. The object is still served to THIS
+	// client — only the local copy is skipped.
+	if h.maxObjectSize > 0 && int64(len(obj.Body)) > h.maxObjectSize {
 		return
 	}
 	// Non-crypto randomness: this is probabilistic cache placement, not
@@ -158,6 +179,15 @@ func (h *Handler) FetchOrigin(ctx context.Context, key api.Key, originReq *fasth
 	method := string(originReq.Header.Method())
 	if method != fasthttp.MethodGet && method != fasthttp.MethodHead {
 		return nil, errCoalesceMethod
+	}
+	// HEAD→GET, same canonicalization as the local miss path: a HEAD
+	// origin fetch yields an empty body that must never be stored under
+	// the (HEAD→GET-canonicalized) cache key. The waiter's serveObject
+	// suppresses the body for HEAD clients, so the waiter-side answer
+	// is unchanged.
+	if method == fasthttp.MethodHead {
+		method = fasthttp.MethodGet
+		originReq.Header.SetMethod(fasthttp.MethodGet)
 	}
 	// Route the fetch through the owning route's own origin-bound URI
 	// rewrite (strip_prefix / path_rewrite). Request-header rewrites
@@ -208,6 +238,11 @@ func (h *Handler) FetchOrigin(ctx context.Context, key api.Key, originReq *fasth
 	res.Header = res.Header.ownedClone()
 	obj := buildObject(key, ri, res, res.Header.ToMap(), h.neg, h.defaultTTL,
 		h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	// Same storage admission as the local fill path: an oversized body
+	// is served to the waiting peer but never enters the owner's store.
+	if h.maxObjectSize > 0 && int64(len(obj.Body)) > h.maxObjectSize {
+		return obj, nil
+	}
 	h.storeObjectLocal(ctx, key, obj, ri, false, 0)
 	return obj, nil
 }

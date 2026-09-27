@@ -382,7 +382,9 @@ type Cluster struct {
 	// fetch on behalf of the asker and returns the object, instead of
 	// answering 404. All peer waiters plus the owner's own client
 	// requests collapse into exactly one origin fetch, so a cold key
-	// costs one origin request for the whole cluster. Default off.
+	// costs one origin request for the whole cluster. Default off. The
+	// flag governs BOTH sides of the RPC: a node with it off neither
+	// sends coalesced peer-fetches nor serves them for waiters.
 	// Inert outside strong mode; the backfill knob below is inert
 	// while this is off.
 	PeerFetchCoalesce bool `yaml:"peer_fetch_coalesce,omitempty" json:"peer_fetch_coalesce,omitempty"`

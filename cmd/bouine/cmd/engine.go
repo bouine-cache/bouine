@@ -790,6 +790,20 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 	}
 }
 
+// buildPeerFetchHandler wires the coalesced peer-fetch handler. The
+// owner check is bound only with a cluster node: a solo deployment has
+// no ring, and binding IsLocal on a nil receiver would panic at the
+// first coalesced RPC (reachable — /v1/peer/fetch is token-exempt on
+// the admin port); the unset check answers 404 in handleCoalesce.
+func (e *engine) buildPeerFetchHandler(rs *runState) *cluster.PeerFetchHandler {
+	h := cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics)
+	h.SetOriginFetchers(rs.routeFetchers)
+	if rs.clusterNode != nil {
+		h.SetOwnerCheck(rs.clusterNode.IsLocal)
+	}
+	return h
+}
+
 // swapAdminHandler builds the full admin handler (all routes, auth,
 // dashboard) and atomically swaps it into the already-listening minimal
 // admin server. The admin listener was started before initSubsystems so
@@ -803,9 +817,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	ops := e.buildInvalidationOps(ctx, rs)
 	dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
 
-	peerFetchHandler := cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics)
-	peerFetchHandler.SetOriginFetchers(rs.routeFetchers)
-	peerFetchHandler.SetOwnerCheck(rs.clusterNode.IsLocal)
+	peerFetchHandler := e.buildPeerFetchHandler(rs)
 
 	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
 		Addr:       addr,

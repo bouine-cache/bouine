@@ -814,7 +814,10 @@ func BenchmarkPeerFetch_BuildRequest(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		httpReq := buildPeerRequest(peer, req)
+		httpReq, err := buildPeerRequest(peer, req)
+		if err != nil {
+			b.Fatal(err)
+		}
 		fasthttp.ReleaseRequest(httpReq)
 	}
 }

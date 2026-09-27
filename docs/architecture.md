@@ -326,6 +326,21 @@ with 256 connections per host. This reduces per-peer connection memory by
 ~97% (12.8 MiB → 400 KiB). Each peer address gets its own `PipelineClient`
 cached in a `sync.Map` (ADR-0039).
 
+**Origin shield** (`cluster.peer_fetch_coalesce`, strong mode only,
+ADR-0051): on a hard miss the non-owner sends the owner a coalesced
+peer-fetch (wire v3: v2 body + flags byte + `OriginRequest` envelope
+carrying method/URI/host and the answer-identity headers —
+`Accept-Encoding`, `Authorization`, `cache.key.include_headers`). The
+owner joins its route's foreground inflight latch, so peer waiters and
+local clients collapse into exactly one origin fetch; waiters wait at
+most `api.CoalesceFetchTimeout` (30s) and any failure (owner down,
+timeout, lane shed, variant-gate rejection) falls back to the waiter's
+own origin fetch. The coalesced lane has dedicated pipeline clients and
+a bounded semaphore so a slow origin cannot stall peer cache HITs.
+`cluster.peer_fetch_backfill_probability` (default 1.0, 0.0 = strict
+owner-only partition) controls whether waiters also store the coalesced
+object locally. Coalesced RPCs are exempt from the peer breaker.
+
 ### 5.4 Consistency
 
 Writes are local-first; eventual replication is fire-and-forget to N-1

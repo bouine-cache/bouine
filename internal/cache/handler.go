@@ -282,6 +282,11 @@ type Handler struct {
 	// onCoalescedSaved counts waiters that received an authoritative
 	// coalesced answer and avoided an origin request (nil-safe).
 	onCoalescedSaved func()
+	// onCoalescedFallback counts waiters whose coalesced wait FAILED
+	// (owner down, timeout, shed, variant-gate rejection) and fell back
+	// to their own origin fetch. The owner-side failure role cannot see
+	// these: when the owner is unreachable no owner-side counter fires.
+	onCoalescedFallback func()
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
@@ -451,6 +456,10 @@ type HandlerConfig struct {
 	// coalesced owner answer and avoids an origin request (the
 	// origin-requests-saved metric). Nil-safe.
 	OnCoalescedSaved func()
+	// OnCoalescedFallback, if non-nil, is called when a waiter's
+	// coalesced wait fails (owner down, timeout, shed, variant-gate
+	// rejection) and it falls back to its own origin fetch. Nil-safe.
+	OnCoalescedFallback func()
 	// OnPeerVariantMismatch, if non-nil, is called when the handler
 	// rejects a peer-fetched object because its stored variant does
 	// not select this request (RFC 9111 §4.1 assertion re-verified on
@@ -753,6 +762,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		peerFetch:               cfg.PeerFetch,
 		peerFetchCoalesce:       cfg.PeerFetchCoalesce,
 		onCoalescedSaved:        cfg.OnCoalescedSaved,
+		onCoalescedFallback:     cfg.OnCoalescedFallback,
 		peerBackfillProbability: cfg.PeerBackfillProbability,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,

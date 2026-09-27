@@ -48,11 +48,10 @@ const peerFetchBinaryVersion = 2
 const peerFetchBinaryVersionCoalesce = 3
 
 // CoalesceFetchTimeout bounds one coalesced peer-fetch RPC on the
-// requester (waiter) side. It must stay strictly below the origin fetch
-// budget (default fetch_timeout 60s): a waiter that gives up must have
-// time to fall back to its own origin fetch inside its own request
-// budget instead of hanging for the full origin timeout on top of it.
-const CoalesceFetchTimeout = 30 * time.Second
+// requester (waiter) side. It lives in pkg/api (api.CoalesceFetchTimeout)
+// so the cache package's waiter budget is the same constant, not a
+// hand-maintained copy.
+const CoalesceFetchTimeout = api.CoalesceFetchTimeout
 
 // coalesceFlightTimeout bounds the owner-side collapsed origin fetch
 // driven on behalf of peer waiters. Slightly above the default origin
@@ -170,6 +169,13 @@ const (
 // address is in cooldown after consecutive failures. Callers treat it
 // like any other peer-fetch error: fall back to origin.
 var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
+
+// ErrCoalesceShed is returned by acquireCoalesceSlot when the
+// coalesced-lane semaphore stays saturated past coalesceShedWait. The
+// owner answers 503 + Retry-After (the origin was never contacted, so
+// the waiter should retry or fall back shortly) instead of the 502
+// reserved for a failed origin flight.
+var ErrCoalesceShed = errors.New("coalesced fetch lane shed")
 
 // ErrPeerFetchShed is returned by Fetch and Put when no concurrency
 // slot could be acquired within peerFetchWaitTimeout. It mirrors the
@@ -671,7 +677,7 @@ func (f *PeerFetcher) updateBlacklistedLocked() {
 // scheme needs no representation in the URI — the PipelineClient's
 // IsTLS flag (fixed at fetcher construction) selects TLS; the request
 // line carries only the path.
-func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Request {
+func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) (*fasthttp.Request, error) {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
 		fetchAddr = peer.Addr
@@ -685,7 +691,10 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Req
 	// ReleaseRequest returns for reuse. The wire format is fully
 	// rewritten from byte 0 on every call, so no reset is needed.
 	var stack [273]byte
-	body := encodePeerFetchBody(stack[:0], req)
+	body, ok := encodePeerFetchBody(stack[:0], req)
+	if !ok {
+		return nil, fmt.Errorf("peer fetch request: envelope field exceeds %d bytes", maxStringLen)
+	}
 
 	httpReq := fasthttp.AcquireRequest()
 	httpReq.Header.SetMethod(fasthttp.MethodPost)
@@ -695,47 +704,65 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Req
 	httpReq.Header.Set(header.ContentType, "application/octet-stream")
 	httpReq.Header.Set(BouineHopHeader, strconv.Itoa(req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
-	return httpReq
+	return httpReq, nil
 }
 
 // encodePeerFetchBody appends the peer-fetch request body for req to
 // dst. v2 requests (Coalesce unset) emit the fixed 273-byte format and
 // never allocate; v3 emits the version byte 3 followed by the v2 fixed
-// part and the coalescing extension.
-func encodePeerFetchBody(dst []byte, req api.PeerFetchRequest) []byte {
+// part and the coalescing extension. An envelope field above the 64 KiB
+// wire cap is a contract violation: rejected with ok=false, never
+// truncated (a silently shortened URI would fetch the wrong origin
+// resource).
+func encodePeerFetchBody(dst []byte, req api.PeerFetchRequest) ([]byte, bool) {
 	if !req.Coalesce {
 		dst = append(dst, peerFetchBinaryVersion)
 		dst = append(dst, req.Key[:]...)
 		dst = append(dst, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
-		return append(dst, req.VaryKey...)
+		return append(dst, req.VaryKey...), true
 	}
 	dst = append(dst, peerFetchBinaryVersionCoalesce)
 	dst = append(dst, req.Key[:]...)
 	dst = append(dst, byte(len(req.VaryKey))) //nolint:gosec // bounded as above
 	dst = append(dst, req.VaryKey...)
 	dst = append(dst, 1) // flags: coalesce
-	dst = putLPString(dst, req.Route)
-	dst = putLPString(dst, req.OriginRequest.Method)
-	dst = putLPString(dst, req.OriginRequest.URI)
-	dst = putLPString(dst, req.OriginRequest.Host)
+	var ok bool
+	if dst, ok = putLPString(dst, req.Route); !ok {
+		return dst, false
+	}
+	if dst, ok = putLPString(dst, req.OriginRequest.Method); !ok {
+		return dst, false
+	}
+	if dst, ok = putLPString(dst, req.OriginRequest.URI); !ok {
+		return dst, false
+	}
+	if dst, ok = putLPString(dst, req.OriginRequest.Host); !ok {
+		return dst, false
+	}
 	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(req.OriginRequest.Headers))) //nolint:gosec // header count is bounded by the request parser caps
 	for _, h := range req.OriginRequest.Headers {
-		dst = putLPString(dst, h.Name)
-		dst = putLPString(dst, h.Value)
+		if dst, ok = putLPString(dst, h.Name); !ok {
+			return dst, false
+		}
+		if dst, ok = putLPString(dst, h.Value); !ok {
+			return dst, false
+		}
 	}
-	return dst
+	return dst, true
 }
 
-// putLPString appends a uint16-length-prefixed string. Strings longer
-// than 64 KiB are truncated by the request-header caps upstream; the
-// length prefix still guarantees the parser stays in bounds.
-func putLPString(dst []byte, s string) []byte {
-	n := len(s)
-	if n > maxStringLen {
-		n = maxStringLen
+// putLPString appends a uint16-length-prefixed string. A string longer
+// than 64 KiB is a contract violation — the request-header caps
+// upstream (URL ≤ 8 KiB, per-header ≤ 8 KiB) make it unreachable
+// today, and silently truncating would ship a corrupted origin URI if
+// those caps are ever relaxed. Rejected, so the caller fails the
+// request construction instead.
+func putLPString(dst []byte, s string) ([]byte, bool) {
+	if len(s) > maxStringLen {
+		return dst, false
 	}
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(n)) //nolint:gosec // clamped above
-	return append(dst, s[:n]...)
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(s))) //nolint:gosec // bounded above
+	return append(dst, s...), true
 }
 
 // acquireSlot takes one slot from sem with a bounded wait: the happy
@@ -828,7 +855,7 @@ func (f *PeerFetcher) recordPeerMiss(req api.PeerFetchRequest, peer api.PeerInfo
 // miss instead of another variant's body. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
 //
-//nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
+//nolint:gocyclo,funlen // one linear miss path: hop/error/decode branches, request build, breaker, queue, pipeline, decode
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
 	if req.Hops >= f.hopLimit {
 		f.hopLimitHits.Add(1)
@@ -839,7 +866,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	httpReq := buildPeerRequest(peer, req)
+	httpReq, err := buildPeerRequest(peer, req)
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch %s: %w", peerAddr(peer), err)
+	}
 	defer fasthttp.ReleaseRequest(httpReq)
 
 	addr := peerAddr(peer)
@@ -1230,6 +1260,14 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 		}
 		h.logger.Info("coalesced fetch failed",
 			"key", req.Key, "route", req.Route, "error", err)
+		// A lane shed answers 503 + Retry-After (the origin was never
+		// contacted; the waiter should retry or fall back shortly);
+		// every other failure is the 502 of a failed origin flight.
+		if errors.Is(err, ErrCoalesceShed) {
+			ctx.Error("coalesced fetch shed", fasthttp.StatusServiceUnavailable)
+			ctx.Response.Header.Set("Retry-After", "1")
+			return true
+		}
 		ctx.Error("coalesced fetch failed", fasthttp.StatusBadGateway)
 		return true
 	}
@@ -1261,7 +1299,9 @@ func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.
 		if h.metrics != nil {
 			h.metrics.IncCoalescedShed()
 		}
-		ctx.Error("coalesced fetch shed", fasthttp.StatusServiceUnavailable)
+		// No response here: handleCoalesce is the single writer, so the
+		// shed can surface its 503 + Retry-After instead of being
+		// overwritten by the caller's 502.
 		return nil, err
 	}
 	defer func() { <-h.coalesceSem }()
@@ -1304,7 +1344,7 @@ func (h *PeerFetchHandler) acquireCoalesceSlot(ctx *fasthttp.RequestCtx) error {
 	case h.coalesceSem <- struct{}{}:
 		return nil
 	case <-timer.C:
-		return fmt.Errorf("coalesced fetch queue wait exceeded %s", coalesceShedWait)
+		return fmt.Errorf("coalesced fetch queue wait exceeded %s: %w", coalesceShedWait, ErrCoalesceShed)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

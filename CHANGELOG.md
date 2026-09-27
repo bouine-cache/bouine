@@ -12,6 +12,18 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Coalesced origin shield: HEAD no longer poisons the store, and
+  `Authorization` is forwarded** (review of PR #731). A HEAD-triggered
+  coalesced fetch used to replay the origin request with HEAD and store
+  the empty body under the (HEAD→GET-canonicalized) cache key, so later
+  GETs on the owner — and on backfilling waiters — served an empty
+  body; HEAD is now canonicalized to GET everywhere the local miss path
+  canonicalizes it, and the waiter suppresses the body at write time.
+  The `OriginRequest` envelope now also forwards `Authorization`: the
+  local path sends it, and dropping it made the owner fetch
+  unauthenticated and negatively cache the wrong answer on routes that
+  opt into caching authorized responses (`Cache-Control: public`).
+
 - **Origin-fetch spans now join the client trace** (CCC-32). On the
   miss, revalidate, invalidating-proxy, bypass, and streaming paths,
   the `bouine.origin` span is parented on the request's
@@ -41,6 +53,29 @@ the curated, human-readable summary.
   now all live in one place.
 
 ### Added
+
+- **Cluster-coordinated origin shield** (`cluster.peer_fetch_coalesce`,
+  strong mode, default off; ADR-0051). The flag governs both sides of
+  the RPC: a node with it off neither sends coalesced peer-fetches nor
+  serves them for waiters. On a cold key the consistent-hash
+  owner drives its own collapsed origin fetch on behalf of peer
+  waiters, so a mass purge, deploy, or TTL expiry costs one origin
+  request for the whole cluster instead of one per node. Peer-fetch
+  wire v3 (v2 body + flags byte + `OriginRequest` envelope); v2 owners
+  reject it at the version byte and waiters fall back to origin, so a
+  rolling deploy degrades per node with no flag flips. Waiters wait at
+  most `api.CoalesceFetchTimeout` (30s) and any failure falls back to
+  their own origin fetch. The coalesced lane runs on dedicated pipeline
+  clients and a bounded semaphore so a slow origin cannot stall peer
+  cache HITs, and is exempt from the peer breaker.
+  `cluster.peer_fetch_backfill_probability` (default 1.0, 0.0 = strict
+  owner-only partition per issue #509) controls whether waiters also
+  store the coalesced object locally, with bounds validation in
+  `config.Validate`. New metrics: `bouine_coalesced_fetch_total`
+  (role: owner/waiter/failure/fallback),
+  `bouine_coalesced_fetch_shed_total`,
+  `bouine_origin_requests_saved_total`, and
+  `bouine_coalesced_fetch_duration_seconds`.
 
 - `routes[].cache.negative_ttl` now accepts a per-status map, mirroring
   Cloudflare's "Cache TTL by status code": `negative_ttl: {404: 1m,

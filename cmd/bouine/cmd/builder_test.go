@@ -1943,6 +1943,56 @@ func TestSwapAdminHandler(t *testing.T) {
 	e.swapAdminHandler(ctx, rs, minimalAdmin, nil, nil)
 }
 
+// TestSwapAdminHandler_SoloCoalescedRPC is the solo-node regression for
+// the coalesced peer-fetch wiring: a deployment without a cluster node
+// must answer a coalesced v3 RPC (reachable on the admin port, which
+// exempts /v1/peer/fetch from the token) without panicking — the owner
+// check used to be bound to a nil cluster receiver and dereferenced on
+// the first coalesced RPC, turning every such RPC into a 500.
+func TestSwapAdminHandler_SoloCoalescedRPC(t *testing.T) {
+	t.Parallel()
+	metrics := observability.NewMetrics()
+	e := &engine{
+		cfg:     &config.Config{Listen: config.Listen{Admin: "127.0.0.1:0"}},
+		logger:  newTestLogger(),
+		metrics: metrics,
+	}
+	seq := shutdown.NewSequencer(newTestLogger())
+	rs, _, err := e.initSubsystems(context.Background(), seq)
+	require.NoError(t, err)
+	minimalAdmin := admin.New(admin.Config{
+		Addr:   "127.0.0.1:0",
+		Logger: newTestLogger(),
+	})
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.swapAdminHandler(sctx, rs, minimalAdmin, nil, nil)
+
+	// Handcrafted v3 coalesced body: version 3, 16-byte key, empty
+	// VaryKey, coalesce flag, then the LP-encoded route/method/URI/host
+	// and a zero header count (mirrors encodePeerFetchBody's v3 layout).
+	key := cache.BuildKeyFromURL("https://example.com/solo", nil)
+	body := []byte{3}
+	body = append(body, key[:]...)
+	body = append(body, 0, 1)
+	for _, s := range []string{"assets", fasthttp.MethodGet, "/", "o"} {
+		body = append(body, byte(len(s)), 0)
+		body = append(body, s...)
+	}
+	body = append(body, 0, 0)
+
+	handler := minimalAdmin.Handler()
+	require.NotPanics(t, func() {
+		reqCtx := &fasthttp.RequestCtx{}
+		reqCtx.Request.Header.SetMethod(fasthttp.MethodPost)
+		reqCtx.Request.SetRequestURI("/v1/peer/fetch")
+		reqCtx.Request.SetBody(body)
+		handler(reqCtx)
+		assert.NotEqual(t, fasthttp.StatusInternalServerError, reqCtx.Response.StatusCode(),
+			"a coalesced RPC on a solo node must be answered (404), not panicked into a 500")
+	})
+}
+
 func TestStartBackgroundTasks_WithWarmMetrics(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

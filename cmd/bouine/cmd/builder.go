@@ -377,7 +377,12 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		if rs.routeFetchers != nil {
+		// routeFetchers backs ONLY the coalesced peer-fetch handler
+		// (handleCoalesce resolves the owning route through it), so
+		// register it only when this node serves coalesced RPCs — a
+		// node with peer_fetch_coalesce: false must not coalesce for
+		// waiters either, or the flag would not describe the node.
+		if rs.routeFetchers != nil && coalesceEnabled(e, rs) {
 			rs.routeFetchers[rc.Name] = cached
 		}
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
@@ -399,6 +404,9 @@ func applyCoalesceConfig(cfg *cache.HandlerConfig, e *engine, rs *runState, rout
 	cfg.PeerBackfillProbability = resolveBackfillProbability(e.cfg.Cluster.PeerFetchBackfillProbability)
 	cfg.OnCoalescedSaved = func() {
 		rs.clusterMetrics.IncCoalescedFetch("waiter")
+	}
+	cfg.OnCoalescedFallback = func() {
+		rs.clusterMetrics.IncCoalescedFetch("fallback")
 	}
 }
 
@@ -548,11 +556,22 @@ func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner 
 	return ownerFn, peerFetch
 }
 
+// coalesceEnabled reports whether this node runs the origin shield,
+// requester side AND owner side (cluster.peer_fetch_coalesce, strong
+// mode): a node with the flag off neither sends coalesced peer-fetches
+// nor serves them for waiters, so the flag always describes the node
+// it is set on.
+func coalesceEnabled(e *engine, rs *runState) bool {
+	return rs.peerFetcher != nil &&
+		e.cfg.Cluster.Mode == config.ClusterModeStrong &&
+		e.cfg.Cluster.PeerFetchCoalesce
+}
+
 // clusterCoalesceClosure builds the origin-shield closure for one route
 // (strong mode + cluster.peer_fetch_coalesce only): a coalesced
 // peer-fetch carrying the OriginRequest envelope. nil when disabled.
 func clusterCoalesceClosure(e *engine, rs *runState, routeName string) func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error) {
-	if rs.peerFetcher == nil || e.cfg.Cluster.Mode != config.ClusterModeStrong || !e.cfg.Cluster.PeerFetchCoalesce {
+	if !coalesceEnabled(e, rs) {
 		return nil
 	}
 	return func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error) {

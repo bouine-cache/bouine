@@ -688,6 +688,14 @@ func (h *Handler) rewriteRequestCtx(ctx *fasthttp.RequestCtx) {
 // identity: the header is removed rather than set to "identity" — some
 // origins treat a bare identity token as "client explicitly refuses
 // compression" and add Vary noise; removal is the absence signal.
+//
+// Accept-Language gets the same pairing treatment (plan §10.4): the
+// bucket claims one variant, so the origin must see one spelling per
+// bucket — the winner tag — or a chain-echoing origin stores
+// chain-dependent bodies under a single bucket. Unbucketable chains
+// (absent, "*", malformed, all q=0) are left untouched: they key via
+// the legacy normalization and their origin spelling is what the
+// legacy keying already saw.
 func (h *Handler) rewriteOutboundAE(hdr *fasthttp.RequestHeader) {
 	if h.policy.verbatimEncoding() {
 		return
@@ -695,9 +703,12 @@ func (h *Handler) rewriteOutboundAE(hdr *fasthttp.RequestHeader) {
 	bucket := encodingBucket(string(hdr.Peek(header.AcceptEncoding)))
 	if bucket == "identity" {
 		hdr.Del(header.AcceptEncoding)
-		return
+	} else {
+		hdr.Set(header.AcceptEncoding, bucket)
 	}
-	hdr.Set(header.AcceptEncoding, bucket)
+	if lang, ok := langBucket(string(hdr.Peek(header.AcceptLanguage))); ok {
+		hdr.Set(header.AcceptLanguage, lang)
+	}
 }
 
 // applyResponseRewrites mutates a client-facing response in place with

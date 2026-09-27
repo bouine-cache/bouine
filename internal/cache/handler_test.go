@@ -4550,14 +4550,21 @@ func TestIncludeHeaders_OriginNoVary(t *testing.T) {
 	require.Equal(t, "HIT", respHeader(rNone2, header.XCache))
 	require.Equal(t, "lang=", respBody(rNone2))
 
-	// "en, FR" and "fr, en" collapse onto the en/fr-normalized variant
-	// order: isListValuedVaryField normalizes Accept-Language for keying.
+	// Accept-Language bucketing (plan §10): "en, FR" ties at top
+	// weight, the bucket is the lexicographic winner ("en"), and the
+	// outbound rewrite hands the origin the winner tag — so the
+	// chain-spelling variants collapse onto the en bucket AND the
+	// origin sees one spelling per bucket.
 	rA := serve("en, FR")
-	require.Equal(t, "MISS", respHeader(rA, header.XCache))
-	require.Equal(t, "lang=en, FR", respBody(rA))
+	require.Equal(t, "HIT", respHeader(rA, header.XCache), `"en, FR" must hit the "en" bucket variant`)
+	require.Equal(t, "lang=en", respBody(rA), "origin must receive the winner tag, not the raw chain")
 	rB := serve("FR, en")
-	require.Equal(t, "HIT", respHeader(rB, header.XCache), `"FR, en" must hit the "en, FR" variant`)
-	require.Equal(t, "lang=en, FR", respBody(rB))
+	require.Equal(t, "HIT", respHeader(rB, header.XCache), `"FR, en" must hit the same "en" bucket variant`)
+	require.Equal(t, "lang=en", respBody(rB))
+	// A distinct winner fills its own variant.
+	rC := serve("de;q=1.0, fr;q=0.5")
+	require.Equal(t, "MISS", respHeader(rC, header.XCache))
+	require.Equal(t, "lang=de", respBody(rC))
 
 	require.Equal(t, int32(4), originCalls.Load(), "en, fr, empty and en-FR variants fetch once each")
 }

@@ -111,6 +111,44 @@ Two structural constraints shaped the decision:
 - Origins that key anything on the literal AE string (rare, and
   indistinguishable from an origin bug) need `verbatim_encoding: true`.
 
+## Follow-up: Accept-Language bucketing (layer 1, same PR series)
+
+The same negotiation-outcome model extends to `Vary: Accept-Language`
+(docs/plans/accept-encoding-bucketing.md §10), where fragmentation is
+worse: browsers send full q-cascades, so a route serving N locales
+stores one variant per distinct chain spelling while the origin only
+ever produces 5-15 distinct representations.
+
+- `langBucket` selects the highest-weight tag, lowercased, subtag
+  preserved. Ties resolve **lexicographically** — unlike AE's closed
+  four-coding set (where ties could be policy-ranked toward br), AL's
+  tag set is open, so the tie rule must be a pure function of the
+  candidate set or fill and lookup disagree across spellings. The
+  rule is pinned by a permutation test (`TestLangBucket_Order
+  Independence`).
+- Unbucketable chains (absent, `*`, malformed, all q=0) fall back to
+  the legacy sorted-string key — degenerate values keep today's
+  keying exactly, so there is no config surface. A `verbatim_lang`
+  escape hatch is the designated "max one more" field if a real
+  population ever needs it; none has asked.
+- Subtags and scripts do NOT collapse in layer 1 (`en-US` vs `en-GB`):
+  merging them would serve region-variant bodies from origins that
+  key on subtags. Collapse beyond the winner tag is the
+  Content-Language-anchored layer 2 (deferred, separate PR).
+- The outbound pairing rule applies exactly as AE's does
+  (`rewriteOutboundAE` sets the winner tag on every fill): the
+  original §10.4 draft claimed no rewrite was needed and a pinning
+  test (`TestIncludeHeaders_OriginNoVary`'s chain-echoing upstream)
+  disproved it — chain-echoing origins would store chain-dependent
+  bodies under one bucket.
+- Conformance: this is the behavior the upstream suite specifies in
+  `vary-normalise-lang-select` (kind: optimal); the test flipped
+  fail→pass with zero regressions elsewhere (order/case/space still
+  green).
+- Cost: 3 allocs/40B on the AL hot path versus the legacy sort's
+  6 allocs/168B (the winner is lowercased once; comparisons are
+  allocation-free ASCII folds).
+
 ## Alternatives considered
 
 - **Sort-only normalization (status quo)**: leaves the

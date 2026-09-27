@@ -33,6 +33,20 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **`Accept-Language` variants now key by negotiated language**
+  (ADR-0051 follow-up, plan §10). The highest-weight tag — subtag
+  preserved, ties resolved lexicographically — replaces the raw chain
+  in the variant key, and origin-bound requests carry the winner tag,
+  so q-cascade spellings that select the same language share one
+  stored variant instead of fragmenting one per spelling. Subtags
+  (en-US vs en-GB) deliberately do not collapse. Unbucketable chains
+  (absent, `*`, malformed, all q=0) keep the legacy keying. This is
+  the behavior the upstream cache-tests suite specifies in
+  `vary-normalise-lang-select` (kind: optimal); the test flipped
+  fail→pass with zero regressions (order/case/space stay green).
+  Variant-key hot path: 3 allocs vs the legacy 6. Zero new config
+  fields.
+
 - **Origin-fetch spans now join the client trace** (CCC-32). On the
   miss, revalidate, invalidating-proxy, bypass, and streaming paths,
   the `bouine.origin` span is parented on the request's

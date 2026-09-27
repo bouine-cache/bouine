@@ -78,3 +78,4 @@ field to `Superseded by ADR-NNNN`.
 | 0047   | Changelog automation                                | Accepted |
 | 0048   | kubeconform validation of rendered Helm templates   | Accepted |
 | 0049   | PurgeEvent.VaryKey is metadata; receivers purge the primary key and all variants | Accepted |
+| 0051   | Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding | Accepted |

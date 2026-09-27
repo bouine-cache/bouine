@@ -2,6 +2,7 @@ package cache
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/valyala/fasthttp"
@@ -147,7 +148,7 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
-		val := normalizeHeaderValue(src.getValue(f))
+		val := varyHeaderValue(f, src.getValue(f), policy)
 		needed := len(f) + 1 + len(val) + 1 // f=val;
 		if off+needed > len(buf) {
 			// Buffer overflow — fall back to alloc path.
@@ -195,7 +196,7 @@ func variantKeySlow(primary api.Key, vary string, reqHeader header.Map, policy *
 		}
 		_, _ = h.WriteString(f)
 		_, _ = h.WriteString("=")
-		val := normalizeHeaderValue(reqHeader.Get(f))
+		val := varyHeaderValue(f, reqHeader.Get(f), policy)
 		_, _ = h.WriteString(val)
 		_, _ = h.WriteString(";")
 		written = true
@@ -219,4 +220,143 @@ func normalizeHeaderValue(v string) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
+}
+
+// varyHeaderValue normalizes one Vary-nominated request header value
+// for the variant-key lookup hash (variantKeyCore / variantKeySlow —
+// the paths behind VariantKey, VariantKeyFast, VariantKeyFromRaw).
+//
+// Accept-Encoding is bucketed by encodingBucket unless the policy pins
+// verbatim (verbatim_encoding: true) — docs/plans/
+// accept-encoding-bucketing.md §3.2, ADR-0051. Every other field keeps
+// this path's legacy lowercase+sort normalization (RFC 9111 §4.1
+// permits normalizing "in a way that is known to have identical
+// semantics"; the pre-bucketing behavior lowercased all values).
+//
+// NOTE: this is deliberately NOT the same dispatch as
+// varyAssertionValue (key.go) — the two paths had different non-AE
+// semantics before bucketing (this one normalized every field, the
+// assertion path only the four list-valued headers) and changing
+// either would silently rekey every stored variant on routes with
+// custom Vary headers. Only the AE rule is shared, and it is pinned
+// identical across both by TestVaryKeyEncodingBucket_ParityAcrossPaths.
+func varyHeaderValue(field, value string, policy *KeyPolicy) string {
+	if field == "accept-encoding" && !policy.verbatimEncoding() {
+		return encodingBucket(value)
+	}
+	return normalizeHeaderValue(value)
+}
+
+// encodingBucket reduces an Accept-Encoding field value (RFC 9110
+// §12.5.3) to the single content coding bouine negotiates with the
+// origin: "zstd", "br", "gzip", or "identity".
+//
+// This is the bucketing docs/architecture.md §3.3 documents. RFC 9111
+// §4.1 permits normalizing a Vary-nominated header "in a way that is
+// known to have identical semantics"; the bucket is the negotiation
+// outcome, not the token set — "gzip, deflate, br" and "br, gzip" both
+// produce "br", so one stored variant serves both request populations.
+//
+// Selection: the highest-weight coding among {zstd, br, gzip} wins
+// (ties broken zstd > br > gzip, the coding-quality order). A weight
+// of 0 excludes (RFC 9110 §12.5.3). deflate, identity, and unknown
+// tokens contribute nothing: the bucket set is exactly the codings
+// bouine re-serves verbatim, and the origin-bound request carries the
+// canonical token (rewriteOutboundAE), so an origin that cannot
+// produce the coding falls back to identity for the whole bucket —
+// consistent bytes, never a Content-Encoding the bucket cannot honor.
+//
+// Absent, empty, or all-excluded input yields "identity" rather than a
+// 406: bouine is a cache, not a negotiator; operators needing strict
+// 406 semantics can exclude the header from the key instead.
+//
+// Zero-allocation: the value is scanned in place. Malformed weights
+// parse as far as the well-formed prefix and a fully malformed value
+// yields "identity"; parsing never fails outward.
+func encodingBucket(v string) string {
+	// bestRank tracks the winning coding's position in the bucket
+	// order; bestQ is the best weight seen. -1/-1 means nothing
+	// acceptable was found yet, which falls through to "identity".
+	bestRank, bestQ := -1, float64(-1)
+	for rest := strings.TrimSpace(v); rest != ""; {
+		var item string
+		item, rest, _ = strings.Cut(rest, ",")
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		// Split "coding[;q=weight]" — the weight parameter is the
+		// only parameter Accept-Encoding defines (RFC 9110 §12.5.3).
+		coding, params, _ := strings.Cut(item, ";")
+		coding = strings.ToLower(strings.TrimSpace(coding))
+		rank, ok := aeRank(coding)
+		if !ok {
+			continue
+		}
+		q := 1.0 // absent weight = 1 (RFC 9110 §5.2.1 default)
+		if params != "" {
+			if qv, ok := parseAEWeight(params); ok {
+				q = qv
+			}
+		}
+		// RFC 9110 §12.5.3: a weight of 0 means "not acceptable" —
+		// the coding is excluded from selection entirely, it must not
+		// win on a q=0 > initial -1 comparison.
+		if q <= 0 {
+			continue
+		}
+		// Strictly-better wins: higher weight, or equal weight at a
+		// better rank (zstd > br > gzip). Rank ties keep the first
+		// token; any of them names the same bucket, so order is moot.
+		if q > bestQ || (q == bestQ && rank > bestRank) {
+			bestRank, bestQ = rank, q
+		}
+	}
+	switch bestRank {
+	case 3:
+		return "zstd"
+	case 2:
+		return "br"
+	case 1:
+		return "gzip"
+	default:
+		return "identity"
+	}
+}
+
+// aeRank maps a content-coding token to its position in the bucket
+// order (zstd > br > gzip). ok=false for every other coding — deflate,
+// identity, and unknown tokens do not participate in bucketing; the
+// bucket set is exactly the codings bouine re-serves verbatim.
+func aeRank(coding string) (rank int, ok bool) {
+	switch coding {
+	case "zstd":
+		return 3, true
+	case "br":
+		return 2, true
+	case "gzip":
+		return 1, true
+	}
+	return 0, false
+}
+
+// parseAEWeight extracts the q parameter from an Accept-Encoding item's
+// parameter list (";q=0.5" or "; q=0.5"). ok=false for a missing or
+// malformed weight; the caller keeps the RFC default of 1.
+func parseAEWeight(params string) (float64, bool) {
+	for rest := params; rest != ""; {
+		var p string
+		p, rest, _ = strings.Cut(rest, ";")
+		p = strings.TrimSpace(p)
+		if len(p) < 2 || !strings.EqualFold(p[:2], "q=") {
+			continue
+		}
+		// RFC 9110 §5.2.1: weight is 0-4 digits "." 0-3 digits.
+		q, err := strconv.ParseFloat(strings.TrimSpace(p[2:]), 64)
+		if err != nil || q < 0 {
+			return 0, false
+		}
+		return q, true
+	}
+	return 0, false
 }

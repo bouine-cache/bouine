@@ -14,11 +14,14 @@ the curated, human-readable summary.
 
 - **Accept-Encoding now keys variants by negotiation bucket**
   (ADR-0051). The header value is reduced to the coding bouine
-  negotiates (`zstd | br | gzip`, highest q-value wins, `q=0`
-  excludes; absent or no acceptable coding -> `identity`), and
+  negotiates (`br | zstd | gzip`, highest q-value wins with ties
+  preferring br — the sharing-maximizing order — `q=0` excludes;
+  absent or no acceptable coding -> `identity`), and
   origin-bound requests carry the canonical bucket token instead of
-  the client's raw dialect. Six realistic browser AE dialects that
-  previously produced six distinct stored variants now share two.
+  the client's raw dialect. A resource's variant count becomes the
+  number of distinct negotiated codings (at most four) instead of the
+  number of header spellings; in particular every br-capable
+  browser — zstd spelling or not — shares one stored variant.
   This finally implements the behavior `docs/architecture.md` §3.3
   has claimed since v1.0. Expect a one-TTL miss-rate step on
   `Vary: Accept-Encoding` routes after upgrading (old variant keys

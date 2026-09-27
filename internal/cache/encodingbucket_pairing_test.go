@@ -51,14 +51,14 @@ func TestVaryKeyEncodingBucket_ParityAcrossPaths(t *testing.T) {
 		require.NotEmpty(t, bvk, "peer-gate hex empty for %s", d.name)
 	}
 
-	// All br-negotiating dialects collapse to one variant key; the
-	// zstd dialect is distinct.
+	// All br-capable dialects — including the zstd spelling, since
+	// equal weights tie-break br — collapse to one variant key.
 	brKeys := map[string]bool{}
 	for _, d := range dialects {
 		hm := headerMap(header.AcceptEncoding, d.ae)
 		brKeys[VariantKey(primary, "Accept-Encoding", hm, nil).String()] = true
 	}
-	require.Equal(t, 2, len(brKeys), "expected br and zstd buckets only, got %v", brKeys)
+	require.Equal(t, 1, len(brKeys), "all br-capable dialects must share one bucket, got %v", brKeys)
 }
 
 // TestVaryKeyEncodingBucket_Verbatim restores the pre-bucketing key when

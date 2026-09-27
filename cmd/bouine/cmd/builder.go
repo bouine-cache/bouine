@@ -36,7 +36,11 @@ import (
 // increment over-budget, eviction, and compaction counters inline.
 // walMetrics, when non-nil, is injected into the WAL log so it can
 // record write duration, queue depth, and write count metrics.
-func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) (storage.Store, error) {
+// pools, when non-empty, arms the TTL reaper's stayin_alive grace gate
+// (ADR-0051): graced entries are reaped only while their origin pool
+// still has a healthy target. An empty map leaves the gate unset —
+// the store reaps every expired entry (historical behavior).
+func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics, pools map[string]*origin.Pool) (storage.Store, error) {
 	hotAlgo := e.cfg.Storage.HotEvictionAlgorithm
 	if hotAlgo == "" {
 		hotAlgo = e.cfg.Storage.EvictionAlgorithm
@@ -50,6 +54,9 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 		Slab:                 e.cfg.Storage.HotMmapSlab,
 		HotEvictionAlgorithm: hotAlgo,
 		BanTTL:               e.cfg.Cluster.BanTTL,
+	}
+	if len(pools) > 0 {
+		hotCfg.MayReap = mayReapDecider(pools)
 	}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
@@ -72,6 +79,26 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 		WarmMetrics:            warmMetrics,
 		WALMetrics:             walMetrics,
 	})
+}
+
+// mayReapDecider builds the HotStore's TTL-reaper grace gate
+// (ADR-0051). An expired KeepGrace entry may be reaped only while the
+// route's origin pool can still refill a miss; when every target is
+// ejected the entry is held so the stayin_alive route keeps serving
+// stale through the outage. Ungraced entries, unknown pools (and
+// pool-less routes, whose Pool stamp is empty) always reap — grace
+// cannot engage without a resolvable health signal.
+func mayReapDecider(pools map[string]*origin.Pool) func(obj *api.Object) bool {
+	return func(obj *api.Object) bool {
+		if !obj.KeepGrace {
+			return true
+		}
+		p, ok := pools[obj.Pool]
+		if !ok {
+			return true
+		}
+		return p.HasHealthyTarget()
+	}
 }
 
 // buildCluster initialises the gossip cluster node from the Listen and Cluster

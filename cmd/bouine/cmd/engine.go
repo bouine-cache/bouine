@@ -278,7 +278,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		warmMetrics = warm.RegisterMetrics(e.metrics.Registry)
 		walMetrics = wal.RegisterMetrics(e.metrics.Registry)
 	}
-	store, err := e.buildStore(warmMetrics, walMetrics)
+	store, err := e.buildStore(warmMetrics, walMetrics, pools)
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -517,6 +517,7 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 		defer ticker.Stop()
 		var lastEvictions int64
 		var lastWarmSelfHeals int64
+		var lastGraceHolds int64
 		for {
 			select {
 			case <-rCtx.Done():
@@ -531,6 +532,10 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 					rs.dpMetrics.HotStoreEvictions.Add(float64(delta))
 					lastEvictions = s.Evictions
 				}
+				// Grace holds: delta-added like evictions above. Non-zero
+				// during an origin outage on stayin_alive routes (ADR-0051).
+				// Extracted to keep startBackgroundTasks' complexity flat.
+				updateReaperGraceHoldMetric(rs.dpMetrics, s, &lastGraceHolds)
 				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
 				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
 				// Warm-tier disk-pressure gauge: disk_bytes reflects total
@@ -601,6 +606,17 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 			}
 		}
 	})
+}
+
+// updateReaperGraceHoldMetric delta-adds the reaper grace-hold counter
+// from a Stats snapshot (ADR-0051), updating the caller's last-seen
+// value. Extracted from startBackgroundTasks so the poll loop's
+// complexity stays flat.
+func updateReaperGraceHoldMetric(m *observability.DataPlaneMetrics, s api.Stats, last *int64) {
+	if d := s.ReaperGraceHolds - *last; d > 0 {
+		m.HotStoreReaperGraceHolds.Add(float64(d))
+		*last = s.ReaperGraceHolds
+	}
 }
 
 // sanitizedConfig returns a deep copy of the config with secret fields

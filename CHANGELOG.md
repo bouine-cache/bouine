@@ -42,6 +42,27 @@ the curated, human-readable summary.
 
 ### Added
 
+- **stayin_alive grace retention** (ADR-0051). The TTL reaper no longer
+  deletes expired entries from `stayin_alive` routes while the route's
+  origin pool has no healthy target — the route's
+  serve-stale-while-outage promise now survives outages longer than
+  `TTL + stale_while_revalidate + stale_if_error` (previously the
+  reaper deleted the stale copies one reaper tick after the freshness
+  horizon, breaking the promise mid-outage). When the pool has a
+  healthy target again, the next reaper pass collects everything on
+  the normal schedule. Objects carry `keep_grace` + `pool` stamps
+  (additive wire fields); graced fills are eagerly warm-backed
+  regardless of `body_threshold`, so hot SIEVE pressure demotes them
+  to a recoverable warm copy instead of deleting them. New metric:
+  `bouine_hot_store_reaper_grace_holds_total`. Full protection
+  requires the pool to have passive
+  (`health.passive.consecutive_5xx`) or active health checks
+  configured. Related fix: the cache-path fetch client now records
+  passive health (consecutive connection errors / 5xx eject, success
+  resets) exactly like the proxy path, so pool ejection — and
+  fail-fast picks once all targets are ejected — finally works on
+  cached routes.
+
 - `routes[].cache.negative_ttl` now accepts a per-status map, mirroring
   Cloudflare's "Cache TTL by status code": `negative_ttl: {404: 1m,
   5xx: 10s, 410: 0}`. Keys are a single error status ("404") or a

@@ -43,6 +43,12 @@ type Pool struct {
 	// pool after this delay for idempotent methods; the first response
 	// wins (config connect.hedge_timeout). Zero disables hedging.
 	hedgeTimeout time.Duration
+	// consecutive5xx is the pool's passive-ejection threshold, kept on
+	// the Pool so the cache-path fetch client (FastClient) can record
+	// passive health exactly like the proxy FastHandler path does
+	// (ADR-0051: the ejection signal must be live on cached routes so
+	// grace retention can key on it). Zero disables passive health.
+	consecutive5xx int
 
 	// clientConfig holds the resolved connect settings the shared
 	// client was built with. Kept after the pointer/lock fields to
@@ -306,10 +312,11 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 
 	p := &Pool{
-		Name:         cfg.Name,
-		logger:       cfg.Logger,
-		ejectFor:     cfg.EjectFor,
-		hedgeTimeout: cfg.HedgeTimeout,
+		Name:           cfg.Name,
+		logger:         cfg.Logger,
+		ejectFor:       cfg.EjectFor,
+		hedgeTimeout:   cfg.HedgeTimeout,
+		consecutive5xx: cfg.Consecutive5xx,
 		clientConfig: clientConfig{
 			dialTimeout:           resolveDefault(cfg.DialTimeout, defaultDialTimeout),
 			keepAlive:             resolveDefault(cfg.KeepAlive, defaultKeepAlive),
@@ -599,9 +606,28 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 		connErrReason := classifyConnError(err)
 		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)
 		t.metrics.observeRequestDuration(c.pool.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
+		// Passive health on the cache path (ADR-0051): consecutive
+		// fetch failures eject the target exactly like the proxy
+		// FastHandler path, so the ejection signal — which the
+		// stayin_alive grace gate keys on — is live for cached
+		// routes too, and picks fail fast once every target is out.
+		if c.pool.consecutive5xx > 0 {
+			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "connection error", connErrReason)
+		}
 		return err
 	}
-	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())
+	statusStr := strconv.Itoa(resp.StatusCode())
+	t.metrics.observeRequestDuration(c.pool.Name, t.addr, statusStr, time.Since(originStart).Seconds())
+	// Passive health: eject on consecutive 5xx, reset on success. A
+	// 304 is a success here — a conditional hit means the origin is
+	// alive (it is the revalidation fast path).
+	if c.pool.consecutive5xx > 0 {
+		if resp.StatusCode() >= 500 {
+			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "passive 5xx", statusStr)
+		} else {
+			t.passiveErrors.Store(0)
+		}
+	}
 	return nil
 }
 
@@ -648,6 +674,23 @@ func (c *PoolFastClient) doHedgedFetch(
 		fasthttp.ReleaseResponse(winner)
 	}
 	return nil
+}
+
+// HasHealthyTarget reports whether at least one target is currently
+// healthy — i.e. whether a miss could be refilled from this pool. It is
+// the health signal the stayin_alive grace gate keys on (ADR-0051):
+// while false, expired KeepGrace entries are withheld from the TTL
+// reaper. Zero-alloc (atomic loads only), safe from any goroutine.
+func (p *Pool) HasHealthyTarget() bool {
+	p.mu.RLock()
+	targets := p.targets
+	p.mu.RUnlock()
+	for _, t := range targets {
+		if t.healthy.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // Healthy returns the list of currently healthy target addresses.

@@ -928,7 +928,7 @@ func TestBuildStore_HotOnly(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -942,7 +942,7 @@ func TestBuildStore_WithWarmDir(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -1077,7 +1077,7 @@ func TestCacheCheck_WithStore(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{store: store}
 	result := cacheCheck(context.Background(), "https://example.com/page", rs)
@@ -1120,13 +1120,58 @@ func TestStartHealthChecks_WithActivePath(t *testing.T) {
 	_ = g.Wait()
 }
 
+// TestMayReapDecider pins the ADR-0051 wiring logic: the grace gate
+// holds a graced entry only while its origin pool has no healthy
+// target; unknown pools, pool-less routes, and ungraced objects always
+// reap.
+func TestMayReapDecider(t *testing.T) {
+	t.Parallel()
+	// A pool with one live target and a pool whose only target gets
+	// ejected by consecutive fetch failures (Consecutive5xx: 1).
+	live := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	alive, err := origin.NewPool(origin.PoolConfig{Name: "alive", Targets: []string{live.Addr}, Logger: newTestLogger()})
+	require.NoError(t, err, "NewPool alive")
+
+	deadSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	deadAddr := deadSrv.Addr
+	deadSrv.Close()
+	dead, err := origin.NewPool(origin.PoolConfig{
+		Name:           "dead",
+		Targets:        []string{deadAddr},
+		Consecutive5xx: 1,
+		Logger:         newTestLogger(),
+	})
+	require.NoError(t, err, "NewPool dead")
+	// One failed fetch ejects the only target (threshold 1).
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.Header.SetMethod("GET")
+	req.SetRequestURI("/x")
+	_ = dead.FastClient().Do(context.Background(), req, resp)
+	fasthttp.ReleaseRequest(req)
+	fasthttp.ReleaseResponse(resp)
+	require.False(t, dead.HasHealthyTarget(), "dead pool must have no healthy target")
+
+	mayReap := mayReapDecider(map[string]*origin.Pool{"alive": alive, "dead": dead})
+
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: "alive"}), "healthy pool: graced entry must be reaped")
+	require.False(t, mayReap(&api.Object{KeepGrace: true, Pool: "dead"}), "unhealthy pool: graced entry must be held")
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: "missing"}), "unknown pool: grace cannot resolve, must reap")
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: ""}), "pool-less route: must reap")
+	require.True(t, mayReap(&api.Object{KeepGrace: false, Pool: "dead"}), "ungraced entry: must reap regardless")
+}
+
 func TestBuildInvalidationOps_Purge(t *testing.T) {
 	t.Parallel()
 	e := &engine{
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1143,7 +1188,7 @@ func TestBuildInvalidationOps_Ban(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1161,7 +1206,7 @@ func TestBuildInvalidationOps_Refresh(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1178,7 +1223,7 @@ func TestPurgeKey_WithHandler(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	handler := cache.NewHandler(cache.HandlerConfig{
 		Upstream: func(ctx *fasthttp.RequestCtx) {},
@@ -1201,7 +1246,7 @@ func TestBuildStore_WithEvictionAlgo(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -1224,7 +1269,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1245,7 +1290,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{
@@ -1268,7 +1313,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1287,7 +1332,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1313,7 +1358,7 @@ func TestBuildRouter_WithStaticRoute(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	metrics := origin.RegisterMetrics(observability.NewMetrics().Registry)
 	rs := &runState{
@@ -1336,7 +1381,7 @@ func TestBuildRouter_WithMissingPool(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:     store,
@@ -1366,7 +1411,7 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1410,7 +1455,7 @@ func TestBuildRouter_StripPrefixWired(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1464,7 +1509,7 @@ func TestBuildRouter_PathRewriteWired(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1574,7 +1619,7 @@ func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1612,7 +1657,7 @@ func TestBuildStaticRoute_CachedPathRewriteAppliedOnce(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "y", "y", "f"), []byte("twice"), 0o600))
 
 	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
@@ -1655,7 +1700,7 @@ func TestBuildStaticRoute_CachedStripPrefixAppliedOnce(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("twice"), 0o600))
 
 	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
@@ -1753,7 +1798,7 @@ func TestStartBackgroundTasks(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rings, snap := e.initRings()
 	rs := &runState{
@@ -2009,7 +2054,7 @@ func TestCacheCheck_WithStoredObject(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rawURL := "https://example.com/page"
 	key := cache.BuildKeyFromURL(rawURL, nil)
@@ -2061,7 +2106,7 @@ func TestPurgeKey_WithMatchingHandler(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	key := cache.BuildKeyFromURL("https://example.com/test", nil)
 	obj := &api.Object{
@@ -2253,7 +2298,7 @@ func TestPurgeKey_IgnoresPurgeEventVaryKey(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 
 	orig := func(ctx *fasthttp.RequestCtx) {

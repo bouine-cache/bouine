@@ -117,6 +117,81 @@ func TestPassiveHealth_DisabledDoesNotZeroCounters(t *testing.T) {
 	require.Equal(t, int64(42), got)
 }
 
+// TestPassiveHealth_FastClientEjectsOnConsecutiveErrors pins ADR-0051's
+// enabling fix: the cache-path fetch client (PoolFastClient, used by
+// every cached route) records passive health exactly like the proxy
+// FastHandler path, so consecutive connection errors eject the target
+// and HasHealthyTarget reflects the outage that grace retention keys
+// on. Without this the ejection signal is dead on cached routes and
+// grace can never engage.
+func TestPassiveHealth_FastClientEjectsOnConsecutiveErrors(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	addr := srv.Addr
+	srv.Close()
+
+	p, err := NewPool(PoolConfig{
+		Name:           "test",
+		Targets:        []string{addr},
+		Consecutive5xx: 3,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err, "NewPool")
+	fc := p.FastClient()
+
+	require.True(t, p.HasHealthyTarget(), "fresh pool must have a healthy target")
+
+	for i := range 3 {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		req.Header.SetMethod("GET")
+		req.SetRequestURI("/x")
+		err := fc.Do(context.Background(), req, resp)
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+		require.Error(t, err, "fetch %d against a dead target must fail", i)
+	}
+
+	require.False(t, p.HasHealthyTarget(), "consecutive fetch failures must eject the target")
+}
+
+// TestPassiveHealth_FastClientResetsOnSuccess pins the reset half of the
+// FastClient passive-health contract: a successful fetch zeroes the
+// consecutive-error counter so a single flapping failure does not
+// accumulate toward ejection.
+func TestPassiveHealth_FastClientResetsOnSuccess(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	defer srv.Close()
+
+	p, err := NewPool(PoolConfig{
+		Name:           "test",
+		Targets:        []string{srv.Addr},
+		Consecutive5xx: 3,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err, "NewPool")
+	fc := p.FastClient()
+	p.targets[0].passiveErrors.Store(2)
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.Header.SetMethod("GET")
+	req.SetRequestURI("/x")
+	err = fc.Do(context.Background(), req, resp)
+	fasthttp.ReleaseRequest(req)
+	fasthttp.ReleaseResponse(resp)
+	require.NoError(t, err, "fetch against live target")
+
+	require.Equal(t, int64(0), p.targets[0].passiveErrors.Load(),
+		"successful fetch must reset the passive error counter")
+	require.True(t, p.HasHealthyTarget())
+}
+
 func TestMarkHealthy_CAS(t *testing.T) {
 	t.Parallel()
 	bad := fivexxServer(t)

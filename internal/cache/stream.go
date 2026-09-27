@@ -1041,7 +1041,7 @@ func (h *Handler) storeStreamedObject(
 	res fetchResult,
 	resMap header.Map,
 ) *api.Object {
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 	h.storeObject(ctx, key, obj, ri, false, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj

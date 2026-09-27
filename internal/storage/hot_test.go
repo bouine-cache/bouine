@@ -147,10 +147,15 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 	// 4 shards, 4096 bytes total = 1024 per shard.
 	s := NewHotStore(HotConfig{MaxBytes: 4096, NumShards: 4})
 
-	// Insert objects until eviction must have happened.
+	// Body 460 keeps a single entry (~998 B with the 336 B object
+	// struct, ADR-0051) under the 1024 B/shard budget, so the final
+	// HotBytes assert is deterministic — overshoot beyond one entry
+	// per shard is drained by the ASYNC sweeper and would race the
+	// Stats() read. Two entries per shard still exceed the budget,
+	// which is what this test exercises.
 	for i := range 100 {
 		k := testkey.Key(uint64(i))
-		_ = s.Put(context.Background(), k, obj(k, 500))
+		_ = s.Put(context.Background(), k, obj(k, 460))
 	}
 
 	st := s.Stats()
@@ -237,6 +242,124 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 
 	st := s.Stats()
 	require.Equal(t, int64(2), st.HotEntries)
+}
+
+// graceObj builds an expired (past TTL+SWR+SIE) graced object.
+func graceObj(key string, keepGrace bool, now time.Time) *api.Object {
+	return &api.Object{
+		Key:        testkey.Hash([]byte(key)),
+		StatusCode: 200,
+		Header:     headerMap(header.ContentType, "text/plain"),
+		Body:       make([]byte, 100),
+		BodySize:   100,
+		StoredAt:   now.Add(-10 * time.Minute),
+		TTL:        time.Second,
+		KeepGrace:  keepGrace,
+		Pool:       "origin-main",
+	}
+}
+
+// TestHotStore_ReapExpired_GraceGate pins the stayin_alive grace
+// contract on the reaper (ADR-0051): an expired KeepGrace entry is
+// removed only when the MayReap gate allows it. A nil gate keeps the
+// historical behavior (reap), and the gate is never consulted for
+// non-graced entries.
+func TestHotStore_ReapExpired_GraceGate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now()
+
+	tests := []struct {
+		name        string
+		mayReap     func(obj *api.Object) bool
+		wantEntries int64
+		wantHolds   int64
+	}{
+		{
+			// DoD 1: origin pool cannot refill — the reaper holds.
+			name:        "graced held when gate withholds",
+			mayReap:     func(*api.Object) bool { return false },
+			wantEntries: 1,
+			wantHolds:   1,
+		},
+		{
+			// DoD 2: pool healthy again — reaped on the normal schedule.
+			name:        "graced reaped when gate allows",
+			mayReap:     func(*api.Object) bool { return true },
+			wantEntries: 0,
+			wantHolds:   0,
+		},
+		{
+			// W3: nil gate (unwired store) must not pin memory.
+			name:        "graced reaped when gate is nil",
+			mayReap:     nil,
+			wantEntries: 0,
+			wantHolds:   0,
+		},
+		{
+			// DoD 3: non-graced entries ignore the gate entirely.
+			name: "non-graced reaped regardless of gate",
+			mayReap: func(*api.Object) bool {
+				return false
+			},
+			wantEntries: 0,
+			wantHolds:   0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			graced := tc.name != "non-graced reaped regardless of gate"
+			s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, ReaperInterval: -1, MayReap: tc.mayReap})
+			obj := graceObj("grace-gate", graced, now)
+			_ = s.Put(ctx, obj.Key, obj)
+
+			s.reapExpired(now)
+
+			st := s.Stats()
+			require.Equal(t, tc.wantEntries, st.HotEntries, "entries after reap")
+			require.Equal(t, tc.wantHolds, st.ReaperGraceHolds, "grace holds after reap")
+			got, _, _ := s.Get(ctx, obj.Key)
+			if tc.wantEntries == 0 {
+				require.Nil(t, got)
+			} else {
+				require.NotNil(t, got, "held graced entry must still serve stale")
+			}
+		})
+	}
+}
+
+// TestHotStore_ReapExpired_GraceGateNotConsultedForFreshEntries pins
+// that the gate is only consulted for *expired* graced entries: a
+// fresh graced object must not reach MayReap at all.
+func TestHotStore_ReapExpired_GraceGateNotConsultedForFreshEntries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now()
+
+	var gateCalls int
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, ReaperInterval: -1,
+		MayReap: func(*api.Object) bool {
+			gateCalls++
+			return false
+		}})
+	obj := &api.Object{
+		Key:       testkey.Hash([]byte("fresh-graced")),
+		Header:    headerMap(header.ContentType, "text/plain"),
+		Body:      make([]byte, 100),
+		BodySize:  100,
+		StoredAt:  now,
+		TTL:       time.Minute,
+		KeepGrace: true,
+		Pool:      "origin-main",
+	}
+	_ = s.Put(ctx, obj.Key, obj)
+
+	s.reapExpired(now)
+
+	require.Equal(t, 0, gateCalls, "MayReap must not be consulted for fresh entries")
+	require.Equal(t, int64(1), s.Stats().HotEntries)
 }
 
 func TestObjSize_AccountsForHeaders(t *testing.T) {
@@ -326,14 +449,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 320, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
+	// objectStructSize: 336, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 320 + 32 + 40 + 32 +
+	want := int64(5) + 336 + 32 + 40 + 32 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)

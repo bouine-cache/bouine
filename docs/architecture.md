@@ -212,11 +212,12 @@ defense against cache-poisoning via unkeyed input (threat T06, T07).
 
 Store responses in the encoding the origin produced. `Accept-Encoding`
 participates in the variant key as a **negotiation bucket**, not as the
-raw header value: the highest-weight coding among `zstd | br | gzip`
-wins (ties broken in that order, `q=0` excludes), and an absent or
-no-acceptable-coding request buckets to `identity`. All clients that
-negotiate the same best coding share one stored variant —
-`gzip, deflate, br` and `br, gzip` are the `br` bucket.
+raw header value: the highest-weight coding among `br | zstd | gzip`
+wins (ties prefer br — the sharing-maximizing order, so the zstd-bearing
+and zstd-less browser spellings share one variant; `q=0` excludes), and
+an absent or no-acceptable-coding request buckets to `identity`. All
+clients that accept the same best coding share one stored variant —
+`gzip, deflate, br` and `br, gzip, deflate, zstd` are the `br` bucket.
 
 Bucketing has a pairing rule without which it would serve wrong bytes:
 origin-bound requests carry the canonical bucket token

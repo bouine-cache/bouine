@@ -8,8 +8,10 @@ import (
 
 // TestEncodingBucket covers the Accept-Encoding bucketing rules
 // (docs/plans/accept-encoding-bucketing.md §3.1): the bucket is the
-// negotiation outcome among {zstd, br, gzip}, not the token set.
-// deflate, identity, and unknown tokens never contribute.
+// negotiation outcome among {br, zstd, gzip}, not the token set.
+// deflate, identity, and unknown tokens never contribute. Equal
+// weights tie-break br > zstd > gzip — the sharing-maximizing order
+// (see aeRank).
 func TestEncodingBucket(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -28,17 +30,18 @@ func TestEncodingBucket(t *testing.T) {
 		{"br wins over gzip", "gzip, deflate, br", "br"},
 		{"br order swap", "br, gzip, deflate", "br"},
 		{"br bare", "br", "br"},
-		{"zstd wins over br", "gzip, deflate, br, zstd", "zstd"},
+		{"br wins over zstd on tie", "gzip, deflate, br, zstd", "br"},
 		{"zstd bare", "zstd", "zstd"},
-		{"zstd after br", "br, zstd", "zstd"},
-		{"zstd with identity suffix", "gzip, deflate, br, zstd, identity", "zstd"},
+		{"zstd after br", "br, zstd", "br"},
+		{"br with zstd and identity suffix", "gzip, deflate, br, zstd, identity", "br"},
 		{"gzip br pair", "gzip, br", "br"},
 		{"br gzip pair swapped", "br, gzip", "br"},
 		{"q excludes gzip", "gzip;q=0, deflate", "identity"},
 		{"q excludes br", "br;q=0, gzip", "gzip"},
 		{"q excludes zstd", "zstd;q=0, br", "br"},
 		{"higher q wins", "br;q=0.5, gzip;q=1.0", "gzip"},
-		{"equal q tie by rank", "zstd;q=1, br;q=1", "zstd"},
+		{"higher q zstd over br", "br;q=0.5, zstd;q=1", "zstd"},
+		{"equal q tie by rank", "zstd;q=1, br;q=1", "br"},
 		{"weight on deflate ignored", "deflate;q=1, gzip;q=0.5", "gzip"},
 		{"spaces around tokens", "  gzip , br  ", "br"},
 		{"space in weight", "gzip; q=0.5, br; q=1", "br"},
@@ -57,10 +60,11 @@ func TestEncodingBucket(t *testing.T) {
 }
 
 // TestEncodingBucket_AllBrowserDialectsOneVariant pins the hit-ratio
-// motivation: every realistic browser Accept-Encoding that negotiates
+// motivation: every realistic browser Accept-Encoding that can accept
 // br collapses to the same bucket, so one stored variant serves them
-// all. Before bucketing these produced five distinct keys (br, br+zstd,
-// gzip-only was already separate, etc.).
+// all — including the zstd-spelling dialect, because equal weights
+// prefer br (the sharing-maximizing tie-break; see aeRank).
+// Pre-bucketing these five spellings were five distinct keys.
 func TestEncodingBucket_AllBrowserDialectsOneVariant(t *testing.T) {
 	t.Parallel()
 	brDialects := []string{
@@ -68,14 +72,12 @@ func TestEncodingBucket_AllBrowserDialectsOneVariant(t *testing.T) {
 		"br, gzip, deflate",
 		"deflate, gzip, br",
 		"gzip, br",
-		"gzip, deflate, br, zstd, identity", // zstd outranks br
+		"gzip, deflate, br, zstd, identity",
 	}
 	seen := make(map[string]int)
 	for _, d := range brDialects {
 		seen[encodingBucket(d)]++
 	}
-	// Two buckets across these dialects: br for the first four, zstd
-	// for the zstd-capable one. The point is that the first four
-	// collapse to one; pre-bucketing they were four distinct keys.
-	require.Equal(t, map[string]int{"br": 4, "zstd": 1}, seen)
+	require.Equal(t, map[string]int{"br": 5}, seen,
+		"all br-capable browser dialects must share one bucket, got %v", seen)
 }

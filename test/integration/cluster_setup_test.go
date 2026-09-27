@@ -58,6 +58,27 @@ func sharedFastPeerCluster(t *testing.T) *driver.ClusterStack {
 	return s
 }
 
+// sharedCoalesceCluster boots (once) a strong-mode stack with the
+// coalesced origin shield (cluster.peer_fetch_coalesce) enabled on
+// every node, for the origin-shield acceptance test.
+func sharedCoalesceCluster(t *testing.T) *driver.ClusterStack {
+	t.Helper()
+	const key = "strong+coalesce"
+	clusterMu.Lock()
+	defer clusterMu.Unlock()
+	if s, ok := clusterStacks[key]; ok {
+		return s
+	}
+	s := driver.BootCluster(t, driver.ClusterOptions{
+		Mode:              "strong",
+		NoAutoCleanup:     true,
+		PeerFetchCoalesce: true,
+	})
+	clusterClean = append(clusterClean, s.Down)
+	clusterStacks[key] = s
+	return s
+}
+
 func TestMain(m *testing.M) {
 	code := m.Run()
 	clusterMu.Lock()

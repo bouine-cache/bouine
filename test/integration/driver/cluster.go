@@ -102,6 +102,9 @@ type ClusterOptions struct {
 	// node. Both default off; the peer flag requires the fast path.
 	ExperimentalH1FastPath     bool
 	ExperimentalH1FastPeerPath bool
+	// PeerFetchCoalesce enables cluster.peer_fetch_coalesce on every
+	// node (coalesced origin shield, strong mode only).
+	PeerFetchCoalesce bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -163,8 +166,9 @@ type nodeConfigParams struct {
 	originAddr  string
 	hotMaxBytes string
 	tls         *TLSOptions // nil when TLS is not configured
-	// experimental lines rendered verbatim under the experimental:
-	// section (nil = omit the section entirely).
+	// coalesce renders `peer_fetch_coalesce: true` under the cluster
+	// section (origin shield on every node).
+	coalesce     bool
 	experimental []string
 }
 
@@ -189,7 +193,7 @@ cluster:
   mode: %s
   join: %s
   hop_limit: 2
-upstream_pools:
+%supstream_pools:
   - name: origin
     targets: [%q]
 routes:
@@ -219,7 +223,7 @@ routes:
       ttl_default: 60s
 `,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
-		p.originAddr)
+		coalesceYAML(p.coalesce), p.originAddr)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -240,6 +244,15 @@ routes:
 		}
 	}
 	return b.String()
+}
+
+// coalesceYAML renders the cluster.peer_fetch_coalesce line, omitted
+// when the option is off.
+func coalesceYAML(on bool) string {
+	if !on {
+		return ""
+	}
+	return "  peer_fetch_coalesce: true\n"
 }
 
 // hotMaxBytesOrDefault renders the hot-tier budget for a node config,
@@ -324,6 +337,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			originAddr:   origin.addr,
 			hotMaxBytes:  opts.HotMaxBytes,
 			tls:          tlsOpts,
+			coalesce:     opts.PeerFetchCoalesce,
 			experimental: s.experimentalYAML,
 		})
 

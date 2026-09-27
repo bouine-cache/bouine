@@ -139,18 +139,21 @@ func (h *Handler) maybeBackfill(ctx *fasthttp.RequestCtx, lookupKey api.Key, obj
 	h.storeObjectLocal(ctx, lookupKey, obj, ri, false, 0)
 }
 
-// FetchOrigin drives this route's collapsed origin fetch on behalf of a
-// cluster peer (the owner side of the origin shield). The originReq is
-// the rebuilt upstream request from the waiter's OriginRequest envelope.
-// The fetch shares the route's singleflight with this node's own client
-// requests, so peer waiters plus local requests collapse into exactly
-// one origin fetch. The resulting object is stored locally (the owner
+// FetchOrigin drives this route's origin fetch on behalf of a cluster
+// peer (the owner side of the origin shield). The originReq is the
+// rebuilt upstream request from the waiter's OriginRequest envelope.
+// The fetch joins the route's foreground inflight latch — the SAME
+// structure a local client miss uses in fetchAndStore — so peer
+// waiters plus this node's own client requests collapse into exactly
+// one origin fetch. Latching on a separate singleflight here would let
+// a local miss and a coalesced RPC race into two origin fetches for
+// the same cold key. The resulting object is stored locally (the owner
 // always keeps its own fill) and returned to the peer encoded.
 //
 // Errors mean the flight failed (origin transport error, shed,
-// deadline): the peer falls back to origin. An origin error STATUS is
-// not an error — it is returned as an authoritative answer so negative
-// caching survives.
+// unshareable stream): the peer falls back to origin. An origin error
+// STATUS is not an error — it is returned as an authoritative answer
+// so negative caching survives.
 func (h *Handler) FetchOrigin(ctx context.Context, key api.Key, originReq *fasthttp.Request) (*api.Object, error) {
 	method := string(originReq.Header.Method())
 	if method != fasthttp.MethodGet && method != fasthttp.MethodHead {
@@ -163,11 +166,6 @@ func (h *Handler) FetchOrigin(ctx context.Context, key api.Key, originReq *fasth
 	originURI := h.originURI(originReq.RequestURI())
 	originReq.SetRequestURIBytes(originURI)
 
-	res := h.collapsedFetchBg(ctx, originReq, key)
-	if res.Err != nil {
-		return nil, res.Err
-	}
-	now := time.Now()
 	ri := RequestInfo{
 		Method: method,
 		URI:    string(originReq.RequestURI()),
@@ -175,9 +173,41 @@ func (h *Handler) FetchOrigin(ctx context.Context, key api.Key, originReq *fasth
 		Path:   string(originReq.URI().Path()),
 		Header: headerFromFastHTTPReqHeader(&originReq.Header),
 	}
-	resMap := res.Header.ToMap()
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL,
-		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
+
+	// Join-or-lead the foreground inflight latch, exactly as a local
+	// client miss does in fetchAndStore. Followers of a client-led
+	// leader receive the leader's buffered result (already stored);
+	// ErrStreamUnshareable, shed, and transport failure surface as the
+	// follower error, sending the waiter back to origin.
+	inflight := &inflightStream{done: make(chan struct{})}
+	if actual, loaded := h.inflightStreams.loadOrStore(key, inflight); loaded {
+		<-actual.done
+		res := actual.res
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		// buildObject mutates the header map (attribution headers) and
+		// the published result is shared with every follower: clone
+		// before building (same discipline as collapsedFetch).
+		res.Header = res.Header.ownedClone()
+		return buildObject(key, ri, res, res.Header.ToMap(), h.neg, h.defaultTTL,
+			h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now()), nil
+	}
+	// Leader: publish the buffered result for followers (client or
+	// peer) BEFORE returning, so a late arrival finds the object in
+	// the store instead of starting a second flight.
+	defer h.inflightStreams.delete(key)
+	res := h.doFetchBg(ctx, originReq)
+	inflight.res = res
+	close(inflight.done)
+	if res.Err != nil {
+		return nil, res.Err
+	}
+	// Clone before buildObject: the published inflight.res is shared
+	// with followers, and buildObject mutates the header map.
+	res.Header = res.Header.ownedClone()
+	obj := buildObject(key, ri, res, res.Header.ToMap(), h.neg, h.defaultTTL,
+		h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 	h.storeObjectLocal(ctx, key, obj, ri, false, 0)
 	return obj, nil
 }

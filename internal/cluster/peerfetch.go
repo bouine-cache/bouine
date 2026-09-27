@@ -1231,6 +1231,9 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 	defer cancel()
 	start := time.Now()
 	obj, err := fetcher.FetchOrigin(flightCtx, req.Key, oreq)
+	if h.metrics != nil {
+		h.metrics.ObserveCoalescedFetch(time.Since(start))
+	}
 	if err != nil || obj == nil {
 		if h.metrics != nil {
 			h.metrics.IncCoalescedFetch("failure")

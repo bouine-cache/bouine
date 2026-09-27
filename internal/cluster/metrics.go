@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -62,6 +63,17 @@ type Metrics struct {
 	// saturated coalesced lane must be visible, not inferred from
 	// latency).
 	CoalescedShed prometheus.Counter
+	// CoalescedFetchSaved counts waiters that received an authoritative
+	// coalesced answer and avoided an origin request — the headline
+	// "origin requests saved" number. Kept separate from the role
+	// counter so dashboards can subtract saved from total origin load
+	// without label queries. Incremented together with
+	// CoalescedFetch{role="waiter"}.
+	CoalescedFetchSaved prometheus.Counter
+	// CoalescedFetchDuration observes the owner-side coalesced flight
+	// latency (one origin round-trip as seen by the owner, success or
+	// failure). Buckets run to 65s to cover the flight timeout.
+	CoalescedFetchDuration prometheus.Histogram
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -130,6 +142,12 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "coalesced_fetch_shed_total",
 			Help:      "Coalesced fetches shed at the owner's coalesced-lane semaphore; a saturated lane sheds waiters back to origin.",
 		}),
+		CoalescedFetchSaved: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "origin_requests_saved_total",
+			Help:      "Origin requests avoided by waiters served from the key owner's coalesced fetch — the cluster-wide origin-shield saving.",
+		}),
+		CoalescedFetchDuration: newCoalescedDurationHistogram(),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -142,8 +160,21 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.PeerFetchVariantMismatch,
 		m.CoalescedFetch,
 		m.CoalescedShed,
+		m.CoalescedFetchSaved,
+		m.CoalescedFetchDuration,
 	)
 	return m
+}
+
+// newCoalescedDurationHistogram builds the owner-side coalesced-flight
+// latency histogram. Buckets run to 65s to cover the flight timeout.
+func newCoalescedDurationHistogram() prometheus.Histogram {
+	return prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "bouine",
+		Name:      "coalesced_fetch_duration_seconds",
+		Help:      "Owner-side coalesced origin-flight latency (success or failure).",
+		Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 65},
+	})
 }
 
 // SetMode sets the cluster_mode_info gauge to 1 for the given mode
@@ -220,13 +251,26 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 
 // IncCoalescedFetch increments the coalesced origin-shield counter for
 // the given role: "owner" (served a peer's flight), "waiter" (served
-// from the owner's answer), or "failure". Nil-safe: single-node mode
-// never registers the vec.
+// from the owner's answer), or "failure". A waiter increment also
+// counts one origin request saved (same event, two views). Nil-safe:
+// single-node mode never registers the vec.
 func (m *Metrics) IncCoalescedFetch(role string) {
 	if m == nil || m.CoalescedFetch == nil {
 		return
 	}
 	m.CoalescedFetch.WithLabelValues(role).Inc()
+	if role == "waiter" {
+		m.CoalescedFetchSaved.Inc()
+	}
+}
+
+// ObserveCoalescedFetch records the duration of one owner-side
+// coalesced origin flight. Nil-safe.
+func (m *Metrics) ObserveCoalescedFetch(d time.Duration) {
+	if m == nil || m.CoalescedFetchDuration == nil {
+		return
+	}
+	m.CoalescedFetchDuration.Observe(d.Seconds())
 }
 
 // IncCoalescedShed increments the coalesced-lane shed counter. Nil-safe.

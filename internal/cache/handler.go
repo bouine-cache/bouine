@@ -673,6 +673,33 @@ func (h *Handler) rewriteRequestCtx(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+// rewriteOutboundAE normalizes Accept-Encoding on an origin-bound
+// request to the canonical token for its bucket: "zstd", "br", "gzip",
+// or removed for "identity". This is the pairing half of AE bucketing
+// (docs/plans/accept-encoding-bucketing.md §2.1): the variant key
+// claims a bucket, so the origin must be asked for exactly that coding,
+// otherwise a deflate-only origin could store `Content-Encoding:
+// deflate` bytes under the `gzip` bucket and a later gzip-only client
+// would receive bytes it cannot decode. An origin that cannot produce
+// the coding falls back to identity for the whole bucket.
+//
+// Called only on miss/revalidate/refill paths, never the hit path, and
+// only when the route buckets (encoding_policy: bucket, the default).
+// identity: the header is removed rather than set to "identity" — some
+// origins treat a bare identity token as "client explicitly refuses
+// compression" and add Vary noise; removal is the absence signal.
+func (h *Handler) rewriteOutboundAE(hdr *fasthttp.RequestHeader) {
+	if h.policy.verbatimEncoding() {
+		return
+	}
+	bucket := encodingBucket(string(hdr.Peek(header.AcceptEncoding)))
+	if bucket == "identity" {
+		hdr.Del(header.AcceptEncoding)
+		return
+	}
+	hdr.Set(header.AcceptEncoding, bucket)
+}
+
 // applyResponseRewrites mutates a client-facing response in place with
 // the route's response header rewrite directives: remove first (Del is a
 // no-op for absent headers), then set (Set replaces any origin value).
@@ -1072,6 +1099,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		req.Header.Set(k, v)
 		return true
 	})
+	// Normalize AE to the bucket token so the refreshed variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
 	// Detached root span: the triggering request is long gone, and its
@@ -1998,6 +2028,9 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token so the revalidated variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&revalReq.Header)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
@@ -2218,6 +2251,9 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		revalReq.Header.Set(k, v)
 		return true
 	})
+	// Normalize AE to the bucket token so the revalidated variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&revalReq.Header)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// The origin span starts here, detached from any client trace: the
@@ -2738,6 +2774,9 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 		req.Header.Set(k, v)
 		return true
 	})
+	// Normalize AE to the bucket token so the refilled variant matches
+	// the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
 
 	// Deadline-based timeout, mirroring doFetchBg's transport deadline.
 	// Detached root span: no client trace to join, but attribute-bearing
@@ -2893,6 +2932,9 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token so the stored variant matches
+	// the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 

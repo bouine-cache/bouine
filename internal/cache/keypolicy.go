@@ -30,6 +30,19 @@ type KeyPolicy struct {
 	// key (cache.key.include_host: false). Read on every key build; the
 	// default (false) is today's behaviour. See includeHostKey.
 	excludeHost bool
+	// verbatimAE selects the Accept-Encoding variant-key policy.
+	// false (default): the AE value is reduced to a bucket by
+	// encodingBucket (docs/architecture.md §3.3) and the origin-bound
+	// request carries the canonical token (rewriteOutboundAE).
+	// true (config encoding_policy: verbatim): the raw AE string is
+	// sorted lowercased (pre-bucketing behavior) and forwarded to the
+	// origin unchanged — for origins that vary response bodies by the
+	// full AE string.
+	// Cluster note: like include_headers, this field must be identical
+	// across nodes serving the route or nodes store/resolve variants
+	// under different keys (peer gates fail safe — miss, never a wrong
+	// body).
+	verbatimAE bool
 }
 
 // shouldStripParam returns true if the query param should be excluded
@@ -169,4 +182,23 @@ func (p *KeyPolicy) ShouldExcludeHeader(h string) bool {
 		return false
 	}
 	return p.excludeHeaders[h]
+}
+
+// SetVerbatimAE sets the Accept-Encoding key policy. Called once at
+// handler construction from the route's encoding_policy config; the
+// zero value (bucket) needs no call. Mutating a policy after the
+// handler is serving is forbidden — stored VaryKeys would no longer
+// match freshly computed ones.
+func (p *KeyPolicy) SetVerbatimAE(verbatim bool) {
+	if p == nil {
+		return
+	}
+	p.verbatimAE = verbatim
+}
+
+// verbatimEncoding reports whether the policy pins Accept-Encoding
+// keying to the verbatim (sorted) pre-bucketing behavior. Nil policy
+// buckets (the documented default).
+func (p *KeyPolicy) verbatimEncoding() bool {
+	return p != nil && p.verbatimAE
 }

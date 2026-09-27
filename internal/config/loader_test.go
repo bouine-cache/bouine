@@ -1387,6 +1387,48 @@ func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
 }
 
+// --- cache.key.verbatim_encoding (ADR-0051) ---
+
+func TestParse_VerbatimEncoding(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - match: { host: api.example.com }
+    pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        verbatim_encoding: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept verbatim_encoding")
+	require.True(t, cfg.Routes[0].Cache.Key.VerbatimEncoding)
+}
+
+// TestValidate_VerbatimEncoding_IsBool pins that the knob is a plain
+// bool: the enum form (encoding_policy: bucket|verbatim) from the
+// original ADR-0051 draft was dropped in review — a bool cannot be
+// misspelled, needs no enum validation, and keeps RouteKey
+// fieldalignment-clean.
+func TestValidate_VerbatimEncoding_IsBool(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes: []Route{{
+			Pool:  "app",
+			Cache: RouteCache{Key: RouteKey{VerbatimEncoding: true}, TTLDefault: 60_000_000_000},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
 // --- cache.key.include_headers (issue #632) ---
 
 func TestParse_IncludeHeaders_ValidYAML(t *testing.T) {

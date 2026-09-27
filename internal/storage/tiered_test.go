@@ -157,6 +157,12 @@ func TestTiered_GraceObjectSurvivesHotSievePressure(t *testing.T) {
 	require.NoError(t, err, "get after pressure")
 	require.NotNil(t, got, "graced entry must survive hot SIEVE pressure via the warm copy")
 	require.NotEqual(t, api.Source(""), src)
+	// The recovery must keep the promise, not just the body: the
+	// re-promoted object decodes from the warm blob, so the grace
+	// stamps must round-trip the codec — otherwise the reaper deletes
+	// the entry one pass after recovery even mid-outage (ADR-0051).
+	require.True(t, got.KeepGrace, "re-promoted graced entry must keep KeepGrace")
+	require.Equal(t, "origin-main", got.Pool, "re-promoted graced entry must keep Pool")
 }
 
 func TestTiered_LargeObjectReadPath(t *testing.T) {

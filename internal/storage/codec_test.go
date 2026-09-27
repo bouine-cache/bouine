@@ -305,3 +305,88 @@ func TestDecodeV3BlobWithoutVaryValue(t *testing.T) {
 	require.Equal(t, orig.StatusCode, got.StatusCode)
 	require.Equal(t, "v3body", string(got.Body))
 }
+
+// TestEncodeDecodeGraceStampsRoundTrip pins the codec-v5 half of
+// ADR-0051: KeepGrace and Pool must survive every serialized hop. The
+// warm tier relies on it (a SIEVE demote → Get re-promote must keep the
+// re-promoted entry grace-gated, or the reaper deletes it one pass
+// after recovery mid-outage) and the peer wire relies on it (in strong
+// cluster mode the owner stores what the fetching node encoded; a
+// dropped stamp silently disables grace retention on ~2/3 of a
+// 3-node fleet's entries).
+func TestEncodeDecodeGraceStampsRoundTrip(t *testing.T) {
+	t.Parallel()
+	graced := &api.Object{
+		Key:        testkey.Key(0xC0FFEE),
+		KeepGrace:  true,
+		Pool:       "origin-main",
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("graced body"),
+		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
+	}
+	got, err := decodeObject(encodeObject(graced))
+	require.NoError(t, err)
+	require.True(t, got.KeepGrace, "KeepGrace must survive the codec round trip")
+	require.Equal(t, "origin-main", got.Pool, "Pool must survive the codec round trip")
+
+	// Control: an ungraced object decodes ungraced (flag byte is 0,
+	// not absent).
+	plain := &api.Object{Key: testkey.Key(1), StatusCode: 200,
+		Header: headerMap(header.CacheControl, "max-age=60"), Body: []byte("plain")}
+	gotPlain, err := decodeObject(encodeObject(plain))
+	require.NoError(t, err)
+	require.False(t, gotPlain.KeepGrace)
+	require.Equal(t, "", gotPlain.Pool)
+}
+
+// TestDecodeV4BlobWithoutGraceStamps pins the upgrade path: a v4 blob
+// (written before the grace-retention stamps existed) decodes cleanly
+// with KeepGrace=false and Pool="" instead of being rejected, so
+// warm-tier entries survive a rolling upgrade; they are reaped on the
+// historical schedule until rewritten in v5 by the next Put.
+func TestDecodeV4BlobWithoutGraceStamps(t *testing.T) {
+	t.Parallel()
+	// Hand-build a v4 blob: version byte + key + VaryKey + VaryValue +
+	// the v4 field order (no grace stamps after ETag).
+	orig := &api.Object{
+		Key:        testkey.Key(0x9012),
+		VaryKey:    "v4hash",
+		VaryValue:  "Accept-Encoding",
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("v4body"),
+		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
+	}
+	blob := []byte{objCodecVersionV4}
+	blob = append(blob, orig.Key[:]...)
+	blob = appendString(blob, orig.VaryKey)
+	blob = appendString(blob, orig.VaryValue)
+	blob = binary.AppendUvarint(blob, uint64(orig.StatusCode))
+	blob = binary.AppendVarint(blob, int64(orig.TTL))
+	blob = binary.AppendVarint(blob, int64(orig.StaleWhileRevalidate))
+	blob = binary.AppendVarint(blob, int64(orig.StaleIfError))
+	blob = appendTime(blob, orig.StoredAt)
+	blob = appendTime(blob, orig.LastModified)
+	blob = binary.AppendUvarint(blob, orig.Hits)
+	blob = appendString(blob, orig.ETag)
+	blob = binary.AppendUvarint(blob, uint64(orig.Header.Len()))
+	orig.Header.Range(func(k, v string) bool {
+		blob = appendString(blob, k)
+		blob = appendString(blob, v)
+		return true
+	})
+	blob = binary.AppendUvarint(blob, uint64(len(orig.SurrogateKeys)))
+	for _, sk := range orig.SurrogateKeys {
+		blob = appendString(blob, sk)
+	}
+	blob = binary.AppendUvarint(blob, uint64(len(orig.Body)))
+	blob = append(blob, orig.Body...)
+
+	got, err := decodeObject(blob)
+	require.NoError(t, err, "v4 blob must decode after the v5 upgrade")
+	require.False(t, got.KeepGrace, "v4 blobs have no grace stamps on the wire")
+	require.Equal(t, "", got.Pool)
+	require.Equal(t, orig.VaryValue, got.VaryValue)
+	require.Equal(t, "v4body", string(got.Body))
+}

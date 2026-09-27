@@ -61,7 +61,12 @@ the curated, human-readable summary.
   passive health (consecutive connection errors / 5xx eject, success
   resets) exactly like the proxy path, so pool ejection — and
   fail-fast picks once all targets are ejected — finally works on
-  cached routes.
+  cached routes. The grace stamps round-trip the binary object codec
+  (v5, cluster protocol header "4"): the warm tier and the
+  peer-fetch/peer-put wire carry them, so a SIEVE demote →
+  re-promotion and an owner-stored peer put keep entries
+  grace-gated; pre-v5 blobs decode with the stamps unset
+  (historical reap) and are rewritten on the next Put.
 
 - `routes[].cache.negative_ttl` now accepts a per-status map, mirroring
   Cloudflare's "Cache TTL by status code": `negative_ttl: {404: 1m,

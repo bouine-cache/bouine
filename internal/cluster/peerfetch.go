@@ -55,10 +55,13 @@ const (
 	ClusterVersionHeader = header.XBouineClusterVersion
 	// ClusterProtocolVersion is the current protocol version.
 	// Bumped to "3" in issue #187: the peer-fetch response format
-	// changed from JSON to the binary storage codec. A mixed v2/v3
-	// cluster fails detectably on version-mismatch instead of
-	// silently producing codec decode errors.
-	ClusterProtocolVersion = "3"
+	// changed from JSON to the binary storage codec. Bumped to "4"
+	// with the storage codec v5 (ADR-0051): the peer-fetch response
+	// and peer-put request bodies now carry the grace-retention
+	// stamps (KeepGrace + Pool). A mixed-version cluster fails
+	// detectably on codec decode errors instead of silently
+	// dropping the stamps.
+	ClusterProtocolVersion = "4"
 	// PeerFetchTimeout is the maximum time for a peer-fetch or peer-put RPC.
 	// Exported so the engine wiring can reuse the same budget for the
 	// write-to-owner goroutine (issue #509).

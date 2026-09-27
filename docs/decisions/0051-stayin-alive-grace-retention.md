@@ -47,9 +47,19 @@ We implement health-gated grace retention ("P1b") plus eager warm
 backing for graced fills ("P5"):
 
 1. **The object carries the policy intent.** `api.Object` gains two
-   additive JSON fields stamped at cache-fill time by `buildObject`
+   additive fields stamped at cache-fill time by `buildObject`
    (and restamped by `refreshFrom304`): `KeepGrace` (true when the
    route has `stayin_alive`) and `Pool` (the route's origin pool).
+   The stamps must survive every serialized hop, so the binary object
+   codec is bumped to v5 (KeepGrace flag byte + Pool after ETag):
+   the warm tier (a SIEVE demote → Get re-promote must keep the
+   re-promoted entry grace-gated) and the peer wire (in strong
+   cluster mode the owner stores what the fetching node encoded;
+   dropping the stamps there disables grace for most of the fleet)
+   both round-trip them. v4/v3 blobs decode with the stamps unset —
+   grace cannot engage on them, matching their pre-upgrade reap
+   behavior. The cluster protocol version header is bumped to "4"
+   accordingly.
 2. **The store implements a generic mechanism.** `HotConfig.MayReap`
    is a reap gate invoked by the TTL reaper only for *expired
    `KeepGrace`* entries. Returning false holds the entry for the next

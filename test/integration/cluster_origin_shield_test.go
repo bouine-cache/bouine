@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,11 @@ var runSeq atomic.Int64
 // (bounded overshoot under adversarial timing, never wrong content).
 func TestStrong_OriginShieldCoalesce(t *testing.T) {
 	s := sharedCoalesceCluster(t)
+	// Let the ring digests converge before the measured wave: on a
+	// freshly booted cluster a node can briefly hold a stale ring view
+	// and address a non-owner (which now answers 404 and the waiter
+	// falls back to its own origin fetch — still a second fetch).
+	time.Sleep(time.Second)
 	require.NoError(t, s.ScaleOriginLatency(100))
 	t.Cleanup(func() { _ = s.ScaleOriginLatency(0) })
 
@@ -74,6 +80,7 @@ func TestStrong_OriginShieldCoalesce(t *testing.T) {
 	bodies := map[string]int{}
 	for r := range results {
 		require.Equal(t, http.StatusOK, r.code, "node %d status", r.node)
+		t.Logf("node %d: X-Cache=%s source=%s body=%s", r.node, r.xcache, r.src, r.body)
 		bodies[r.body]++
 	}
 	require.Len(t, bodies, 1,

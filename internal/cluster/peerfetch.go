@@ -940,7 +940,20 @@ type PeerFetchHandler struct {
 	// coalesced lane). Separate from the lookup semaphore so one slow
 	// origin cannot stall peer cache HITs on this node.
 	coalesceSem chan struct{}
-	hopLimit    int
+	// ownsKey reports whether THIS node currently owns the key. A
+	// coalesced fetch must only run on the ring owner: a node with a
+	// stale ring view (boot convergence, churn) that coalesced anyway
+	// would run a second cluster-wide origin fetch for a cold key.
+	// Nil disables the gate (unit tests, single-node use).
+	ownsKey  func(api.Key) bool
+	hopLimit int
+}
+
+// SetOwnerCheck installs the ownership gate consulted before a
+// coalesced fetch runs. Call after the cluster node is up; nil (the
+// constructor default) disables the gate.
+func (h *PeerFetchHandler) SetOwnerCheck(fn func(api.Key) bool) {
+	h.ownsKey = fn
 }
 
 // SetOriginFetchers installs the route-name → OriginFetcher registry
@@ -1199,10 +1212,49 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 	if req.OriginRequest.Method != fasthttp.MethodGet && req.OriginRequest.Method != fasthttp.MethodHead {
 		return false // coalescing is GET/HEAD-only; requester fetches origin directly
 	}
+	// Ownership gate: only the ring owner may run a coalesced origin
+	// fetch. A requester with a stale ring view can address this node
+	// believing it owns the key; answering 404 sends it back to its own
+	// origin fetch (today's behavior) instead of doubling the fetch.
+	if h.ownsKey != nil && !h.ownsKey(req.Key) {
+		return false
+	}
 	fetcher := h.originFetcher(req.Route)
 	if fetcher == nil {
 		return false
 	}
+	obj, err := h.runCoalescedFlight(ctx, req, fetcher)
+	if err != nil {
+		if h.metrics != nil {
+			h.metrics.IncCoalescedFetch("failure")
+		}
+		h.logger.Info("coalesced fetch failed",
+			"key", req.Key, "route", req.Route, "error", err)
+		ctx.Error("coalesced fetch failed", fasthttp.StatusBadGateway)
+		return true
+	}
+	if h.metrics != nil {
+		h.metrics.IncCoalescedFetch("owner")
+	}
+	h.logger.Info("served coalesced fetch",
+		"key", req.Key, "route", req.Route, "status", obj.StatusCode)
+
+	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+	bufp := peerFetchEncodePool.Get().(*[]byte)
+	encoded := storage.EncodeObjectInto(obj, (*bufp)[:0])
+	_, _ = ctx.Write(encoded)
+	if cap(encoded) <= 64*1024 {
+		*bufp = encoded[:0]
+		peerFetchEncodePool.Put(bufp)
+	}
+	return true
+}
+
+// runCoalescedFlight acquires a coalesced-lane slot and drives one
+// detached origin flight for the peer waiter. Lane shed maps to an
+// error (the requester falls back to origin), mirroring transport
+// failure; an origin error STATUS is an answer, not an error.
+func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.PeerFetchRequest, fetcher OriginFetcher) (*api.Object, error) {
 	if err := h.acquireCoalesceSlot(ctx); err != nil {
 		h.logger.Warn("coalesced fetch shed at the lane semaphore",
 			"key", req.Key, "route", req.Route, "error", err)
@@ -1210,7 +1262,7 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 			h.metrics.IncCoalescedShed()
 		}
 		ctx.Error("coalesced fetch shed", fasthttp.StatusServiceUnavailable)
-		return true
+		return nil, err
 	}
 	defer func() { <-h.coalesceSem }()
 
@@ -1234,31 +1286,7 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 	if h.metrics != nil {
 		h.metrics.ObserveCoalescedFetch(time.Since(start))
 	}
-	if err != nil || obj == nil {
-		if h.metrics != nil {
-			h.metrics.IncCoalescedFetch("failure")
-		}
-		h.logger.Info("coalesced fetch failed",
-			"key", req.Key, "route", req.Route, "error", err)
-		ctx.Error("coalesced fetch failed", fasthttp.StatusBadGateway)
-		return true
-	}
-	if h.metrics != nil {
-		h.metrics.IncCoalescedFetch("owner")
-	}
-	h.logger.Info("served coalesced fetch",
-		"key", req.Key, "route", req.Route, "status", obj.StatusCode,
-		"dur_ms", time.Since(start).Milliseconds())
-
-	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
-	bufp := peerFetchEncodePool.Get().(*[]byte)
-	encoded := storage.EncodeObjectInto(obj, (*bufp)[:0])
-	_, _ = ctx.Write(encoded)
-	if cap(encoded) <= 64*1024 {
-		*bufp = encoded[:0]
-		peerFetchEncodePool.Put(bufp)
-	}
-	return true
+	return obj, err
 }
 
 // acquireCoalesceSlot takes one coalesced-lane slot with a bounded

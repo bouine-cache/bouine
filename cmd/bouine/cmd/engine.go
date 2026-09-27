@@ -805,6 +805,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 
 	peerFetchHandler := cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics)
 	peerFetchHandler.SetOriginFetchers(rs.routeFetchers)
+	peerFetchHandler.SetOwnerCheck(rs.clusterNode.IsLocal)
 
 	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
 		Addr:       addr,

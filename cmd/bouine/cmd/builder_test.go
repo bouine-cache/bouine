@@ -1567,7 +1567,7 @@ func TestPolicyForURL(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)

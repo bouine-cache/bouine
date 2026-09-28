@@ -1,6 +1,9 @@
 # ADR-0052: Cluster origin shield via request forwarding
 
-- **Status**: Proposed
+- **Status**: Accepted — implemented 2026-09-28; see
+  `docs/plans/origin-shield.md` §8 for the as-built notes (original-method
+  HEAD forwards, requester never backfills a HEAD answer, shared
+  30 s forward deadline).
 - **Date**: 2026-09-28
 - **Deciders**: @chridupin-33
 - **Phase**: cluster / origin

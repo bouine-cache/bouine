@@ -6,7 +6,7 @@
 > wire format. Second attempt: supersedes the envelope-based design of
 > PR #731 (see ADR-0052 for the decision record).
 
-**Status:** Draft — awaiting review before implementation
+**Status:** Implemented (2026-09-28) — see §8 for what shipped
 **Date:** 2026-09-28
 **ADR:** ADR-0052 (cluster origin shield via request forwarding)
 **Motivation:** strong-mode cold-key storms (mass purge, deploy, TTL
@@ -165,3 +165,37 @@ naming (D9) — see §2. No open questions remain on the design.
   documents the envelope design's costs.
 - Varnish origin shield — the property worth borrowing: the shield
   node sees the full client request.
+
+## 8. What shipped (as-built notes, 2026-09-28)
+
+Implementation diverged from this plan only in the details below;
+everything else landed as designed. `docs/reviews/pr-731-origin-shield-review.md`
+records the findings that drove the changes.
+
+- **HEAD forwards carry the original method** (refines D1/D8). The
+  forward is not pre-canonicalized; the owner's standard miss path
+  (`requestInfoFromRaw`) canonicalizes HEAD→GET itself, so the owner
+  stores a full GET object as with any direct HEAD client. The
+  requester suppresses the response body for its HEAD client
+  (HTTP answers HEAD without a body) and **never backfills a HEAD
+  answer**: the owner's answer bytes are GET-shaped, and storing an
+  empty body under the shared key would poison later GET lookups —
+  the re-opened #731 blocker 1, caught by the integration test
+  `TestStrong_OriginShield_HeadForwardNoPoison` against the real path.
+- **Deadline**: the shared wait bound is `api.ShieldForwardTimeout`
+  (30 s). `config.Validate` rejects an explicit route `fetch_timeout`
+  at or below it while the shield is on; pool-inherited defaults are
+  checked at runtime in the requester's own fetch, never wrong
+  content.
+- **Body ownership on the requester side**: the owner's answer body
+  is read once into an owned copy before `ReleaseResponse` — the
+  pooled response buffer must not outlive the release. This is the
+  same `buildObject` contract the standard miss path follows
+  (handler.go, `buildObject` callers pass an independently-owned
+  body).
+- **Refusal detection reads the status before release**: the
+  requester-side `ShieldForward` captures `resp.StatusCode()` before
+  `ReleaseResponse`, since a released fasthttp response zeroes its
+  status. Reading it after release silently turned every owner
+  refusal into a generic error (fallback still worked, but 404-specific
+  handling was unreachable).

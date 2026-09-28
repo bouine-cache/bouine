@@ -121,6 +121,37 @@ beyond the D9 decision.
    strong-mode cluster and interacts with the fetch-timeout
    validation).
 
+## 7. Mining #731 — mechanical guide
+
+Salvage lives on branch `feat/cluster-origin-shield` (PR #731,
+closed). Do **not** cherry-pick commits — they interleave salvage with
+to-delete code. Copy the pieces instead:
+
+| Salvage piece (§3) | Source | Commit(s) |
+|---|---|---|
+| Flag + `validateRouteCoalesceFetchTimeout` | `internal/config/loader.go` | `36f294bd`, `fab58b96` |
+| Backfill knob + bounds tests | `internal/config/{config.go,loader_test.go}` | `8b53fa46`, `36f294bd` |
+| The four metrics + nil-safe helpers | `internal/cluster/metrics.go` | `8b53fa46` |
+| `WithCoalesce` + OwnerMiss interaction | `internal/cache/fastpath.go` | `8b53fa46`, `fab58b96` |
+| Ownership gate (`SetOwnerCheck` shape) | `internal/cluster/peerfetch.go` | `5ffe7f80` — moves to the forward endpoint |
+| Integration test shape (cold key → origin counter = 1) | `test/integration/cluster_origin_shield_test.go` | `8b53fa46` |
+
+Everything else on that branch (v3 wire, `OriginRequest`, `FetchOrigin`,
+coalesce lane, HEAD canonicalizations, `originEnvelope`) is deleted by
+this design.
+
+**Known blocker, external to this work:** `test/integration` fails 4
+tests deterministically in full-suite runs **on `main` itself**,
+passing in isolation (cross-test interference) — issue #735. Run the
+plan's integration tests with `-run` filters until #735 is fixed;
+their full-suite failure is not a regression signal for this feature.
+
+**Open question (must be settled in this plan's review, before the
+implementation branch cuts):** backfill scope — shield fills only
+(#731 semantics) vs all peer-served responses. §2 D9's answer decides
+the knob's name and whether the backfill cherry-picks above land as-is
+or need renaming.
+
 ## References
 
 - ADR-0052 — the decision record for this design.

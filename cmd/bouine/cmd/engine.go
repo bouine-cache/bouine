@@ -211,13 +211,13 @@ func (e *engine) run(ctx context.Context) error {
 
 	handler := e.buildDataPlane(rs)
 
-	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
-	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
-	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
-	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
-	e.startEjectReapers(g, rs.pools)                                 // eject_for window reapers (no-op pools without the knob)
-	e.startClusterJoin(g, rs)                                        // gossip join with retry against seed peers
-	e.registerShutdownSteps(g, rs)                                   // ordered drain: readiness, store flush, cluster leave
+	e.startBackgroundTasks(g, rs)                                             // rings snapshot, store metrics
+	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn, handler) // swap full admin routes into the minimal server
+	e.startListeners(g, handler, rs)                                          // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools)                                          // active health probes per upstream pool
+	e.startEjectReapers(g, rs.pools)                                          // eject_for window reapers (no-op pools without the knob)
+	e.startClusterJoin(g, rs)                                                 // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)                                            // ordered drain: readiness, store flush, cluster leave
 
 	// Listeners are started by startListeners (synchronous call above
 	// starts the supervised goroutines). Mark ready after the call
@@ -795,7 +795,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 // dashboard) and atomically swaps it into the already-listening minimal
 // admin server. The admin listener was started before initSubsystems so
 // K8s probes could reach healthz/readyz during store loading.
-func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server, conditionsFn func() []admin.Condition, drainFn func()) {
+func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server, conditionsFn func() []admin.Condition, drainFn func(), dataPlane fasthttp.RequestHandler) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -869,9 +869,14 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
 		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
 		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
-		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
-		DashboardHandler:        dashMux,
-		FaviconHandler:          webdash.FaviconHandler(),
+		PeerForwardHandler:      e.buildShieldForwardHandlerForAdmin(rs, dataPlane),
+		// The forward's write deadline must cover the owner's origin
+		// fetch (fetch budget + the shield's own hop overhead), not the
+		// admin 5s default — see shieldHeaderReceived.
+		ShieldForwardTimeout: e.shieldFetchBudget() + api.ShieldForwardTimeout,
+		PeerMetricsHandler:   dashboard.PeerMetricsHandler(rs.rings),
+		DashboardHandler:     dashMux,
+		FaviconHandler:       webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
@@ -967,6 +972,20 @@ func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {
 		}
 	}
 	return h
+}
+
+// buildShieldForwardHandlerForAdmin returns the admin-plane handler for
+// the origin shield's forward endpoint, or nil when the feature is off
+// (a nil handler leaves the route unregistered — requesters see 404 and
+// fall back to their own origin fetch, the mixed-version degrade).
+// The endpoint replays forwards through dataPlane: the same tracing →
+// metrics → router stack the listeners serve, so the shield's fill is
+// attributed, traced and bounded exactly like a local miss (D3).
+func (e *engine) buildShieldForwardHandlerForAdmin(rs *runState, dataPlane fasthttp.RequestHandler) fasthttp.RequestHandler {
+	if !e.cfg.Cluster.OriginShield || rs.clusterNode == nil {
+		return nil
+	}
+	return e.buildPeerForwardHandler(rs, dataPlane).Handle
 }
 
 // buildDashboard wires and returns the dashboard fasthttp handler.
@@ -1248,6 +1267,10 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+		// With the shield on, the fast path's OwnerMiss hint would
+		// suppress the slow path's forward — the exact RPC the shield
+		// needs. WithShield keeps the hint unset (see tryPeerFetch).
+		fp.WithShield(e.cfg.Cluster.OriginShield)
 	}
 	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
 }

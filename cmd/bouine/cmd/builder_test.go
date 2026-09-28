@@ -1985,7 +1985,7 @@ func TestSwapAdminHandler(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	e.swapAdminHandler(ctx, rs, minimalAdmin, nil, nil)
+	e.swapAdminHandler(ctx, rs, minimalAdmin, nil, nil, nil)
 }
 
 func TestStartBackgroundTasks_WithWarmMetrics(t *testing.T) {
@@ -2095,7 +2095,7 @@ func TestSwapAdminHandler_WithCluster(t *testing.T) {
 	defer cancel()
 	condsFn := func() []admin.Condition { return nil }
 	drainFn := func() {}
-	e.swapAdminHandler(ctx, rs, minimalAdmin, condsFn, drainFn)
+	e.swapAdminHandler(ctx, rs, minimalAdmin, condsFn, drainFn, nil)
 }
 
 func TestPurgeKey_WithMatchingHandler(t *testing.T) {
@@ -2162,7 +2162,7 @@ func TestSwapAdminHandler_DefaultAddr(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	e.swapAdminHandler(ctx, rs, minimalAdmin, nil, nil)
+	e.swapAdminHandler(ctx, rs, minimalAdmin, nil, nil, nil)
 }
 
 func TestInitCloudflare_WithEnvToken(t *testing.T) {

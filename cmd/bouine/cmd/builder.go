@@ -380,32 +380,57 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
-			cfg.OwnerFn = ownerFn
-			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() {
-				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
-			}
-			// Write-to-owner RPC: a non-owner that fetches from origin
-			// forwards the object to the owner so subsequent peer-fetches
-			// hit (issue #509). Fire-and-forget in a bounded goroutine so
-			// the response path is never blocked on the RPC.
-			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
-				go func() {
-					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
-					defer cancel()
-					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
-						e.logger.Debug("peer put error (non-fatal)",
-							"owner", owner.Name, "key", obj.Key, "error", err)
-					}
-				}()
-			}
-		}
+		applyClusterWiring(e, rs, &cfg)
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
 	}
 	return router
+}
+
+// applyClusterWiring wires the cluster peer closures (owner lookup,
+// peer fetch, peer put, origin shield) onto a route's cache handler
+// config. It is a no-op when the engine is not clustered — in that
+// case OwnerFn/PeerFetch stay unset and the handler behaves exactly
+// as a single-node cache (see HandlerConfig).
+func applyClusterWiring(e *engine, rs *runState, cfg *cache.HandlerConfig) {
+	if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
+		cfg.OwnerFn = ownerFn
+		cfg.PeerFetch = peerFetchFn
+		cfg.OnPeerVariantMismatch = func() {
+			rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
+		}
+		// Write-to-owner RPC: a non-owner that fetches from origin
+		// forwards the object to the owner so subsequent peer-fetches
+		// hit (issue #509). Fire-and-forget in a bounded goroutine so
+		// the response path is never blocked on the RPC.
+		cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
+			go func() {
+				putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
+				defer cancel()
+				if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
+					e.logger.Debug("peer put error (non-fatal)",
+						"owner", owner.Name, "key", obj.Key, "error", err)
+				}
+			}()
+		}
+		// Origin shield (ADR-0052): the requester side of the shield.
+		// On a hard miss the handler forwards the ORIGINAL request to
+		// the owner; the owner's /v1/peer/forward replays it through
+		// its own data plane. Flag-gated per route construction —
+		// buildRouter builds one handler per route, so every route
+		// carries the shield if and only if the deployment does.
+		if e.cfg.Cluster.OriginShield {
+			cfg.ShieldForward = rs.peerFetcher.ShieldForward
+			cfg.OnShieldSaved = func() {
+				rs.clusterMetrics.IncShield("waiter")
+			}
+			cfg.OnShieldFallback = func() {
+				rs.clusterMetrics.IncShield("fallback")
+			}
+			cfg.OriginShieldBackfillProbability = shieldBackfillProbability(e.cfg)
+		}
+	}
 }
 
 // buildStaticRoute wires a route that serves files from a local directory
@@ -416,7 +441,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 // (default for static routes), the static handler serves directly from disk
 // and the OS page cache provides the hot caching layer.
 //
-//nolint:funlen // 84: the cached-static-route wiring mirrors the proxied-route block by design; splitting it would hide the symmetry
+//nolint:funlen // 90: the HandlerConfig field list dominates; splitting it would hide the symmetry with buildRouter
 func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route, buildRouteFP func(*cache.Handler) *cache.FastPathHandler) {
 	sh, err := staticfile.New(staticfile.Config{
 		Root:       rc.Static.Root,
@@ -489,27 +514,9 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
-			cfg.OwnerFn = ownerFn
-			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() {
-				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
-			}
-			// Write-to-owner RPC: a non-owner that fetches from origin
-			// forwards the object to the owner so subsequent peer-fetches
-			// hit (issue #509). Fire-and-forget in a bounded goroutine so
-			// the response path is never blocked on the RPC.
-			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
-				go func() {
-					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
-					defer cancel()
-					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
-						e.logger.Debug("peer put error (non-fatal)",
-							"owner", owner.Name, "key", obj.Key, "error", err)
-					}
-				}()
-			}
-		}
+		// Same cluster wiring as proxied routes: cached static routes
+		// participate in peer-fetch, peer-put, and the shield identically.
+		applyClusterWiring(e, rs, &cfg)
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		handler = cached.ServeRequest
@@ -531,6 +538,54 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	}
 
 	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler, cacheFP)
+}
+
+// shieldBackfillProbability resolves the origin-shield backfill knob:
+// unset defaults to 1.0 (store every shield fill), matching the D10
+// knob semantics carried over from #731. Validation already rejected
+// out-of-range values at config load.
+func shieldBackfillProbability(cfg *config.Config) float64 {
+	if p := cfg.Cluster.OriginShieldBackfillProbability; p != nil {
+		return *p
+	}
+	return 1.0
+}
+
+// buildPeerForwardHandler builds the owner side of the origin shield
+// (ADR-0052, §4.1): the /v1/peer/forward endpoint on the admin plane.
+// dataPlane is the full data-plane handler (tracing → metrics →
+// router), the same stack the listeners serve — the replayed request
+// runs the standard miss path by construction (D3). The ownership gate
+// binds only with a live cluster node; solo deployments never register
+// the endpoint (a shield RPC has nothing to forward to anyway).
+func (e *engine) buildPeerForwardHandler(rs *runState, dataPlane fasthttp.RequestHandler) *cluster.PeerForwardHandler {
+	var ownsKey func(api.Key) bool
+	if rs.clusterNode != nil {
+		ownsKey = rs.clusterNode.IsLocal
+	}
+	return cluster.NewPeerForwardHandler(
+		dataPlane,
+		ownsKey,
+		e.shieldFetchBudget(),
+		e.cfg.Cluster.HopLimit,
+		e.cfg.Cluster.OriginShield,
+		e.logger,
+		rs.clusterMetrics,
+	)
+}
+
+// shieldFetchBudget is the budget the owner clamps an incoming forward's
+// deadline against (D4). Identical-config pods share the value; the
+// first route's explicit fetch_timeout is the deployment's contract —
+// per-route budgets would make the clamp depend on which route the
+// forward lands on, which the forwarded request does not know yet.
+func (e *engine) shieldFetchBudget() time.Duration {
+	for i := range e.cfg.Routes {
+		if ft := e.cfg.Routes[i].Cache.FetchTimeout; ft > 0 {
+			return ft
+		}
+	}
+	return api.ShieldForwardTimeout
 }
 
 // clusterFastPathClosures builds the ownerFn/peerFetch closures shared

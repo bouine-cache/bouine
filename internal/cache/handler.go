@@ -442,22 +442,16 @@ type HandlerConfig struct {
 	// receipt). Wired to the peer-fetch variant-mismatch metric
 	// (consumer side) by the engine; nil in single-node mode.
 	OnPeerVariantMismatch func()
-	// ShieldForward, when non-nil, enables the cluster origin shield's
-	// requester side (cluster.origin_shield, ADR-0052): on a hard
-	// GET/HEAD miss where the plain peer-fetch answered 404, the
-	// original client request is forwarded to the key's ring owner.
-	// The owner runs its standard miss path and proxies the response
-	// bytes back; the handler writes them to the client and applies
-	// backfill per OriginShieldBackfillProbability. Any error is a
-	// miss — the caller falls back to its own origin fetch. Nil when
-	// the feature is off or the node is the owner / in single-node mode.
+	// ShieldForward, when non-nil, enables the shield's requester side
+	// (ADR-0052): on a hard GET/HEAD miss after the peer-fetch answered
+	// 404, the original request is forwarded to the ring owner, whose
+	// standard miss path answers; errors fall back to the caller's own
+	// origin fetch. Nil when off, owner, or single-node.
 	ShieldForward func(ctx context.Context, owner api.PeerInfo, req *fasthttp.Request, key api.Key, clientTLS bool, deadline time.Time) (*fasthttp.Response, error)
-	// OnShieldSaved counts requesters served from the owner's shield
-	// answer (nil-safe; wired to bouine_shield_requests_total{role=waiter}).
-	OnShieldSaved func()
-	// OnShieldFallback counts requesters whose forward failed and who
-	// fell back to their own origin fetch (nil-safe; wired to
-	// bouine_shield_requests_total{role=fallback}).
+	// OnShieldSaved counts requesters served from the owner's answer;
+	// OnShieldFallback counts requesters that fell back to origin
+	// (nil-safe; wired to bouine_shield_requests_total{role=waiter/fallback}).
+	OnShieldSaved    func()
 	OnShieldFallback func()
 	Upstream         fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
@@ -527,11 +521,11 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
-	// OriginShieldBackfillProbability is the probability that a
-	// shield-sourced response is also stored locally (0.0–1.0).
-	// 1.0 (the zero value here — callers pass the config default)
-	// backfills every shield fill; 0.0 keeps the owner-only partition
-	// (issue #509). Applies to shield fills only (D10).
+	// OriginShieldBackfillProbability: probability (0.0–1.0) that a
+	// shield-sourced response is also stored locally. 1.0 (the zero
+	// value; callers pass the config default) backfills every fill;
+	// 0.0 keeps the owner-only partition (issue #509). Shield fills
+	// only (D10).
 	OriginShieldBackfillProbability float64
 	// DefaultSIE is applied to every stored object when the origin does not
 	// send stale-if-error. Zero disables SIE fallback for this route.
@@ -1528,13 +1522,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 					h.logger.Debug("peer fetch error, falling back to origin",
 						"peer", owner.Addr, "key", lookupKey, "error", err)
 				}
-				// Origin shield (ADR-0052): on a definitive owner miss
-				// (404 — the owner has nothing either) the request is
-				// forwarded to the owner, which runs its standard miss
-				// path and proxies the bytes back. Served means done;
-				// attempted means the owner was just asked and failed,
-				// so the origin fetch below follows without a second
-				// peer retry; not applied keeps the flow untouched.
+				// Origin shield (ADR-0052): on a definitive owner miss (404 —
+				// the owner has nothing either) forward the request to the
+				// owner, which runs its standard miss path and proxies the
+				// bytes back. Served: done. Attempted: the owner was just
+				// asked and failed — the origin fetch follows, without a
+				// second peer retry. Not applied: flow untouched.
 				switch h.handleShieldMiss(ctx, owner, lookupKey, obj, ri) {
 				case shieldServed:
 					return
@@ -2726,7 +2719,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 // the cluster ownership gate. Callers must have decided the object
 // belongs on THIS node — the owner's own fill, a stayin-alive graced
 // entry, or a shield backfill (the knob that deliberately relaxes the
-// partition, D10 in docs/plans/origin-shield.md).
+// partition, ADR-0052 D10).
 func (h *Handler) storeObjectLocal(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {

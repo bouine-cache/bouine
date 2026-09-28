@@ -85,9 +85,8 @@ const (
 )
 
 // maxShieldConcurrency bounds concurrent shield forwards per peer
-// fetcher. A forward holds a pipeline connection for an origin-scale
-// round trip; 16 mirrors #731's coalesced-lane bound and keeps a
-// cold-key storm's forwards from exhausting the peer's connections.
+// fetcher: a forward holds a pipeline connection for an origin-scale
+// round trip; 16 mirrors #731's coalesced-lane bound.
 const maxShieldConcurrency = 16
 
 // maxPeerFetchBytes caps the response body read from a peer during

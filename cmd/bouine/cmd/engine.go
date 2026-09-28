@@ -1267,9 +1267,8 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
-		// With the shield on, the fast path's OwnerMiss hint would
-		// suppress the slow path's forward — the exact RPC the shield
-		// needs. WithShield keeps the hint unset (see tryPeerFetch).
+		// The shield needs the slow path's forward; the OwnerMiss hint
+		// would suppress it (see tryPeerFetch).
 		fp.WithShield(e.cfg.Cluster.OriginShield)
 	}
 	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)

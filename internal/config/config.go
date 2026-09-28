@@ -298,15 +298,12 @@ const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
-	// OriginShieldBackfillProbability is the probability (0.0–1.0)
-	// that a shield-filled response received from the owner is also
-	// stored on the non-owner that received it. Unset (nil) defaults
-	// to 1.0; 0.0 keeps the strict owner-only partition (issue #509).
-	// Applies to shield fills only (D10 in docs/plans/origin-shield.md):
-	// storing warm peer hits would re-create the every-pod-caches-hot-
-	// keys failure the partition exists to prevent. The owner always
-	// stores its own fill regardless. Ignored while origin_shield is
-	// off.
+	// OriginShieldBackfillProbability: probability (0.0–1.0) that a
+	// shield fill is also stored on the non-owner that received it.
+	// nil defaults to 1.0; 0.0 keeps the strict owner-only partition
+	// (issue #509). Shield fills only — storing warm peer hits would
+	// re-create the every-pod-caches-hot-keys failure the partition
+	// exists to prevent. Ignored while origin_shield is off.
 	OriginShieldBackfillProbability *float64 `yaml:"origin_shield_backfill_probability,omitempty" json:"origin_shield_backfill_probability,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
@@ -376,14 +373,13 @@ type Cluster struct {
 	// Zero applies the default; negative values and values below 1s are
 	// rejected by validatePeerFetchConfig.
 	BanTTL time.Duration `yaml:"ban_ttl,omitempty" json:"ban_ttl,omitempty"`
-	// OriginShield enables the cluster origin shield (strong mode
-	// only, default off): on a hard miss the non-owner forwards the
-	// original client request to the key's ring owner, which runs its
-	// standard miss path (one collapsed origin fetch for the whole
-	// cluster) and proxies the response bytes back. A node with the
-	// flag off neither forwards nor serves forwards, so a rolling
-	// deploy degrades per node to today's one-fetch-per-node behavior.
-	// Inert outside strong mode. See ADR-0052.
+	// OriginShield enables the cluster origin shield (strong mode only,
+	// default off): on a hard miss the non-owner forwards the original
+	// client request to the ring owner, which runs its standard miss
+	// path — one collapsed origin fetch for the whole cluster. A node
+	// with the flag off neither forwards nor serves forwards, so a
+	// rolling deploy degrades per node to today's behavior. Inert
+	// outside strong mode. See ADR-0052.
 	OriginShield bool `yaml:"origin_shield,omitempty" json:"origin_shield,omitempty"`
 }
 

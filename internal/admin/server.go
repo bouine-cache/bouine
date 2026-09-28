@@ -73,9 +73,8 @@ type Config struct {
 	Addr     string
 	Token    string
 	// ShieldForwardTimeout, when > 0, extends the admin server's
-	// per-request write deadline for /v1/peer/forward: a shield forward
-	// legitimately holds the connection for an origin fetch, which the
-	// 5s default WriteTimeout would cut mid-flight.
+	// per-request write deadline for /v1/peer/forward (an origin fetch
+	// would outlive the 5s default).
 	ShieldForwardTimeout time.Duration
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
@@ -193,22 +192,18 @@ func New(cfg Config) *Server {
 	if cfg.PprofEnabled {
 		s.inner.WriteTimeout = 0
 	}
-	// Shield forwards (cluster.origin_shield) legitimately hold an
-	// admin connection for an origin fetch — the 5s default WriteTimeout
-	// would cut the proxied response mid-flight. The per-request hook
-	// extends only /v1/peer/forward, mirroring the data plane's SSE
-	// treatment (sseHeaderReceived).
+	// A shield forward holds the connection for an origin fetch — the
+	// 5s default WriteTimeout would cut it mid-flight. The hook extends
+	// only /v1/peer/forward, mirroring the data plane's SSE treatment.
 	if cfg.PeerForwardHandler != nil && cfg.ShieldForwardTimeout > 5*time.Second {
 		s.inner.HeaderReceived = shieldHeaderReceived(cfg.ShieldForwardTimeout)
 	}
 	return s
 }
 
-// shieldHeaderReceived is the admin fasthttp.Server HeaderReceived hook
-// (cluster.origin_shield): requests addressed to /v1/peer/forward get a
-// write deadline covering the owner's origin fetch (gate + miss path +
-// proxied response); every other request keeps the 5s server default.
-// Mirrors the data plane's sseHeaderReceived pattern (internal/server).
+// shieldHeaderReceived gives /v1/peer/forward a write deadline covering
+// the origin fetch; every other request keeps the 5s default. Mirrors the
+// data plane's sseHeaderReceived pattern.
 func shieldHeaderReceived(timeout time.Duration) func(*fasthttp.RequestHeader) fasthttp.RequestConfig {
 	return func(h *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		if string(h.RequestURI()) == "/v1/peer/forward" {

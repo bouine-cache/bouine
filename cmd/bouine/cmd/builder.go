@@ -414,12 +414,9 @@ func applyClusterWiring(e *engine, rs *runState, cfg *cache.HandlerConfig) {
 				}
 			}()
 		}
-		// Origin shield (ADR-0052): the requester side of the shield.
-		// On a hard miss the handler forwards the ORIGINAL request to
-		// the owner; the owner's /v1/peer/forward replays it through
-		// its own data plane. Flag-gated per route construction —
-		// buildRouter builds one handler per route, so every route
-		// carries the shield if and only if the deployment does.
+		// Requester side of the shield (ADR-0052). Flag-gated per route
+		// construction so every route carries the shield iff the
+		// deployment does.
 		if e.cfg.Cluster.OriginShield {
 			cfg.ShieldForward = rs.peerFetcher.ShieldForward
 			cfg.OnShieldSaved = func() {
@@ -540,10 +537,8 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler, cacheFP)
 }
 
-// shieldBackfillProbability resolves the origin-shield backfill knob:
-// unset defaults to 1.0 (store every shield fill), matching the D10
-// knob semantics carried over from #731. Validation already rejected
-// out-of-range values at config load.
+// shieldBackfillProbability: unset defaults to 1.0 (store every shield
+// fill); validation already rejected out-of-range values.
 func shieldBackfillProbability(cfg *config.Config) float64 {
 	if p := cfg.Cluster.OriginShieldBackfillProbability; p != nil {
 		return *p
@@ -551,13 +546,10 @@ func shieldBackfillProbability(cfg *config.Config) float64 {
 	return 1.0
 }
 
-// buildPeerForwardHandler builds the owner side of the origin shield
-// (ADR-0052, §4.1): the /v1/peer/forward endpoint on the admin plane.
-// dataPlane is the full data-plane handler (tracing → metrics →
-// router), the same stack the listeners serve — the replayed request
-// runs the standard miss path by construction (D3). The ownership gate
-// binds only with a live cluster node; solo deployments never register
-// the endpoint (a shield RPC has nothing to forward to anyway).
+// buildPeerForwardHandler builds the owner side of the shield: the
+// /v1/peer/forward endpoint. dataPlane is the same stack the
+// listeners serve, so the replay runs the standard miss path by
+// construction (D3). Solo deployments never register the endpoint.
 func (e *engine) buildPeerForwardHandler(rs *runState, dataPlane fasthttp.RequestHandler) *cluster.PeerForwardHandler {
 	var ownsKey func(api.Key) bool
 	if rs.clusterNode != nil {
@@ -574,11 +566,9 @@ func (e *engine) buildPeerForwardHandler(rs *runState, dataPlane fasthttp.Reques
 	)
 }
 
-// shieldFetchBudget is the budget the owner clamps an incoming forward's
-// deadline against (D4). Identical-config pods share the value; the
-// first route's explicit fetch_timeout is the deployment's contract —
-// per-route budgets would make the clamp depend on which route the
-// forward lands on, which the forwarded request does not know yet.
+// shieldFetchBudget: the owner clamps incoming deadlines against it
+// (D4). Uses the first route's explicit fetch_timeout — a forwarded
+// request does not know its route yet, so per-route budgets cannot.
 func (e *engine) shieldFetchBudget() time.Duration {
 	for i := range e.cfg.Routes {
 		if ft := e.cfg.Routes[i].Cache.FetchTimeout; ft > 0 {

@@ -442,16 +442,14 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
 }
 
-// validateRouteShieldFetchTimeout enforces the origin-shield
-// cross-field invariant (ADR-0052, D4): a route's effective
-// fetch_timeout (explicit, or the pool-inherited default when 0) must
-// exceed api.ShieldForwardTimeout while cluster.origin_shield is on —
-// a requester that exhausts the shield wait must still have budget for
-// its own origin fetch. The pool-inherited default varies per route
-// (resolveRouteFetchTimeout), so the 0 case cannot be checked here
-// without duplicating that resolution; only explicit values below the
-// bound are rejected. Routes inheriting a pool default below the bound
-// fail at runtime in the requester's own fetch, never wrong content.
+// validateRouteShieldFetchTimeout enforces the shield's cross-field
+// invariant (ADR-0052, D4): a route's fetch_timeout must exceed
+// api.ShieldForwardTimeout while cluster.origin_shield is on — a
+// requester that exhausts the shield wait must still have budget for
+// its own origin fetch. Only explicit values are checked: the 0 case
+// inherits a per-route pool default (resolveRouteFetchTimeout) that
+// cannot be resolved here, and such routes fail at runtime in the
+// requester's own fetch, never wrong content.
 func (c *Config) validateRouteShieldFetchTimeout(ec *errCollector, prefix string, rc RouteCache) {
 	if !c.Cluster.OriginShield || rc.FetchTimeout <= 0 {
 		return

@@ -58,9 +58,8 @@ type FastPathHandler struct {
 	onStale    func(req *api.RawRequest, key api.Key, stale *api.Object)
 	cachedDate atomic.Pointer[string]
 	poolName   string
-	// shield mirrors cluster.origin_shield: when on, a fast-path owner
-	// miss must not set OwnerMiss — the slow path's shield branch must
-	// still run its forward to the owner (WithShield wiring).
+	// shield: when on, a fast-path owner miss must not set OwnerMiss —
+	// the slow path still needs to run its shield forward.
 	shield         bool
 	cachedDateUnix atomic.Int64
 }
@@ -126,12 +125,9 @@ func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.Pee
 	return f
 }
 
-// WithShield marks the fast path as serving a deployment with the
-// cluster origin shield on (cluster.origin_shield): an owner miss must
-// leave OwnerMiss unset so the slow path still runs its shield forward
-// instead of skipping straight to origin. Without this the fast-path
-// peer hint (issue #636) would suppress the very RPC the shield needs.
-// No-op when the fast-path peer branch is not wired.
+// WithShield keeps OwnerMiss unset on an owner miss when the shield is
+// on, so the slow path still runs its shield forward — the fast-path
+// peer hint would otherwise suppress the very RPC the shield needs.
 func (f *FastPathHandler) WithShield(on bool) *FastPathHandler {
 	f.shield = on
 	return f

@@ -52,28 +52,20 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
-	// ShieldRequests counts origin-shield events by role: "owner"
-	// (a shield forward served by the ring owner), "waiter" (a
-	// non-owner served from the owner's answer — the headline
-	// "origin requests saved" number), "failure" (the owner's miss
-	// path errored; the requester falls back to origin), or
-	// "fallback" (the forward never produced a servable answer on the
-	// requester side; the requester fetched origin itself). See
-	// ADR-0052.
+	// ShieldRequests counts shield events by role: owner, waiter
+	// (origin request saved), failure (owner's miss path errored),
+	// fallback (requester-side forward failed; owner-side counters
+	// cannot see these). See ADR-0052.
 	ShieldRequests *prometheus.CounterVec
-	// ShieldShed counts shield forwards shed at the owner's standard
-	// fetch semaphore (a saturated owner must be visible, not inferred
-	// from latency).
+	// ShieldShed counts forwards shed at the owner's fetch semaphore: a
+	// saturated owner must be visible, not inferred from latency.
 	ShieldShed prometheus.Counter
-	// ShieldSaved counts requesters that avoided an origin request by
-	// serving the owner's shield answer. Kept separate from the role
-	// vec so dashboards can subtract it from total origin load without
-	// label queries. Incremented together with
-	// ShieldRequests{role="waiter"}.
+	// ShieldSaved counts origin requests avoided by the shield. Separate
+	// from the role vec so dashboards subtract from origin load without
+	// label queries. Incremented with ShieldRequests{role="waiter"}.
 	ShieldSaved prometheus.Counter
-	// ShieldDuration observes one shield forward's end-to-end latency
-	// on the owner (the requester's wait is bounded by the same
-	// deadline it carried).
+	// ShieldDuration observes one forward's end-to-end latency on the
+	// owner.
 	ShieldDuration prometheus.Histogram
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
@@ -252,9 +244,8 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 	m.peerFetchVariantMismatchTotal.Add(1)
 }
 
-// IncShield increments the origin-shield role counter. A "waiter"
-// increment also counts one origin request saved (same event, two
-// views). Nil-safe: single-node mode never registers the vec.
+// IncShield increments the role counter; a "waiter" also counts one
+// origin request saved. Nil-safe.
 func (m *Metrics) IncShield(role string) {
 	if m == nil || m.ShieldRequests == nil {
 		return
@@ -275,8 +266,8 @@ func (m *Metrics) IncShieldShed() {
 	m.ShieldShed.Inc()
 }
 
-// ObserveShieldDuration records one owner-side shield forward's
-// end-to-end latency. Nil-safe.
+// ObserveShieldDuration records one forward's end-to-end latency.
+// Nil-safe.
 func (m *Metrics) ObserveShieldDuration(d time.Duration) {
 	if m == nil || m.ShieldDuration == nil {
 		return

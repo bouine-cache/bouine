@@ -19,16 +19,9 @@ the curated, human-readable summary.
   origin fetch for the whole cluster. The owner-side forward is
   exposed on `/v1/peer/forward` with new `bouine_shield_*` metrics;
   backfill on the non-owner is tunable via
-  `cluster.origin_shield_backfill_probability` (default 1.0).
-
-- **Design plan for the cluster origin shield, second attempt**
-  (ADR-0052, `docs/plans/origin-shield.md`). Documents the
-  request-forwarding design that supersedes the envelope-based
-  approach of PR #731 (closed without merging): on a cold key the
-  non-owner forwards the original client request to the ring owner,
-  which runs its standard miss path — one origin fetch per cluster
-  with no new wire format. Docs only; implementation follows on a
-  separate PR.
+  `cluster.origin_shield_backfill_probability` (default 1.0, shield
+  fills only). Supersedes the envelope-based first attempt of PR #731
+  (closed without merging).
 
 ### Changed
 

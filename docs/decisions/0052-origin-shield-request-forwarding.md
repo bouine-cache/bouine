@@ -1,9 +1,11 @@
 # ADR-0052: Cluster origin shield via request forwarding
 
-- **Status**: Accepted — implemented 2026-09-28; see
-  `docs/plans/origin-shield.md` §8 for the as-built notes (original-method
-  HEAD forwards, requester never backfills a HEAD answer, shared
-  30 s forward deadline).
+- **Status**: Accepted — implemented 2026-09-28. As-built deltas from
+  this decision: HEAD requests are forwarded with their original
+  method (the owner's standard path suppresses the body for HEAD
+  clients), the requester never backfills a HEAD answer, and the
+  forward carries a single shared 30 s deadline clamped on both
+  sides.
 - **Date**: 2026-09-28
 - **Deciders**: @chridupin-33
 - **Phase**: cluster / origin
@@ -137,7 +139,5 @@ key-derived envelope:
 
 - PR #731 — first attempt (closed); its "Known trade-offs" section is
   the evidence for the envelope alternative's cost.
-- `docs/plans/origin-shield.md` — implementation plan for this
-  decision.
 - Varnish origin shield (shield nodes receive the full client
   request; that property is what this design borrows).

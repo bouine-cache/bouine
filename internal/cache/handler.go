@@ -1525,14 +1525,11 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 				// Origin shield (ADR-0052): on a definitive owner miss (404 —
 				// the owner has nothing either) forward the request to the
 				// owner, which runs its standard miss path and proxies the
-				// bytes back. Served: done. Attempted: the owner was just
-				// asked and failed — the origin fetch follows, without a
-				// second peer retry. Not applied: flow untouched.
-				switch h.handleShieldMiss(ctx, owner, lookupKey, obj, ri) {
-				case shieldServed:
+				// bytes back. Served: done. Not served (never qualified or the
+				// forward failed): the origin fetch below follows, without a
+				// second peer retry.
+				if h.handleShieldMiss(ctx, owner, lookupKey, obj, ri) {
 					return
-				case shieldAttempted:
-					goto originFetch
 				}
 			}
 		}
@@ -1545,7 +1542,6 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// The miss path uses staleFallbackAllowed as a third OR term so that
 	// objects without an explicit SIE window still get stale-on-error
 	// fallback, matching the revalidate path's behaviour.
-originFetch:
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src, ri)
 	} else {

@@ -28,22 +28,6 @@ func (h *Handler) shieldApplies(obj *api.Object, method []byte) bool {
 	return string(method) == fasthttp.MethodGet || string(method) == fasthttp.MethodHead
 }
 
-// shieldOutcome: without serving, a return means either the forward
-// ran and failed (re-asking the owner is useless — it just answered)
-// or the request never qualified.
-type shieldOutcome int
-
-const (
-	// shieldNotApplied: the request did not qualify; today's behavior
-	// is untouched.
-	shieldNotApplied shieldOutcome = iota
-	// shieldAttempted: the forward ran and failed; the origin fetch
-	// below follows.
-	shieldAttempted
-	// shieldServed: the answer was written to the client.
-	shieldServed
-)
-
 // shieldForwardRequest copies the ORIGINAL client request verbatim
 // (D1) — route rewrites are NOT applied; the owner's route applies
 // them once. The deadline is the shield bound; the owner clamps it
@@ -66,14 +50,16 @@ func (h *Handler) shieldForwardRequest(ctx *fasthttp.RequestCtx) (*fasthttp.Requ
 }
 
 // handleShieldMiss runs the shield branch for a hard miss the plain
-// peer-fetch could not answer. shieldServed: written, caller returns.
-// shieldAttempted: the forward failed; origin fetch follows. Not
-// applied: never qualified.
+// peer-fetch could not answer: forward the original request to the
+// ring owner and serve its proxied answer. Returns true when the
+// response was written and the caller must return; false (request
+// never qualified, or the forward failed) falls through to the
+// caller's own origin fetch.
 //
 //nolint:gocyclo // 13: outcome/gate/backfill branches are the ADR-0052 checklist
-func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo, lookupKey api.Key, obj *api.Object, ri RequestInfo) shieldOutcome {
+func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo, lookupKey api.Key, obj *api.Object, ri RequestInfo) bool {
 	if !h.shieldApplies(obj, ctx.Method()) {
-		return shieldNotApplied
+		return false
 	}
 	fwdReq, deadline, cancel := h.shieldForwardRequest(ctx)
 	defer cancel()
@@ -86,7 +72,7 @@ func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo,
 		if h.onShieldFallback != nil {
 			h.onShieldFallback()
 		}
-		return shieldAttempted
+		return false
 	}
 	defer fasthttp.ReleaseResponse(resp)
 
@@ -99,7 +85,7 @@ func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo,
 		if h.onShieldFallback != nil {
 			h.onShieldFallback()
 		}
-		return shieldAttempted
+		return false
 	}
 
 	// Serve the proxied bytes; the owner already applied response
@@ -120,7 +106,7 @@ func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo,
 		h.onShieldSaved()
 	}
 	h.shieldBackfill(ctx, lookupKey, resp, body, ri)
-	return shieldServed
+	return true
 }
 
 // shieldBackfill stores the shield-sourced response locally per the

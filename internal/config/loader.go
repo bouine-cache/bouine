@@ -434,11 +434,33 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 		r.Match.Methods[j] = up
 	}
 	validateRouteKeyHostSelector(ec, prefix, r)
+	c.validateRouteShieldFetchTimeout(ec, prefix, r.Cache)
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		ec.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
 	validatePathRewrite(ec, prefix+".request", r.Request)
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
+}
+
+// validateRouteShieldFetchTimeout enforces the origin-shield
+// cross-field invariant (ADR-0052, D4): a route's effective
+// fetch_timeout (explicit, or the pool-inherited default when 0) must
+// exceed api.ShieldForwardTimeout while cluster.origin_shield is on —
+// a requester that exhausts the shield wait must still have budget for
+// its own origin fetch. The pool-inherited default varies per route
+// (resolveRouteFetchTimeout), so the 0 case cannot be checked here
+// without duplicating that resolution; only explicit values below the
+// bound are rejected. Routes inheriting a pool default below the bound
+// fail at runtime in the requester's own fetch, never wrong content.
+func (c *Config) validateRouteShieldFetchTimeout(ec *errCollector, prefix string, rc RouteCache) {
+	if !c.Cluster.OriginShield || rc.FetchTimeout <= 0 {
+		return
+	}
+	if rc.FetchTimeout <= api.ShieldForwardTimeout {
+		ec.addf(prefix+".cache.fetch_timeout",
+			"(%v) must be > %v while cluster.origin_shield is on: a requester that gives up on the shield wait must still have budget for its own origin fetch",
+			rc.FetchTimeout, api.ShieldForwardTimeout)
+	}
 }
 
 // validateRouteKeyHostSelector rejects include_host: false on a route
@@ -966,6 +988,7 @@ func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 		ec.addf("cluster.ban_ttl", "must be >= 1s when set, got %v",
 			c.Cluster.BanTTL)
 	}
+	c.validateOriginShield(ec)
 	if c.Admin.IdleTimeout < 0 {
 		ec.addf("admin.idle_timeout", "must be >= 0 (0 = default 300s), got %v",
 			c.Admin.IdleTimeout)
@@ -986,6 +1009,23 @@ func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 				"(%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
 				id, adminIdle)
 		}
+	}
+}
+
+// validateOriginShield checks the origin-shield settings (ADR-0052).
+// Extracted from validatePeerFetchConfig to keep cyclomatic complexity
+// under the gocyclo limit.
+func (c *Config) validateOriginShield(ec *errCollector) {
+	if c.Cluster.OriginShieldBackfillProbability != nil {
+		p := *c.Cluster.OriginShieldBackfillProbability
+		if p < 0 || p > 1 {
+			ec.addf("cluster.origin_shield_backfill_probability",
+				"must be within [0.0, 1.0], got %v", p)
+		}
+	}
+	if c.Cluster.OriginShield && c.Cluster.Mode != ClusterModeStrong {
+		ec.addf("cluster.origin_shield",
+			"is only supported in strong mode (cluster.mode is %q); the shield forwards cold misses to the consistent-hash ring owner, which only exists in strong mode", c.Cluster.Mode)
 	}
 }
 

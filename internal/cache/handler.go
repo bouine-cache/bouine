@@ -272,6 +272,14 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// shieldForward, when non-nil, forwards the original client request
+	// to the ring owner's /v1/peer/forward endpoint (cluster.origin_shield).
+	// Nil when the feature is off.
+	shieldForward func(ctx context.Context, owner api.PeerInfo, req *fasthttp.Request, key api.Key, clientTLS bool, deadline time.Time) (*fasthttp.Response, error)
+	// onShieldSaved / onShieldFallback count the shield outcome on the
+	// requester side (nil-safe).
+	onShieldSaved    func()
+	onShieldFallback func()
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
@@ -356,7 +364,10 @@ type Handler struct {
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
-	stayinAlive          bool
+	// shieldBackfillProbability: probability a shield-sourced response is
+	// also stored locally (0.0–1.0). D10: shield fills only.
+	shieldBackfillProbability float64
+	stayinAlive               bool
 	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
@@ -431,7 +442,24 @@ type HandlerConfig struct {
 	// receipt). Wired to the peer-fetch variant-mismatch metric
 	// (consumer side) by the engine; nil in single-node mode.
 	OnPeerVariantMismatch func()
-	Upstream              fasthttp.RequestHandler
+	// ShieldForward, when non-nil, enables the cluster origin shield's
+	// requester side (cluster.origin_shield, ADR-0052): on a hard
+	// GET/HEAD miss where the plain peer-fetch answered 404, the
+	// original client request is forwarded to the key's ring owner.
+	// The owner runs its standard miss path and proxies the response
+	// bytes back; the handler writes them to the client and applies
+	// backfill per OriginShieldBackfillProbability. Any error is a
+	// miss — the caller falls back to its own origin fetch. Nil when
+	// the feature is off or the node is the owner / in single-node mode.
+	ShieldForward func(ctx context.Context, owner api.PeerInfo, req *fasthttp.Request, key api.Key, clientTLS bool, deadline time.Time) (*fasthttp.Response, error)
+	// OnShieldSaved counts requesters served from the owner's shield
+	// answer (nil-safe; wired to bouine_shield_requests_total{role=waiter}).
+	OnShieldSaved func()
+	// OnShieldFallback counts requesters whose forward failed and who
+	// fell back to their own origin fetch (nil-safe; wired to
+	// bouine_shield_requests_total{role=fallback}).
+	OnShieldFallback func()
+	Upstream         fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -499,6 +527,12 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
+	// OriginShieldBackfillProbability is the probability that a
+	// shield-sourced response is also stored locally (0.0–1.0).
+	// 1.0 (the zero value here — callers pass the config default)
+	// backfills every shield fill; 0.0 keeps the owner-only partition
+	// (issue #509). Applies to shield fills only (D10).
+	OriginShieldBackfillProbability float64
 	// DefaultSIE is applied to every stored object when the origin does not
 	// send stale-if-error. Zero disables SIE fallback for this route.
 	DefaultSIE time.Duration
@@ -735,44 +769,48 @@ func (h *Handler) applyResponseRewrites(dst *fasthttp.ResponseHeader) {
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
-		upstream:                cfg.Upstream,
-		fastClient:              cfg.FastClient,
-		stripPrefix:             []byte(cfg.StripPrefix),
-		pathRewrite:             cfg.PathRewrite,
-		store:                   cfg.Store,
-		logger:                  cfg.Logger,
-		neg:                     cfg.Negative,
-		jitterPercent:           cfg.JitterPercent,
-		stayinAlive:             cfg.StayinAlive,
-		logCacheKeys:            cfg.LogCacheKeys,
-		defaultTTL:              cfg.DefaultTTL,
-		overrideTTL:             cfg.OverrideTTL,
-		defaultSWR:              cfg.DefaultSWR,
-		defaultSIE:              cfg.DefaultSIE,
-		variantSets:             make(map[api.Key]map[api.Key]struct{}),
-		VaryCapHits:             cfg.VaryCapHits,
-		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
-		StreamingFallbackInc:    cfg.StreamingFallback,
-		FetchShedInc:            cfg.FetchShed,
-		RewarmFillInc:           cfg.RewarmFill,
-		ownerFn:                 cfg.OwnerFn,
-		peerFetch:               cfg.PeerFetch,
-		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
-		peerPut:                 cfg.PeerPut,
-		allowSetCookie:          cfg.AllowSetCookie,
-		maxObjectSize:           cfg.MaxObjectSize,
-		maxResponseBytes:        cfg.MaxResponseBytes,
-		policy:                  cfg.Policy,
-		refreshBeforeExpiry:     cfg.RefreshBeforeExpiry,
-		refreshMargin:           cfg.RefreshMargin,
-		refreshTimeout:          cfg.RefreshTimeout,
-		refreshMinHits:          cfg.RefreshMinHits,
-		refreshPersistCycles:    cfg.RefreshPersistCycles,
-		refreshMinScore:         cfg.RefreshMinScore,
-		refreshReactiveFirst:    cfg.RefreshReactiveFirst,
-		routeName:               cfg.RouteName,
-		poolName:                cfg.PoolName,
-		done:                    make(chan struct{}),
+		upstream:                  cfg.Upstream,
+		fastClient:                cfg.FastClient,
+		stripPrefix:               []byte(cfg.StripPrefix),
+		pathRewrite:               cfg.PathRewrite,
+		store:                     cfg.Store,
+		logger:                    cfg.Logger,
+		neg:                       cfg.Negative,
+		jitterPercent:             cfg.JitterPercent,
+		stayinAlive:               cfg.StayinAlive,
+		logCacheKeys:              cfg.LogCacheKeys,
+		defaultTTL:                cfg.DefaultTTL,
+		overrideTTL:               cfg.OverrideTTL,
+		defaultSWR:                cfg.DefaultSWR,
+		defaultSIE:                cfg.DefaultSIE,
+		variantSets:               make(map[api.Key]map[api.Key]struct{}),
+		VaryCapHits:               cfg.VaryCapHits,
+		StreamingBufferBytesSet:   cfg.StreamingBufferBytes,
+		StreamingFallbackInc:      cfg.StreamingFallback,
+		FetchShedInc:              cfg.FetchShed,
+		RewarmFillInc:             cfg.RewarmFill,
+		ownerFn:                   cfg.OwnerFn,
+		peerFetch:                 cfg.PeerFetch,
+		onPeerVariantMismatch:     cfg.OnPeerVariantMismatch,
+		peerPut:                   cfg.PeerPut,
+		shieldForward:             cfg.ShieldForward,
+		onShieldSaved:             cfg.OnShieldSaved,
+		onShieldFallback:          cfg.OnShieldFallback,
+		shieldBackfillProbability: cfg.OriginShieldBackfillProbability,
+		allowSetCookie:            cfg.AllowSetCookie,
+		maxObjectSize:             cfg.MaxObjectSize,
+		maxResponseBytes:          cfg.MaxResponseBytes,
+		policy:                    cfg.Policy,
+		refreshBeforeExpiry:       cfg.RefreshBeforeExpiry,
+		refreshMargin:             cfg.RefreshMargin,
+		refreshTimeout:            cfg.RefreshTimeout,
+		refreshMinHits:            cfg.RefreshMinHits,
+		refreshPersistCycles:      cfg.RefreshPersistCycles,
+		refreshMinScore:           cfg.RefreshMinScore,
+		refreshReactiveFirst:      cfg.RefreshReactiveFirst,
+		routeName:                 cfg.RouteName,
+		poolName:                  cfg.PoolName,
+		done:                      make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
@@ -1480,13 +1518,29 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
 	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
+			peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj))
+			if err == nil && peerObj != nil {
 				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 					return
 				}
-			} else if err != nil {
-				h.logger.Debug("peer fetch error, falling back to origin",
-					"peer", owner.Addr, "key", lookupKey, "error", err)
+			} else {
+				if err != nil {
+					h.logger.Debug("peer fetch error, falling back to origin",
+						"peer", owner.Addr, "key", lookupKey, "error", err)
+				}
+				// Origin shield (ADR-0052): on a definitive owner miss
+				// (404 — the owner has nothing either) the request is
+				// forwarded to the owner, which runs its standard miss
+				// path and proxies the bytes back. Served means done;
+				// attempted means the owner was just asked and failed,
+				// so the origin fetch below follows without a second
+				// peer retry; not applied keeps the flow untouched.
+				switch h.handleShieldMiss(ctx, owner, lookupKey, obj, ri) {
+				case shieldServed:
+					return
+				case shieldAttempted:
+					goto originFetch
+				}
 			}
 		}
 	}
@@ -1498,6 +1552,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// The miss path uses staleFallbackAllowed as a third OR term so that
 	// objects without an explicit SIE window still get stale-on-error
 	// fallback, matching the revalidate path's behaviour.
+originFetch:
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src, ri)
 	} else {
@@ -2664,6 +2719,15 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 			return
 		}
 	}
+	h.storeObjectLocal(ctx, key, obj, ri, isRefresh, staleHits)
+}
+
+// storeObjectLocal stores and runs the refresh bookkeeping, WITHOUT
+// the cluster ownership gate. Callers must have decided the object
+// belongs on THIS node — the owner's own fill, a stayin-alive graced
+// entry, or a shield backfill (the knob that deliberately relaxes the
+// partition, D10 in docs/plans/origin-shield.md).
+func (h *Handler) storeObjectLocal(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
 		// An error status covered by the negative-caching policy skips

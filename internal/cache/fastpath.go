@@ -52,12 +52,16 @@ type FastPathHandler struct {
 	// and whether it is local; peerFetch asks that owner for the object.
 	// Nil in single-node and eventual modes — the peer branch then never
 	// runs and TryHit behaves exactly as before.
-	ownerFn        func(key api.Key) (owner api.PeerInfo, isLocal bool)
-	peerFetch      func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	policy         *KeyPolicy // nil = no query/header policy
-	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
-	cachedDate     atomic.Pointer[string]
-	poolName       string
+	ownerFn    func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	peerFetch  func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	policy     *KeyPolicy // nil = no query/header policy
+	onStale    func(req *api.RawRequest, key api.Key, stale *api.Object)
+	cachedDate atomic.Pointer[string]
+	poolName   string
+	// shield mirrors cluster.origin_shield: when on, a fast-path owner
+	// miss must not set OwnerMiss — the slow path's shield branch must
+	// still run its forward to the owner (WithShield wiring).
+	shield         bool
 	cachedDateUnix atomic.Int64
 }
 
@@ -119,6 +123,17 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool), peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) *FastPathHandler {
 	f.ownerFn = ownerFn
 	f.peerFetch = peerFetch
+	return f
+}
+
+// WithShield marks the fast path as serving a deployment with the
+// cluster origin shield on (cluster.origin_shield): an owner miss must
+// leave OwnerMiss unset so the slow path still runs its shield forward
+// instead of skipping straight to origin. Without this the fast-path
+// peer hint (issue #636) would suppress the very RPC the shield needs.
+// No-op when the fast-path peer branch is not wired.
+func (f *FastPathHandler) WithShield(on bool) *FastPathHandler {
+	f.shield = on
 	return f
 }
 
@@ -231,11 +246,17 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err != nil || peerObj == nil {
-		if err == nil {
+		if err == nil && !f.shield {
 			// Definitive owner miss: the owner answered (no error) with no
 			// object for the plain key. Flag the request so the slow path
 			// skips its duplicate owner lookup + peer RPC and goes straight
 			// to origin. Errors keep the slow-path retry.
+			//
+			// Shield-on (cluster.origin_shield) keeps the hint unset:
+			// handleCacheMiss's shield branch needs to see a plain miss
+			// to forward the request to the owner (ADR-0052); the
+			// duplicate key-only peer-fetch the hint suppresses is
+			// exactly what the shield branch runs first anyway.
 			req.OwnerMiss = true
 		}
 		return nil, false

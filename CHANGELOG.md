@@ -10,6 +10,17 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- **Design plan for the cluster origin shield, second attempt**
+  (ADR-0052, `docs/plans/origin-shield.md`). Documents the
+  request-forwarding design that supersedes the envelope-based
+  approach of PR #731 (closed without merging): on a cold key the
+  non-owner forwards the original client request to the ring owner,
+  which runs its standard miss path — one origin fetch per cluster
+  with no new wire format. Docs only; implementation follows on a
+  separate PR.
+
 ### Changed
 
 - **Accept-Encoding now keys variants by negotiation bucket**

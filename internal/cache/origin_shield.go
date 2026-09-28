@@ -32,7 +32,7 @@ func (h *Handler) shieldApplies(obj *api.Object, method []byte) bool {
 // (D1) — route rewrites are NOT applied; the owner's route applies
 // them once. The deadline is the shield bound; the owner clamps it
 // against its own fetch budget (D4).
-func (h *Handler) shieldForwardRequest(ctx *fasthttp.RequestCtx) (*fasthttp.Request, time.Time, func()) {
+func (h *Handler) shieldForwardRequest(ctx *fasthttp.RequestCtx) (*fasthttp.Request, time.Time) {
 	req := fasthttp.AcquireRequest()
 	req.Header.SetMethodBytes(ctx.Method())
 	req.SetRequestURIBytes(ctx.RequestURI())
@@ -40,13 +40,7 @@ func (h *Handler) shieldForwardRequest(ctx *fasthttp.RequestCtx) (*fasthttp.Requ
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
-	// A RequestCtx has no Done channel; WithoutCancel avoids the
-	// WithTimeout panic. Client cancellation is not propagated — the
-	// deadline bounds the wait, and the owner's flight lands in its
-	// store either way.
-	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), api.ShieldForwardTimeout)
-	_ = waitCtx // the RPC budget is the deadline below; ctx cancels nothing extra
-	return req, time.Now().Add(api.ShieldForwardTimeout), cancel
+	return req, time.Now().Add(api.ShieldForwardTimeout)
 }
 
 // handleShieldMiss runs the shield branch for a hard miss the plain
@@ -61,8 +55,7 @@ func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo,
 	if !h.shieldApplies(obj, ctx.Method()) {
 		return false
 	}
-	fwdReq, deadline, cancel := h.shieldForwardRequest(ctx)
-	defer cancel()
+	fwdReq, deadline := h.shieldForwardRequest(ctx)
 	defer fasthttp.ReleaseRequest(fwdReq)
 
 	resp, err := h.shieldForward(context.WithoutCancel(ctx), owner, fwdReq, lookupKey, ctx.IsTLS(), deadline)

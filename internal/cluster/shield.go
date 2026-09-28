@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -55,28 +56,10 @@ func parseShieldKey(b []byte) (api.Key, bool) {
 		return api.Key{}, false
 	}
 	var key api.Key
-	for i := range key {
-		hi, okHi := unhexDigit(b[2*i])
-		lo, okLo := unhexDigit(b[2*i+1])
-		if !okHi || !okLo {
-			return api.Key{}, false
-		}
-		key[i] = hi<<4 | lo
+	if _, err := hex.Decode(key[:], b); err != nil {
+		return api.Key{}, false
 	}
 	return key, true
-}
-
-func unhexDigit(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
-	default:
-		return 0, false
-	}
 }
 
 // PeerForwardHandler serves shield forwards on the admin plane.

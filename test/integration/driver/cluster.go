@@ -76,6 +76,9 @@ type ClusterStack struct {
 	// hotMaxBytes retains the per-node hot-tier budget so RestartNode
 	// rebuilds the same config BootCluster originally wrote.
 	hotMaxBytes string
+	// originShield retains the shield flag so RestartNode rebuilds the
+	// same config BootCluster originally wrote.
+	originShield bool
 	// experimentalYAML lines are appended to every node config under
 	// the experimental: section (nil = no section).
 	experimentalYAML []string
@@ -102,6 +105,9 @@ type ClusterOptions struct {
 	// node. Both default off; the peer flag requires the fast path.
 	ExperimentalH1FastPath     bool
 	ExperimentalH1FastPeerPath bool
+	// OriginShield enables cluster.origin_shield on every node for the
+	// origin-shield acceptance tests (ADR-0052).
+	OriginShield bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -153,16 +159,17 @@ func formatCertEntry(certFile, keyFile string, sni []string) string {
 // YAML config file. It is shared by BootCluster, RestartNode, and
 // RestartNodeWithTLS to keep the config template in one place.
 type nodeConfigParams struct {
-	name        string
-	mode        string
-	httpPort    int
-	httpsPort   int // 0 when TLS is not configured
-	adminPort   int
-	gossipPort  int
-	seedList    string
-	originAddr  string
-	hotMaxBytes string
-	tls         *TLSOptions // nil when TLS is not configured
+	name         string
+	mode         string
+	httpPort     int
+	httpsPort    int // 0 when TLS is not configured
+	adminPort    int
+	gossipPort   int
+	seedList     string
+	originAddr   string
+	hotMaxBytes  string
+	originShield bool
+	tls          *TLSOptions // nil when TLS is not configured
 	// experimental lines rendered verbatim under the experimental:
 	// section (nil = omit the section entirely).
 	experimental []string
@@ -188,7 +195,7 @@ cluster:
   node_name: %s
   mode: %s
   join: %s
-  hop_limit: 2
+  hop_limit: 2%s
 upstream_pools:
   - name: origin
     targets: [%q]
@@ -219,7 +226,7 @@ routes:
       ttl_default: 60s
 `,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
-		p.originAddr)
+		shieldYAMLLine(p.originShield), p.originAddr)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -249,6 +256,15 @@ func hotMaxBytesOrDefault(v string) string {
 		return "128MiB"
 	}
 	return v
+}
+
+// shieldYAMLLine renders the cluster.origin_shield line appended to the
+// cluster block, or an empty string to keep the flag's default (off).
+func shieldYAMLLine(on bool) string {
+	if on {
+		return "\n  origin_shield: true"
+	}
+	return ""
 }
 
 // BootCluster starts a 3-node in-process bouine cluster with a fasthttp origin.
@@ -288,12 +304,13 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		t.Fatalf("create config dir: %v", err)
 	}
 	s := &ClusterStack{
-		Mode:        opts.Mode,
-		OriginURL:   origin.url,
-		origin:      origin,
-		originCtl:   originCtl,
-		configDir:   configDir,
-		hotMaxBytes: opts.HotMaxBytes,
+		Mode:         opts.Mode,
+		OriginURL:    origin.url,
+		origin:       origin,
+		originCtl:    originCtl,
+		configDir:    configDir,
+		hotMaxBytes:  opts.HotMaxBytes,
+		originShield: opts.OriginShield,
 	}
 	if opts.ExperimentalH1FastPath || opts.ExperimentalH1FastPeerPath {
 		if opts.ExperimentalH1FastPath {
@@ -323,6 +340,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			seedList:     seedList,
 			originAddr:   origin.addr,
 			hotMaxBytes:  opts.HotMaxBytes,
+			originShield: opts.OriginShield,
 			tls:          tlsOpts,
 			experimental: s.experimentalYAML,
 		})
@@ -483,6 +501,7 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		seedList:     seedList,
 		originAddr:   s.origin.addr,
 		hotMaxBytes:  s.hotMaxBytes,
+		originShield: s.originShield,
 		tls:          tlsOpts,
 		experimental: s.experimentalYAML,
 	})
@@ -597,10 +616,17 @@ func (s *ClusterStack) KillNode(t *testing.T, n int) {
 
 // doGet performs a GET request and returns a Response.
 func doGet(url, host string) (*Response, error) {
+	return doRequest(fasthttp.MethodGet, url, host)
+}
+
+// doRequest performs a request with the given method and returns a
+// Response.
+func doRequest(method, url, host string) (*Response, error) {
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
+	req.Header.SetMethod(method)
 	req.SetRequestURI(url)
 	if host != "" {
 		// UseHostHeader keeps the dial target from the URL while the
@@ -707,6 +733,18 @@ func (s *ClusterStack) GetWithHost(t *testing.T, n int, path string, host string
 	resp, err := doGet(url, host)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// HeadWithHost performs a HEAD with a specific Host header. Use with
+// CrossNodeHost so every node derives the same cache key.
+func (s *ClusterStack) HeadWithHost(t *testing.T, n int, path string, host string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	resp, err := doRequest(fasthttp.MethodHead, url, host)
+	if err != nil {
+		t.Fatalf("HEAD %s: %v", url, err)
 	}
 	return resp
 }

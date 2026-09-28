@@ -1,8 +1,10 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"time"
@@ -25,6 +27,11 @@ const PeerForwardPath = "/v1/peer/forward"
 // owner's clamped fetch budget. config.Validate rejects explicit route
 // fetch_timeouts at or below this while the shield is on.
 const shieldForwardTimeout = api.ShieldForwardTimeout
+
+// shieldMaxBodyBytes caps the response body a shield forward may carry
+// through the admin plane's body-limit middleware. The admin default
+// (admin.max_body_bytes, 1 MiB) applies below this value.
+const shieldMaxBodyBytes int64 = 64 << 20
 
 // ErrShieldForward is returned by ShieldForward when the owner refused
 // or could not serve the forward. Callers treat it like any other peer
@@ -353,3 +360,144 @@ type shieldTLSConn struct {
 
 func (*shieldTLSConn) Handshake() error                     { return nil }
 func (*shieldTLSConn) ConnectionState() tls.ConnectionState { return tls.ConnectionState{} }
+
+// ShieldForward forwards the original client request to the owner's
+// /v1/peer/forward endpoint (requester side of the shield, §4.2). The
+// request carries the shield control headers (deadline, hex key, hop,
+// cluster version, client scheme); the owner's response bytes are
+// returned as-is. Any transport error, refusal, or deadline miss
+// returns an error — the caller falls back to its own origin fetch.
+//
+// The forward rides a dedicated pipeline lane (not the 500ms key-only
+// lane): a shield forward legitimately takes origin-scale time, and
+// lookups must never queue behind an origin round-trip.
+func (f *PeerFetcher) ShieldForward(ctx context.Context, peer api.PeerInfo, req *fasthttp.Request, key api.Key, clientTLS bool, deadline time.Time) (*fasthttp.Response, error) {
+	addr := peerAddr(peer)
+	if !f.breakerAllowed(addr) {
+		return nil, fmt.Errorf("shield forward %s: %w", peer.Addr, ErrPeerBlacklisted)
+	}
+	if err := f.acquireSlot(ctx, f.shieldSem); err != nil {
+		return nil, fmt.Errorf("shield forward %s: %w", peer.Addr, err)
+	}
+	defer func() { <-f.shieldSem }()
+
+	// Control headers (D4/D5): the deadline is absolute unix-nano; the
+	// key hex lets the owner gate on ownership without recomputation;
+	// the scheme lets the owner rebuild the CLIENT's cache key (the
+	// forward rides the admin plane); the original request-target
+	// travels in a header because the wire request line must address
+	// /v1/peer/forward; the hop counter starts at 1 (the key-only
+	// peer-fetch already ran).
+	origURI := req.RequestURI()
+	req.Header.Set(header.XBouineDeadline, strconv.FormatInt(deadline.UnixNano(), 10))
+	req.Header.Set(header.XBouineShieldKey, key.Hex())
+	scheme := "http"
+	if clientTLS {
+		scheme = "https"
+	}
+	req.Header.Set(header.XBouineScheme, scheme)
+	req.Header.SetBytesV(header.XBouineForwardURI, origURI)
+	req.Header.Set(BouineHopHeader, "1")
+	req.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
+	req.SetRequestURI(PeerForwardPath)
+	// The wire request line addresses the endpoint, but the Host header
+	// MUST stay the client's: the owner's cache key embeds the Host
+	// (BuildKeyFast) — overwriting it here (the plain SetHost path) made
+	// the owner derive a foreign key, fail the ownership gate, and
+	// forward the request onward: a self-sustaining forward loop that
+	// burned the whole 30s budget. UseHostHeader keeps the header as
+	// the client sent it; the pipeline client dials its configured Addr
+	// regardless of the URI host.
+	req.UseHostHeader = true
+
+	resp := fasthttp.AcquireResponse()
+	pc := f.getShieldPipelineClient(addr)
+	if pc == nil {
+		fasthttp.ReleaseResponse(resp)
+		return nil, fmt.Errorf("shield forward %s: fetcher closed during shutdown", peer.Addr)
+	}
+	// The RPC budget is the carried deadline clamped to the lane bound:
+	// the owner clamps again against its own fetch budget (D4), so the
+	// effective wait never exceeds what the requester can still use.
+	if time.Until(deadline) > shieldForwardTimeout {
+		if err := pc.DoTimeout(req, resp, shieldForwardTimeout); err != nil {
+			if ctx.Err() == nil {
+				f.recordPeerFailure(addr)
+			}
+			fasthttp.ReleaseResponse(resp)
+			return nil, fmt.Errorf("shield forward %s: %w", peer.Addr, err)
+		}
+	} else if err := pc.DoDeadline(req, resp, deadline); err != nil {
+		if ctx.Err() == nil {
+			f.recordPeerFailure(addr)
+		}
+		fasthttp.ReleaseResponse(resp)
+		return nil, fmt.Errorf("shield forward %s: %w", peer.Addr, err)
+	}
+	f.recordPeerSuccess(addr)
+
+	if resp.StatusCode() != fasthttp.StatusOK {
+		// 404/410: the owner refused (flag off, not owner, no route) —
+		// the plain origin fallback applies, and a 404 is NOT a peer
+		// health failure. 503: the owner shed at its fetch semaphore —
+		// fall back rather than retry (the same bargem the owner's own
+		// clients accept).
+		// Read the status BEFORE the release: ReleaseResponse resets
+		// the response, so a post-release StatusCode is always 0.
+		status := resp.StatusCode()
+		fasthttp.ReleaseResponse(resp)
+		if status == fasthttp.StatusNotFound {
+			return nil, fmt.Errorf("shield forward %s: refused: %w", peer.Addr, ErrShieldForward)
+		}
+		return nil, fmt.Errorf("shield forward %s: status %d: %w", peer.Addr, status, ErrShieldForward)
+	}
+	if int64(len(resp.Body())) > shieldMaxBodyBytes {
+		fasthttp.ReleaseResponse(resp)
+		return nil, fmt.Errorf("shield forward %s: response too large: %w", peer.Addr, ErrShieldForward)
+	}
+	return resp, nil
+}
+
+// getShieldPipelineClient returns the shield-lane PipelineClient for
+// addr, creating one on first use. The lane is separate from the
+// key-only fetch lane: its ReadTimeout accommodates origin-scale
+// latency (a key-only fetch must never queue behind an origin
+// round-trip and vice versa). Retired addresses park like the fetch
+// lane (see getPipelineClient).
+func (f *PeerFetcher) getShieldPipelineClient(addr string) *fasthttp.PipelineClient {
+	clients := f.pipelineClients.Load()
+	if clients == nil {
+		return nil // closed during shutdown
+	}
+	key := addr + "\x00shield"
+	if _, retired := f.retiredAddrs.Load(addr); retired {
+		clients.Delete(key)
+	}
+	if v, ok := clients.Load(key); ok {
+		return v.(*fasthttp.PipelineClient)
+	}
+	pc := &fasthttp.PipelineClient{
+		Addr:                          addr,
+		MaxConns:                      f.maxConnsPerHost,
+		MaxPendingRequests:            peerMaxPendingRequests,
+		MaxIdleConnDuration:           f.maxIdleConnDuration,
+		ReadTimeout:                   shieldForwardTimeout,
+		WriteTimeout:                  5 * time.Minute,
+		IsTLS:                         f.useTLS,
+		TLSConfig:                     f.tlsConfig,
+		DisableHeaderNamesNormalizing: true,
+		Logger:                        observability.NewFastHTTPClientLogger(f.logger, "cluster"),
+		Dial: func(addr string) (net.Conn, error) {
+			if _, retired := f.retiredAddrs.Load(addr); retired {
+				<-f.done
+				return nil, errPeerAddrRetired
+			}
+			return (&net.Dialer{
+				Timeout:   peerDialTimeout,
+				KeepAlive: 30 * time.Second,
+			}).Dial("tcp", addr)
+		},
+	}
+	actual, _ := clients.LoadOrStore(key, pc)
+	return actual.(*fasthttp.PipelineClient)
+}

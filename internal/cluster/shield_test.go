@@ -1,8 +1,12 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"math/big"
+	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,6 +225,142 @@ func TestPeerForwardHandler_OwnerMetrics(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "owner role counter must be registered and incremented")
+}
+
+// shieldServer starts an in-process fasthttp server wrapping a forward
+// handler and returns its address plus the fetcher-facing PeerInfo.
+func shieldServer(t *testing.T, h *PeerForwardHandler) api.PeerInfo {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &fasthttp.Server{Handler: h.Handle}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Shutdown()
+		_ = ln.Close()
+	})
+	addr := ln.Addr().String()
+	return api.PeerInfo{Name: "owner", Addr: addr, AdminAddr: addr}
+}
+
+func TestShieldForward_RequesterSide(t *testing.T) {
+	t.Parallel()
+	key := shieldTestKey(t)
+	ownerPeer := shieldServer(t, NewPeerForwardHandler(echoDataPlane, func(api.Key) bool { return true }, 0, 0, true, nil, nil))
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	resp, err := f.ShieldForward(context.Background(), ownerPeer, req, key, false, time.Now().Add(5*time.Second))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer fasthttp.ReleaseResponse(resp)
+	assert.Equal(t, fasthttp.StatusOK, resp.StatusCode())
+	assert.Equal(t, "origin-fill", string(resp.Body()))
+	assert.Equal(t, "/x", string(resp.Header.Peek("X-Forwarded-Uri")))
+}
+
+func TestShieldForward_RefusedIsFallbackError(t *testing.T) {
+	t.Parallel()
+	key := shieldTestKey(t)
+	nonOwnerPeer := shieldServer(t, NewPeerForwardHandler(echoDataPlane, func(api.Key) bool { return false }, 0, 0, true, nil, nil))
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	resp, err := f.ShieldForward(context.Background(), nonOwnerPeer, req, key, false, time.Now().Add(5*time.Second))
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.True(t, errors.Is(err, ErrShieldForward),
+		"a refused forward is the origin-fallback signal, never a hard failure")
+}
+
+func TestShieldForward_ExpiredDeadlineIsError(t *testing.T) {
+	t.Parallel()
+	key := shieldTestKey(t)
+	peer := shieldServer(t, NewPeerForwardHandler(echoDataPlane, nil, 0, 0, true, nil, nil))
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	resp, err := f.ShieldForward(context.Background(), peer, req, key, false, time.Now().Add(-time.Second))
+	require.Error(t, err)
+	assert.Nil(t, resp)
+}
+
+// TestShieldForward_LaneIsolation pins the two-lane contract: a shield
+// forward in flight does not consume a key-only fetch slot — the slow
+// fetch lane stays available for peer lookups (the reason the shield
+// rides its own pipeline lane).
+func TestShieldForward_LaneIsolation(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var forwards atomic.Int64
+	dataPlane := fasthttp.RequestHandler(func(ctx *fasthttp.RequestCtx) {
+		forwards.Add(1)
+		<-release
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
+	peer := shieldServer(t, NewPeerForwardHandler(dataPlane, func(api.Key) bool { return true }, 0, 0, true, nil, nil))
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{FetchConcurrency: 1}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	key := shieldTestKey(t)
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := f.ShieldForward(context.Background(), peer, req, key, false, time.Now().Add(5*time.Second))
+		if err == nil {
+			fasthttp.ReleaseResponse(resp)
+		}
+	}()
+
+	// The forward is in flight (holding the shield lane); a key-only
+	// Fetch to the same peer must not queue behind it. The peer serves
+	// /v1/peer/fetch with 404 through its own fasthttp server here —
+	// simulate a plain TCP refusal instead: the point is the semaphore,
+	// and a refused dial completes immediately either way.
+	require.Eventually(t, func() bool { return forwards.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
+	fetchStarted := make(chan error, 1)
+	go func() {
+		_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+		fetchStarted <- err
+	}()
+	select {
+	case err := <-fetchStarted:
+		// Fetch may error (no fetch endpoint on this server) — the pin
+		// is that it RETURNS rather than parking behind the forward.
+		_ = err
+	case <-time.After(2 * time.Second):
+		t.Fatal("key-only fetch parked behind the in-flight shield forward — lanes are not isolated")
+	}
+	close(release)
+	<-done
 }
 
 // parseShieldKey round-trip through api.Key.Hex.

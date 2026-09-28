@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -51,6 +52,29 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
+	// ShieldRequests counts origin-shield events by role: "owner"
+	// (a shield forward served by the ring owner), "waiter" (a
+	// non-owner served from the owner's answer — the headline
+	// "origin requests saved" number), "failure" (the owner's miss
+	// path errored; the requester falls back to origin), or
+	// "fallback" (the forward never produced a servable answer on the
+	// requester side; the requester fetched origin itself). See
+	// ADR-0052.
+	ShieldRequests *prometheus.CounterVec
+	// ShieldShed counts shield forwards shed at the owner's standard
+	// fetch semaphore (a saturated owner must be visible, not inferred
+	// from latency).
+	ShieldShed prometheus.Counter
+	// ShieldSaved counts requesters that avoided an origin request by
+	// serving the owner's shield answer. Kept separate from the role
+	// vec so dashboards can subtract it from total origin load without
+	// label queries. Incremented together with
+	// ShieldRequests{role="waiter"}.
+	ShieldSaved prometheus.Counter
+	// ShieldDuration observes one shield forward's end-to-end latency
+	// on the owner (the requester's wait is bounded by the same
+	// deadline it carried).
+	ShieldDuration prometheus.Histogram
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -110,6 +134,9 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Help:      "Peer-fetch RPCs rejected by the RFC 9111 variant-assertion gate, by side (server, consumer). Sustained non-zero rate indicates a mixed-version fleet or a peer serving wrong-variant content.",
 		}, []string{"side"}),
 	}
+	shieldRequests, shieldShed, shieldSaved, shieldDuration := newShieldMetrics()
+	m.ShieldRequests, m.ShieldShed, m.ShieldSaved, m.ShieldDuration =
+		shieldRequests, shieldShed, shieldSaved, shieldDuration
 	reg.MustRegister(
 		m.ModeInfo,
 		m.InvalidationsGossip,
@@ -119,8 +146,38 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.RingEmpty,
 		m.BroadcastOverflows,
 		m.PeerFetchVariantMismatch,
+		m.ShieldRequests,
+		m.ShieldShed,
+		m.ShieldSaved,
+		m.ShieldDuration,
 	)
 	return m
+}
+
+// newShieldMetrics builds the four origin-shield collectors (ADR-0052).
+func newShieldMetrics() (requests *prometheus.CounterVec, shed, saved prometheus.Counter, duration prometheus.Histogram) {
+	requests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "shield_requests_total",
+		Help:      "Cluster origin-shield forwards by role: owner (forward served by the ring owner), waiter (requester served, origin request saved), failure (owner's miss path errored), fallback (requester fell back to its own origin fetch).",
+	}, []string{"role"})
+	shed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "shield_shed_total",
+		Help:      "Shield forwards shed at the owner's standard fetch semaphore; a saturated owner sheds requesters back to their own origin fetch.",
+	})
+	saved = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "shield_origin_requests_saved_total",
+		Help:      "Origin requests avoided by requesters served from the ring owner's shield answer — the cluster-wide origin-shield saving.",
+	})
+	duration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "bouine",
+		Name:      "shield_duration_seconds",
+		Help:      "Owner-side end-to-end latency of one shield forward (gate + miss path + proxied response). The requester's wait is bounded by the deadline it carried.",
+		Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+	})
+	return requests, shed, saved, duration
 }
 
 // SetMode sets the cluster_mode_info gauge to 1 for the given mode
@@ -193,6 +250,38 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 	}
 	m.PeerFetchVariantMismatch.WithLabelValues(side).Inc()
 	m.peerFetchVariantMismatchTotal.Add(1)
+}
+
+// IncShield increments the origin-shield role counter. A "waiter"
+// increment also counts one origin request saved (same event, two
+// views). Nil-safe: single-node mode never registers the vec.
+func (m *Metrics) IncShield(role string) {
+	if m == nil || m.ShieldRequests == nil {
+		return
+	}
+	m.ShieldRequests.WithLabelValues(role).Inc()
+	if role == "waiter" {
+		if m.ShieldSaved != nil {
+			m.ShieldSaved.Inc()
+		}
+	}
+}
+
+// IncShieldShed increments the shield-shed counter. Nil-safe.
+func (m *Metrics) IncShieldShed() {
+	if m == nil || m.ShieldShed == nil {
+		return
+	}
+	m.ShieldShed.Inc()
+}
+
+// ObserveShieldDuration records one owner-side shield forward's
+// end-to-end latency. Nil-safe.
+func (m *Metrics) ObserveShieldDuration(d time.Duration) {
+	if m == nil || m.ShieldDuration == nil {
+		return
+	}
+	m.ShieldDuration.Observe(d.Seconds())
 }
 
 // PeerFetchVariantMismatchCount returns the total number of variant

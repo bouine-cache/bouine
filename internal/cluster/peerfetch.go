@@ -84,6 +84,12 @@ const (
 	MaxPeerFetchConcurrency = 128
 )
 
+// maxShieldConcurrency bounds concurrent shield forwards per peer
+// fetcher. A forward holds a pipeline connection for an origin-scale
+// round trip; 16 mirrors #731's coalesced-lane bound and keeps a
+// cold-key storm's forwards from exhausting the peer's connections.
+const maxShieldConcurrency = 16
+
 // maxPeerFetchBytes caps the response body read from a peer during
 // binary decode. A compromised peer could send an arbitrarily large
 // payload; without a limit io.ReadAll buffers unbounded data on
@@ -224,7 +230,13 @@ type PeerFetcher struct {
 	logger observability.Logger
 	// putSem bounds concurrent write-to-owner RPCs to prevent memory
 	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
-	putSem    chan struct{}
+	putSem chan struct{}
+	// shieldSem bounds concurrent shield forwards. Separate from
+	// fetchSem: a shield forward holds its slot for origin-scale time,
+	// and a cold-key storm's forwards would otherwise starve the
+	// sub-millisecond key-only peer-fetches (and vice versa — a burst
+	// of key-only fetches would shed every shield forward).
+	shieldSem chan struct{}
 	tlsConfig *tls.Config
 	fetchSem  chan struct{}
 	// pipelineClients caches one PipelineClient per peer address. Held
@@ -365,6 +377,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		maxBodyBytes:        maxPeerFetchBytes,
 		fetchSem:            make(chan struct{}, fetchConcurrency),
 		putSem:              make(chan struct{}, fetchConcurrency),
+		shieldSem:           make(chan struct{}, maxShieldConcurrency),
 		fetchWaitTimeout:    waitTimeout,
 		logger:              observability.ResolveLogger(logger),
 		maxConnsPerHost:     maxConns,

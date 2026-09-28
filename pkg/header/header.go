@@ -217,6 +217,33 @@ const (
 	// loop detection.
 	BouineHop = "Bouine-Hop"
 
+	// XBouineDeadline — carries the absolute unix-nano deadline of a
+	// shield forward (cluster.origin_shield): the owner clamps it
+	// (min) against its own fetch budget so a requester never waits
+	// on a flight that outlives its patience (ADR-0052, decision D4).
+	XBouineDeadline = "X-Bouine-Deadline"
+
+	// XBouineShieldKey — carries the requester's hex cache key on a
+	// shield forward so the owner's ownership gate (D5) can refuse
+	// non-owned keys without recomputing the key from the wire
+	// request; the replayed request is served through the standard
+	// miss path regardless.
+	XBouineShieldKey = "X-Bouine-Shield-Key"
+
+	// XBouineScheme — carries the client request's scheme (http/https)
+	// on a shield forward: the forward rides the admin plane, whose
+	// connection scheme is unrelated, and the owner's cache key embeds
+	// the client scheme (IsTLS feeds BuildKeyFast), so the replay must
+	// restore it or the owner derives a different key.
+	XBouineScheme = "X-Bouine-Scheme"
+
+	// XBouineForwardURI — carries the client request's original
+	// request-target (path + query) on a shield forward: the wire
+	// request line must address /v1/peer/forward, so the original
+	// target travels in this header and the owner restores it before
+	// replaying through its data plane.
+	XBouineForwardURI = "X-Bouine-Forward-URI"
+
 	// XBouineClusterVersion — carries the cluster protocol version for
 	// negotiation during rolling upgrades.
 	XBouineClusterVersion = "X-Bouine-Cluster-Version"

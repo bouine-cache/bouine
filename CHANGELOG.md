@@ -12,6 +12,15 @@ the curated, human-readable summary.
 
 ### Added
 
+- **Cluster origin shield** (ADR-0052, strong mode, opt-in via
+  `cluster.origin_shield`). On a hard miss the non-owner forwards the
+  original client request to the key's ring owner, which runs its
+  standard miss path and proxies the response back — one collapsed
+  origin fetch for the whole cluster. The owner-side forward is
+  exposed on `/v1/peer/forward` with new `bouine_shield_*` metrics;
+  backfill on the non-owner is tunable via
+  `cluster.origin_shield_backfill_probability` (default 1.0).
+
 - **Design plan for the cluster origin shield, second attempt**
   (ADR-0052, `docs/plans/origin-shield.md`). Documents the
   request-forwarding design that supersedes the envelope-based

@@ -2,6 +2,15 @@ package api
 
 import "time"
 
+// ShieldForwardTimeout bounds one shield forward (cluster.origin_shield)
+// on both sides: the requester's wait and the owner's deadline clamp. It
+// must stay below the effective fetch_timeout so a requester that gives
+// up still has budget to run its own origin fetch — config.Validate
+// rejects a route whose effective fetch_timeout is not above this while
+// the shield is on. Shared by the cache and cluster packages — do not
+// duplicate it.
+const ShieldForwardTimeout = 30 * time.Second
+
 // PeerInfo describes a single cluster peer as seen by the gossip
 // layer. It is broadcast in memberlist user metadata.
 //

@@ -56,16 +56,27 @@ type Config struct {
 	OnRefreshed             func(ctx context.Context, url string)
 	OnBanned                func(ctx context.Context, expr api.BanExpr)
 	PeerFetchHandler        fasthttp.RequestHandler
-	CFPropagateFn           func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler      fasthttp.RequestHandler
-	OnPurged                func(ctx context.Context, url string)
-	FaviconHandler          fasthttp.RequestHandler
+	// PeerForwardHandler serves GET/HEAD /v1/peer/forward (cluster
+	// origin_shield, ADR-0052): the ring owner replays the forwarded
+	// client request through its data plane and proxies the bytes back.
+	// Nil disables the endpoint (a requester then falls back to its own
+	// origin fetch, per the mixed-version degrade rule).
+	PeerForwardHandler fasthttp.RequestHandler
+	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler fasthttp.RequestHandler
+	OnPurged           func(ctx context.Context, url string)
+	FaviconHandler     fasthttp.RequestHandler
 	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
 	// the ops history shown on the dashboard invalidation page. nil
 	// disables history recording. Set to OpsLogRing.Record by the engine.
 	OpsLogFn func(op, arg, result string)
 	Addr     string
 	Token    string
+	// ShieldForwardTimeout, when > 0, extends the admin server's
+	// per-request write deadline for /v1/peer/forward: a shield forward
+	// legitimately holds the connection for an origin fetch, which the
+	// 5s default WriteTimeout would cut mid-flight.
+	ShieldForwardTimeout time.Duration
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
 	// this server, so peer clients must keep their idle timeout strictly
@@ -182,7 +193,29 @@ func New(cfg Config) *Server {
 	if cfg.PprofEnabled {
 		s.inner.WriteTimeout = 0
 	}
+	// Shield forwards (cluster.origin_shield) legitimately hold an
+	// admin connection for an origin fetch — the 5s default WriteTimeout
+	// would cut the proxied response mid-flight. The per-request hook
+	// extends only /v1/peer/forward, mirroring the data plane's SSE
+	// treatment (sseHeaderReceived).
+	if cfg.PeerForwardHandler != nil && cfg.ShieldForwardTimeout > 5*time.Second {
+		s.inner.HeaderReceived = shieldHeaderReceived(cfg.ShieldForwardTimeout)
+	}
 	return s
+}
+
+// shieldHeaderReceived is the admin fasthttp.Server HeaderReceived hook
+// (cluster.origin_shield): requests addressed to /v1/peer/forward get a
+// write deadline covering the owner's origin fetch (gate + miss path +
+// proxied response); every other request keeps the 5s server default.
+// Mirrors the data plane's sseHeaderReceived pattern (internal/server).
+func shieldHeaderReceived(timeout time.Duration) func(*fasthttp.RequestHeader) fasthttp.RequestConfig {
+	return func(h *fasthttp.RequestHeader) fasthttp.RequestConfig {
+		if string(h.RequestURI()) == "/v1/peer/forward" {
+			return fasthttp.RequestConfig{WriteTimeout: timeout}
+		}
+		return fasthttp.RequestConfig{}
+	}
 }
 
 func (s *Server) minimalHandler() fasthttp.RequestHandler {
@@ -256,7 +289,7 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 }
 
 func (s *Server) routeHandler() fasthttp.RequestHandler {
-	peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics := s.buildPeerHandlers()
+	peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics := s.buildPeerHandlers()
 	pprofIndexHandler, pprofMap := s.buildPprofHandlers()
 
 	return func(ctx *fasthttp.RequestCtx) {
@@ -269,7 +302,7 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 		if s.handleWriteRoutes(ctx, p, m) {
 			return
 		}
-		if s.handlePeerRoutes(ctx, p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics) {
+		if s.handlePeerRoutes(ctx, p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics) {
 			return
 		}
 		if s.handleDataRoutes(ctx, p) {
@@ -289,7 +322,7 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 	}
 }
 
-func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics fasthttp.RequestHandler) {
+func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics fasthttp.RequestHandler) {
 	if s.cfg.PeerPurgeHandler != nil {
 		peerPurge = s.cfg.PeerPurgeHandler
 	}
@@ -304,6 +337,9 @@ func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch
 	}
 	if s.cfg.PeerPutHandler != nil {
 		peerPut = s.cfg.PeerPutHandler
+	}
+	if s.cfg.PeerForwardHandler != nil {
+		peerForward = s.cfg.PeerForwardHandler
 	}
 	if s.cfg.PeerMetricsHandler != nil {
 		peerMetrics = s.cfg.PeerMetricsHandler
@@ -380,44 +416,39 @@ func (s *Server) handleWriteRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 	return false
 }
 
-func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics fasthttp.RequestHandler) bool {
+func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics fasthttp.RequestHandler) bool {
+	h := peerRouteHandler(p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics)
+	if h != nil {
+		h(ctx)
+		return true
+	}
+	// Batch endpoints live on Server.Config directly rather than the
+	// positional buildPeerHandlers arguments (which predate them); they
+	// answer false themselves when unwired, as do unknown paths.
+	return s.handlePeerBatchRoute(ctx, p)
+}
+
+// peerRouteHandler resolves the peer endpoint to its handler, or nil
+// when the path is a batch endpoint (dispatched separately) or the
+// handler is unwired.
+func peerRouteHandler(p string, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerForward, peerMetrics fasthttp.RequestHandler) fasthttp.RequestHandler {
 	switch p {
 	case "/v1/peer/purge":
-		if peerPurge != nil {
-			peerPurge(ctx)
-			return true
-		}
-	case "/v1/peer/purge/batch":
-		return s.handlePeerBatchRoute(ctx, p)
+		return peerPurge
 	case "/v1/peer/ban":
-		if peerBan != nil {
-			peerBan(ctx)
-			return true
-		}
+		return peerBan
 	case "/v1/peer/refresh":
-		if peerRefresh != nil {
-			peerRefresh(ctx)
-			return true
-		}
-	case "/v1/peer/refresh/batch":
-		return s.handlePeerBatchRoute(ctx, p)
+		return peerRefresh
 	case "/v1/peer/fetch":
-		if peerFetch != nil {
-			peerFetch(ctx)
-			return true
-		}
+		return peerFetch
 	case "/v1/peer/put":
-		if peerPut != nil {
-			peerPut(ctx)
-			return true
-		}
+		return peerPut
+	case "/v1/peer/forward":
+		return peerForward
 	case "/v1/peer/metrics":
-		if peerMetrics != nil {
-			peerMetrics(ctx)
-			return true
-		}
+		return peerMetrics
 	}
-	return false
+	return nil
 }
 
 // handlePeerBatchRoute dispatches the ADR-0044 batch endpoints, which
@@ -745,6 +776,7 @@ func (s *Server) rateLimitMiddleware(next fasthttp.RequestHandler, perSecond int
 
 func (s *Server) bodyLimitMiddleware(next fasthttp.RequestHandler, maxBytes int) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
+		// GET/HEAD carry no body; only POST-style writes are capped.
 		if string(ctx.Method()) == "POST" && len(ctx.PostBody()) > maxBytes {
 			writeJSON(ctx, fasthttp.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 			return
@@ -760,6 +792,7 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
 		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
 		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
+		"/v1/peer/forward": true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {

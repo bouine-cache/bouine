@@ -622,3 +622,19 @@ func TestPurgeBatch_BatchFnCoalesced(t *testing.T) {
 	require.Equal(t, []string{"https://a.com/", "https://b.com/", "https://c.com/"}, batchURLs)
 	require.True(t, bytes.Contains(respBody, []byte(`"count":3`)))
 }
+
+// TestPeerForward_UnwiredAnswers404 pins the single-node contract
+// (ADR-0052 D9, PR #731 review blocker #2): /v1/peer/forward is
+// token-exempt, so a cluster-less deployment (PeerForwardHandler nil)
+// must answer 404 — never a nil-receiver panic laundered into a 500 by
+// the recover middleware.
+func TestPeerForward_UnwiredAnswers404(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, func() bool { return true })
+	for _, method := range []string{fasthttp.MethodGet, fasthttp.MethodHead} {
+		ctx := testCtx(method, "/v1/peer/forward")
+		s.Handler()(ctx)
+		assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+			"%s /v1/peer/forward on a solo node must 404, not panic", method)
+	}
+}

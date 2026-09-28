@@ -309,13 +309,10 @@ type Cluster struct {
 	// nodes on the same host (e.g. integration tests).
 	NodeName string   `yaml:"node_name,omitempty" json:"node_name,omitempty"`
 	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
-	// PeerFetchBackfillProbability is the probability (0.0–1.0) that a
-	// coalesced object received from the owner is also stored on the
-	// non-owner that received it. Unset (nil) defaults to 1.0 (store
-	// every coalesced object); 0.0 keeps the strict owner-only
-	// partition (issue #509). Lower values trade local hit rate for
-	// tier capacity. The owner always stores its own fill regardless
-	// of the knob. Ignored while peer_fetch_coalesce is off.
+	// PeerFetchBackfillProbability: probability (0.0–1.0) that a
+	// coalesced object is also stored on the non-owner that received it.
+	// nil defaults to 1.0; 0.0 keeps the strict owner-only partition
+	// (issue #509). Inert while peer_fetch_coalesce is off.
 	PeerFetchBackfillProbability *float64 `yaml:"peer_fetch_backfill_probability,omitempty" json:"peer_fetch_backfill_probability,omitempty"`
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
@@ -376,17 +373,12 @@ type Cluster struct {
 	// Zero applies the default; negative values and values below 1s are
 	// rejected by validatePeerFetchConfig.
 	BanTTL time.Duration `yaml:"ban_ttl,omitempty" json:"ban_ttl,omitempty"`
-	// PeerFetchCoalesce enables cluster-coordinated origin shielding
-	// (strong mode only): when the key owner receives a peer fetch for
-	// a key it does not have cached, it drives its own collapsed origin
-	// fetch on behalf of the asker and returns the object, instead of
-	// answering 404. All peer waiters plus the owner's own client
-	// requests collapse into exactly one origin fetch, so a cold key
-	// costs one origin request for the whole cluster. Default off. The
-	// flag governs BOTH sides of the RPC: a node with it off neither
-	// sends coalesced peer-fetches nor serves them for waiters.
-	// Inert outside strong mode; the backfill knob below is inert
-	// while this is off.
+	// PeerFetchCoalesce enables origin shielding (strong mode only): on a
+	// hard miss the owner drives its own collapsed origin fetch on the
+	// asker's behalf, so a cold key costs one origin request for the
+	// whole cluster. Governs BOTH sides of the RPC: a node with it off
+	// neither sends nor serves coalesced peer-fetches. Default off.
+	// Inert outside strong mode; the backfill knob is inert while off.
 	PeerFetchCoalesce bool `yaml:"peer_fetch_coalesce,omitempty" json:"peer_fetch_coalesce,omitempty"`
 }
 
@@ -715,27 +707,19 @@ type RouteCache struct {
 
 // RouteKey configures cache key construction for a route.
 type RouteKey struct {
-	// IncludeHost controls whether the request Host participates in
-	// the primary cache key. nil (absent) and true keep today's key
-	// form scheme|host|path|query|method; explicitly false omits the
-	// host segment so the same URL+query resolves to one entry no
-	// matter which Host the request arrives with. Requests are still
-	// forwarded upstream with their original Host; only key
-	// computation changes. A pointer (like allow_set_cookie) because
-	// the default is true: a plain bool would flip the key form of
-	// every existing config that does not set the field.
+	// IncludeHost controls whether the request Host participates in the
+	// primary cache key. nil and true keep today's scheme|host|path|query
+	// |method form; explicitly false omits the host segment (requests are
+	// still forwarded with their original Host). A pointer because the
+	// default is true: a plain bool would flip the key form of every
+	// existing config that does not set the field.
 	//
-	// Use it only on routes whose origin is provably host-blind (no
-	// redirects, no absolute Location/links, no host-keyed feature
-	// flags): collapsing two hosts the origin serves differently is a
-	// wrong-body bug, not a miss. The flag must be identical across
-	// all cluster nodes serving the route — a node with a different
-	// setting stores and resolves the same logical URL under different
-	// keys, and the consistent-hash ring then splits ownership of
-	// those keys (same hazard class as exclude_headers /
-	// include_headers). Validation rejects combining it with
-	// match.host: a route that selects on host and then ignores host
-	// in the key is almost certainly a config error.
+	// Only for provably host-blind origins: collapsing two hosts the
+	// origin serves differently is a wrong-body bug. Must be identical
+	// across all nodes serving the route — different settings split
+	// ring ownership of the same logical URL (same hazard class as
+	// exclude_headers / include_headers). Validation rejects combining
+	// it with match.host.
 	IncludeHost *bool `yaml:"include_host,omitempty" json:"include_host,omitempty"`
 	// StripQueryParams removes the listed query parameter names from
 	// the cache key. The parameters are still forwarded to the upstream.

@@ -377,11 +377,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		// routeFetchers backs ONLY the coalesced peer-fetch handler
-		// (handleCoalesce resolves the owning route through it), so
-		// register it only when this node serves coalesced RPCs — a
-		// node with peer_fetch_coalesce: false must not coalesce for
-		// waiters either, or the flag would not describe the node.
+		// Register the route only when this node serves coalesced RPCs:
+		// the flag governs both sides, so it must describe the node.
 		if rs.routeFetchers != nil && coalesceEnabled(e, rs) {
 			rs.routeFetchers[rc.Name] = cached
 		}
@@ -390,11 +387,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 	return router
 }
 
-// applyCoalesceConfig wires the origin shield (cluster.peer_fetch_coalesce)
-// onto a strong-mode cache handler: the non-owner waits on the owner's
-// coalesced origin fetch instead of fetching origin itself. The route
-// registry lets the owner resolve the route that owns the key on
-// coalesced misses.
+// applyCoalesceConfig wires the origin shield onto a strong-mode
+// cache handler, plus its metrics hooks.
 func applyCoalesceConfig(cfg *cache.HandlerConfig, e *engine, rs *runState, routeName string) {
 	coalesceFn := clusterCoalesceClosure(e, rs, routeName)
 	if coalesceFn == nil {
@@ -556,20 +550,16 @@ func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner 
 	return ownerFn, peerFetch
 }
 
-// coalesceEnabled reports whether this node runs the origin shield,
-// requester side AND owner side (cluster.peer_fetch_coalesce, strong
-// mode): a node with the flag off neither sends coalesced peer-fetches
-// nor serves them for waiters, so the flag always describes the node
-// it is set on.
+// coalesceEnabled: whether this node runs the origin shield on both
+// sides (strong mode + cluster.peer_fetch_coalesce).
 func coalesceEnabled(e *engine, rs *runState) bool {
 	return rs.peerFetcher != nil &&
 		e.cfg.Cluster.Mode == config.ClusterModeStrong &&
 		e.cfg.Cluster.PeerFetchCoalesce
 }
 
-// clusterCoalesceClosure builds the origin-shield closure for one route
-// (strong mode + cluster.peer_fetch_coalesce only): a coalesced
-// peer-fetch carrying the OriginRequest envelope. nil when disabled.
+// clusterCoalesceClosure builds the coalesced peer-fetch closure for
+// one route; nil when disabled.
 func clusterCoalesceClosure(e *engine, rs *runState, routeName string) func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error) {
 	if !coalesceEnabled(e, rs) {
 		return nil
@@ -585,9 +575,8 @@ func clusterCoalesceClosure(e *engine, rs *runState, routeName string) func(ctx 
 	}
 }
 
-// resolveBackfillProbability applies the default for
-// cluster.peer_fetch_backfill_probability: unset (nil) stores every
-// coalesced object (1.0), per the origin-shield plan's default.
+// resolveBackfillProbability: unset (nil) defaults to 1.0 (store every
+// coalesced object).
 func resolveBackfillProbability(p *float64) float64 {
 	if p == nil {
 		return 1.0
@@ -687,9 +676,8 @@ func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	)
 }
 
-// excludeHost resolves cache.key.include_host's tri-state: nil/true
-// keep host in the key (the default since the field was added); only an
-// explicit false produces a host-agnostic key.
+// excludeHost: only an explicit include_host: false produces a
+// host-agnostic key; nil/true keep host keyed.
 func excludeHost(rk config.RouteKey) bool {
 	return rk.IncludeHost != nil && !*rk.IncludeHost
 }

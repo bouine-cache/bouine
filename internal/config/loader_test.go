@@ -283,6 +283,47 @@ func TestClusterBackfillProbability_Bounds(t *testing.T) {
 	}
 }
 
+func TestCoalesceFetchTimeout_VsRouteFetchTimeout(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := func(ft time.Duration) Route {
+		return Route{Pool: "app", Match: RouteMatch{PathPrefix: "/"}, Cache: RouteCache{FetchTimeout: ft}}
+	}
+	for _, tc := range []struct {
+		name      string
+		coalesce  bool
+		fetchTTL  time.Duration
+		wantError bool
+	}{
+		// A waiter burns the whole coalesced wait (30s) before falling
+		// back to its own origin fetch, so the route's fetch budget
+		// must exceed it — else the fallback can never complete.
+		{name: "coalesce_off_short_timeout_ok", coalesce: false, fetchTTL: 5 * time.Second},
+		{name: "coalesce_on_default_timeout_ok", coalesce: true, fetchTTL: 0}, // 0 = 60s default
+		{name: "coalesce_on_explicit_long_ok", coalesce: true, fetchTTL: 45 * time.Second},
+		{name: "coalesce_on_equal_rejected", coalesce: true, fetchTTL: 30 * time.Second, wantError: true},
+		{name: "coalesce_on_shorter_rejected", coalesce: true, fetchTTL: 10 * time.Second, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Listen:        Listen{Admin: ":9000", Cluster: ":8443"},
+				Cluster:       Cluster{PeerFetchCoalesce: tc.coalesce},
+				UpstreamPools: []UpstreamPool{pool},
+				Routes:        []Route{route(tc.fetchTTL)},
+			}
+			err := cfg.Validate()
+			if !tc.wantError {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "routes[0].cache.fetch_timeout")
+			require.Contains(t, err.Error(), "peer_fetch_coalesce")
+		})
+	}
+}
+
 func TestClusterBanTTL_NegativeRejected(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

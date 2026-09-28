@@ -103,12 +103,12 @@ type RefreshEvent struct {
 	Key Key `json:"key"`
 }
 
-// CoalesceFetchTimeout bounds a coalesced peer-fetch (origin shield) on
-// both the waiter (RPC wait) and the owner's requester-side lane. It
-// must stay strictly below the origin fetch budget (default
-// fetch_timeout 60s) so a waiter that gives up still has time to run
-// its own origin fetch inside its request budget. Both the cache and
-// cluster packages consume this single constant — do not duplicate it.
+// CoalesceFetchTimeout bounds a coalesced RPC on both the waiter and
+// the owner's requester-side lane. Must stay below the origin fetch
+// budget so a waiter that gives up still has time to run its own
+// origin fetch — config.Validate rejects a route whose effective
+// fetch_timeout is not above this while peer_fetch_coalesce is on.
+// Shared by the cache and cluster packages — do not duplicate it.
 const CoalesceFetchTimeout = 30 * time.Second
 
 // PeerHeader is one forwarded request header (name/value pair) inside
@@ -122,13 +122,11 @@ type PeerHeader struct {
 	Value string `json:"value"`
 }
 
-// OriginRequest is the minimal envelope a non-owner sends so the owner
-// can rebuild an upstream request and drive its own collapsed origin
-// fetch on the requester's behalf (cluster-coordinated origin shield).
-// Only headers that participate in response identity are carried: Host,
-// Accept-Encoding, and every header the route's cache-key policy
-// consults. Everything else is dropped — an open-ended forward is how
-// variant mismatches ship to production.
+// OriginRequest is the envelope a non-owner sends so the owner can
+// rebuild the upstream request and drive the origin fetch on its
+// behalf. Only headers that participate in response identity are
+// carried (Host, Accept-Encoding, the key policy's headers); an
+// open-ended forward is how variant mismatches ship to production.
 //
 // Stable.
 type OriginRequest struct {
@@ -148,9 +146,8 @@ type OriginRequest struct {
 type PeerFetchRequest struct {
 	// VaryKey is the variant key (empty = any variant).
 	VaryKey string `json:"vary_key,omitempty"`
-	// Route is the route name the requester resolved the key under.
-	// The owner looks the route's handler up in its registry; an
-	// unknown route answers 404 as today (ring churn, config skew).
+	// Route is the route name the requester resolved the key under; an
+	// unknown route answers 404 (ring churn, config skew).
 	Route string `json:"route,omitempty"`
 	// OriginRequest carries the upstream request context used when
 	// Coalesce triggers an owner-side fetch. Ignored without Coalesce.
@@ -159,10 +156,8 @@ type PeerFetchRequest struct {
 	Hops int `json:"hops"`
 	// Key is the cache key being requested.
 	Key Key `json:"key"`
-	// Coalesce requests that, on a hard miss, the owner drive its own
-	// collapsed origin fetch on the requester's behalf instead of
-	// answering 404 (origin-shield mode). Wire format v3; an owner
-	// that does not understand v3 answers 400 and the requester falls
-	// back to origin.
+	// Coalesce asks the owner to drive the origin fetch on the
+	// requester's behalf instead of answering 404. Wire format v3; a
+	// v2-only owner answers 400 and the requester falls back to origin.
 	Coalesce bool `json:"coalesce,omitempty"`
 }

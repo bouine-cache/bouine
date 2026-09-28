@@ -39,6 +39,11 @@ const maxFetchWaitTimeout = 1 * time.Second
 // internal/admin. If you change one, change the other.
 const defaultAdminIdleTimeout = 300 * time.Second
 
+// defaultFetchTimeout mirrors internal/cache.defaultFetchTimeout (60s).
+// Duplicated because config is a leaf package and cannot import
+// internal/cache. If you change one, change the other.
+const defaultFetchTimeout = 60 * time.Second
+
 // MaxPeerFetchConcurrency mirrors cluster.MaxPeerFetchConcurrency (128).
 // Duplicated because config is a leaf package and cannot import
 // internal/cluster. If you change one, change the other.
@@ -434,11 +439,33 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 		r.Match.Methods[j] = up
 	}
 	validateRouteKeyHostSelector(ec, prefix, r)
+	c.validateRouteCoalesceFetchTimeout(ec, prefix, r.Cache)
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		ec.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
 	validatePathRewrite(ec, prefix+".request", r.Request)
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
+}
+
+// validateRouteCoalesceFetchTimeout enforces the origin-shield
+// cross-field invariant: a route's effective fetch_timeout (explicit
+// or the 60s default when 0) must exceed api.CoalesceFetchTimeout while
+// cluster.peer_fetch_coalesce is on — a waiter that exhausts the
+// coalesced wait must still have budget for its own origin fetch.
+// Irrelevant to a node that never waits, hence the flag gate.
+func (c *Config) validateRouteCoalesceFetchTimeout(ec *errCollector, prefix string, rc RouteCache) {
+	if !c.Cluster.PeerFetchCoalesce {
+		return
+	}
+	ft := rc.FetchTimeout
+	if ft == 0 {
+		ft = defaultFetchTimeout
+	}
+	if ft <= api.CoalesceFetchTimeout {
+		ec.addf(prefix+".cache.fetch_timeout",
+			"(%v) must be > %v while cluster.peer_fetch_coalesce is on: a waiter that exhausts the coalesced wait must still have budget for its own origin fetch",
+			ft, api.CoalesceFetchTimeout)
+	}
 }
 
 // validateRouteKeyHostSelector rejects include_host: false on a route

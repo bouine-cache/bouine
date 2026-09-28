@@ -27,8 +27,7 @@ type KeyPolicy struct {
 	stripEmpty     bool     // strip params with empty values
 	dedup          bool     // keep first value (in request order) for duplicate params
 	// excludeHost, when true, omits the host segment from the primary
-	// key (cache.key.include_host: false). Read on every key build; the
-	// default (false) is today's behaviour. See includeHostKey.
+	// key (cache.key.include_host: false). See includeHostKey.
 	excludeHost bool
 }
 
@@ -118,9 +117,8 @@ func (p *KeyPolicy) HasQueryPolicy() bool {
 }
 
 // includeHostKey reports whether the primary key must carry the host
-// segment. nil policy (the common case) keeps host keyed: the admin
-// purge/refresh paths build keys with a nil policy, and a nil-safe
-// default of "include host" is what every existing route does today.
+// segment. nil policy keeps host keyed (the admin purge/refresh paths
+// build keys with a nil policy; including host is today's default).
 func includeHostKey(p *KeyPolicy) bool {
 	return p == nil || !p.excludeHost
 }
@@ -131,8 +129,8 @@ func includeHostKey(p *KeyPolicy) bool {
 // validation guarantees no duplicates, so the canonical form makes the
 // stored union deterministic and lets effectiveVary dedupe a field the
 // origin also lists in Vary (its own trims must match).
-// excludeHost carries cache.key.include_host: false — the one field
-// that is true by default, hence an inverted "exclude" parameter.
+// excludeHost carries cache.key.include_host: false — true by default,
+// hence the inverted parameter.
 func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool, includeHeaders []string, excludeHost bool) *KeyPolicy {
 	if len(includeHeaders) > 0 {
 		lowered := make([]string, 0, len(includeHeaders))

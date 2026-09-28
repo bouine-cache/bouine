@@ -272,20 +272,17 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	// peerFetchCoalesce, when non-nil, enables cluster-coordinated origin
-	// shielding (origin shield): on a hard miss the non-owner asks the
-	// owner to drive its own collapsed origin fetch on its behalf, and
-	// waits for the answer instead of fetching origin itself. The extra
-	// OriginRequest parameter carries the upstream request context the
-	// owner needs to replay the fetch. Nil when disabled (default).
+	// peerFetchCoalesce, when non-nil, enables origin shielding: on a
+	// hard miss the non-owner asks the owner to drive the origin fetch
+	// and waits for the answer. The OriginRequest carries the upstream
+	// context the owner needs to replay the fetch. Nil when disabled.
 	peerFetchCoalesce func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error)
-	// onCoalescedSaved counts waiters that received an authoritative
-	// coalesced answer and avoided an origin request (nil-safe).
+	// onCoalescedSaved counts waiters served from an authoritative
+	// coalesced answer (nil-safe).
 	onCoalescedSaved func()
-	// onCoalescedFallback counts waiters whose coalesced wait FAILED
-	// (owner down, timeout, shed, variant-gate rejection) and fell back
-	// to their own origin fetch. The owner-side failure role cannot see
-	// these: when the owner is unreachable no owner-side counter fires.
+	// onCoalescedFallback counts waiters whose wait failed and fell
+	// back to their own origin fetch — events owner-side counters
+	// cannot see (nil-safe).
 	onCoalescedFallback func()
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
@@ -359,9 +356,8 @@ type Handler struct {
 	// the synchronous buffered path to prevent OOMKill under slow-origin
 	// conditions (see status-0-investigation.md).
 	refreshPersistCycles int
-	// peerBackfillProbability is the probability that a coalesced object
-	// received from the owner is also stored locally (0.0–1.0). The
-	// owner always stores its own fill regardless of the knob.
+	// peerBackfillProbability: probability a coalesced object is also
+	// stored locally (0.0–1.0). The owner always stores its own fill.
 	peerBackfillProbability float64
 	refreshMinScore         int64
 	refreshTimeout          time.Duration
@@ -444,21 +440,16 @@ type HandlerConfig struct {
 	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	// PeerFetchCoalesce, when non-nil, enables cluster-coordinated origin
-	// shielding on the hard-miss path: instead of falling back to origin
-	// after the owner's cache-only 404, the non-owner sends the owner an
-	// OriginRequest envelope and waits. A successful peer answer is
-	// authoritative — the waiter does NOT fetch origin. Errors (owner
-	// down, timeout, shed) fall back to origin, preserving availability.
-	// Only wired in strong mode with cluster.peer_fetch_coalesce on.
+	// PeerFetchCoalesce, when non-nil, enables origin shielding on the
+	// hard-miss path: the non-owner sends the owner an OriginRequest
+	// envelope and waits; a successful answer is authoritative. Errors
+	// fall back to origin. Strong mode + cluster.peer_fetch_coalesce only.
 	PeerFetchCoalesce func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string, originReq *api.OriginRequest) (*api.Object, error)
-	// OnCoalescedSaved, if non-nil, is called when a waiter serves a
-	// coalesced owner answer and avoids an origin request (the
-	// origin-requests-saved metric). Nil-safe.
+	// OnCoalescedSaved is called when a waiter avoids an origin request
+	// via a coalesced answer (nil-safe).
 	OnCoalescedSaved func()
-	// OnCoalescedFallback, if non-nil, is called when a waiter's
-	// coalesced wait fails (owner down, timeout, shed, variant-gate
-	// rejection) and it falls back to its own origin fetch. Nil-safe.
+	// OnCoalescedFallback is called when a waiter's coalesced wait fails
+	// and it falls back to origin (nil-safe).
 	OnCoalescedFallback func()
 	// OnPeerVariantMismatch, if non-nil, is called when the handler
 	// rejects a peer-fetched object because its stored variant does
@@ -509,11 +500,9 @@ type HandlerConfig struct {
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
-	// PeerBackfillProbability is the probability (0.0–1.0) that a
-	// coalesced object is also stored on the non-owner that received it.
-	// 1.0 stores every coalesced object; 0.0 keeps the strict
-	// owner-only partition of issue #509. Ignored (inert) while
-	// PeerFetchCoalesce is nil.
+	// PeerBackfillProbability: probability (0.0–1.0) that a coalesced
+	// object is also stored on the non-owner (0.0 = strict owner-only
+	// partition, issue #509). Inert while PeerFetchCoalesce is nil.
 	PeerBackfillProbability float64
 	// RefreshMinScore is the minimum refresh priority score (staleHits ×
 	// BodySize) required for re-scheduling. Zero disables the score gate.
@@ -1220,12 +1209,9 @@ func (h *Handler) RouteName() string {
 	return h.routeName
 }
 
-// KeyPolicy returns the route's compiled cache key policy, or nil when
-// the route has none. The engine uses it to rebuild keys from raw URLs
-// in the admin plane (purge/refresh/cachecheck): those surfaces must
-// compute the key the same way the data plane does, or a route whose
-// key differs from the default (e.g. include_host: false) would purge
-// and inspect keys that were never stored.
+// KeyPolicy returns the route's compiled cache key policy, or nil.
+// The admin plane (purge/refresh/cachecheck) rebuilds keys with it so
+// those surfaces compute keys the same way the data plane does.
 func (h *Handler) KeyPolicy() *KeyPolicy {
 	return h.policy
 }
@@ -1484,17 +1470,17 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
 	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			// Origin-shield path: on a hard miss (no locally usable
-			// object) and a cacheable method, the coalesced owner call
-			// REPLACES the plain peer fetch — the owner either answers
-			// authoritatively or fails, and both outcomes fall through
-			// to the origin fetch below on failure (availability
-			// preserved). Stale-usable objects keep today's plain
-			// peer-fetch semantics (no coordinated revalidation).
-			if h.coalesceWait(ctx, owner, lookupKey, obj, now, ri) {
+			// Origin shield: on a hard miss the coalesced owner call
+			// replaces the plain peer fetch. Served means done; attempted
+			// means the owner was already asked and failed, so the plain
+			// peer fetch is skipped and the origin fetch below follows.
+			// Not applied (stale-usable object, non-GET/HEAD) keeps the
+			// plain peer fetch (no coordinated revalidation).
+			switch h.coalesceWait(ctx, owner, lookupKey, obj, now, ri) {
+			case coalesceServed:
 				return
-			}
-			if !h.coalesceApplies(obj, ctx.Method()) {
+			case coalesceAttempted:
+			case coalesceNotApplied:
 				if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
 					if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 						return
@@ -2661,9 +2647,9 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 	// forwarded to the owner via the write-to-owner RPC (peerPut) so
 	// subsequent peer-fetches hit. Without this gate every pod caches
 	// the same hot keys, the consistent-hash ring is decorative, and
-	// peer fetch has 0% hit rate (issue #509). The origin-shield
-	// backfill knob deliberately relaxes this for coalesced objects —
-	// see backfillPeerObject, which calls storeObjectLocal directly.
+	// peer fetch has 0% hit rate (issue #509). The origin-shield backfill
+	// knob deliberately relaxes this for coalesced objects via
+	// backfillPeerObject, which calls storeObjectLocal directly.
 	if h.ownerFn != nil {
 		if _, isLocal := h.ownerFn(key); !isLocal {
 			return
@@ -2672,9 +2658,9 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 	h.storeObjectLocal(ctx, key, obj, ri, isRefresh, staleHits)
 }
 
-// storeObjectLocal is storeObject without the cluster ownership gate:
-// it stores and runs the refresh-before-expiry bookkeeping. Callers
-// must have decided the object should live on THIS node.
+// storeObjectLocal stores and runs the refresh bookkeeping, without
+// the cluster ownership gate. Callers must have decided the object
+// belongs on THIS node.
 func (h *Handler) storeObjectLocal(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {

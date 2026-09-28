@@ -36,43 +36,34 @@ var peerFetchEncodePool = sync.Pool{
 // arrives on a dedicated endpoint, so the channel already discriminates
 // the format and a magic byte would only break the v2 framing shipped
 // in v0.5.21. v2 uses 16-byte (128-bit) keys. v3 appends the
-// origin-shield extension (Coalesce, Route, OriginRequest envelope)
-// after the v2 fixed part; a v2 receiver rejects a v3 body at the
-// version byte (400) and the requester falls back to origin, so mixed
-// fleets during a rolling deploy degrade per node to today's behavior.
-// The legacy JSON fallback was removed (retrocompat drop).
+// origin-shield extension; a v2 receiver rejects v3 at the version
+// byte (400) and the requester falls back to origin, so mixed fleets
+// degrade per node. The legacy JSON fallback was removed (retrocompat
+// drop).
 const peerFetchBinaryVersion = 2
 
-// peerFetchBinaryVersionCoalesce is the v3 peer-fetch request version:
-// the v2 fixed part followed by the coalescing extension.
+// peerFetchBinaryVersionCoalesce is the v3 request version: the v2
+// fixed part plus the coalescing extension.
 const peerFetchBinaryVersionCoalesce = 3
 
-// CoalesceFetchTimeout bounds one coalesced peer-fetch RPC on the
-// requester (waiter) side. It lives in pkg/api (api.CoalesceFetchTimeout)
-// so the cache package's waiter budget is the same constant, not a
-// hand-maintained copy.
+// CoalesceFetchTimeout bounds one coalesced RPC on the waiter side.
+// Lives in pkg/api so the cache package shares the same constant.
 const CoalesceFetchTimeout = api.CoalesceFetchTimeout
 
-// coalesceFlightTimeout bounds the owner-side collapsed origin fetch
-// driven on behalf of peer waiters. Slightly above the default origin
-// fetch_timeout so a slow origin's answer still lands in the owner's
-// cache (shared with the owner's own client flights) even after every
-// waiter gave up. The flight runs detached from any single waiter's
-// connection context: a departing waiter must not abort the origin
-// fetch other waiters (and the owner's own fill) depend on.
+// coalesceFlightTimeout bounds the owner-side flight. Slightly above
+// the default fetch_timeout so a slow origin's answer still lands in
+// the owner's cache after waiters gave up. Detached from waiters: a
+// departing waiter must not abort the fetch other waiters depend on.
 const coalesceFlightTimeout = 65 * time.Second
 
 // defaultCoalesceConcurrency bounds concurrent coalesced origin fetches
-// per owner node (the coalesced-lane semaphore). Deliberately separate
-// from the peer-fetch lookup semaphore: coalesced RPCs have origin-scale
-// latency, and sharing slots with fast cache lookups would let one slow
-// origin stall every peer cache HIT on the node. A full lane sheds with
-// a dedicated error status and the waiters fall back to origin.
+// per owner. Separate from the lookup semaphore: coalesced RPCs have
+// origin-scale latency, and sharing slots would let one slow origin
+// stall every peer cache HIT. A full lane sheds to origin fallback.
 const defaultCoalesceConcurrency = 16
 
-// coalesceShedWait bounds how long an incoming coalesced RPC waits for
-// a coalesced-lane slot before shedding. Same pattern as the lookup
-// lane's peerFetchWaitTimeout.
+// coalesceShedWait bounds the wait for a coalesced-lane slot before
+// shedding, mirroring the lookup lane's peerFetchWaitTimeout.
 const coalesceShedWait = 100 * time.Millisecond
 
 const (
@@ -170,11 +161,10 @@ const (
 // like any other peer-fetch error: fall back to origin.
 var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
 
-// ErrCoalesceShed is returned by acquireCoalesceSlot when the
-// coalesced-lane semaphore stays saturated past coalesceShedWait. The
-// owner answers 503 + Retry-After (the origin was never contacted, so
-// the waiter should retry or fall back shortly) instead of the 502
-// reserved for a failed origin flight.
+// ErrCoalesceShed is returned when the coalesced-lane semaphore stays
+// saturated past coalesceShedWait. Answers 503 + Retry-After (the
+// origin was never contacted), distinct from the 502 of a failed
+// origin flight.
 var ErrCoalesceShed = errors.New("coalesced fetch lane shed")
 
 // ErrPeerFetchShed is returned by Fetch and Put when no concurrency
@@ -493,14 +483,10 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	return f.pipelineClientFor(addr, false)
 }
 
-// pipelineClientFor returns the PipelineClient for the given peer
-// address and lane, creating one on first use, or nil once the fetcher
-// is closed (Close dropped the map). The coalesced lane keeps its own
-// clients: its ReadTimeout must accommodate origin-scale latency, and
-// sharing one client pool would let a slow origin's coalesced responses
-// pin the connections fast cache lookups queue behind — the fast
-// lookup path must be structurally unable to queue behind an origin
-// round-trip.
+// pipelineClientFor returns the PipelineClient for addr and lane,
+// creating one on first use, or nil once closed. The coalesced lane
+// keeps its own clients: its ReadTimeout accommodates origin-scale
+// latency, and lookups must never queue behind an origin round-trip.
 func (f *PeerFetcher) pipelineClientFor(addr string, coalesce bool) *fasthttp.PipelineClient {
 	clients := f.pipelineClients.Load()
 	if clients == nil {
@@ -558,10 +544,8 @@ func (f *PeerFetcher) pipelineClientFor(addr string, coalesce bool) *fasthttp.Pi
 	return actual.(*fasthttp.PipelineClient)
 }
 
-// rpcBudget resolves the RPC budget for a fetch: coalesced RPCs have
-// origin-scale latency and must not be bounded by the fast-lookup
-// PeerFetchTimeout (they would always time out and every waiter would
-// fall back to origin, negating the shield).
+// rpcBudget: coalesced RPCs have origin-scale latency and must not be
+// bounded by the fast-lookup PeerFetchTimeout.
 func (f *PeerFetcher) rpcBudget(coalesce bool) time.Duration {
 	if coalesce {
 		return CoalesceFetchTimeout
@@ -573,12 +557,9 @@ func (f *PeerFetcher) rpcBudget(coalesce bool) time.Duration {
 // callers pass the *fasthttp.RequestCtx as context, which carries no
 // deadline, so transport.PipelineDo's deadline-less fallback applies
 // its 60s default — a hung peer would hold a fetch/put slot for a full
-// minute while only the RPC-level ReadTimeout eventually kills the
-// request. This wrapper guarantees the budget regardless of the
-// caller's context: a caller deadline shorter than the budget is
-// preserved (honoured via DoDeadline), and a deadline-less context is
-// capped by the budget itself (DoTimeout). Coalesced RPCs pass a longer
-// budget (origin-scale latency); fast lookups pass PeerFetchTimeout.
+// minute. This wrapper guarantees the budget regardless of the
+// caller's context: a shorter caller deadline is preserved (DoDeadline),
+// a deadline-less context is capped by the budget itself (DoTimeout).
 func (f *PeerFetcher) pipelineDo(ctx context.Context, c *fasthttp.PipelineClient, req *fasthttp.Request, resp *fasthttp.Response, budget time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -683,13 +664,9 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) (*fasthttp.Re
 		fetchAddr = peer.Addr
 	}
 
-	// v2 path (no coalescing fields) encodes into a stack array (max
-	// body = 1+16+1+255 = 273 bytes); v3 appends the coalescing
-	// extension (route + origin-request envelope) and is variable
-	// length, so it encodes into a heap buffer. SetBody copies into
-	// the pooled request's internal buffer (bytebufferpool), which
-	// ReleaseRequest returns for reuse. The wire format is fully
-	// rewritten from byte 0 on every call, so no reset is needed.
+	// v2 encodes into a stack array; v3 is variable-length and encodes
+	// into a heap buffer. SetBody copies into the pooled request's
+	// buffer; the wire format is rewritten from byte 0 every call.
 	var stack [273]byte
 	body, ok := encodePeerFetchBody(stack[:0], req)
 	if !ok {
@@ -707,13 +684,11 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) (*fasthttp.Re
 	return httpReq, nil
 }
 
-// encodePeerFetchBody appends the peer-fetch request body for req to
-// dst. v2 requests (Coalesce unset) emit the fixed 273-byte format and
-// never allocate; v3 emits the version byte 3 followed by the v2 fixed
-// part and the coalescing extension. An envelope field above the 64 KiB
-// wire cap is a contract violation: rejected with ok=false, never
-// truncated (a silently shortened URI would fetch the wrong origin
-// resource).
+// encodePeerFetchBody appends the request body to dst. v2 (Coalesce
+// unset) emits the fixed 273-byte format and never allocates; v3 emits
+// the v3 version byte plus the coalescing extension. A field above the
+// wire cap is rejected, never truncated (a shortened URI would fetch
+// the wrong origin resource).
 func encodePeerFetchBody(dst []byte, req api.PeerFetchRequest) ([]byte, bool) {
 	if !req.Coalesce {
 		dst = append(dst, peerFetchBinaryVersion)
@@ -751,12 +726,8 @@ func encodePeerFetchBody(dst []byte, req api.PeerFetchRequest) ([]byte, bool) {
 	return dst, true
 }
 
-// putLPString appends a uint16-length-prefixed string. A string longer
-// than 64 KiB is a contract violation — the request-header caps
-// upstream (URL ≤ 8 KiB, per-header ≤ 8 KiB) make it unreachable
-// today, and silently truncating would ship a corrupted origin URI if
-// those caps are ever relaxed. Rejected, so the caller fails the
-// request construction instead.
+// putLPString appends a uint16-length-prefixed string. Over-cap strings
+// are rejected so a relaxed upstream cap can never ship a truncated URI.
 func putLPString(dst []byte, s string) ([]byte, bool) {
 	if len(s) > maxStringLen {
 		return dst, false
@@ -944,11 +915,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	return obj, nil
 }
 
-// OriginFetcher is the owner-side hook for coalesced peer fetches
-// (cluster-coordinated origin shield): on a hard miss for a key this
-// node owns, drive the owning route's collapsed origin fetch on behalf
-// of the peer waiter instead of answering 404. Implemented by
-// *cache.Handler (structurally, without importing this package).
+// OriginFetcher is the owner-side coalesced-fetch hook, implemented
+// by *cache.Handler (structurally, without importing it).
 type OriginFetcher interface {
 	FetchOrigin(ctx context.Context, key api.Key, originReq *fasthttp.Request) (*api.Object, error)
 }
@@ -962,32 +930,26 @@ type PeerFetchHandler struct {
 	// (label "server") and coalesced-fetch outcomes. Nil-safe: nil
 	// counts nothing.
 	metrics *Metrics
-	// originFetchers maps route name → the route's coalesced origin
-	// fetch hook. Set once at startup via SetOriginFetchers; nil-safe
-	// (empty map) when origin shielding is disabled.
+	// originFetchers maps route name → coalesced origin-fetch hook
+	// (set via SetOriginFetchers; nil-safe when unset).
 	originFetchers atomic.Pointer[map[string]OriginFetcher]
-	// coalesceSem bounds concurrent coalesced origin fetches (the
-	// coalesced lane). Separate from the lookup semaphore so one slow
-	// origin cannot stall peer cache HITs on this node.
+	// coalesceSem bounds concurrent coalesced fetches, separate from
+	// the lookup semaphore (one slow origin must not stall cache HITs).
 	coalesceSem chan struct{}
-	// ownsKey reports whether THIS node currently owns the key. A
-	// coalesced fetch must only run on the ring owner: a node with a
-	// stale ring view (boot convergence, churn) that coalesced anyway
-	// would run a second cluster-wide origin fetch for a cold key.
-	// Nil disables the gate (unit tests, single-node use).
+	// ownsKey gates coalescing on ring ownership: a stale-ring node
+	// coalescing anyway would double the origin fetch for a cold key.
+	// Nil disables the gate (tests, single-node).
 	ownsKey  func(api.Key) bool
 	hopLimit int
 }
 
-// SetOwnerCheck installs the ownership gate consulted before a
-// coalesced fetch runs. Call after the cluster node is up; nil (the
-// constructor default) disables the gate.
+// SetOwnerCheck installs the ownership gate; nil (the default) disables it.
 func (h *PeerFetchHandler) SetOwnerCheck(fn func(api.Key) bool) {
 	h.ownsKey = fn
 }
 
-// SetOriginFetchers installs the route-name → OriginFetcher registry
-// used to resolve coalesced fetches. Call after the routes are built.
+// SetOriginFetchers installs the route-name → OriginFetcher registry.
+// Call after the routes are built.
 func (h *PeerFetchHandler) SetOriginFetchers(m map[string]OriginFetcher) {
 	if m == nil {
 		m = map[string]OriginFetcher{}
@@ -995,9 +957,8 @@ func (h *PeerFetchHandler) SetOriginFetchers(m map[string]OriginFetcher) {
 	h.originFetchers.Store(&m)
 }
 
-// originFetcher resolves the route's coalesced-fetch hook; nil when the
-// route is unknown (ring churn, config skew) — the caller answers 404
-// as today and the requester falls back to origin. Never guess a route.
+// originFetcher resolves the route's hook; nil means unknown route —
+// the caller answers 404 and the requester falls back to origin.
 func (h *PeerFetchHandler) originFetcher(name string) OriginFetcher {
 	if p := h.originFetchers.Load(); p != nil {
 		return (*p)[name]
@@ -1036,11 +997,9 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 	return h
 }
 
-// parsePeerFetchBody decodes the binary peer-fetch request body. v2 is
-// the fixed 273-byte format; v3 appends the coalescing extension
-// (flags byte, route, origin-request envelope). ok=false maps to a 400
-// response — which is exactly how an old owner rejects a v3 body it
-// does not understand, sending the requester back to origin.
+// parsePeerFetchBody decodes the request body: v2 fixed format, or v3
+// with the coalescing extension. ok=false maps to 400 — which is how an
+// old owner rejects a v3 body, sending the requester back to origin.
 func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	var req api.PeerFetchRequest
 	if len(body) < 18 {
@@ -1063,9 +1022,8 @@ func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	}
 }
 
-// parsePeerFetchBodyV3 decodes the v3 TLV suffix (flags byte, LP-strings
-// Route/Method/URI/Host, header count, header pairs) after the shared
-// 18-byte v2 prefix already consumed by the caller.
+// parsePeerFetchBodyV3 decodes the v3 suffix (flags, LP-strings
+// Route/Method/URI/Host, header count, header pairs).
 func parsePeerFetchBodyV3(req *api.PeerFetchRequest, body []byte) bool {
 	off := 1 + 16
 	varyLen := int(body[off])
@@ -1117,8 +1075,8 @@ func parsePeerFetchBodyV3(req *api.PeerFetchRequest, body []byte) bool {
 	return true
 }
 
-// maxPeerFetchEnvelopeHeaders caps the forwarded-header count in a v3
-// coalesced request. The data plane caps messages at 100 headers.
+// maxPeerFetchEnvelopeHeaders caps forwarded headers in a v3 request
+// (data plane caps messages at 100 headers).
 const maxPeerFetchEnvelopeHeaders = 100
 
 func readLPString(buf []byte, off int) (string, int, error) {
@@ -1218,23 +1176,14 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	}
 }
 
-// handleCoalesce serves a coalesced peer fetch on a hard miss: this
-// node owns the key, so drive the owning route's collapsed origin fetch
-// on behalf of the peer waiter and return the resulting object. All
-// peer requests plus this node's own client requests collapse into
-// exactly one origin fetch through the route's existing singleflight.
-//
-// Response classification (the wire contract the requester's fallback
-// depends on):
-//   - Origin answered (any status): the object is returned encoded —
-//     an origin 5xx is an ANSWER, not a failure, so negative caching
-//     survives; the requester treats it as authoritative.
-//   - Flight failed (transport error, lane shed, deadline): a dedicated
-//     error status; the requester falls back to origin.
-//   - Unknown route / non-GET-HEAD: returns false and the caller answers
-//     404 exactly as today.
-//
-// Returns true when the response was fully handled.
+// handleCoalesce serves a coalesced peer fetch on a hard miss: drive
+// the owning route's collapsed origin fetch and return the object;
+// peer requests plus this node's own clients collapse into one origin
+// fetch. An origin error STATUS is an authoritative answer (negative
+// caching survives); a flight failure answers a dedicated error status
+// and the requester falls back to origin. Unknown route / non-GET/HEAD
+// returns false and the caller answers 404 as today. Returns true when
+// the response was fully handled.
 func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.PeerFetchRequest) bool {
 	if !req.Coalesce || req.Route == "" {
 		return false
@@ -1242,10 +1191,8 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 	if req.OriginRequest.Method != fasthttp.MethodGet && req.OriginRequest.Method != fasthttp.MethodHead {
 		return false // coalescing is GET/HEAD-only; requester fetches origin directly
 	}
-	// Ownership gate: only the ring owner may run a coalesced origin
-	// fetch. A requester with a stale ring view can address this node
-	// believing it owns the key; answering 404 sends it back to its own
-	// origin fetch (today's behavior) instead of doubling the fetch.
+	// Ownership gate: only the ring owner may coalesce. A requester with a
+	// stale ring view gets a 404 (today's behavior), not a doubled fetch.
 	if h.ownsKey != nil && !h.ownsKey(req.Key) {
 		return false
 	}
@@ -1260,9 +1207,8 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 		}
 		h.logger.Info("coalesced fetch failed",
 			"key", req.Key, "route", req.Route, "error", err)
-		// A lane shed answers 503 + Retry-After (the origin was never
-		// contacted; the waiter should retry or fall back shortly);
-		// every other failure is the 502 of a failed origin flight.
+		// Shed answers 503 + Retry-After (origin never contacted);
+		// other failures are the 502 of a failed origin flight.
 		if errors.Is(err, ErrCoalesceShed) {
 			ctx.Error("coalesced fetch shed", fasthttp.StatusServiceUnavailable)
 			ctx.Response.Header.Set("Retry-After", "1")
@@ -1288,10 +1234,8 @@ func (h *PeerFetchHandler) handleCoalesce(ctx *fasthttp.RequestCtx, req api.Peer
 	return true
 }
 
-// runCoalescedFlight acquires a coalesced-lane slot and drives one
-// detached origin flight for the peer waiter. Lane shed maps to an
-// error (the requester falls back to origin), mirroring transport
-// failure; an origin error STATUS is an answer, not an error.
+// runCoalescedFlight acquires a lane slot and drives one detached
+// origin flight for the peer waiter.
 func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.PeerFetchRequest, fetcher OriginFetcher) (*api.Object, error) {
 	if err := h.acquireCoalesceSlot(ctx); err != nil {
 		h.logger.Warn("coalesced fetch shed at the lane semaphore",
@@ -1299,9 +1243,8 @@ func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.
 		if h.metrics != nil {
 			h.metrics.IncCoalescedShed()
 		}
-		// No response here: handleCoalesce is the single writer, so the
-		// shed can surface its 503 + Retry-After instead of being
-		// overwritten by the caller's 502.
+		// No response here: handleCoalesce is the single writer and must
+		// surface the shed's 503 instead of the caller's 502.
 		return nil, err
 	}
 	defer func() { <-h.coalesceSem }()
@@ -1315,10 +1258,9 @@ func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.
 		oreq.Header.Set(hd.Name, hd.Value)
 	}
 
-	// Detach the flight from this waiter's connection context: a
-	// departing waiter must not abort the origin fetch other waiters
-	// (and the owner's own fill) depend on. Bounded by the flight
-	// timeout, which absorbs the route's own fetch_timeout.
+	// Detach from the waiter's connection context (a departing waiter
+	// must not abort the fetch other waiters depend on); bounded by
+	// the flight timeout, which absorbs the route's fetch_timeout.
 	flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coalesceFlightTimeout)
 	defer cancel()
 	start := time.Now()
@@ -1329,9 +1271,8 @@ func (h *PeerFetchHandler) runCoalescedFlight(ctx *fasthttp.RequestCtx, req api.
 	return obj, err
 }
 
-// acquireCoalesceSlot takes one coalesced-lane slot with a bounded
-// wait: a full lane sheds (the requester falls back to origin) instead
-// of piling up goroutines behind a slow origin.
+// acquireCoalesceSlot takes one lane slot with a bounded wait: a full
+// lane sheds instead of piling up goroutines behind a slow origin.
 func (h *PeerFetchHandler) acquireCoalesceSlot(ctx *fasthttp.RequestCtx) error {
 	select {
 	case h.coalesceSem <- struct{}{}:

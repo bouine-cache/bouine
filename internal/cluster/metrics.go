@@ -52,30 +52,21 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
-	// CoalescedFetch counts cluster-coordinated origin-shield fetches,
-	// labelled by role: "owner" (a coalesced fetch served by the key
-	// owner), "waiter" (a non-owner that avoided origin — the headline
-	// "origin requests saved" number), "failure" (the owner's flight
-	// failed; the waiter falls back to origin), and "fallback" (a
-	// waiter-side wait failed — owner down, timeout, shed, or
-	// variant-gate rejection — and the waiter fetched origin itself;
-	// owner-side counters cannot see these events).
+	// CoalescedFetch counts origin-shield fetches by role: owner,
+	// waiter, failure (owner's flight failed), fallback (waiter-side
+	// wait failed; owner-side counters cannot see these).
 	CoalescedFetch *prometheus.CounterVec
-	// CoalescedShed counts coalesced RPCs shed at the owner's coalesced
-	// lane semaphore (mirrors the peer_fetch_shed_total pattern; a
-	// saturated coalesced lane must be visible, not inferred from
-	// latency).
+	// CoalescedShed counts RPCs shed at the owner's coalesced-lane
+	// semaphore: a saturated lane must be visible, not inferred from
+	// latency.
 	CoalescedShed prometheus.Counter
-	// CoalescedFetchSaved counts waiters that received an authoritative
-	// coalesced answer and avoided an origin request — the headline
-	// "origin requests saved" number. Kept separate from the role
-	// counter so dashboards can subtract saved from total origin load
-	// without label queries. Incremented together with
+	// CoalescedFetchSaved counts waiters that avoided an origin request.
+	// Kept separate from the role vec so dashboards can subtract from
+	// total origin load without label queries. Incremented together with
 	// CoalescedFetch{role="waiter"}.
 	CoalescedFetchSaved prometheus.Counter
-	// CoalescedFetchDuration observes the owner-side coalesced flight
-	// latency (one origin round-trip as seen by the owner, success or
-	// failure). Buckets run to 65s to cover the flight timeout.
+	// CoalescedFetchDuration observes owner-side flight latency (one
+	// origin round-trip, success or failure).
 	CoalescedFetchDuration prometheus.Histogram
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
@@ -169,8 +160,8 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
-// newCoalescedDurationHistogram builds the owner-side coalesced-flight
-// latency histogram. Buckets run to 65s to cover the flight timeout.
+// newCoalescedDurationHistogram builds the owner-side flight latency
+// histogram. Buckets run to 65s to cover the flight timeout.
 func newCoalescedDurationHistogram() prometheus.Histogram {
 	return prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "bouine",
@@ -252,12 +243,9 @@ func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
 	m.peerFetchVariantMismatchTotal.Add(1)
 }
 
-// IncCoalescedFetch increments the coalesced origin-shield counter for
-// the given role: "owner" (served a peer's flight), "waiter" (served
-// from the owner's answer), "failure" (owner-side flight failure), or
-// "fallback" (waiter-side wait failed). A waiter increment also counts
-// one origin request saved (same event, two views). Nil-safe:
-// single-node mode never registers the vec.
+// IncCoalescedFetch increments the counter for the given role
+// (owner/waiter/failure/fallback); a waiter also counts one origin
+// request saved. Nil-safe.
 func (m *Metrics) IncCoalescedFetch(role string) {
 	if m == nil || m.CoalescedFetch == nil {
 		return
@@ -268,8 +256,7 @@ func (m *Metrics) IncCoalescedFetch(role string) {
 	}
 }
 
-// ObserveCoalescedFetch records the duration of one owner-side
-// coalesced origin flight. Nil-safe.
+// ObserveCoalescedFetch records one owner-side flight duration. Nil-safe.
 func (m *Metrics) ObserveCoalescedFetch(d time.Duration) {
 	if m == nil || m.CoalescedFetchDuration == nil {
 		return

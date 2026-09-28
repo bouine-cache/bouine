@@ -97,10 +97,9 @@ type runState struct {
 	broadcaster    *cluster.Broadcaster
 	peersFn        func() []api.PeerInfo
 	clusterMetrics *cluster.Metrics
-	// routeFetchers maps route name → the route's coalesced origin
-	// fetch hook (origin shield). Populated by buildRouter in strong
-	// mode with cluster.peer_fetch_coalesce on; handed to the
-	// PeerFetchHandler so the owner can resolve coalesced fetches.
+	// routeFetchers maps route name → the route's coalesced origin-fetch
+	// hook (origin shield); handed to the PeerFetchHandler so the owner
+	// can resolve coalesced fetches.
 	routeFetchers map[string]cluster.OriginFetcher
 
 	warmMetrics    *warm.Metrics
@@ -326,10 +325,8 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		broadcaster:    broadcaster,
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
-		// Pre-allocate the origin-shield route registry even when the
-		// feature is off: buildRouter populates it only in strong mode
-		// with coalescing on, and the PeerFetchHandler's registry
-		// setter needs a non-nil map either way.
+		// Pre-allocated even with the feature off: the PeerFetchHandler's
+		// registry setter needs a non-nil map.
 		routeFetchers:  map[string]cluster.OriginFetcher{},
 		warmMetrics:    warmMetrics,
 		walMetrics:     walMetrics,
@@ -630,14 +627,12 @@ func sanitizedConfig(cfg config.Config) config.Config {
 }
 
 // policyForURL resolves the cache key policy the data plane would apply
-// to a URL: the first route matching the URL's host+path, via the same
-// first-match-wins router the data plane uses. Returns nil when no
-// route matches (the caller then builds the default host-ful key —
-// and an unmatched URL is by definition un-stored, so the mismatch is
-// harmless). Admin purge/refresh/cachecheck must compute keys this
-// way or routes whose key form differs from the default (include_host:
-// false, strip_query_params, ...) would invalidate and inspect keys
-// that were never stored.
+// to a URL: the first route matching host+path, via the same
+// first-match-wins router. nil when no route matches (an unmatched URL
+// is un-stored, so the caller's default key is harmless). Admin surfaces
+// must compute keys this way or routes with a non-default key form
+// (include_host: false, strip_query_params, ...) would purge and inspect
+// keys that were never stored.
 func policyForURL(rs *runState, rawURL string) *cache.KeyPolicy {
 	if rs == nil || rs.router == nil {
 		return nil
@@ -1263,9 +1258,9 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
-		// With origin shielding on, the fast path must not set the
-		// OwnerMiss hint: the slow path's coalesced owner call can
-		// still produce an authoritative object.
+		// With origin shielding on, the fast path must not set OwnerMiss:
+		// the slow path's coalesced owner call can still produce an
+		// authoritative object.
 		fp.WithCoalesce(e.cfg.Cluster.PeerFetchCoalesce)
 	}
 	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)

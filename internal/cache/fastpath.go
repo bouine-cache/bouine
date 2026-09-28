@@ -59,8 +59,8 @@ type FastPathHandler struct {
 	cachedDate atomic.Pointer[string]
 	poolName   string
 	// coalesce mirrors cluster.peer_fetch_coalesce: when on, a fast-path
-	// owner miss must NOT set the OwnerMiss hint — the slow path retries
-	// with a coalesced owner call that drives the owner's origin fetch.
+	// owner miss must not set OwnerMiss — the slow path's coalesced owner
+	// call can still produce an authoritative object.
 	coalesce       bool
 	cachedDateUnix atomic.Int64
 }
@@ -126,10 +126,9 @@ func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.Pee
 	return f
 }
 
-// WithCoalesce marks the fast path as serving a route with
-// cluster.peer_fetch_coalesce on: a fast-path owner miss leaves the
-// OwnerMiss hint unset so the slow path's coalesced owner call (which
-// can still produce an authoritative object) is not skipped.
+// WithCoalesce marks the fast path as serving a route with origin
+// shielding on: an owner miss leaves OwnerMiss unset so the slow path
+// still runs its coalesced owner call.
 func (f *FastPathHandler) WithCoalesce(on bool) *FastPathHandler {
 	f.coalesce = on
 	return f
@@ -244,13 +243,11 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err != nil || peerObj == nil {
+		// Definitive owner miss: the owner answered (no error) with no
+		// object. Flag the request so the slow path skips its duplicate
+		// owner lookup + peer RPC and goes straight to origin. Errors keep
+		// the slow-path retry; with origin shielding the hint is withheld.
 		if err == nil && !f.coalesce {
-			// Definitive owner miss: the owner answered (no error) with no
-			// object for the plain key. Flag the request so the slow path
-			// skips its duplicate owner lookup + peer RPC and goes straight
-			// to origin. Errors keep the slow-path retry. With origin
-			// shielding on, the hint is withheld: the slow path's coalesced
-			// owner call can still produce an authoritative object.
 			req.OwnerMiss = true
 		}
 		return nil, false

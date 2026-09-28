@@ -56,8 +56,14 @@ key-derived envelope:
 4. Any failure of the forward (transport, deadline, endpoint absent,
    ownership gate, hop limit) falls back to the non-owner's own
    origin fetch — availability is never worse than today.
-5. Gated by `cluster.peer_fetch_coalesce` (strong mode, default off).
-   A node with the flag off neither forwards nor serves forwards.
+5. Gated by `cluster.origin_shield` (strong mode, default off) —
+   renamed from #731's `peer_fetch_coalesce` before first release
+   ("coalesce" described the deleted v3 mechanism). A node with the
+   flag off neither forwards nor serves forwards. Backfill
+   (`origin_shield_backfill_probability`, default 1.0) applies to
+   shield fills only: storing warm peer hits would re-create the
+   every-pod-caches-hot-keys failure the owner-only partition
+   (issue #509) exists to prevent.
 
 ## Consequences
 

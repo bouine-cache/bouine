@@ -52,23 +52,23 @@ from PR #731.
 | D6 | Response bytes are **proxied** to the requester (not re-encoded as an `api.Object`) | Preserves streaming; avoids re-serialization; the requester already knows how to serve origin responses |
 | D7 | Requester **skips `peerPut`** for shield-sourced fills | Pod B already stored the fill; forwarding it back is a redundant RPC |
 | D8 | **GET/HEAD only** | Matches cacheable-method semantics; keeps request-body streaming out of scope |
-| D9 | Flag `cluster.peer_fetch_coalesce` (strong mode, **default off**); a flag-off node neither forwards nor serves forwards | Same rollout valve as #731; behavior change for every strong-mode cluster otherwise |
+| D9 | Flag `cluster.origin_shield` (strong mode, **default off**); a flag-off node neither forwards nor serves forwards | Same rollout valve as #731; behavior change for every strong-mode cluster otherwise. Renamed from #731's `peer_fetch_coalesce` — that name described the deleted v3 mechanism; the flag never shipped, so the rename is free |
+| D10 | Backfill applies to **shield fills only** (settled in design review, not generalized to warm peer hits) | The shield's job is deduplicating origin fetches. Storing warm peer hits re-creates the every-pod-caches-hot-keys failure #509's owner-only partition exists to prevent (ring goes decorative, capacity becomes N× working set). If that product is wanted someday it gets its own flag and evidence |
 
-**Open question for review (the one unresolved call):** does backfill
-generalize? In this design "requester stores the answer" applies to
-any shield-served response. Options: keep the knob scoped to shield
-fills (as #731 did, `peer_fetch_backfill_probability`, default 1.0)
-or generalize to all peer-served responses. The knob's name and
-semantics should be settled here, before code carries them.
+**Settled decisions (design review, 2026-09-28):** D9 renamed the
+feature to `cluster.origin_shield` / `bouine_shield_*` metrics (free
+before first release; a compat break after). D10 scoped backfill to
+shield fills only, keeping #731's knob semantics
+(`origin_shield_backfill_probability`, default 1.0).
 
 ## 3. What transfers from PR #731 (salvage list)
 
 | Piece | Disposition |
 |---|---|
-| `cluster.peer_fetch_coalesce` flag + `config.Validate` bounds | Keep (generalize the fetch-timeout validation: effective `fetch_timeout` must exceed the shield deadline, both sides identical config) |
-| `peer_fetch_backfill_probability` (default 1.0) + bounds tests | Keep, pending D9's open question |
-| Metrics: `bouine_coalesced_fetch_total{role=owner/waiter/failure/fallback}`, `bouine_coalesced_fetch_shed_total`, `bouine_origin_requests_saved_total`, `bouine_coalesced_fetch_duration_seconds` | Keep; relabel if the feature name changes |
-| Fast-path `OwnerMiss` hint interaction (`WithCoalesce`) | Keep — the fast path must still not set OwnerMiss when the shield is on |
+| Flag + `config.Validate` bounds | Keep, **renamed**: `cluster.peer_fetch_coalesce` → `cluster.origin_shield`; generalize the fetch-timeout validation (effective `fetch_timeout` must exceed the shield deadline, both sides identical config) |
+| Backfill knob (default 1.0) + bounds tests | Keep, **renamed**: `peer_fetch_backfill_probability` → `origin_shield_backfill_probability`; scoped to shield fills per D10 |
+| Metrics | Keep, **renamed**: `bouine_coalesced_fetch_total` → `bouine_shield_requests_total{role=owner/waiter/failure/fallback}`, `bouine_coalesced_fetch_shed_total` → `bouine_shield_shed_total`, `bouine_origin_requests_saved_total` → `bouine_shield_origin_requests_saved_total`, `bouine_coalesced_fetch_duration_seconds` → `bouine_shield_duration_seconds`. Role names unchanged |
+| Fast-path `OwnerMiss` hint interaction (`WithCoalesce` → rename to `WithShield`) | Keep — the fast path must still not set OwnerMiss when the shield is on |
 | `ownsKey`/`IsLocal` ownership gate | Keep, moves to the forward endpoint (D5) |
 | Integration test shape (cold key → origin sees 1 request, ring-convergence polling) | Keep, mechanism rewritten |
 | v3 wire format, `OriginRequest`/`PeerHeader` types, `FetchOrigin`, `OriginFetcher` registry, coalesce lane/semaphore/timeout constants, HEAD canonicalizations, `originEnvelope` | **Delete — replaced by the real request path** |
@@ -96,7 +96,7 @@ Estimate: ~30–40% of #731 transfers by line count.
 Deliberately **not** in scope: designated shield tiers, request-body
 forwarding (POST), coordinated revalidation of stale-usable objects
 (the plain peer-fetch path stays for those), and generalizing backfill
-beyond the D9 decision.
+beyond the D10 decision.
 
 ## 5. Test plan
 
@@ -114,8 +114,17 @@ beyond the D9 decision.
 
 ## 6. Rollout
 
-1. This plan + ADR-0052 land (docs PR).
-2. Implementation PR on a fresh branch off `main`, mining §3.
+This plan lands and stays open as the **design phase** of one PR;
+implementation follows as commits on the same branch, and the PR
+merges once, complete (design-first, single merge — the docs are not
+merged ahead of the code they describe).
+
+1. Plan + ADR-0052 (this commit) — the design record.
+2. Implementation commits on this branch, mining §3: salvage first
+   (flag, knob, metrics, ownership gate, fast-path interaction —
+   renamed per D9/D10), then the forward endpoint (§4.1), the
+   requester branch (§4.2), deadline + backfill (§4.3–4.4), wiring
+   (§4.5), tests (§5).
 3. Flag ships default-off; flipping the default is a separate decision
    (its own changelog entry — it changes cold-miss latency for every
    strong-mode cluster and interacts with the fetch-timeout
@@ -132,7 +141,7 @@ to-delete code. Copy the pieces instead:
 | Flag + `validateRouteCoalesceFetchTimeout` | `internal/config/loader.go` | `36f294bd`, `fab58b96` |
 | Backfill knob + bounds tests | `internal/config/{config.go,loader_test.go}` | `8b53fa46`, `36f294bd` |
 | The four metrics + nil-safe helpers | `internal/cluster/metrics.go` | `8b53fa46` |
-| `WithCoalesce` + OwnerMiss interaction | `internal/cache/fastpath.go` | `8b53fa46`, `fab58b96` |
+| Fast-path OwnerMiss interaction (`WithCoalesce` → rename to `WithShield`) | `internal/cache/fastpath.go` | `8b53fa46`, `fab58b96` |
 | Ownership gate (`SetOwnerCheck` shape) | `internal/cluster/peerfetch.go` | `5ffe7f80` — moves to the forward endpoint |
 | Integration test shape (cold key → origin counter = 1) | `test/integration/cluster_origin_shield_test.go` | `8b53fa46` |
 
@@ -146,11 +155,8 @@ passing in isolation (cross-test interference) — issue #735. Run the
 plan's integration tests with `-run` filters until #735 is fixed;
 their full-suite failure is not a regression signal for this feature.
 
-**Open question (must be settled in this plan's review, before the
-implementation branch cuts):** backfill scope — shield fills only
-(#731 semantics) vs all peer-served responses. §2 D9's answer decides
-the knob's name and whether the backfill cherry-picks above land as-is
-or need renaming.
+**Settled in design review (2026-09-28):** backfill scope (D10) and
+naming (D9) — see §2. No open questions remain on the design.
 
 ## References
 

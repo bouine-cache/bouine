@@ -246,13 +246,8 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 			// Definitive owner miss: the owner answered (no error) with no
 			// object for the plain key. Flag the request so the slow path
 			// skips its duplicate owner lookup + peer RPC and goes straight
-			// to origin. Errors keep the slow-path retry.
-			//
-			// Shield-on (cluster.origin_shield) keeps the hint unset:
-			// handleCacheMiss's shield branch needs to see a plain miss
-			// to forward the request to the owner (ADR-0052); the
-			// duplicate key-only peer-fetch the hint suppresses is
-			// exactly what the shield branch runs first anyway.
+			// to origin. Errors keep the slow-path retry. Shield-on keeps
+			// the hint unset: the slow path's shield branch still runs.
 			req.OwnerMiss = true
 		}
 		return nil, false

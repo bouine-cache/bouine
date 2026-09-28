@@ -56,25 +56,19 @@ type Config struct {
 	OnRefreshed             func(ctx context.Context, url string)
 	OnBanned                func(ctx context.Context, expr api.BanExpr)
 	PeerFetchHandler        fasthttp.RequestHandler
-	// PeerForwardHandler serves GET/HEAD /v1/peer/forward (cluster
-	// origin_shield, ADR-0052): the ring owner replays the forwarded
-	// client request through its data plane and proxies the bytes back.
-	// Nil disables the endpoint (a requester then falls back to its own
-	// origin fetch, per the mixed-version degrade rule).
-	PeerForwardHandler fasthttp.RequestHandler
-	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler fasthttp.RequestHandler
-	OnPurged           func(ctx context.Context, url string)
-	FaviconHandler     fasthttp.RequestHandler
+	PeerForwardHandler      fasthttp.RequestHandler
+	CFPropagateFn           func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler      fasthttp.RequestHandler
+	OnPurged                func(ctx context.Context, url string)
+	FaviconHandler          fasthttp.RequestHandler
 	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
 	// the ops history shown on the dashboard invalidation page. nil
 	// disables history recording. Set to OpsLogRing.Record by the engine.
 	OpsLogFn func(op, arg, result string)
 	Addr     string
 	Token    string
-	// ShieldForwardTimeout, when > 0, extends the admin server's
-	// per-request write deadline for /v1/peer/forward (an origin fetch
-	// would outlive the 5s default).
+	// ShieldForwardTimeout, when > 0, extends the /v1/peer/forward
+	// write deadline (an origin fetch outlives the 5s default).
 	ShieldForwardTimeout time.Duration
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride

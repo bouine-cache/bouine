@@ -23,6 +23,14 @@ spec:
       {{- with .Values.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
+      scrapeNativeHistograms: {{ .Values.serviceMonitor.scrapeNativeHistograms }}
+      scrapeProtocols:
+        - PrometheusProto
+        - OpenMetricsText1.0.0
+        - OpenMetricsText0.0.1
+        - PrometheusText1.0.0
+        - PrometheusText0.0.4
+      scrapeClassicHistograms: {{ .Values.serviceMonitor.scrapeClassicHistograms }}
       {{- with .Values.serviceMonitor.relabelings }}
       relabelings:
         {{- toYaml . | nindent 8 }}

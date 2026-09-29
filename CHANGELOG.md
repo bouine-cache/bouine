@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **kubeconform gate now validates the ServiceMonitor CRD**. The
+  `helm-kubeconform` prek hook (ADR-0048) renders the chart with
+  `serviceMonitor.enabled=true` and validates the rendered ServiceMonitor
+  against the `monitoring.coreos.com/v1` CRD via the datree
+  CRDs-catalog. Previously the ServiceMonitor was neither rendered (it
+  defaults to disabled) nor schema-covered (kubeconform's default
+  schema location only has Kubernetes built-ins), which let PR #738
+  ship `scrapeNativeHistograms`/`scrapeProtocols`/`scrapeClassicHistograms`
+  inside `endpoints[]` — a spec-level field — past every gate.
+
 ## [0.5.24] - 2026-09-29
 
 ### Fixed

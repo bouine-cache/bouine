@@ -888,6 +888,16 @@
           "type": "string",
           "default": ""
         },
+        "scrapeNativeHistograms": {
+          "description": "Scrape native histograms. Sets scrapeNativeHistograms on the endpoint and negotiates scrapeProtocols (PrometheusProto first). Requires prometheus-operator >= v0.80 and Prometheus >= 2.40.",
+          "type": "boolean",
+          "default": true
+        },
+        "scrapeClassicHistograms": {
+          "description": "Also ingest classic histogram series for metrics exposed as native histograms. Only takes effect with scrapeNativeHistograms enabled. Requires Prometheus >= 2.45.",
+          "type": "boolean",
+          "default": true
+        },
         "relabelings": {
           "description": "Prometheus relabeling rules applied before scraping.",
           "type": "array",

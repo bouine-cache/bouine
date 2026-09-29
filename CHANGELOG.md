@@ -10,6 +10,15 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Helm chart: the ServiceMonitor rendered `scrapeNativeHistograms`,
+  `scrapeProtocols`, and `scrapeClassicHistograms` inside `endpoints[]`,
+  but the prometheus-operator CRD defines them at the `spec` level —
+  the API server rejected the ServiceMonitor for any install with
+  `serviceMonitor.enabled: true` (since chart 0.5.23). They now render
+  on the ServiceMonitor spec where they belong, applying to every
+  endpoint.
+
 ## [0.5.23] - 2026-09-29
 
 ## [0.5.22] - 2026-09-28

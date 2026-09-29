@@ -402,16 +402,10 @@ serviceMonitor:
   labels: {}
   interval: 60s
   scrapeTimeout: ""  # uses default
-  # Native histogram scraping. Rendered on the endpoint whenever the
-  # ServiceMonitor is enabled; requires prometheus-operator >= v0.80.
-  # scrapeProtocols is negotiated with PrometheusProto first — the only
-  # protocol that carries native histogram buckets losslessly.
+  # Native histogram scraping. requires prometheus-operator >= v0.80.
   scrapeNativeHistograms: true
   # Also ingest the classic histogram series (_bucket/_sum/_count) for
-  # metrics exposed as native histograms (maps to Prometheus
-  # always_scrape_classic_histograms, needs Prometheus >= 2.45). Keep
-  # true so existing dashboards and alerts keep working; set false for
-  # the cardinality win (native only).
+  # metrics exposed as native histograms.
   scrapeClassicHistograms: true
   relabelings: []
   metricRelabelings: []

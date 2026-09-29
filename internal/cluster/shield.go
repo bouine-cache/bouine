@@ -27,9 +27,25 @@ const PeerForwardPath = "/v1/peer/forward"
 // route fetch_timeouts at or below this while the shield is on.
 const shieldForwardTimeout = api.ShieldForwardTimeout
 
-// shieldMaxBodyBytes caps the forward response body through the admin
-// plane's body-limit middleware.
+// shieldMaxBodyBytes caps the forward response body at the transport
+// layer (the shield client's MaxResponseBodySize): a misbehaving peer
+// cannot make the requester buffer unbounded bytes before the check.
 const shieldMaxBodyBytes int64 = 64 << 20
+
+// Shield reply marker values (header.XBouineShieldResult).
+const (
+	// shieldResultServed marks a reply the owner's replay produced —
+	// any status, including an origin 404/5xx relayed through it.
+	shieldResultServed = "served"
+	// shieldResultRefused marks an endpoint-level refusal (disabled,
+	// wrong method, gate failure). Refusals and origin answers can
+	// share a status (404), so the marker is what the requester keys on.
+	shieldResultRefused = "refused"
+)
+
+// shieldLaneKeySuffix namespaces the shield lane's cached client in the
+// peer client map, away from the key-only fetch lane.
+const shieldLaneKeySuffix = "\x00shield"
 
 // ErrShieldForward is returned when the owner refused or failed the
 // forward; callers fall back to their own origin fetch.
@@ -106,12 +122,12 @@ func (h *PeerForwardHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if !h.Enabled {
 		// 404, not 501: matches an endpoint-less old build so mixed
 		// fleets behave identically during rolling deploys.
-		ctx.Error("shield disabled", fasthttp.StatusNotFound)
+		h.refuse(ctx, "disabled", fasthttp.StatusNotFound)
 		return
 	}
 	method := string(ctx.Method())
 	if method != fasthttp.MethodGet && method != fasthttp.MethodHead {
-		ctx.Error("method not allowed", fasthttp.StatusMethodNotAllowed)
+		h.refuse(ctx, "method", fasthttp.StatusMethodNotAllowed)
 		return
 	}
 	key, _, hops, ok := h.checkForwardGate(ctx)
@@ -136,6 +152,15 @@ func (h *PeerForwardHandler) Handle(ctx *fasthttp.RequestCtx) {
 	h.serveForwardResponse(ctx, fwdCtx, key, hops, start)
 }
 
+// refuse answers an endpoint-level refusal: the marker tells the
+// requester this is not an origin answer relayed through the replay —
+// the two can share a status (404). The marker goes on after Error:
+// ctx.Error resets the response.
+func (h *PeerForwardHandler) refuse(ctx *fasthttp.RequestCtx, reason string, code int) {
+	ctx.Error("shield refused: "+reason, code)
+	ctx.Response.Header.Set(header.XBouineShieldResult, shieldResultRefused)
+}
+
 // checkForwardGate runs the admission checks (hop limit, deadline,
 // key, ownership, expiry, SSE) and answers the error itself.
 //
@@ -151,13 +176,13 @@ func (h *PeerForwardHandler) checkForwardGate(ctx *fasthttp.RequestCtx) (api.Key
 		}
 	}
 	if hops >= h.HopLimit {
-		ctx.Error("hop limit", fasthttp.StatusLoopDetected)
+		h.refuse(ctx, "hop limit", fasthttp.StatusLoopDetected)
 		return api.Key{}, time.Time{}, 0, false
 	}
 
 	deadline, ok := parseShieldDeadline(ctx.Request.Header.Peek(header.XBouineDeadline))
 	if !ok {
-		ctx.Error("missing or invalid deadline", fasthttp.StatusBadRequest)
+		h.refuse(ctx, "missing or invalid deadline", fasthttp.StatusBadRequest)
 		return api.Key{}, time.Time{}, 0, false
 	}
 	// D4: under config skew the shorter budget wins, so the owner can
@@ -169,7 +194,7 @@ func (h *PeerForwardHandler) checkForwardGate(ctx *fasthttp.RequestCtx) (api.Key
 
 	key, ok := parseShieldKey(ctx.Request.Header.Peek(header.XBouineShieldKey))
 	if !ok {
-		ctx.Error("missing or invalid shield key", fasthttp.StatusBadRequest)
+		h.refuse(ctx, "missing or invalid shield key", fasthttp.StatusBadRequest)
 		return api.Key{}, time.Time{}, 0, false
 	}
 	if h.OwnsKey != nil && !h.OwnsKey(key) {
@@ -177,20 +202,20 @@ func (h *PeerForwardHandler) checkForwardGate(ctx *fasthttp.RequestCtx) (api.Key
 		// origin fetch instead of doubling the cold-key fetch.
 		h.logger.Info("refused shield forward: not the ring owner",
 			"key", key, "hops", hops)
-		ctx.Error("not owner", fasthttp.StatusNotFound)
+		h.refuse(ctx, "not owner", fasthttp.StatusNotFound)
 		return api.Key{}, time.Time{}, 0, false
 	}
 	if time.Now().After(deadline) {
 		// The requester's budget is already spent — a fetch could not
 		// reach the client in time.
-		ctx.Error("deadline exceeded", fasthttp.StatusGatewayTimeout)
+		h.refuse(ctx, "deadline exceeded", fasthttp.StatusGatewayTimeout)
 		return api.Key{}, time.Time{}, 0, false
 	}
 
 	// SSE cannot be replayed into a second connection (ADR-0042); the
 	// requester's plain SSE handling runs locally.
 	if header.AcceptsEventStream(ctx.Request.Header.Peek(header.Accept)) {
-		ctx.Error("sse not forwardable", fasthttp.StatusNotFound)
+		h.refuse(ctx, "sse not forwardable", fasthttp.StatusNotFound)
 		return api.Key{}, time.Time{}, 0, false
 	}
 	return key, deadline, hops, true
@@ -211,8 +236,19 @@ func (h *PeerForwardHandler) serveForwardResponse(ctx *fasthttp.RequestCtx, fwdC
 	// and every pipelined response after it on the same connection.
 	// SetContentLength also deletes the Transfer-Encoding header.
 	ctx.Response.Header.SetContentLength(len(ctx.Response.Body()))
+	// Mark the reply as replay-produced (any status): the requester keys
+	// its relay-or-fallback decision on this marker, not the status —
+	// refusals and origin answers can share one (404).
+	ctx.Response.Header.Set(header.XBouineShieldResult, shieldResultServed)
 	if h.metrics != nil {
-		h.metrics.IncShield("owner")
+		// A replayed 5xx means the owner's miss path degraded (shed,
+		// origin failure) — the requester falls back, so separate it from
+		// the served case instead of counting both as "owner".
+		if fwdCtx.Response.StatusCode() >= fasthttp.StatusInternalServerError {
+			h.metrics.IncShield("failure")
+		} else {
+			h.metrics.IncShield("owner")
+		}
 		h.metrics.ObserveShieldDuration(time.Since(start))
 	}
 	h.logger.Debug("served shield forward",
@@ -327,22 +363,22 @@ func (f *PeerFetcher) ShieldForward(ctx context.Context, peer api.PeerInfo, req 
 	req.UseHostHeader = true
 
 	resp := fasthttp.AcquireResponse()
-	pc := f.getShieldPipelineClient(addr)
-	if pc == nil {
+	client := f.getShieldClient(addr)
+	if client == nil {
 		fasthttp.ReleaseResponse(resp)
 		return nil, fmt.Errorf("shield forward %s: fetcher closed during shutdown", peer.Addr)
 	}
 	// The owner clamps against its own budget too, so the effective
 	// wait never exceeds what the requester can still use.
 	if time.Until(deadline) > shieldForwardTimeout {
-		if err := pc.DoTimeout(req, resp, shieldForwardTimeout); err != nil {
+		if err := client.DoTimeout(req, resp, shieldForwardTimeout); err != nil {
 			if ctx.Err() == nil {
 				f.recordPeerFailure(addr)
 			}
 			fasthttp.ReleaseResponse(resp)
 			return nil, fmt.Errorf("shield forward %s: %w", peer.Addr, err)
 		}
-	} else if err := pc.DoDeadline(req, resp, deadline); err != nil {
+	} else if err := client.DoDeadline(req, resp, deadline); err != nil {
 		if ctx.Err() == nil {
 			f.recordPeerFailure(addr)
 		}
@@ -351,56 +387,54 @@ func (f *PeerFetcher) ShieldForward(ctx context.Context, peer api.PeerInfo, req 
 	}
 	f.recordPeerSuccess(addr)
 
-	if resp.StatusCode() != fasthttp.StatusOK {
-		// 404: refusal (flag off, not owner, no route) — not a peer
-		// health failure. 503: the owner's fetch semaphore shed, the
-		// same bargain its own clients accept.
-		// Read the status BEFORE the release: ReleaseResponse resets
-		// the response, so a post-release StatusCode is always 0.
+	// The result marker separates endpoint refusals (and unmarked
+	// replies from an endpoint-less old build) from origin answers
+	// relayed through the replay — refusals and origin answers can
+	// share a status (404), and only the marker disambiguates. Body
+	// size is bounded by the client's MaxResponseBodySize.
+	if result := resp.Header.Peek(header.XBouineShieldResult); string(result) != shieldResultServed {
 		status := resp.StatusCode()
 		fasthttp.ReleaseResponse(resp)
-		if status == fasthttp.StatusNotFound {
-			return nil, fmt.Errorf("shield forward %s: refused: %w", peer.Addr, ErrShieldForward)
-		}
-		return nil, fmt.Errorf("shield forward %s: status %d: %w", peer.Addr, status, ErrShieldForward)
-	}
-	if int64(len(resp.Body())) > shieldMaxBodyBytes {
-		fasthttp.ReleaseResponse(resp)
-		return nil, fmt.Errorf("shield forward %s: response too large: %w", peer.Addr, ErrShieldForward)
+		return nil, fmt.Errorf("shield forward %s: refused (status %d): %w", peer.Addr, status, ErrShieldForward)
 	}
 	return resp, nil
 }
 
-// getShieldPipelineClient returns the shield-lane PipelineClient for
-// addr. Separate from the key-only lane: its ReadTimeout accommodates
-// origin-scale latency, and a lookup must never queue behind an origin
-// round-trip.
-func (f *PeerFetcher) getShieldPipelineClient(addr string) *fasthttp.PipelineClient {
+// getShieldClient returns the shield lane's HTTP client for addr. A
+// plain pooled client, not the key lane's PipelineClient: a forward
+// holds its slot for origin-scale time, so pipelining buys nothing,
+// and fasthttp's PipelineClient cannot bound the response body — the
+// client's MaxResponseBodySize aborts the read mid-body instead of
+// allocating first and checking after.
+func (f *PeerFetcher) getShieldClient(addr string) *fasthttp.HostClient {
 	clients := f.pipelineClients.Load()
 	if clients == nil {
 		return nil // closed during shutdown
 	}
-	key := addr + "\x00shield"
+	key := addr + shieldLaneKeySuffix
 	if _, retired := f.retiredAddrs.Load(addr); retired {
 		clients.Delete(key)
 	}
 	if v, ok := clients.Load(key); ok {
-		return v.(*fasthttp.PipelineClient)
+		return v.(*fasthttp.HostClient)
 	}
-	pc := &fasthttp.PipelineClient{
-		Addr:                          addr,
-		MaxConns:                      f.maxConnsPerHost,
-		MaxPendingRequests:            peerMaxPendingRequests,
-		MaxIdleConnDuration:           f.maxIdleConnDuration,
-		ReadTimeout:                   shieldForwardTimeout,
-		WriteTimeout:                  5 * time.Minute,
-		IsTLS:                         f.useTLS,
-		TLSConfig:                     f.tlsConfig,
+	client := &fasthttp.HostClient{
+		Addr:                addr,
+		MaxConns:            f.maxConnsPerHost,
+		MaxIdleConnDuration: f.maxIdleConnDuration,
+		ReadTimeout:         shieldForwardTimeout,
+		WriteTimeout:        5 * time.Minute,
+		MaxResponseBodySize: int(shieldMaxBodyBytes),
+		IsTLS:               f.useTLS,
+		TLSConfig:           f.tlsConfig,
+		// Parity with the origin client: a 4 KiB default caps the
+		// parseable response-header block below what origins emit.
+		ReadBufferSize:                64 << 10,
 		DisableHeaderNamesNormalizing: true,
-		Logger:                        observability.NewFastHTTPClientLogger(f.logger, "cluster"),
 		Dial: func(addr string) (net.Conn, error) {
+			// Unlike the key lane's PipelineClient there is no worker
+			// to park: a dial error just fails this request.
 			if _, retired := f.retiredAddrs.Load(addr); retired {
-				<-f.done
 				return nil, errPeerAddrRetired
 			}
 			return (&net.Dialer{
@@ -409,6 +443,6 @@ func (f *PeerFetcher) getShieldPipelineClient(addr string) *fasthttp.PipelineCli
 			}).Dial("tcp", addr)
 		},
 	}
-	actual, _ := clients.LoadOrStore(key, pc)
-	return actual.(*fasthttp.PipelineClient)
+	actual, _ := clients.LoadOrStore(key, client)
+	return actual.(*fasthttp.HostClient)
 }

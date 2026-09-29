@@ -52,10 +52,11 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
-	// ShieldRequests counts shield events by role: owner, waiter
-	// (origin request saved), failure (owner's miss path errored),
-	// fallback (requester-side forward failed; owner-side counters
-	// cannot see these). See ADR-0052.
+	// ShieldRequests counts shield events by role: owner (forward
+	// served), waiter (requester relayed the owner's answer, origin
+	// request saved), failure (the owner's replay answered 5xx), and
+	// fallback (requester-side forward failed or was refused;
+	// owner-side counters cannot see these). See ADR-0052.
 	ShieldRequests *prometheus.CounterVec
 	// ShieldShed counts forwards shed at the owner's fetch semaphore: a
 	// saturated owner must be visible, not inferred from latency.
@@ -151,7 +152,7 @@ func newShieldMetrics() (requests *prometheus.CounterVec, shed, saved prometheus
 	requests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bouine",
 		Name:      "shield_requests_total",
-		Help:      "Cluster origin-shield forwards by role: owner (forward served by the ring owner), waiter (requester served, origin request saved), failure (owner's miss path errored), fallback (requester fell back to its own origin fetch).",
+		Help:      "Cluster origin-shield forwards by role: owner (forward served by the ring owner), waiter (requester relayed the owner's answer, origin request saved), failure (the owner's replay answered 5xx), fallback (requester fell back to its own origin fetch).",
 	}, []string{"role"})
 	shed = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "bouine",

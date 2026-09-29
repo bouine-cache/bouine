@@ -80,6 +80,8 @@ func TestPeerForwardHandler_ServesOwner(t *testing.T) {
 	assert.Equal(t, "origin-fill", string(ctx.Response.Body()))
 	assert.Equal(t, "applied", string(ctx.Response.Header.Peek("X-Forwarded-Rewrite")),
 		"the owner's data plane runs the route rewrites — the forward must hit it verbatim")
+	assert.Equal(t, "served", string(ctx.Response.Header.Peek(header.XBouineShieldResult)),
+		"every replay-produced reply is marked served, whatever its status")
 }
 
 func TestPeerForwardHandler_RefusesNonOwner(t *testing.T) {
@@ -93,6 +95,8 @@ func TestPeerForwardHandler_RefusesNonOwner(t *testing.T) {
 	h.Handle(ctx)
 
 	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "a non-owner answers 404 (D5)")
+	assert.Equal(t, "refused", string(ctx.Response.Header.Peek(header.XBouineShieldResult)),
+		"the refusal must be marked: an origin 404 relayed through the replay shares the status")
 	assert.False(t, called, "the data plane must not run on a non-owner")
 }
 
@@ -197,34 +201,43 @@ func TestPeerForwardHandler_HTTPSSchemeRestored(t *testing.T) {
 
 func TestPeerForwardHandler_OwnerMetrics(t *testing.T) {
 	t.Parallel()
-	key := shieldTestKey(t)
 	reg := prometheus.NewRegistry()
 	m := RegisterMetrics(reg)
-	h := NewPeerForwardHandler(echoDataPlane, func(api.Key) bool { return true }, 0, 0, true, nil, m)
+	key := shieldTestKey(t)
 
+	served := NewPeerForwardHandler(echoDataPlane, func(api.Key) bool { return true }, 0, 0, true, nil, m)
 	ctx := fwdCtx(fasthttp.MethodGet, key, func(c *fasthttp.RequestCtx) {
 		c.Request.Header.Set(header.XBouineScheme, "http")
 	})
-	h.Handle(ctx)
+	served.Handle(ctx)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+
+	failed := NewPeerForwardHandler(fasthttp.RequestHandler(func(c *fasthttp.RequestCtx) {
+		c.SetStatusCode(fasthttp.StatusServiceUnavailable)
+	}), func(api.Key) bool { return true }, 0, 0, true, nil, m)
+	failedCtx := fwdCtx(fasthttp.MethodGet, key, func(c *fasthttp.RequestCtx) {
+		c.Request.Header.Set(header.XBouineScheme, "http")
+	})
+	failed.Handle(failedCtx)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	found := false
+	counts := map[string]float64{}
 	for _, f := range families {
 		if f.GetName() != "bouine_shield_requests_total" {
 			continue
 		}
 		for _, mt := range f.GetMetric() {
 			for _, lp := range mt.GetLabel() {
-				if lp.GetName() == "role" && lp.GetValue() == "owner" {
-					assert.Equal(t, 1.0, mt.GetCounter().GetValue())
-					found = true
+				if lp.GetName() == "role" {
+					counts[lp.GetValue()] = mt.GetCounter().GetValue()
 				}
 			}
 		}
 	}
-	assert.True(t, found, "owner role counter must be registered and incremented")
+	assert.Equal(t, 1.0, counts["owner"], "a 200 replay counts as served")
+	assert.Equal(t, 1.0, counts["failure"],
+		"a 5xx replay is the owner's miss path degrading — it must not hide inside the served count")
 }
 
 // shieldServer starts an in-process fasthttp server wrapping a forward
@@ -285,6 +298,78 @@ func TestShieldForward_RefusedIsFallbackError(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.True(t, errors.Is(err, ErrShieldForward),
 		"a refused forward is the origin-fallback signal, never a hard failure")
+}
+
+// bareServer answers like an endpoint-less old build: plain status,
+// no shield result marker.
+func bareServer(t *testing.T, status int) api.PeerInfo {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &fasthttp.Server{Handler: func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(status)
+	}}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Shutdown()
+		_ = ln.Close()
+	})
+	return api.PeerInfo{Name: "bare", Addr: ln.Addr().String()}
+}
+
+// TestShieldForward_RelaysServedOriginStatus pins finding 1's fix: a
+// replay-produced 404 (origin answer) is returned to the caller with
+// its status intact — only the marker separates it from a refusal,
+// which can share the status.
+func TestShieldForward_RelaysServedOriginStatus(t *testing.T) {
+	t.Parallel()
+	key := shieldTestKey(t)
+	notFound := fasthttp.RequestHandler(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Content-Type", "text/plain")
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		ctx.SetBodyString("origin says no")
+	})
+	peer := shieldServer(t, NewPeerForwardHandler(notFound, func(api.Key) bool { return true }, 0, 0, true, nil, nil))
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	resp, err := f.ShieldForward(context.Background(), peer, req, key, false, time.Now().Add(5*time.Second))
+	require.NoError(t, err, "a served 404 is an origin answer, not a forward failure")
+	require.NotNil(t, resp)
+	defer fasthttp.ReleaseResponse(resp)
+	assert.Equal(t, fasthttp.StatusNotFound, resp.StatusCode())
+	assert.Equal(t, "origin says no", string(resp.Body()))
+}
+
+// TestShieldForward_UnmarkedReplyIsRefusal pins the mixed-version
+// degrade: a reply without the result marker (endpoint-less old build,
+// or a stray proxy answering for the owner) is the fallback signal,
+// never content the client could be served.
+func TestShieldForward_UnmarkedReplyIsRefusal(t *testing.T) {
+	t.Parallel()
+	key := shieldTestKey(t)
+	peer := bareServer(t, fasthttp.StatusNotFound)
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	t.Cleanup(func() { _ = f.Close(context.Background()) })
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.SetRequestURI("/x")
+	req.Header.SetHost("test")
+
+	resp, err := f.ShieldForward(context.Background(), peer, req, key, false, time.Now().Add(5*time.Second))
+	require.Error(t, err, "an unmarked 404 must not be relayed — it is not the shield's answer")
+	assert.Nil(t, resp)
+	assert.True(t, errors.Is(err, ErrShieldForward))
 }
 
 func TestShieldForward_ExpiredDeadlineIsError(t *testing.T) {

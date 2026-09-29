@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -30,25 +31,68 @@ func (h *Handler) shieldApplies(obj *api.Object, method []byte) bool {
 
 // shieldForwardRequest copies the ORIGINAL client request verbatim
 // (D1) — route rewrites are NOT applied; the owner's route applies
-// them once. The deadline is the shield bound; the owner clamps it
-// against its own fetch budget (D4).
+// them once. Hop-by-hop headers are stripped (RFC 9110 §7.6.1,
+// including the Connection token list and Proxy-*): they describe the
+// client's connection to THIS node, and a copied "Connection: close"
+// would degrade the peer connection the forward rides. The deadline is
+// the shield bound; the owner clamps it against its own fetch budget
+// (D4).
 func (h *Handler) shieldForwardRequest(ctx *fasthttp.RequestCtx) (*fasthttp.Request, time.Time) {
 	req := fasthttp.AcquireRequest()
 	req.Header.SetMethodBytes(ctx.Method())
 	req.SetRequestURIBytes(ctx.RequestURI())
 	req.Header.SetHostBytes(ctx.Host())
+	connList := connectionTokenList(ctx.Request.Header.Peek(header.Connection))
 	for k, v := range ctx.Request.Header.All() {
-		req.Header.AddBytesKV(k, v)
+		if shieldHeaderForwardable(k, connList) {
+			req.Header.AddBytesKV(k, v)
+		}
 	}
 	return req, time.Now().Add(api.ShieldForwardTimeout)
 }
 
+// connectionTokenList parses the Connection header's tokens (the
+// headers it names are hop-by-hop too, RFC 9110 §7.6.1).
+func connectionTokenList(b []byte) map[string]struct{} {
+	if len(b) == 0 {
+		return nil
+	}
+	tokens := map[string]struct{}{}
+	for _, f := range bytes.Split(b, []byte(",")) {
+		tok := bytes.TrimSpace(f)
+		if len(tok) > 0 {
+			tokens[string(bytes.ToLower(tok))] = struct{}{}
+		}
+	}
+	return tokens
+}
+
+// shieldHeaderForwardable reports whether a client request header may
+// ride the shield forward: hop-by-hop headers (RFC 9110 §7.6.1) and
+// Proxy-* fields must not (AGENTS §6); everything else forwards.
+// Comparison is case-insensitive: fasthttp's canonicalization ("Te")
+// differs from the RFC's registered forms.
+func shieldHeaderForwardable(key []byte, connList map[string]struct{}) bool {
+	lower := string(bytes.ToLower(key))
+	switch lower {
+	case "connection", "keep-alive", "transfer-encoding",
+		"te", "trailer", "upgrade":
+		return false
+	}
+	if _, listed := connList[lower]; listed {
+		return false
+	}
+	return !strings.HasPrefix(lower, "proxy-")
+}
+
 // handleShieldMiss runs the shield branch for a hard miss the plain
-// peer-fetch could not answer: forward the original request to the
-// ring owner and serve its proxied answer. Returns true when the
-// response was written and the caller must return; false (request
-// never qualified, or the forward failed) falls through to the
-// caller's own origin fetch.
+// peer-fetch could not answer (definitive owner miss, or the peer-fetch
+// itself failed — a retry against the same owner's stronger path is
+// still worth one RPC): forward the original request to the ring owner
+// and relay its answer. Returns true when the response was written and
+// the caller must return; false (request never qualified, the forward
+// failed, or the owner answered 5xx) falls through to the caller's own
+// origin fetch.
 //
 //nolint:gocyclo // 13: outcome/gate/backfill branches are the ADR-0052 checklist
 func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo, lookupKey api.Key, obj *api.Object, ri RequestInfo) bool {
@@ -69,26 +113,29 @@ func (h *Handler) handleShieldMiss(ctx *fasthttp.RequestCtx, owner api.PeerInfo,
 	}
 	defer fasthttp.ReleaseResponse(resp)
 
-	if resp.StatusCode() != fasthttp.StatusOK {
-		// The owner's fetch attempt failed (shed, origin failure). The
-		// requester still has its own origin budget — fall back rather
+	status := resp.StatusCode()
+	if status >= fasthttp.StatusInternalServerError {
+		// The owner's miss path degraded (shed, origin failure). The
+		// requester's own fetch gets a fresh budget — fall back rather
 		// than relay a degradation the local fetch may not share.
-		h.logger.Debug("shield forward answered non-OK, falling back to origin",
-			"peer", owner.Addr, "key", lookupKey, "status", resp.StatusCode())
+		h.logger.Debug("shield forward answered 5xx, falling back to origin",
+			"peer", owner.Addr, "key", lookupKey, "status", status)
 		if h.onShieldFallback != nil {
 			h.onShieldFallback()
 		}
 		return false
 	}
 
-	// Serve the proxied bytes; the owner already applied response
-	// rewrites — applying them again would be the response-side
-	// double-rewrite.
+	// Relay the owner's answer (200, but also a negative-cached 404, a
+	// 304 revalidation, a redirect — anything the owner's standard
+	// miss path produced for this exact request); the owner already
+	// applied response rewrites — applying them again would be the
+	// response-side double-rewrite.
 	resp.Header.CopyTo(&ctx.Response.Header)
 	if len(resp.Header.Peek(header.Age)) == 0 {
 		ctx.Response.Header.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
-	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.SetStatusCode(status)
 	// resp is released on return, before the body is served or stored —
 	// copy once and serve/store from the owned copy.
 	body := append([]byte(nil), resp.Body()...)

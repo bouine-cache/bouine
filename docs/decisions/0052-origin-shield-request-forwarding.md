@@ -3,9 +3,18 @@
 - **Status**: Accepted — implemented 2026-09-28. As-built deltas from
   this decision: HEAD requests are forwarded with their original
   method (the owner's standard path suppresses the body for HEAD
-  clients), the requester never backfills a HEAD answer, and the
-  forward carries a single shared 30 s deadline clamped on both
-  sides.
+  clients), the requester never backfills a HEAD answer, the forward
+  carries a single shared 30 s deadline clamped on both sides (the
+  owner's clamp budget is the tightest effective fetch timeout across
+  routes, pool defaults included), hop-by-hop headers are stripped
+  from the forward (RFC 9110 §7.6.1, Connection token list included),
+  and every forward reply carries `X-Bouine-Shield-Result`: "served"
+  for a replay-produced answer (any status below 500 is relayed to the
+  client — a cold 404 or redirect is shielded like a 200) and
+  "refused" for an endpoint-level refusal; a reply without the marker
+  (endpoint-less old build) is the fallback signal. The shield lane is
+  a plain pooled fasthttp client whose MaxResponseBodySize bounds the
+  answer at the transport layer.
 - **Date**: 2026-09-28
 - **Deciders**: @chridupin-33
 - **Phase**: cluster / origin

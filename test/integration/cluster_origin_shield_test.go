@@ -238,6 +238,25 @@ func shieldMetricValue(body []byte, metric, labelSub string) float64 {
 	return total
 }
 
+// TestStrong_OriginShield_Cold404RelayedNotRefetched pins the relay
+// rule end-to-end: an origin 404 is a legitimate miss-path answer —
+// the owner relays it (marker "served") and every requester serves it
+// without re-fetching origin. Before the relay fix, the requester read
+// any non-200 as a forward failure and re-fetched origin per node.
+func TestStrong_OriginShield_Cold404RelayedNotRefetched(t *testing.T) {
+	s := sharedShieldCluster(t)
+	path := fmt.Sprintf("/api/v1/gone?x=shield-404-%d", shieldRunSeq.Add(1))
+
+	before := s.OriginRequests()
+	for i := range s.Nodes {
+		resp := s.GetWithHost(t, i, path, driver.CrossNodeHost)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		assert.Equal(t, "gone", string(resp.Body))
+	}
+	assert.Equal(t, int64(1), s.OriginRequests()-before,
+		"a cold 404 hit on every node must cost the origin exactly one request — the shield relays the negative answer")
+}
+
 // TestStrong_OriginShield_HeadForwardNoPoison pins the cache-poisoning
 // regression from the PR #731 review (blocker #1, ADR-0052): a HEAD
 // shield forward must never leave a bodyless object under the GET

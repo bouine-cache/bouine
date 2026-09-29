@@ -237,6 +237,14 @@ const (
 	// before replay.
 	XBouineForwardURI = "X-Bouine-Forward-URI"
 
+	// XBouineShieldResult — set on every shield-forward reply: "served"
+	// when the owner's replay produced this answer (any status), or
+	// "refused" when the endpoint itself declined. The requester needs
+	// the distinction because refusals and origin answers can share a
+	// status (404): relaying an unmarked reply would serve some other
+	// admin server's 404 to the client.
+	XBouineShieldResult = "X-Bouine-Shield-Result"
+
 	// XBouineClusterVersion — carries the cluster protocol version for
 	// negotiation during rolling upgrades.
 	XBouineClusterVersion = "X-Bouine-Cluster-Version"

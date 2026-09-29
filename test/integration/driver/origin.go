@@ -131,6 +131,13 @@ func originRouteHandler(ctx *fasthttp.RequestCtx) {
 	case "/error":
 		ctx.SetStatusCode(503)
 		ctx.WriteString("origin error")
+	case "/gone":
+		// A cacheable 404: exercises the shield's relay path for
+		// negative origin answers (ADR-0052 as-built: a replayed
+		// status below 500 is relayed, not re-fetched per node).
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		ctx.WriteString("gone")
 	case "/slow":
 		ms, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("ms")))
 		if ms <= 0 {

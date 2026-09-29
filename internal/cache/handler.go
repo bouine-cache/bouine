@@ -1522,12 +1522,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 					h.logger.Debug("peer fetch error, falling back to origin",
 						"peer", owner.Addr, "key", lookupKey, "error", err)
 				}
-				// Origin shield (ADR-0052): on a definitive owner miss (404 —
-				// the owner has nothing either) forward the request to the
-				// owner, which runs its standard miss path and proxies the
-				// bytes back. Served: done. Not served (never qualified or the
-				// forward failed): the origin fetch below follows, without a
-				// second peer retry.
+				// Origin shield (ADR-0052): after a definitive owner miss
+				// (404) or a failed peer-fetch, forward the request to
+				// the owner, which runs its standard miss path and
+				// relays the bytes back. Served: done. Not served (never
+				// qualified, forward failed, owner 5xx): the origin
+				// fetch below follows, without a second peer retry.
 				if h.handleShieldMiss(ctx, owner, lookupKey, obj, ri) {
 					return
 				}

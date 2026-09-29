@@ -16,9 +16,11 @@ the curated, human-readable summary.
   `cluster.origin_shield`). On a hard miss the non-owner forwards the
   original client request to the key's ring owner, which runs its
   standard miss path and proxies the response back — one collapsed
-  origin fetch for the whole cluster. The owner-side forward is
-  exposed on `/v1/peer/forward` with new `bouine_shield_*` metrics;
-  backfill on the non-owner is tunable via
+  origin fetch for the whole cluster, for 200s and relayed origin
+  answers below 500 alike (a cold 404 or redirect is shielded, not
+  re-fetched per node). The owner-side forward is exposed on
+  `/v1/peer/forward` with new `bouine_shield_*` metrics; backfill on
+  the non-owner is tunable via
   `cluster.origin_shield_backfill_probability` (default 1.0, shield
   fills only). Supersedes the envelope-based first attempt of PR #731
   (closed without merging).

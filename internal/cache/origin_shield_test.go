@@ -99,8 +99,9 @@ func TestHandler_Shield_FallbackOnForwardError(t *testing.T) {
 }
 
 // TestHandler_Shield_FallbackOnOwnerErrorStatus pins that an owner's
-// non-200 answer (its own fetch shed/failed) is a fallback, not a
-// relayed degradation.
+// 5xx answer (its own fetch shed/failed) is a fallback, not a relayed
+// degradation. Origin answers below 500 are relayed — see
+// TestHandler_Shield_RelaysOwner404.
 func TestHandler_Shield_FallbackOnOwnerErrorStatus(t *testing.T) {
 	t.Parallel()
 	h, originCalls := shieldHarness(t, func(cfg *HandlerConfig) {
@@ -257,6 +258,67 @@ func TestHandler_Shield_ForwardCarriesOriginalRequest(t *testing.T) {
 	assert.Equal(t, "test", gotHost)
 	assert.Equal(t, "br", gotAE)
 	assert.Equal(t, "Bearer tok", gotAuth, "credentials must forward: the owner's fetch would otherwise be unauthenticated")
+}
+
+// TestHandler_Shield_RelaysOwner404 pins the relay rule: an origin 404
+// that reached the owner's replay (served marker) is answered to the
+// client as-is — a cold negative-cached URL is shielded like any
+// other, and the requester does not re-fetch origin per node.
+func TestHandler_Shield_RelaysOwner404(t *testing.T) {
+	t.Parallel()
+	saved := &atomic.Int64{}
+	fallbacks := &atomic.Int64{}
+	h, originCalls := shieldHarness(t, func(cfg *HandlerConfig) {
+		cfg.ShieldForward = func(context.Context, api.PeerInfo, *fasthttp.Request, api.Key, bool, time.Time) (*fasthttp.Response, error) {
+			resp := fasthttp.AcquireResponse()
+			resp.Header.Set("Cache-Control", "public, max-age=30")
+			resp.SetStatusCode(404)
+			resp.SetBodyString("not found")
+			return resp, nil
+		}
+		cfg.OnShieldSaved = func() { saved.Add(1) }
+		cfg.OnShieldFallback = func() { fallbacks.Add(1) }
+		cfg.OriginShieldBackfillProbability = 0
+	})
+
+	ctx := testCtx(fasthttp.MethodGet, "http://test/shielded")
+	serveRequest(h, ctx)
+	require.Equal(t, 404, respCode(ctx), "the owner's origin 404 is relayed, not re-fetched")
+	assert.Equal(t, "not found", respBody(ctx))
+	assert.EqualValues(t, 0, originCalls.Load(), "a relayed owner answer must not re-fetch origin on the requester")
+	assert.EqualValues(t, 1, saved.Load(), "the origin request was saved even for the 404")
+	assert.EqualValues(t, 0, fallbacks.Load())
+}
+
+// TestHandler_Shield_ForwardStripsHopByHop pins the RFC 9110 §7.6.1
+// strip: hop-by-hop headers and the Connection token list describe the
+// client's connection to THIS node; a copied "Connection: close" would
+// degrade the peer connection the forward rides.
+func TestHandler_Shield_ForwardStripsHopByHop(t *testing.T) {
+	t.Parallel()
+	var gotConn, gotTE, gotToken, gotKeep string
+	h, _ := shieldHarness(t, func(cfg *HandlerConfig) {
+		cfg.ShieldForward = func(_ context.Context, _ api.PeerInfo, req *fasthttp.Request, _ api.Key, _ bool, _ time.Time) (*fasthttp.Response, error) {
+			gotConn = string(req.Header.Peek("Connection"))
+			gotTE = string(req.Header.Peek("TE"))
+			gotToken = string(req.Header.Peek("X-Custom-Hop"))
+			gotKeep = string(req.Header.Peek("Keep-Alive"))
+			return shieldOK("ok"), nil
+		}
+		cfg.OriginShieldBackfillProbability = 0
+	})
+
+	ctx := testCtx(fasthttp.MethodGet, "http://test/shielded")
+	ctx.Request.Header.Set("Connection", "close, X-Custom-Hop")
+	ctx.Request.Header.Set("TE", "trailers")
+	ctx.Request.Header.Set("Keep-Alive", "timeout=5")
+	ctx.Request.Header.Set("X-Custom-Hop", "listed-by-connection")
+	serveRequest(h, ctx)
+
+	assert.Empty(t, gotConn, "Connection must not ride the forward (RFC 9110 §7.6.1)")
+	assert.Empty(t, gotTE)
+	assert.Empty(t, gotKeep)
+	assert.Empty(t, gotToken, "headers named by the Connection token list are hop-by-hop too")
 }
 
 // TestHandler_Shield_NonHardMissDoesNotForward pins the scope: a

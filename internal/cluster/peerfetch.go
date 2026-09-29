@@ -323,6 +323,9 @@ func (f *PeerFetcher) RetireAddress(addr string) {
 	f.retiredAddrs.Store(addr, struct{}{})
 	if clients := f.pipelineClients.Load(); clients != nil {
 		clients.Delete(addr)
+		// The shield lane caches its own client per address; leaving
+		// it cached would hand retired-address traffic a live client.
+		clients.Delete(addr + shieldLaneKeySuffix)
 	}
 }
 

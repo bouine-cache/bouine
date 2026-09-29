@@ -873,7 +873,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		// The forward's write deadline must cover the owner's origin
 		// fetch (fetch budget + the shield's own hop overhead), not the
 		// admin 5s default — see shieldHeaderReceived.
-		ShieldForwardTimeout: e.shieldFetchBudget() + api.ShieldForwardTimeout,
+		ShieldForwardTimeout: e.shieldFetchBudget(rs) + api.ShieldForwardTimeout,
 		PeerMetricsHandler:   dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:     dashMux,
 		FaviconHandler:       webdash.FaviconHandler(),

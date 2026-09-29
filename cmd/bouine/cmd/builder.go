@@ -558,7 +558,7 @@ func (e *engine) buildPeerForwardHandler(rs *runState, dataPlane fasthttp.Reques
 	return cluster.NewPeerForwardHandler(
 		dataPlane,
 		ownsKey,
-		e.shieldFetchBudget(),
+		e.shieldFetchBudget(rs),
 		e.cfg.Cluster.HopLimit,
 		e.cfg.Cluster.OriginShield,
 		e.logger,
@@ -567,15 +567,25 @@ func (e *engine) buildPeerForwardHandler(rs *runState, dataPlane fasthttp.Reques
 }
 
 // shieldFetchBudget: the owner clamps incoming deadlines against it
-// (D4). Uses the first route's explicit fetch_timeout — a forwarded
-// request does not know its route yet, so per-route budgets cannot.
-func (e *engine) shieldFetchBudget() time.Duration {
+// (D4). A forwarded request does not know its route until the replay
+// resolves it, so the budget is the tightest effective fetch timeout
+// across routes — resolveRouteFetchTimeout includes the pool-default
+// response-header timeout, which config.Validate (explicit values
+// only) cannot see. A conservative under-use for long-budget routes
+// is the cost; overrunning a short-budget route's fetch is the bug
+// this prevents.
+func (e *engine) shieldFetchBudget(rs *runState) time.Duration {
+	budget := time.Duration(0)
 	for i := range e.cfg.Routes {
-		if ft := e.cfg.Routes[i].Cache.FetchTimeout; ft > 0 {
-			return ft
+		ft := resolveRouteFetchTimeout(e.cfg.Routes[i], rs.pools[e.cfg.Routes[i].Pool])
+		if ft > 0 && (budget == 0 || ft < budget) {
+			budget = ft
 		}
 	}
-	return api.ShieldForwardTimeout
+	if budget <= 0 {
+		return api.ShieldForwardTimeout
+	}
+	return budget
 }
 
 // clusterFastPathClosures builds the ownerFn/peerFetch closures shared

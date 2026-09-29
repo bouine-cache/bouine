@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.24] - 2026-09-29
+
 ### Fixed
 - Helm chart: the ServiceMonitor rendered `scrapeNativeHistograms`,
   `scrapeProtocols`, and `scrapeClassicHistograms` inside `endpoints[]`,
@@ -1955,7 +1957,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.23...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.24...HEAD
+[0.5.24]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.24
 [0.5.23]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.23
 [0.5.22]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.22
 [0.5.21]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.21

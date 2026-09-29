@@ -370,6 +370,7 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 6 * time.Minute }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 5 * time.Minute }},
+		{"max_variants", func(rc *RouteCache) { rc.MaxVariants = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,6 +386,19 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 				t.Fatalf("error %q does not mention field %q", err, tc.name)
 			}
 		})
+	}
+}
+
+func TestValidate_MaxVariants_Accepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{MaxVariants: 4096, MaxFetchConcurrency: 1}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected max_variants=4096 to be valid, got %v", err)
 	}
 }
 

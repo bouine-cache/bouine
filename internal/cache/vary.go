@@ -14,10 +14,11 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// MaxVariants is the default cap on stored variants per primary key.
-// Enforced by the handler: a Put is skipped when the variant count for
+// DefaultMaxVariants is the default cap on stored variants per primary
+// key. Enforced by the handler: a Put is skipped when the variant count for
 // a primary key exceeds this value, preventing Vary blow-up attacks.
-const MaxVariants = 64
+// Overridable per route via cache.max_variants (HandlerConfig.MaxVariants).
+const DefaultMaxVariants = 1024
 
 // maxVaryFields caps the number of Vary header fields we process.
 // RFC 9110 does not limit Vary fields, but >16 is pathological and

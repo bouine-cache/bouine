@@ -581,6 +581,14 @@ type RouteCache struct {
 	// fetches wait up to fetch_wait_timeout for a slot and then shed.
 	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
+	// MaxVariants caps the number of distinct Vary variants stored per
+	// primary cache key on this route. When the cap is reached, further
+	// variant storage is skipped (and vary_cap_hits_total increments) —
+	// requests keep being proxied, only caching is affected. Guards
+	// against Vary explosion (RFC 9110 §12.5.5). Zero (default) applies
+	// the built-in default (1024). Negative values are rejected; there is
+	// no upper bound, but the cap itself cannot be disabled.
+	MaxVariants int `yaml:"max_variants,omitempty" json:"max_variants,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
 	// a 502 (or stale content if stayin-alive is enabled). It is the

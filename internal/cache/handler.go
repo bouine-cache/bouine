@@ -334,6 +334,7 @@ type Handler struct {
 	defaultTTL              time.Duration  // operator fallback when origin sends no freshness
 	defaultSIE              time.Duration  // operator-level stale-if-error floor
 	maxObjectSize           int64          // skip storage for responses larger than this; 0 = no limit
+	maxVariants             int            // cap on stored variants per primary key; DefaultMaxVariants when unset
 	maxStreamingBufferBytes int64
 	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
 	// defaultMaxStreamingBufferBytes.
@@ -402,7 +403,7 @@ type HandlerConfig struct {
 	// config layer; validated and compiled by config.validatePathRewrite.
 	PathRewrite *PathRewrite
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
-	// because MaxVariants is exceeded.
+	// because the variant cap is exceeded.
 	VaryCapHits interface{ Inc() }
 	// StreamingBufferBytes, if non-nil, is set to the current total
 	// bytes held in live streaming tee buffers. Polled by the engine's
@@ -488,6 +489,10 @@ type HandlerConfig struct {
 	// or stale content when a stale object exists).
 	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int
+	// MaxVariants is the cap on stored variants per primary key
+	// (cache.max_variants). Zero (default) applies DefaultMaxVariants.
+	// RFC 9110 §12.5.5 — unbounded variants are a DoS vector, hence the cap.
+	MaxVariants int
 	// MaxResponseBytes is a hard limit on the amount of response body
 	// data buffered in memory during an upstream fetch. When exceeded the
 	// fetch is aborted and the client receives a 502. This is distinct
@@ -761,6 +766,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		peerPut:                 cfg.PeerPut,
 		allowSetCookie:          cfg.AllowSetCookie,
 		maxObjectSize:           cfg.MaxObjectSize,
+		maxVariants:             cfg.MaxVariants,
 		maxResponseBytes:        cfg.MaxResponseBytes,
 		policy:                  cfg.Policy,
 		refreshBeforeExpiry:     cfg.RefreshBeforeExpiry,
@@ -776,6 +782,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
+	}
+	if h.maxVariants <= 0 {
+		h.maxVariants = DefaultMaxVariants
 	}
 	h.maxStreamingBufferBytes = cfg.MaxStreamingBufferBytes
 	if h.maxStreamingBufferBytes <= 0 {
@@ -2437,7 +2446,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 			h.variantSets[primaryKey] = set
 		}
 	}
-	if len(set) < MaxVariants {
+	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
 		h.variantMu.Unlock()
 		return true
@@ -2468,12 +2477,12 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	for _, k := range dead {
 		delete(set, k)
 	}
-	if len(set) < MaxVariants {
+	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
 		return true
 	}
 	h.logger.Warn("vary cap exceeded, skipping variant storage",
-		"primary_key", primaryKey, "cap", MaxVariants)
+		"primary_key", primaryKey, "cap", h.maxVariants)
 	if h.VaryCapHits != nil {
 		h.VaryCapHits.Inc()
 	}

@@ -10,6 +10,17 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- **`cache.max_variants` is now configurable per route**. The Vary
+  variant cap (the number of distinct Vary variants stored per primary
+  cache key, guarding against Vary blow-up per RFC 9110 §12.5.5) was a
+  hard-coded constant. It can now be set per route; unset (or 0) applies
+  the built-in default (1024). Negative values are rejected at config
+  validation. The cap itself cannot be disabled. When the cap is hit,
+  further variant storage is skipped and `vary_cap_hits_total`
+  increments; requests keep being proxied, only caching is affected.
+
 ### Fixed
 
 - **kubeconform gate now validates the ServiceMonitor CRD**. The

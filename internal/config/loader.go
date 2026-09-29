@@ -672,6 +672,9 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	if rc.MaxFetchConcurrency < 0 {
 		ec.addf(path+".max_fetch_concurrency", "must be >= 0, got %d", rc.MaxFetchConcurrency)
 	}
+	if rc.MaxVariants < 0 {
+		ec.addf(path+".max_variants", "must be >= 0, got %d", rc.MaxVariants)
+	}
 	if rc.FetchTimeout < 0 {
 		ec.addf(path+".fetch_timeout", "must be >= 0, got %v", rc.FetchTimeout)
 	}

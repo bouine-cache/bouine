@@ -902,7 +902,7 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	})
 
 	// Fill exactly MaxVariants distinct variants.
-	for i := range MaxVariants {
+	for i := range DefaultMaxVariants {
 		req := testCtx("GET", "http://example.com/vary")
 		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
 		rr := req
@@ -915,6 +915,39 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	req.Request.Header.Set("X-Test-Variant", "overflow")
 	rr := req
 	h.ServeRequest(rr)
+	require.Equal(t, 1, hitCount)
+}
+
+func TestMaxVariants_CustomCapPerRoute(t *testing.T) {
+	t.Parallel()
+	hitCount := 0
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:    orig,
+		FastClient:  &testFastClient{handler: orig},
+		Store:       store,
+		Logger:      slog.Default(),
+		MaxVariants: 4,
+		VaryCapHits: counterFunc(func() { hitCount++ }),
+	})
+
+	for i := range 4 {
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		h.ServeRequest(req)
+	}
+	require.Equal(t, 0, hitCount)
+
+	req := testCtx("GET", "http://example.com/vary")
+	req.Request.Header.Set("X-Test-Variant", "overflow")
+	h.ServeRequest(req)
 	require.Equal(t, 1, hitCount)
 }
 
@@ -969,7 +1002,7 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 		VaryCapHits: counterFunc(func() { hitCount++ }),
 	})
 
-	for i := range MaxVariants + 10 {
+	for i := range DefaultMaxVariants + 10 {
 		req := testCtx("GET", "http://example.com/vary")
 		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
 		rr := req

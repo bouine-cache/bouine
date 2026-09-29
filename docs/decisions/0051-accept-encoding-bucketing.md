@@ -21,7 +21,7 @@ strings produced six distinct cache variants for the same resource:
 - `gzip, deflate, br, zstd, identity` → another
 - `gzip` / `gzip, br` / `identity` → three more
 
-Each extra variant costs an origin fill, a `MaxVariants` (64) slot, and
+Each extra variant costs an origin fill, a `MaxVariants` (1024) slot, and
 hot-tier capacity for a body that is byte-identical to its siblings.
 The win is not speculative: at `Vary: Accept-Encoding`, every browser
 population that negotiates br collapses to one variant.

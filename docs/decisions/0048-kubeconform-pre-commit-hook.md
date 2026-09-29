@@ -31,6 +31,17 @@ We add a `helm-kubeconform` prek hook that:
 2. Pipes the output through `kubeconform -strict` using the
    `master-standalone-strict` schema location, which rejects unknown
    fields such as the one that caused this regression.
+3. Renders a second variant with `--set serviceMonitor.enabled=true`
+   so the ServiceMonitor template is exercised, and adds the
+   [datree CRDs-catalog](https://github.com/datreeio/CRDs-catalog) as a
+   second `-schema-location` so the rendered ServiceMonitor is
+   validated against the real `monitoring.coreos.com/v1` CRD — not
+   silently skipped as an unknown kind. This was added after PR #738
+   (commit `b0b1eac`) shipped `scrapeNativeHistograms`,
+   `scrapeProtocols`, and `scrapeClassicHistograms` inside
+   `endpoints[]` (a `ServiceMonitorSpec` field, not an `Endpoint`
+   field) past every gate because the ServiceMonitor was neither
+   rendered nor schema-covered.
 
 It is scoped with `files: ^deploy/helm/bouine/` so it only fires when
 chart files change, and registered on both the `pre-commit` and
@@ -55,3 +66,18 @@ norm: a schema gate that silently skips is a gate that does not exist.
   (PDB, NetworkPolicy, Ingress, ServiceMonitor, ...) should be added to
   the hook's `--set` list when introduced, so each template renders in
   at least one gate.
+- The datree CRDs-catalog is archived (2024) but still served via
+  raw.githubusercontent.com. Its schemas are frozen at their last
+  state, which is fine for stable CRDs like ServiceMonitor v1. A
+  future chart feature relying on a brand-new or rapidly-evolving CRD
+  may require vendoring that CRD's schema pinned to a specific release.
+- The first run on a fresh machine or CI runner needs network access
+  to download the ServiceMonitor schema (~100 KB). Subsequent runs use
+  the `.kubeconform-cache/` directory (gitignored) and are fully
+  offline. The self-hosted CI runner must allow outbound HTTPS to
+  `raw.githubusercontent.com`.
+- `-ignore-missing-schemas` is kept: kinds covered by a schema
+  location are validated strictly; kinds without any schema (e.g.
+  future CRDs not in the catalog) still skip silently rather than
+  blocking all commits. Dropping the flag was considered and rejected
+  as too noisy until catalog coverage is comprehensive.

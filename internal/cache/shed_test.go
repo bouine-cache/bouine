@@ -372,7 +372,7 @@ func TestCollapsedFetchResultNeverAliasesPooledResponse(t *testing.T) {
 	h := testHandler(t, origin200("owned-body"))
 	key := BuildKeyFromURL("http://example.com/owned", nil)
 
-	res := h.collapsedFetch(testCtx("GET", "http://example.com/owned"), key)
+	res := h.collapsedFetch(testCtx("GET", "http://example.com/owned"), key, requestInfoFromCtx(testCtx("GET", "http://example.com/owned")))
 	require.NoError(t, res.Err)
 	require.Nil(t, res.Header.fastHdr, "flight results must not alias the pooled response")
 	require.Equal(t, "owned-body", string(res.Body))

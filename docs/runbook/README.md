@@ -19,6 +19,7 @@ code change that introduces a new failure mode.
 | [`52-sse-streaming.md`](52-sse-streaming.md) | SSE streaming: hint contract, idle deadlines, tuning per route. |
 | [`53-origin-timeouts.md`](53-origin-timeouts.md) | Origin timeouts: per-route fetch_timeout resolution and pool fallback. |
 | [`54-origin-ejection.md`](54-origin-ejection.md) | Origin ejection: circuit-breaker state and recovery. |
+| [`55-collapse-identity.md`](55-collapse-identity.md) | Request collapsing: origin load from identity-split flights (ADR-0052). |
 | [`gc-tuning-fasthttp.md`](gc-tuning-fasthttp.md) | GC tuning under fasthttp. |
 | [`native-histogram.md`](native-histogram.md) | Native-histogram latency metrics. |
 | [`static-files.md`](static-files.md) | Static file serving. |

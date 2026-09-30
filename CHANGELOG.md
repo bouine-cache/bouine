@@ -23,6 +23,28 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Requests carrying `Authorization` no longer share an in-flight
+  origin response with any other request** (ADR-0052). The singleflight
+  dedup (miss, revalidate, background refresh, shed refill) was keyed
+  by the cache key alone, so concurrent requests for the same URI
+  collapsed onto one origin fetch and every follower received the
+  leader's response — including authorized callers receiving each
+  other's data. Storage was never involved (RFC 9111 §3.5 gates
+  storage, not in-flight sharing), which is exactly how a pass-through
+  route leaked one tenant's data to another in production; the leak
+  shape had *identical* credentials (a shared service JWT with the
+  tenant selected by an undeclared custom header), so no
+  credential-equality scheme can prove sharing safe. Authorized
+  requests now always fetch their own copy; anonymous traffic is
+  bit-for-bit unchanged; authorized responses the origin marks
+  shareable (`public, s-maxage`) still converge to stored HITs.
+- **Fixed a data race in the buffered miss follower path**. The
+  singleflight leader published its `header.Map` to followers and
+  then mutated the same Map while building the stored object
+  (`buildObject` stamps `X-Bouine-Path`/`X-Bouine-Host`, strips
+  `Set-Cookie`, sets `Content-Length`), racing with followers reading
+  it after `close(done)`. Followers now receive a detached clone —
+  the ownership split the singleflight contract always promised.
 - **kubeconform gate now validates the ServiceMonitor CRD**. The
   `helm-kubeconform` prek hook (ADR-0048) renders the chart with
   `serviceMonitor.enabled=true` and validates the rendered ServiceMonitor

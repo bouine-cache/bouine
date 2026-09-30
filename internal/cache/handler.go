@@ -1132,7 +1132,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	)
 	defer span.End()
 
-	res := h.collapsedFetchBg(spanCtx, req, key)
+	res := h.collapsedFetchBg(spanCtx, req, key, ri)
 	if res.Err != nil {
 		// A failed fetch must not export as a clean span.
 		tracing.RecordError(span, res.Err)
@@ -1807,8 +1807,15 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
 // The shared fetchResult is detached per caller: buildObject mutates its
 // resMap (attribution headers), so concurrent callers must not share one
-// mutable header.Map.
-func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
+// mutable header.Map. Authorized requests skip the dedup entirely
+// (collapseDenied, ADR-0052): an authorized response is never shareable
+// in-flight, so each authorized caller fetches its own copy.
+func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key, ri RequestInfo) fetchResult {
+	if collapseDenied(ri) {
+		res := h.doFetch(ctx)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
@@ -1823,7 +1830,12 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchRes
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
-func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
+func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key, ri RequestInfo) fetchResult {
+	if collapseDenied(ri) {
+		res := h.doFetchBg(ctx, req)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
@@ -1833,7 +1845,17 @@ func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, k
 	return res
 }
 
-func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
+// collapsedRevalidateBg deduplicates concurrent revalidations for the
+// same key. Authorized requests skip the dedup entirely (collapseDenied,
+// ADR-0052): the conditional request carries the caller's credentials,
+// so its response is never shareable in-flight — each authorized caller
+// revalidates on its own.
+func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key, ri RequestInfo) fetchResult {
+	if collapseDenied(ri) {
+		res := h.doFetchBg(ctx, req)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
 	sfKey := key.SingleFlightKey(revalKeySuffix)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetchBg(ctx, req)
@@ -1922,12 +1944,22 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 }
 
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
+	// Authorized requests never share an in-flight response
+	// (collapseDenied, ADR-0052): collapsing is not storage, so the
+	// RFC 9111 §3.5 gate that protects stored authorized responses never
+	// applied to followers. Fetch our own copy outside the inflight
+	// table — no follower can park on it.
+	if collapseDenied(ri) {
+		h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+		return
+	}
 	// Try to become the streaming leader for this key.
 	// If another request is already streaming, wait for its buffered result.
 	inflight := &inflightStream{done: make(chan struct{})}
 	if actual, loaded := h.inflightStreams.loadOrStore(lookupKey, inflight); loaded {
 		// Follower: wait for the leader's buffered result.
 		existing := actual
+		existing.followers.Add(1)
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
@@ -2007,7 +2039,7 @@ func (h *Handler) writeBufferedResult(
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	res := h.collapsedFetch(ctx, lookupKey)
+	res := h.collapsedFetch(ctx, lookupKey, ri)
 	if res.Err != nil {
 		if errors.Is(res.Err, ErrFetchShed) {
 			// Shed — the fetch queue was full for fetchWaitTimeout. The
@@ -2068,7 +2100,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// Join the client trace like the other foreground fetches; the
 	// singleflight leader's span context is what gets injected.
 	tracing.InjectFastHTTP(revalCtx, revalReq)
-	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey)
+	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey, ri)
 	if res.Err != nil {
 		tracing.RecordError(revalSpan, res.Err)
 	}
@@ -2288,7 +2320,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 
 	staleHits := h.store.WindowHits(key)
 
-	res := h.collapsedFetchBg(spanCtx, revalReq, key)
+	res := h.collapsedFetchBg(spanCtx, revalReq, key, ri)
 	if res.Err != nil {
 		// The owner of the span records the failure: a fetch that never
 		// succeeded must not export as a clean span (the revalidate
@@ -2815,11 +2847,19 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	// Collapse with concurrent foreground misses for this key. The
 	// foreground leader runs the slotted doFetch and stores on success;
 	// if it sheds, our leader slot re-runs the fetch here — unslotted,
-	// which is the point of the allowance.
-	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
-		return h.doRefillFetch(fetchCtx, req), nil
-	})
-	res := v.(fetchResult)
+	// which is the point of the allowance. An authorized triggering
+	// request skips the shared flight (collapseDenied, ADR-0052): the
+	// refill carries its credentials, and an authorized response is
+	// never shareable in-flight.
+	var res fetchResult
+	if collapseDenied(ri) {
+		res = h.doRefillFetch(fetchCtx, req)
+	} else {
+		v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+			return h.doRefillFetch(fetchCtx, req), nil
+		})
+		res = v.(fetchResult)
+	}
 	// Detach the header.Map before buildObject mutates it (attribution
 	// headers, Set-Cookie strip): the flight group shares one result
 	// across all concurrent callers, and concurrent SetEntryRaw/Del on a

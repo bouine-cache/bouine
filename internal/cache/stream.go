@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
@@ -50,6 +51,13 @@ type streamFetchResult struct {
 type inflightStream struct {
 	done chan struct{} // closed when the fetch finished or shed
 	res  fetchResult   // set by leader before closing done; Err set on failure/shed
+	// followers counts callers that loaded this stream from the
+	// inflight table (i.e. parked as followers). Written only by
+	// loadOrStore's follower branch (under the shard lock) before the
+	// leader can observe it at publish time; read by the leader after
+	// close-adjacent publication. atomic so the leader's read is
+	// race-detector-clean without holding the shard lock.
+	followers atomic.Int32
 }
 
 // doFetchStream starts an origin fetch with response body streaming
@@ -765,17 +773,24 @@ func (h *Handler) streamMissBuffered(
 
 	// Owned header.Map: followers read res.Header after close(done),
 	// concurrently with releaseStreamFetch returning the pooled response
-	// to its sync.Pool (see teeStreamToClient for the same fix). On the
-	// cacheable path resMap is already an owned Map built by streamMiss
-	// (ToMap detaches from the pooled response) — reuse it instead of a
-	// second FromFastHTTP conversion. Non-cacheable misses arrive with a
-	// zero Map (streamMiss skipped the build), so build one here: it is
-	// only 2 allocs and only on the never-stored path, but followers
-	// still read it after close(done) and must not touch the pooled
-	// response.
+	// to its sync.Pool (see teeStreamToClient for the same fix), and — on
+	// the cacheable path — concurrently with buildObject mutating resMap
+	// below (obj.Header = resMap: SetEntryRaw, Del, Set stamp the stored
+	// object after close(done)). When at least one follower parked on
+	// this stream, publish a detached clone and keep the mutable
+	// original for storage — the same ownership split collapsedFetch
+	// applies with ownedClone. With no followers there is exactly one
+	// reader (this caller, before buildObject runs), so the Map is
+	// reused as-is and the benchmark's miss-path alloc budget is
+	// unchanged. Non-cacheable misses arrive with a zero Map (streamMiss
+	// skipped the build), so build one here: 2 allocs, never-stored
+	// path only, and the object-build mutations below never happen for
+	// it.
 	owned := resMap
 	if owned.Len() == 0 {
 		owned = sf.Header.ToMap()
+	} else if inflight.followers.Load() > 0 {
+		owned = owned.Clone()
 	}
 	res := fetchResult{
 		StatusCode: sf.StatusCode,

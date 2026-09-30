@@ -193,7 +193,12 @@ simultaneously stream to the client and buffer for storage; if the body
 exceeds `maxResponseBytes`, buffering stops but the client continues
 receiving the full response. Concurrent identical misses use an
 `inflightStream` with a `done` channel for singleflight deduplication —
-the leader streams, followers serve the buffered result.
+the leader streams, followers serve the buffered result. "Identical"
+means identical cache key *and* anonymous (ADR-0052): a request
+carrying `Authorization` never shares an in-flight response with any
+other request — the in-flight counterpart of the RFC 9111 §3.5 storage
+gate, which likewise refuses to share authorized responses unless the
+origin explicitly opts in.
 
 ### 3.2 Cache key construction
 
@@ -391,8 +396,9 @@ rolling-deploy compatibility.
 - **Passive health checks** — outlier ejection based on rolling error rate.
 - **Hedged requests** — fire a duplicate after p99 latency for idempotent
   methods only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`).
-- **Request collapsing** — single-flight per cache key, latches subscribers
-  while the leader fetches.
+- **Request collapsing** — single-flight per cache key for anonymous
+  requests only; requests carrying `Authorization` never collapse
+  (ADR-0052).
 - **Circuit breaker** — half-open probes, exponential backoff.
 
 ### 6.1 Upstream TLS

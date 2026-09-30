@@ -1168,6 +1168,7 @@ func TestBan_PruneExpiredBans(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 	require.NoError(t, err)
+	s.bans.flushSnapshot() // burst: publication deferred to the coalescing flush
 
 	// The snapshot should contain only the live ban.
 	require.Equal(t, 1, s.bans.len(), "expired ban should be pruned")
@@ -1257,6 +1258,7 @@ func TestBan_MultipleBansAllChecked(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 	require.NoError(t, err)
+	s.bans.flushSnapshot() // burst: publication deferred to the coalescing flush
 
 	// Object matches the second ban.
 	o := obj(testkey.Hash([]byte("x")), 50)

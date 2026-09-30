@@ -3,6 +3,7 @@ package storage
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -331,12 +332,36 @@ func literalOfBody(body string) (string, bool) {
 	return b.String(), true
 }
 
+// banFlushDelay bounds how long a registration may stay unpublished.
+// A rebuild composes fresh maps sized by the list (O(list) transient
+// garbage), so compiling per registration at storm rates (~600 bans/s
+// against a list at banListCap) generates hundreds of MB/s of garbage.
+// Registrations arriving more than banFlushDelay apart flush
+// synchronously (the common single-ban case: enforced when Ban
+// returns, no window); a denser burst coalesces into one rebuild per
+// window on the deferred timer. Same tradeoff family as the eager
+// scan's banScanCoalesceWindow, which see. Worst case, a ban is
+// enforced by the lazy lookup path up to banFlushDelay after Ban
+// returns — invalidation is lazy by design (RFC 9111 §4.4), and where
+// one runs, the eager scan reclaims matching hot-tier entries
+// immediately.
+const banFlushDelay = 50 * time.Millisecond
+
 // banListState couples the authoritative ordered ban list with its
-// compiled snapshot. Mutations mark the state dirty; the snapshot is
-// recompiled lazily on the next snapshot() read, so a batch of N
-// registrations costs one O(list) compile, not N.
+// compiled snapshot. The snapshot is published copy-on-write (RCU):
+// lookups load it with a plain atomic load and never take mu, never
+// compile. Mutations mark the state dirty; the publication is either
+// synchronous (sparse registrations) or deferred to a coalescing
+// timer (storms), so a batch of N registrations costs one O(list)
+// compile, not N — and, decisively, that compile never runs on the
+// hit path. This is what removes the whole-plane stall under ban
+// storms: previously every dirty lookup rebuilt the snapshot while
+// holding mu, serializing all hits and peer-put receivers behind one
+// compile.
 type banListState struct {
-	snap *banSnapshot
+	// snap is the last published immutable snapshot. Readers load it
+	// without locking (see snapshot).
+	snap atomic.Pointer[banSnapshot]
 	list []activeBan
 	// ttl is how long a ban stays in the list before prune paths drop
 	// it. Zero applies defaultBanTTL. Configured per store via
@@ -345,7 +370,23 @@ type banListState struct {
 	ttl time.Duration
 	// dirty records that list changed since snap was compiled.
 	dirty bool
-	mu    sync.Mutex
+	// flushing records a pending deferred flush; one timer is armed at
+	// a time (register's CAS on it).
+	flushing atomic.Bool
+	// flushDelay overrides banFlushDelay in tests (a huge value pins
+	// deferral deterministically; zero means the default).
+	flushDelay time.Duration
+	mu         sync.Mutex
+
+	// registered/rebuilds/lastRebuildNanos/lastPublishNano feed the
+	// bouine_ban_* metrics via HotStore.Stats (lastPublishNano also
+	// separates isolated registrations from bursts in register).
+	// Atomic so register and the flush timer stay off mu's critical
+	// section for reporting.
+	registered       atomic.Int64
+	rebuilds         atomic.Int64
+	lastRebuildNanos atomic.Int64
+	lastPublishNano  atomic.Int64
 }
 
 func (b *banListState) ttlOrDefault() time.Duration {
@@ -355,12 +396,19 @@ func (b *banListState) ttlOrDefault() time.Duration {
 	return b.ttl
 }
 
+func (b *banListState) flushDelayOrDefault() time.Duration {
+	if b.flushDelay <= 0 {
+		return banFlushDelay
+	}
+	return b.flushDelay
+}
+
 // register appends (or refreshes) a ban and marks the snapshot dirty
-// without compiling it: the rebuild happens on the next snapshot()
-// read, which amortizes registration batches (cache-lifecycle storms
-// register 100+ bans/s against a list saturated at banListCap) into a
-// single O(list) compile. Enforcement is unchanged — the first lookup
-// after registration reads a fresh snapshot and sees the new ban.
+// without compiling it. Publication follows immediately when the last
+// rebuild is older than flushDelayOrDefault (isolated bans: enforced
+// when Ban returns, no visibility window); during bursts it is
+// deferred to the coalescing timer so a storm costs one O(list)
+// compile per window, never per ban and never per lookup.
 //
 // The list is mutated in place with zero allocations: expired bans are
 // dropped and a matching pattern refreshed during one scan, a new
@@ -368,7 +416,6 @@ func (b *banListState) ttlOrDefault() time.Duration {
 // in place.
 func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt time.Time) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	pat := patternOf(expr)
 	// exemptAfter mirrors the predicate's own exemption semantics: the
 	// ban's ORIGINAL CreatedAt (possibly zero = no exemption), not the
@@ -391,16 +438,55 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	b.list = pruned
 	if refreshed {
 		b.dirty = true
+	} else {
+		ban := activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat}
+		if len(b.list) >= banListCap {
+			copy(b.list, b.list[1:])
+			b.list[len(b.list)-1] = ban
+		} else {
+			b.list = append(b.list, ban)
+		}
+		b.dirty = true
+	}
+	b.mu.Unlock()
+
+	b.registered.Add(1)
+	if time.Since(b.lastPublished()) >= b.flushDelayOrDefault() {
+		b.flushSnapshot()
 		return
 	}
-	ban := activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat}
-	if len(b.list) >= banListCap {
-		copy(b.list, b.list[1:])
-		b.list[len(b.list)-1] = ban
-	} else {
-		b.list = append(b.list, ban)
+	b.scheduleFlush()
+}
+
+// scheduleFlush arms the deferred rebuild unless one is already
+// pending, so a storm coalesces into a single timer.
+func (b *banListState) scheduleFlush() {
+	if b.flushing.CompareAndSwap(false, true) {
+		time.AfterFunc(b.flushDelayOrDefault(), b.flushSnapshot)
 	}
-	b.dirty = true
+}
+
+// flushSnapshot publishes a fresh snapshot if the list changed since
+// the last publication. Runs on the deferred timer and synchronously
+// from register; safe concurrently with any register (a racing timer
+// either observes the registration's dirty flag or the registrant
+// flushes it itself — see register).
+func (b *banListState) flushSnapshot() {
+	b.flushing.Store(false)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.dirty {
+		b.rebuildLocked(time.Now())
+	}
+}
+
+// lastPublished reports when the snapshot was last compiled, used to
+// separate isolated registrations (flush now) from bursts (defer).
+func (b *banListState) lastPublished() time.Time {
+	if b.rebuilds.Load() == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, b.lastPublishNano.Load())
 }
 
 // pruneExpired rebuilds the state as of now, dropping bans older than
@@ -415,26 +501,21 @@ func (b *banListState) pruneExpired(now time.Time) bool {
 	return len(b.list) != before
 }
 
-// snapshot returns the current compiled view. When registrations have
-// marked the state dirty, the snapshot is recompiled first (pruning
-// expired bans per compileBanSnapshot's precondition); otherwise the
-// previously published immutable snapshot is returned as-is. The hit
-// path therefore pays the O(list) compile at most once per
-// registration batch.
+// snapshot returns the last published compiled view. Lock-free by
+// design: the hit path never takes mu and never compiles — a slow or
+// storm-driven rebuild cannot stall lookups (the RCU publication). A
+// registration becomes visible when its flush publishes: immediately
+// for sparse registrations, within flushDelayOrDefault during bursts.
 func (b *banListState) snapshot() *banSnapshot {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.dirty || b.snap == nil {
-		b.rebuildLocked(time.Now())
-	}
-	return b.snap
+	return b.snap.Load()
 }
 
 // rebuildLocked prunes bans older than the configured TTL and
-// recompiles the snapshot from the surviving list, clearing the dirty
-// flag. The filter reuses the list's backing array. The mutex must be
-// held.
+// recompiles the snapshot from the surviving list, publishing it with
+// one atomic store and clearing the dirty flag. The filter reuses the
+// list's backing array. The mutex must be held.
 func (b *banListState) rebuildLocked(now time.Time) {
+	start := time.Now()
 	pruned := b.list[:0]
 	for _, ban := range b.list {
 		if now.Sub(ban.created) >= b.ttlOrDefault() {
@@ -443,8 +524,11 @@ func (b *banListState) rebuildLocked(now time.Time) {
 		pruned = append(pruned, ban)
 	}
 	b.list = pruned
-	b.snap = compileBanSnapshot(b.list)
+	b.snap.Store(compileBanSnapshot(b.list))
 	b.dirty = false
+	b.rebuilds.Add(1)
+	b.lastRebuildNanos.Store(time.Since(start).Nanoseconds())
+	b.lastPublishNano.Store(start.UnixNano())
 }
 
 // len reports the active ban count (tests and metrics).

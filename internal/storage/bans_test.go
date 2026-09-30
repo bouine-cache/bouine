@@ -233,6 +233,7 @@ func TestBanSnapshot_RebuildOnRefresh(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 	require.NoError(t, err)
+	s.bans.flushSnapshot() // burst re-issue: publication deferred to the coalescing flush
 	assert.True(t, s.MatchesActiveBan(banTestObj("banned.example.com", "/x", 30*time.Minute)))
 }
 

@@ -368,6 +368,7 @@ func TestBan_ListCapBoundsGrowth(t *testing.T) {
 	o.Header.Set(header.XBouineHost, fmt.Sprintf("host-%d.example.com", banListCap+49))
 	_ = s.Put(context.Background(), testkey.Key(9999), o)
 	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: fmt.Sprintf("host-%d.example.com", banListCap+49)})
+	s.bans.flushSnapshot() // burst: publication deferred to the coalescing flush
 	got, _, _ := s.Get(context.Background(), testkey.Key(9999))
 	assert.Nil(t, got, "newest ban must remain active at the cap")
 }

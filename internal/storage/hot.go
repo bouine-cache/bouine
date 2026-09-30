@@ -890,8 +890,9 @@ func isSurrogateOnlyBan(expr api.BanExpr) bool {
 // list and returns the registration wall-clock time. Identical
 // re-issued patterns refresh in place instead of duplicating; the
 // list is capped at banListCap with the oldest bans dropped first.
-// Each registration rebuilds the compiled snapshot (O(list), bounded
-// by the cap).
+// Snapshot publication follows the coalescing policy in
+// banListState.register — synchronous for isolated bans, one compile
+// per window during storms, never on the lookup path.
 func (h *HotStore) registerBan(expr api.BanExpr, pred banPredicate) time.Time {
 	createdAt := expr.CreatedAt
 	if createdAt.IsZero() {
@@ -1044,12 +1045,16 @@ func (h *HotStore) Stats() api.Stats {
 		s.mu.RUnlock()
 	}
 	return api.Stats{
-		HotEntries:       hotEntries,
-		HotBytes:         hotBytes,
-		Hits:             h.stats.hits.Load(),
-		Misses:           h.stats.misses.Load(),
-		Evictions:        h.stats.evictions.Load(),
-		ReaperGraceHolds: h.stats.graceHolds.Load(),
+		HotEntries:          hotEntries,
+		HotBytes:            hotBytes,
+		Hits:                h.stats.hits.Load(),
+		Misses:              h.stats.misses.Load(),
+		Evictions:           h.stats.evictions.Load(),
+		ReaperGraceHolds:    h.stats.graceHolds.Load(),
+		BanRegistrations:    h.bans.registered.Load(),
+		BanSnapshotRebuilds: h.bans.rebuilds.Load(),
+		BanListEntries:      int64(h.bans.len()),
+		BanLastRebuildNanos: h.bans.lastRebuildNanos.Load(),
 	}
 }
 

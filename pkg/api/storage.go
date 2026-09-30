@@ -421,4 +421,19 @@ type Stats struct {
 	// an expired KeepGrace entry because the MayReap gate withheld it
 	// (origin pool unable to refill) since boot.
 	ReaperGraceHolds int64 `json:"reaper_grace_holds"`
+	// BanRegistrations is the number of lazy ban registrations received
+	// (admin + peer) since boot. A rate spike is the signature of a
+	// ban storm.
+	BanRegistrations int64 `json:"ban_registrations"`
+	// BanSnapshotRebuilds is the number of ban-snapshot compiles since
+	// boot. Compare against BanRegistrations: during a healthy storm
+	// rebuilds stay bounded by the coalescing window, not the ban rate.
+	BanSnapshotRebuilds int64 `json:"ban_snapshot_rebuilds"`
+	// BanListEntries is the current size of the lazy ban list.
+	BanListEntries int64 `json:"ban_list_entries"`
+	// BanLastRebuildNanos is the duration in nanoseconds of the most
+	// recent ban-snapshot compile. Growth with the list size is
+	// expected (O(list)); a large value during a storm is the symptom
+	// the lock-free snapshot publication absorbs.
+	BanLastRebuildNanos int64 `json:"ban_last_rebuild_nanos"`
 }

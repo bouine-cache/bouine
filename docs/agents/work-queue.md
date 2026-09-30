@@ -19,6 +19,7 @@ at the bottom. Entries older than 30 days may be pruned.
 ## Active claims
 
 - [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
+- [WIP] crush — internal/storage, internal/cluster — fix red CI on main: ban exemption regression from 3b9417f9 (over-broad bans permanently poison later fills) + SetOnPeerRetired/SetInvalidator data race — started: 2026-09-30 — ETA: same day
 - [WIP] crush — release 0.5.24 (changelog curation + promotion, chart bump) — started: 2026-09-29 — ETA: same day
 
 ## fasthttp migration — phase claims

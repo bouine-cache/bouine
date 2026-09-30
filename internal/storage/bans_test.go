@@ -207,6 +207,32 @@ func TestBanReaper_PrunesExpiredBans(t *testing.T) {
 		"pruned ban must no longer match")
 }
 
+// TestBanSnapshot_UnsetCreatedAtExemptsLaterFills pins the admin-API
+// path regression from 3b9417f9: a ban registered without CreatedAt
+// (how /v1/ban issues bans) must exempt objects stored after
+// registration, on the opaque (regex) walk as well as the literal
+// sets. Pre-fix, exemptAfter was zero (= no exemption ever), so an
+// over-broad ban (host_regex ".*") permanently banned every later
+// fill. RFC 9111 §4.4: invalidation only removes responses that
+// existed at invalidation time.
+func TestBanSnapshot_UnsetCreatedAtExemptsLaterFills(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Opaque (regex) ban, no CreatedAt — the fleet-wide ".*" shape.
+	_, err := s.Ban(context.Background(), api.BanExpr{HostRegex: ".*"})
+	require.NoError(t, err)
+
+	// Object that predates the ban: subject.
+	require.True(t, s.MatchesActiveBan(banTestObj("any.example.com", "/x", time.Hour)),
+		"object stored before the ban is subject to it")
+	// Object stored after registration: exempt — the ban must not
+	// poison later fills.
+	assert.False(t, s.MatchesActiveBan(banTestObj("any.example.com", "/x", 0)),
+		"object stored after an unset-CreatedAt ban must be exempt")
+}
+
 // TestBanSnapshot_RebuildOnRefresh verifies re-issuing an identical
 // ban refreshes its exemption window in the compiled snapshot, not
 // just the list. Uses the anchored-exact form (the literal-classified

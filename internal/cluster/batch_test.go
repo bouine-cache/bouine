@@ -224,14 +224,14 @@ func TestGossipPurgeBatch_AppliesAndDedups(t *testing.T) {
 	c.seqs = newSeqTracker() // minimalCluster skips New; wire the tracker explicitly
 	var mu sync.Mutex
 	var applied []api.PurgeEvent
-	c.inv = Invalidator{
+	c.SetInvalidator(Invalidator{
 		PurgeFn: func(_ context.Context, evt api.PurgeEvent) error {
 			mu.Lock()
 			applied = append(applied, evt)
 			mu.Unlock()
 			return nil
 		},
-	}
+	})
 	body, err := EncodePurgeBatchGossip(samplePurgeEvents(8))
 	require.NoError(t, err)
 

@@ -126,11 +126,16 @@ func (s *banSnapshot) matches(obj *api.Object) bool {
 	if s.prefixMatch(obj) {
 		return true
 	}
-	// Opaque bans: full predicate walk. The StoredAt/CreatedAt
-	// exemption check inside the predicate already handles staleness.
+	// Opaque bans: full predicate walk, gated by the same exemption
+	// rule as the cheap sets. The predicate's own CreatedAt check
+	// only fires when the ORIGINAL expr.CreatedAt was non-zero; for
+	// bans registered without one (the admin API path), exemptAfter
+	// carries the normalized registration time instead.
 	for _, b := range s.opaqueBans {
-		if b.pred(obj) {
-			return true
+		if b.exemptAfter.IsZero() || !obj.StoredAt.After(b.exemptAfter) {
+			if b.pred(obj) {
+				return true
+			}
 		}
 	}
 	return false
@@ -370,10 +375,15 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	pat := patternOf(expr)
-	// exemptAfter mirrors the predicate's own exemption semantics: the
-	// ban's ORIGINAL CreatedAt (possibly zero = no exemption), not the
-	// normalized registration time used for TTL accounting.
-	exemptAfter := expr.CreatedAt
+	// exemptAfter is the normalized createdAt: the ban's original
+	// CreatedAt when set, or the registration instant otherwise (the
+	// admin API path — registerBan normalizes zero to time.Now()).
+	// Objects stored after it are not subject to the ban (RFC 9111
+	// §4.4: invalidation only removes responses that existed at
+	// invalidation time). A zero value here would mean "no exemption
+	// ever", which turned any over-broad ban (e.g. host_regex ".*")
+	// into a permanent poison for every later fill.
+	exemptAfter := createdAt
 	now := time.Now()
 	pruned := b.list[:0]
 	refreshed := false

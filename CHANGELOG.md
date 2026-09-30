@@ -23,6 +23,24 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Bans no longer poison objects stored after them** (regression in
+  v0.5.13). A ban registered without `created_at` — how the admin
+  `/v1/ban` endpoint issues bans — treated every object as subject
+  forever, including objects stored long after the ban. An over-broad
+  ban (e.g. `host_regex: ".*"`) therefore permanently banned every
+  later cache fill. Per RFC 9111 §4.4, invalidation only removes
+  responses that existed at invalidation time; objects stored after
+  the ban's registration are now exempt on all snapshot paths
+  (literal sets, anchored prefixes, and opaque regex bans).
+
+- **Cluster callback wiring data race fixed.** `SetOnPeerRetired` and
+  `SetInvalidator` wrote plain fields while memberlist goroutines
+  (started inside `cluster.New`, before the engine finishes wiring)
+  could concurrently read them — a data race detected by the
+  integration suite's `-race` runs and in CI. The callbacks are now
+  published via `atomic.Pointer`, matching the existing metrics
+  pattern.
+
 - **kubeconform gate now validates the ServiceMonitor CRD**. The
   `helm-kubeconform` prek hook (ADR-0048) renders the chart with
   `serviceMonitor.enabled=true` and validates the rendered ServiceMonitor

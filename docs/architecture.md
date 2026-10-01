@@ -198,7 +198,11 @@ means identical cache key *and* anonymous (ADR-0052): a request
 carrying `Authorization` never shares an in-flight response with any
 other request — the in-flight counterpart of the RFC 9111 §3.5 storage
 gate, which likewise refuses to share authorized responses unless the
-origin explicitly opts in.
+origin explicitly opts in. The gate also denies every unsafe method
+(POST/PUT/DELETE, anything outside GET/HEAD/OPTIONS): unsafe methods
+normally dispatch to the invalidating proxy before the miss pipeline,
+but the flight gate keeps that invariant local — a mutation is never
+parked on another caller's flight whatever the dispatcher does.
 
 ### 3.2 Cache key construction
 
@@ -397,8 +401,8 @@ rolling-deploy compatibility.
 - **Hedged requests** — fire a duplicate after p99 latency for idempotent
   methods only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`).
 - **Request collapsing** — single-flight per cache key for anonymous
-  requests only; requests carrying `Authorization` never collapse
-  (ADR-0052).
+  safe-method requests only; requests carrying `Authorization` or an
+  unsafe method (POST/PUT/DELETE, …) never collapse (ADR-0052).
 - **Circuit breaker** — half-open probes, exponential backoff.
 
 ### 6.1 Upstream TLS

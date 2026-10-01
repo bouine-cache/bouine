@@ -1,8 +1,9 @@
-# 55 — Request collapsing: authorized requests never collapse
+# 55 — Request collapsing: authorized and unsafe-method requests never collapse
 
 **Audience**: operators seeing origin load or hit-ratio changes after
 ADR-0052 (requests carrying `Authorization` were removed from the
-request-collapsing space).
+request-collapsing space; unsafe methods were added to the gate as
+defense-in-depth).
 
 ## What changed
 
@@ -13,14 +14,21 @@ leader's response to all of them. **A request carrying `Authorization`
 no longer participates**: it always performs its own origin fetch.
 Anonymous requests are bit-for-bit unchanged.
 
-Why: storage of an authorized response is gated by RFC 9111 §3.5
-(not stored unless the response is `public`/`s-maxage`/`must-revalidate`),
-but collapsing is not storage — nothing stopped one authorized caller
-from receiving another authorized caller's in-flight response. This
-leaked cross-tenant data in production (identical shared service JWT,
-tenant selected by an undeclared custom header), and no
-credential-equality scheme can prove that shape safe — so authorized
-flights are refused outright (ADR-0052).
+The gate also denies unsafe methods (POST/PUT/DELETE, anything outside
+GET/HEAD/OPTIONS). This is defense-in-depth with no behavior change:
+unsafe methods never reached the collapsing paths anyway (the
+dispatcher proxies them directly), but the gate now enforces that
+locally, so a future dispatcher refactor cannot silently coalesce
+concurrent mutations onto one origin fetch.
+
+Why the `Authorization` half exists: storage of an authorized response
+is gated by RFC 9111 §3.5 (not stored unless the response is
+`public`/`s-maxage`/`must-revalidate`), but collapsing is not storage —
+nothing stopped one authorized caller from receiving another authorized
+caller's in-flight response. This leaked cross-tenant data in
+production (identical shared service JWT, tenant selected by an
+undeclared custom header), and no credential-equality scheme can prove
+that shape safe — so authorized flights are refused outright (ADR-0052).
 
 ## When origin load increases — and when it is expected
 

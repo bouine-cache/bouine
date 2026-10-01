@@ -518,6 +518,8 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 		var lastEvictions int64
 		var lastWarmSelfHeals int64
 		var lastGraceHolds int64
+		var lastBanRegistrations int64
+		var lastBanRebuilds int64
 		for {
 			select {
 			case <-rCtx.Done():
@@ -536,6 +538,22 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 				// during an origin outage on stayin_alive routes (ADR-0051).
 				// Extracted to keep startBackgroundTasks' complexity flat.
 				updateReaperGraceHoldMetric(rs.dpMetrics, s, &lastGraceHolds)
+				// Lazy-ban metrics: counters delta-added like evictions;
+				// the rebuild-duration gauge holds the last compile seen.
+				banRegDelta := s.BanRegistrations - lastBanRegistrations
+				if banRegDelta > 0 {
+					rs.dpMetrics.BanRegistrations.Add(float64(banRegDelta))
+					lastBanRegistrations = s.BanRegistrations
+				}
+				banRebuildDelta := s.BanSnapshotRebuilds - lastBanRebuilds
+				if banRebuildDelta > 0 {
+					rs.dpMetrics.BanSnapshotRebuilds.Add(float64(banRebuildDelta))
+					lastBanRebuilds = s.BanSnapshotRebuilds
+				}
+				if s.BanLastRebuildNanos > 0 {
+					rs.dpMetrics.BanSnapshotRebuildDuration.Set(float64(s.BanLastRebuildNanos) / 1e9)
+				}
+				rs.dpMetrics.BanListEntries.Set(float64(s.BanListEntries))
 				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
 				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
 				// Warm-tier disk-pressure gauge: disk_bytes reflects total

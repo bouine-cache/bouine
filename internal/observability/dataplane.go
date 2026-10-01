@@ -72,6 +72,17 @@ type DataPlaneMetrics struct {
 	// an expired stayin_alive entry because its origin pool had no
 	// healthy target (ADR-0051).
 	HotStoreReaperGraceHolds prometheus.Counter
+	// Lazy-ban metrics — updated on every Stats() poll by the engine.
+	// BanRegistrations/BanSnapshotRebuilds are delta-added counters;
+	// comparing their rates is the storm-health signal: rebuilds must
+	// stay bounded by the coalescing window, not track the ban rate.
+	// BanSnapshotRebuildDuration is the last compile's duration (the
+	// stall-sized symptom the lock-free snapshot publication absorbs).
+	// BanListEntries is the current lazy-ban list size.
+	BanRegistrations           prometheus.Counter
+	BanSnapshotRebuilds        prometheus.Counter
+	BanSnapshotRebuildDuration prometheus.Gauge
+	BanListEntries             prometheus.Gauge
 	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
 	WarmStoreBytes     prometheus.Gauge
 	WarmStoreEntries   prometheus.Gauge
@@ -203,6 +214,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions, m.HotStoreMaxBytes,
 		m.HotStoreReaperGraceHolds,
+		m.BanRegistrations, m.BanSnapshotRebuilds, m.BanSnapshotRebuildDuration, m.BanListEntries,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals, m.WarmStoreMaxBytes,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
@@ -243,6 +255,26 @@ func (m *DataPlaneMetrics) initHotStoreMetrics() {
 		Namespace: "bouine",
 		Name:      "hot_store_max_bytes",
 		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
+	})
+	m.BanRegistrations = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "ban_registrations_total",
+		Help:      "Total lazy ban registrations received (admin + peer) since boot. A rate spike identifies a ban storm; compare with bouine_ban_snapshot_rebuilds_total.",
+	})
+	m.BanSnapshotRebuilds = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "ban_snapshot_rebuilds_total",
+		Help:      "Total ban-snapshot compiles since boot. During a storm this stays bounded by the coalescing window (not the ban rate); a 1:1 ratio with registrations means coalescing is not engaging.",
+	})
+	m.BanSnapshotRebuildDuration = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "ban_snapshot_rebuild_duration_seconds",
+		Help:      "Duration of the most recent ban-snapshot compile. Scales with the ban list size (O(list)); large values during a storm are expected and absorbed off the hit path by the lock-free publication.",
+	})
+	m.BanListEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "ban_list_entries",
+		Help:      "Current size of the lazy ban list evaluated on every lookup. At the cap, oldest bans are dropped first.",
 	})
 }
 

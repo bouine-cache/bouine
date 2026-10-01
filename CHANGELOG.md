@@ -10,6 +10,30 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lock-free ban snapshot publication (RCU) removes whole-plane
+  stalls under ban storms.** Previously the compiled ban snapshot was
+  rebuilt lazily *inside* the ban mutex on the first lookup after a
+  registration, so a burst of invalidations (~630 bans/s observed in
+  production) serialized every cache hit and every peer-put receiver
+  behind one O(list) compile — all planes froze together and woke in
+  sync when the rebuild finished. Lookups now read an immutably
+  published snapshot with a plain atomic load: no lock, no compile,
+  zero allocations on the hit path. Registrations publish synchronously
+  when sparse (a ban is enforced by the time `Ban` returns, unchanged
+  semantics for the single-ban case) and coalesce into one rebuild per
+  50 ms window during storms, so rebuild cost is bounded by the window,
+  not the ban rate. Tradeoff, deliberately accepted: during a storm a
+  registered ban may be enforced by the lazy lookup path up to 50 ms
+  after `Ban` returns (invalidation is lazy by design, RFC 9111 §4.4;
+  the eager scan still reclaims matching hot-tier entries immediately
+  where one runs). New metrics on the admin port:
+  `bouine_ban_registrations_total`, `bouine_ban_snapshot_rebuilds_total`
+  (compare rates: rebuilds must stay bounded by the window, not track
+  the ban rate), `bouine_ban_snapshot_rebuild_duration_seconds` (last
+  compile), and `bouine_ban_list_entries`.
+
 ## [0.5.25] - 2026-09-30
 
 ### Added

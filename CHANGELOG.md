@@ -34,6 +34,8 @@ the curated, human-readable summary.
   the ban rate), `bouine_ban_snapshot_rebuild_duration_seconds` (last
   compile), and `bouine_ban_list_entries`.
 
+## [0.5.25] - 2026-09-30
+
 ### Added
 
 - **`cache.max_variants` is now configurable per route**. The Vary
@@ -2026,7 +2028,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.24...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.25...HEAD
+[0.5.25]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.25
 [0.5.24]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.24
 [0.5.23]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.23
 [0.5.22]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.22

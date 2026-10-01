@@ -19,7 +19,7 @@ at the bottom. Entries older than 30 days may be pruned.
 ## Active claims
 
 - [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
-- [WIP] crush — release 0.5.24 (changelog curation + promotion, chart bump) — started: 2026-09-29 — ETA: same day
+- [WIP] crush — release 0.5.25 (changelog curation + promotion, chart bump) — started: 2026-09-30 — ETA: same day
 
 ## fasthttp migration — phase claims
 
@@ -44,6 +44,7 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — release 0.5.24 (changelog curation + promotion, chart bump) — 2026-09-29
 - [DONE] crush — release 0.5.23 (changelog curation + promotion, chart bump) — 2026-09-29
 - [DONE] crush — internal/config, internal/cache, cmd/bouine/cmd, docs — implement `cache.key.include_headers` (issue #632: config field + validation, KeyPolicy include list folded into stored Vary via effectiveVary, tests, ADR-0046, docs) — 2026-09-17
 

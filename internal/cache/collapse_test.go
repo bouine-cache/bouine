@@ -40,6 +40,50 @@ func TestCollapseDenied_AuthorizedRequestsNeverCollapse(t *testing.T) {
 	}
 }
 
+// TestCollapseDenied_UnsafeMethodsNeverCollapse pins the method half of
+// the gate (ADR-0052, extended): POST/PUT/DELETE/PATCH requests never
+// share a flight, in both RequestInfo forms. They never reach the
+// collapsing paths today (ServeRequest dispatches them to
+// invalidateAndProxy, which fetches directly), but that guarantee is
+// purely structural — the gate makes it local so a future dispatcher
+// refactor cannot silently coalesce mutations. The flight key is the
+// cache key (method included), so two identical POSTs would otherwise
+// merge onto one origin mutation and drop the follower's body.
+func TestCollapseDenied_UnsafeMethodsNeverCollapse(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{"POST", "PUT", "DELETE", "PATCH"} {
+		ri := RequestInfo{Method: method}
+		require.True(t, collapseDenied(ri), "%s (string form) must never collapse", method)
+
+		// Byte form — what requestInfoFromCtx populates on the live
+		// miss path; GetMethod() is never called (alloc budget).
+		ctx := testCtx(method, "http://example.com/mut")
+		riBytes := requestInfoFromCtx(ctx)
+		require.True(t, collapseDenied(riBytes), "%s (byte form) must never collapse", method)
+	}
+}
+
+// TestCollapseDenied_SafeMethodsStillEligible pins the safe set: GET,
+// HEAD (which shares flight space with GET by key construction), and
+// OPTIONS stay eligible for collapsing when anonymous — and stay
+// eligible for the Authorization check (safe method + Authorization
+// still denies).
+func TestCollapseDenied_SafeMethodsStillEligible(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
+		require.False(t, collapseDenied(RequestInfo{Method: method}),
+			"anonymous %s must stay eligible for collapsing", method)
+
+		ri := RequestInfo{Method: method}
+		ri.Header.Set(header.Authorization, "Bearer t")
+		require.True(t, collapseDenied(ri), "%s + Authorization must never collapse", method)
+
+		ctx := testCtx(method, "http://example.com/x")
+		require.False(t, collapseDenied(requestInfoFromCtx(ctx)),
+			"anonymous %s (byte form) must stay eligible for collapsing", method)
+	}
+}
+
 func TestCollapseDenied_CookiedRequestsNeverCollapse(t *testing.T) {
 	t.Parallel()
 	// ADR-0054: any Cookie value removes the request from the collapsing
@@ -257,6 +301,111 @@ func TestFetchAndStore_AnonymousUnchanged(t *testing.T) {
 
 	require.Equal(t, int64(1), fetches.Load(),
 		"anonymous callers must keep collapsing")
+}
+
+// TestInvalidatingMethods_EachRequestFetchesItsOwnCopy pins the
+// dispatcher-level behavior end to end: concurrent POST/PUT/DELETE
+// requests for the same URI each perform their own origin fetch and
+// each receive their own mutation's result. The origin echoes the
+// request body back, so a collapsed (broken) run would deliver the
+// leader's body to the follower and fail the assertion. This pins the
+// dispatch (serveInvalidating → invalidateAndProxy fetches directly);
+// the gate itself is pinned below with the dispatcher bypassed.
+func TestInvalidatingMethods_EachRequestFetchesItsOwnCopy(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"POST", "PUT", "DELETE"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			var fetches atomic.Int64
+			release := make(chan struct{})
+			origin := func(ctx *fasthttp.RequestCtx) {
+				n := fetches.Add(1)
+				if n <= 2 {
+					select {
+					case <-release:
+					case <-time.After(2 * time.Second):
+					}
+				}
+				ctx.SetStatusCode(200)
+				_, _ = ctx.WriteString("mutated:" + string(ctx.Request.Body()))
+			}
+			h := testHandler(t, origin)
+
+			var wg sync.WaitGroup
+			bodies := make([]string, 2)
+			for i, body := range []string{"item-a", "item-b"} {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					ctx := testCtxWithBody(method, "http://example.com/items", []byte(body))
+					serveRequest(h, ctx)
+					bodies[i] = respBody(ctx)
+				}()
+			}
+			for fetches.Load() < 2 {
+				time.Sleep(5 * time.Millisecond)
+			}
+			close(release)
+			wg.Wait()
+
+			require.Equal(t, int64(2), fetches.Load(),
+				"each %s must perform its own origin fetch", method)
+			require.Equal(t, "mutated:item-a", bodies[0])
+			require.Equal(t, "mutated:item-b", bodies[1])
+		})
+	}
+}
+
+// TestFetchAndStore_UnsafeMethodNeverParksOnSharedFlight pins the
+// collapse gate behind the dispatcher: fetchAndStore is the miss-path
+// entry a dispatcher refactor would have to route a POST through, so
+// the test calls it directly with an unsafe method and proves the
+// follower never receives the leader's response. The origin echoes the
+// body, so a collapsed (broken) run returns the leader's body to the
+// follower.
+func TestFetchAndStore_UnsafeMethodNeverParksOnSharedFlight(t *testing.T) {
+	t.Parallel()
+
+	var fetches atomic.Int64
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		n := fetches.Add(1)
+		if n <= 2 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body:" + string(ctx.Request.Body()))
+	}
+	h := testHandler(t, origin)
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 2)
+	for i, body := range []string{"payload-1", "payload-2"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtxWithBody("POST", "http://example.com/owned", []byte(body))
+			primaryKey, lookupKey, _, _ := h.lookup(ctx)
+			h.fetchAndStore(ctx, primaryKey, lookupKey, requestInfoFromCtx(ctx))
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	for fetches.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(2), fetches.Load(),
+		"the gate must keep unsafe methods off the shared flight even behind the dispatcher")
+	require.Equal(t, "body:payload-1", bodies[0])
+	require.Equal(t, "body:payload-2", bodies[1])
 }
 
 // TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses pins

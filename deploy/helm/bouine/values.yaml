@@ -205,16 +205,10 @@ terminationGracePeriodSeconds: 40
 # Pod management policy for the StatefulSet.
 # Parallel: all pods start simultaneously (correct for strong-mode
 # clusters where peers join via gossip concurrently).
-# maxUnavailable controls rolling update concurrency — set to 1 to
-# roll one pod at a time while allowing parallel initial boot.
-# partition is rendered explicitly (0 is the API server default for
-# RollingUpdate StatefulSets) so GitOps diffs stay clean; raise it to
-# stage canaries during a rollout.
 podManagementPolicy: Parallel
 updateStrategy:
   type: RollingUpdate
-  maxUnavailable: 1
-  partition: 0
+  rollingUpdate: {}
 
 # Seconds after a pod becomes Ready before it enters Service endpoints.
 # Gives the cluster ring time to converge after a pod joins, reducing

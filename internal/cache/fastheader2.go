@@ -48,7 +48,11 @@ func getOrComputeFastHeader(obj *api.Object) *fasthttp.ResponseHeader {
 	hdr := &fasthttp.ResponseHeader{}
 	hdr.DisableNormalizing()
 	obj.Header.WriteToFastHTTP(hdr)
-	if obj.HasDate {
+	// The map check backstops HasDate for objects whose flag was lost in
+	// transit (pre-v6 wire decode, ADR-0053): WriteToFastHTTP skips Date
+	// by contract, so a false flag with a stored Date would serve a
+	// response with no Date header at all.
+	if obj.HasDate || obj.Header.Has(header.Date) {
 		dateVal := obj.Header.Get(header.Date)
 		header.SetDateRaw(hdr, dateVal)
 	}

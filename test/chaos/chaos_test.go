@@ -439,7 +439,7 @@ func fastGetBody(client *fasthttp.Client, url string) (statusCode int, xCache st
 }
 
 // TestChaos_OriginBodyIntegrityUnderEviction is the data-integrity net
-// the preprod corruption incident slipped past: every prior chaos
+// the staging corruption incident slipped past: every prior chaos
 // scenario asserted status codes, never payload bytes. A working set
 // larger than the per-node hot budget (48 x 64 KiB keys against 2 MiB)
 // keeps SIEVE eviction and origin refetches churning while parallel

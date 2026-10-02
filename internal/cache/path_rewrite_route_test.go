@@ -16,11 +16,11 @@ import (
 )
 
 // rewritePattern/rewriteReplace are the production nginx migration
-// shape shared by every test in this file: the /payment/orchestrator/
-// callback/<x> public path rewritten to /scrooge/callback/<x>.
+// shape shared by every test in this file: the /public/webhook/
+// callback/<x> public path rewritten to /internal/webhook/<x>.
 const (
-	rewritePattern = `^/payment/orchestrator/callback/(.*)$`
-	rewriteReplace = "/scrooge/callback/$1"
+	rewritePattern = `^/public/webhook/(.*)$`
+	rewriteReplace = "/internal/webhook/$1"
 )
 
 // TestPathRewriteRoute_MissSendsRewrittenURIToOrigin pins the core
@@ -39,13 +39,13 @@ func TestPathRewriteRoute_MissSendsRewrittenURIToOrigin(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	rr := testCtx("GET", "/payment/orchestrator/callback/payin123?sig=1")
+	rr := testCtx("GET", "/public/webhook/payin123?sig=1")
 	h.ServeRequest(rr)
 
 	require.Equal(t, 200, respCode(rr))
 	uris := cap.uris()
 	require.Len(t, uris, 1)
-	assert.Equal(t, "/scrooge/callback/payin123?sig=1", uris[0],
+	assert.Equal(t, "/internal/webhook/payin123?sig=1", uris[0],
 		"origin must receive the rewritten URI with the query preserved")
 }
 
@@ -66,7 +66,7 @@ func TestPathRewriteRoute_CacheKeyUsesOriginalPath(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	url := "/payment/orchestrator/callback/payin123"
+	url := "/public/webhook/payin123"
 	rr := testCtx("GET", url)
 	h.ServeRequest(rr)
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
@@ -95,17 +95,17 @@ func TestPathRewriteRoute_BypassAndInvalidateSendRewrittenURI(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	rr := testCtx("GET", "/payment/orchestrator/callback/bypass")
+	rr := testCtx("GET", "/public/webhook/bypass")
 	rr.Request.Header.Set(header.CacheControl, "no-cache")
 	h.ServeRequest(rr)
 
-	rr = testCtx("POST", "/payment/orchestrator/callback/payin123")
+	rr = testCtx("POST", "/public/webhook/payin123")
 	h.ServeRequest(rr)
 
 	uris := cap.uris()
 	require.Len(t, uris, 2)
-	assert.Equal(t, "/scrooge/callback/bypass", uris[0])
-	assert.Equal(t, "/scrooge/callback/payin123", uris[1])
+	assert.Equal(t, "/internal/webhook/bypass", uris[0])
+	assert.Equal(t, "/internal/webhook/payin123", uris[1])
 }
 
 // TestPathRewriteRoute_RevalidateSendsRewrittenURI covers the
@@ -134,7 +134,7 @@ func TestPathRewriteRoute_RevalidateSendsRewrittenURI(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	url := "/payment/orchestrator/callback/reval"
+	url := "/public/webhook/reval"
 	rr := testCtx("GET", url)
 	h.ServeRequest(rr)
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
@@ -145,8 +145,8 @@ func TestPathRewriteRoute_RevalidateSendsRewrittenURI(t *testing.T) {
 
 	uris := capture.uris()
 	require.Len(t, uris, 2)
-	assert.Equal(t, "/scrooge/callback/reval", uris[0], "initial fetch must be rewritten")
-	assert.Equal(t, "/scrooge/callback/reval", uris[1], "revalidation must be rewritten")
+	assert.Equal(t, "/internal/webhook/reval", uris[0], "initial fetch must be rewritten")
+	assert.Equal(t, "/internal/webhook/reval", uris[1], "revalidation must be rewritten")
 }
 
 // TestPathRewriteRoute_WithoutRewritePassthrough pins the zero-config
@@ -163,12 +163,12 @@ func TestPathRewriteRoute_WithoutRewritePassthrough(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	rr := testCtx("GET", "/payment/orchestrator/callback/x")
+	rr := testCtx("GET", "/public/webhook/x")
 	h.ServeRequest(rr)
 
 	uris := cap.uris()
 	require.Len(t, uris, 1)
-	assert.Equal(t, "/payment/orchestrator/callback/x", uris[0])
+	assert.Equal(t, "/public/webhook/x", uris[0])
 }
 
 // TestPathRewriteRoute_NoMatchPassthrough pins that a request whose
@@ -225,7 +225,7 @@ func TestPathRewriteRoute_BgRevalidateSendsRewrittenURI(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 
-		url := "/payment/orchestrator/callback/swr"
+		url := "/public/webhook/swr"
 		rr := testCtx("GET", url)
 		h.ServeRequest(rr)
 		require.Equal(t, "MISS", respHeader(rr, header.XCache))
@@ -238,8 +238,8 @@ func TestPathRewriteRoute_BgRevalidateSendsRewrittenURI(t *testing.T) {
 		synctest.Wait()
 		uris := capture.uris()
 		require.Len(t, uris, 2)
-		assert.Equal(t, "/scrooge/callback/swr", uris[0])
-		assert.Equal(t, "/scrooge/callback/swr", uris[1], "background SWR revalidation must send the rewritten URI")
+		assert.Equal(t, "/internal/webhook/swr", uris[0])
+		assert.Equal(t, "/internal/webhook/swr", uris[1], "background SWR revalidation must send the rewritten URI")
 	})
 }
 
@@ -263,7 +263,7 @@ func TestPathRewriteRoute_RefreshSendsRewrittenURI(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	url := "/payment/orchestrator/callback/page"
+	url := "/public/webhook/page"
 	rr := testCtx("GET", url)
 	h.ServeRequest(rr)
 	rr = testCtx("GET", url)
@@ -279,7 +279,7 @@ func TestPathRewriteRoute_RefreshSendsRewrittenURI(t *testing.T) {
 
 	uris := cap.uris()
 	require.Len(t, uris, 2)
-	assert.Equal(t, "/scrooge/callback/page", uris[0])
-	assert.Equal(t, "/scrooge/callback/page", uris[1],
+	assert.Equal(t, "/internal/webhook/page", uris[0])
+	assert.Equal(t, "/internal/webhook/page", uris[1],
 		"refresh-before-expiry fetch must send the rewritten URI")
 }

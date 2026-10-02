@@ -580,17 +580,17 @@ upstream_pools:
   - name: app
     targets: [a:1]
 routes:
-  - match: { path_prefix: /payment/orchestrator/callback }
+  - match: { path_prefix: /public/webhook }
     pool: app
     request:
       path_rewrite:
-        match: ^/payment/orchestrator/callback/(.*)$
-        replace: /scrooge/callback/$1
+        match: ^/public/webhook/(.*)$
+        replace: /internal/webhook/$1
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err, "unexpected error")
-	assert.Equal(t, `^/payment/orchestrator/callback/(.*)$`, cfg.Routes[0].Request.PathRewrite.Match)
-	assert.Equal(t, "/scrooge/callback/$1", cfg.Routes[0].Request.PathRewrite.Replace)
+	assert.Equal(t, `^/public/webhook/(.*)$`, cfg.Routes[0].Request.PathRewrite.Match)
+	assert.Equal(t, "/internal/webhook/$1", cfg.Routes[0].Request.PathRewrite.Replace)
 }
 
 func TestValidate_PathRewrite_RequiresBothFields(t *testing.T) {

@@ -429,8 +429,8 @@ func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
 		objs[i] = api.Object{
 			StatusCode: 200,
 			Header: headerMap("Content-Type", "text/html", "Content-Length", "13",
-				header.Vary, "BM-Market"),
-			VaryValue: "BM-Market",
+				header.Vary, "X-Region"),
+			VaryValue: "X-Region",
 			Body:      []byte("Hello, World!"),
 			BodySize:  13,
 			StoredAt:  time.Now(),
@@ -438,7 +438,7 @@ func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
 		}
 	}
 	var objIdx atomic.Int64
-	varyKeyUS := BuildVaryKey("BM-Market", headerMap("BM-Market", "US"), nil)
+	varyKeyUS := BuildVaryKey("X-Region", headerMap("X-Region", "US"), nil)
 	fp.WithPeerFetch(
 		func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "10.0.0.2:8081"}, false
@@ -459,7 +459,7 @@ func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.Headers[0] = api.RawHeader{Key: "X-Region", Value: "US"}
 	req.RecomputeScanFlags()
 	now := time.Now()
 
@@ -1740,7 +1740,7 @@ func TestFastPathHandler_PeerWrongVariantFallsBack(t *testing.T) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.Headers[0] = api.RawHeader{Key: "X-Region", Value: "US"}
 	req.RecomputeScanFlags()
 
 	// The peer serves a body cached for a different market: the stored
@@ -1753,12 +1753,12 @@ func TestFastPathHandler_PeerWrongVariantFallsBack(t *testing.T) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	otherReq.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "fr"}
+	otherReq.Headers[0] = api.RawHeader{Key: "X-Region", Value: "fr"}
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     peerHeaderMap13(),
-		VaryValue:  "BM-Market",
-		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(otherReq).Header, nil),
+		VaryValue:  "X-Region",
+		VaryKey:    BuildVaryKey("X-Region", requestInfoFromCtxRaw(otherReq).Header, nil),
 		Body:       []byte("foreign-market"),
 		BodySize:   14,
 		StoredAt:   time.Now(),
@@ -1787,13 +1787,13 @@ func TestFastPathHandler_PeerMatchingVariantServed(t *testing.T) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.Headers[0] = api.RawHeader{Key: "X-Region", Value: "US"}
 	req.RecomputeScanFlags()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     headerMap("Content-Type", "text/html", header.ContentLength, "9", header.Vary, "BM-Market"),
-		VaryValue:  "BM-Market",
-		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(req).Header, nil),
+		Header:     headerMap("Content-Type", "text/html", header.ContentLength, "9", header.Vary, "X-Region"),
+		VaryValue:  "X-Region",
+		VaryKey:    BuildVaryKey("X-Region", requestInfoFromCtxRaw(req).Header, nil),
 		Body:       []byte("us-market"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
@@ -1909,7 +1909,7 @@ func TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss(t *testing.T) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.Headers[0] = api.RawHeader{Key: "X-Region", Value: "US"}
 	req.RecomputeScanFlags()
 
 	otherReq := &api.RawRequest{
@@ -1920,12 +1920,12 @@ func TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss(t *testing.T) {
 		HTTPVersion: "HTTP/1.1",
 		NHeaders:    1,
 	}
-	otherReq.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "fr"}
+	otherReq.Headers[0] = api.RawHeader{Key: "X-Region", Value: "fr"}
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     peerHeaderMap13(),
-		VaryValue:  "BM-Market",
-		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(otherReq).Header, nil),
+		VaryValue:  "X-Region",
+		VaryKey:    BuildVaryKey("X-Region", requestInfoFromCtxRaw(otherReq).Header, nil),
 		Body:       []byte("foreign-market"),
 		BodySize:   14,
 		StoredAt:   time.Now(),
@@ -2030,23 +2030,23 @@ func TestPeerVaryGateHeaderParity(t *testing.T) {
 	}{
 		{
 			name: "canonical key",
-			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US\r\n\r\n",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nX-Region: US\r\n\r\n",
 		},
 		{
 			name: "non-canonical key casing",
-			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nbm-market: US\r\n\r\n",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nx-region: US\r\n\r\n",
 		},
 		{
 			name: "leading OWS in value",
-			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: \tUS\r\n\r\n",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nX-Region: \tUS\r\n\r\n",
 		},
 		{
 			name: "trailing OWS in value",
-			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US \t\r\n\r\n",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nX-Region: US \t\r\n\r\n",
 		},
 		{
 			name: "duplicate vary header first wins",
-			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US\r\nBM-Market: EU\r\n\r\n",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nX-Region: US\r\nX-Region: EU\r\n\r\n",
 		},
 		{
 			name: "list-valued vary field",
@@ -2071,8 +2071,8 @@ func TestPeerVaryGateHeaderParity(t *testing.T) {
 			require.NoError(t, rctx.Request.Read(bufio.NewReader(bytes.NewReader([]byte(tt.wire)))))
 			fasthttpView := headerFromCtx(&rctx)
 
-			raw := BuildVaryKey("BM-Market", fastView, nil)
-			slow := BuildVaryKey("BM-Market", fasthttpView, nil)
+			raw := BuildVaryKey("X-Region", fastView, nil)
+			slow := BuildVaryKey("X-Region", fasthttpView, nil)
 			assert.Equal(t, slow, raw,
 				"raw and fasthttp views must compute identical Vary keys for the same wire bytes")
 		})

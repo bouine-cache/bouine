@@ -49,7 +49,7 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 - [DONE] crush — internal/config, internal/cache, cmd/bouine/cmd, docs — implement `cache.key.include_headers` (issue #632: config field + validation, KeyPolicy include list folded into stored Vary via effectiveVary, tests, ADR-0046, docs) — 2026-09-17
 
 - [DONE] crush — release 0.5.17 (changelog curation + promotion, chart bump) — 2026-09-11
-- [DONE] crush — internal/cluster — peer retire hardening: race-safe retired-address semantics (retire until the Cluster un-retires on ring re-add; a stale-owner fetch can no longer mint a client for a dead address) + peer_fetch_queue_wait_seconds metric (prod-eu postmortem follow-up) (fix/peer-retire-race) — 2026-09-12
+- [DONE] crush — internal/cluster — peer retire hardening: race-safe retired-address semantics (retire until the Cluster un-retires on ring re-add; a stale-owner fetch can no longer mint a client for a dead address) + peer_fetch_queue_wait_seconds metric (production postmortem follow-up) (fix/peer-retire-race) — 2026-09-12
 - [DONE] crush — internal/cluster — bound peer-fetch/put RPCs by PeerFetchTimeout + 200ms peer dial timeout (fix/peer-fetch-rpc-budget) — 2026-09-12
 - [DONE] crush — internal/cluster — self-heal stale peer ring entries + peer-address failure breaker (fix/cluster-stale-peer-selfhealing) — 2026-09-11
 - [DONE] crush — internal/storage — batch the ban snapshot rebuild (deferred compile on read, in-place list mutation) (perf/ban-snapshot-batch-rebuild) — 2026-09-11

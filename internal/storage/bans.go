@@ -357,7 +357,7 @@ func (b *banListState) ttlOrDefault() time.Duration {
 
 // register appends (or refreshes) a ban and marks the snapshot dirty
 // without compiling it: the rebuild happens on the next snapshot()
-// read, which amortizes registration batches (cache-lifecycle storms
+// read, which amortizes registration batches (invalidation storms
 // register 100+ bans/s against a list saturated at banListCap) into a
 // single O(list) compile. Enforcement is unchanged — the first lookup
 // after registration reads a fresh snapshot and sees the new ban.

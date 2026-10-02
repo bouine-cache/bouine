@@ -25,25 +25,25 @@ func TestHandleCacheMiss_PeerFetchVariantMismatchMetric(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 
 	riFr := requestInfoFromHTTP("http://example.com/vary-metric", "/vary-metric",
-		headerMap("BM-Market", "fr"))
+		headerMap("X-Region", "fr"))
 	frObj := &api.Object{
 		StatusCode: 200,
-		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
 		Body:       []byte("market=fr"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
-		VaryValue:  "BM-Market",
-		VaryKey:    BuildVaryKey("BM-Market", riFr.Header, nil),
+		VaryValue:  "X-Region",
+		VaryKey:    BuildVaryKey("X-Region", riFr.Header, nil),
 	}
 	frObj.CacheControl = "max-age=60"
 
 	var mismatches atomic.Int32
 	originUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
-		ctx.Response.Header.Set(header.Vary, "BM-Market")
+		ctx.Response.Header.Set(header.Vary, "X-Region")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("X-Region"))))
 	}
 	h := NewHandler(HandlerConfig{
 		Upstream:   originUpstream,
@@ -60,7 +60,7 @@ func TestHandleCacheMiss_PeerFetchVariantMismatchMetric(t *testing.T) {
 
 	// A us request against an fr-only peer: the gate rejects, origin
 	// fills, and the callback fires exactly once.
-	rUs := testCtxWithHeader("GET", "http://example.com/vary-metric", "BM-Market", "us")
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-metric", "X-Region", "us")
 	h.ServeRequest(rUs)
 	require.Equal(t, "MISS", respHeader(rUs, header.XCache))
 	require.Equal(t, "market=us", respBody(rUs))
@@ -68,7 +68,7 @@ func TestHandleCacheMiss_PeerFetchVariantMismatchMetric(t *testing.T) {
 
 	// A fr request selects the peer's stored variant: served as a peer
 	// hit, no callback.
-	rFr := testCtxWithHeader("GET", "http://example.com/vary-metric", "BM-Market", "fr")
+	rFr := testCtxWithHeader("GET", "http://example.com/vary-metric", "X-Region", "fr")
 	h.ServeRequest(rFr)
 	require.Equal(t, "HIT", respHeader(rFr, header.XCache))
 	require.Equal(t, "peer", respHeader(rFr, header.XCacheSource))
@@ -78,7 +78,7 @@ func TestHandleCacheMiss_PeerFetchVariantMismatchMetric(t *testing.T) {
 	// A second us request after the origin fill stores the us variant
 	// locally... but this non-owner does not store; it peer-fetches
 	// again and the gate rejects again.
-	rUs2 := testCtxWithHeader("GET", "http://example.com/vary-metric", "BM-Market", "us")
+	rUs2 := testCtxWithHeader("GET", "http://example.com/vary-metric", "X-Region", "us")
 	h.ServeRequest(rUs2)
 	require.Equal(t, "market=us", respBody(rUs2))
 	assert.Equal(t, int32(2), mismatches.Load())
@@ -91,21 +91,21 @@ func TestHandleCacheMiss_PeerFetchMismatchNilCallback(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	riFr := requestInfoFromHTTP("http://example.com/vary-nil-cb", "/vary-nil-cb",
-		headerMap("BM-Market", "fr"))
+		headerMap("X-Region", "fr"))
 	frObj := &api.Object{
 		StatusCode: 200,
-		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
 		Body:       []byte("market=fr"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
-		VaryValue:  "BM-Market",
-		VaryKey:    BuildVaryKey("BM-Market", riFr.Header, nil),
+		VaryValue:  "X-Region",
+		VaryKey:    BuildVaryKey("X-Region", riFr.Header, nil),
 	}
 	frObj.CacheControl = "max-age=60"
 	originUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
-		ctx.Response.Header.Set(header.Vary, "BM-Market")
+		ctx.Response.Header.Set(header.Vary, "X-Region")
 		ctx.SetStatusCode(200)
 		_, _ = ctx.Write([]byte("market=us"))
 	}
@@ -121,7 +121,7 @@ func TestHandleCacheMiss_PeerFetchMismatchNilCallback(t *testing.T) {
 		},
 	})
 
-	rUs := testCtxWithHeader("GET", "http://example.com/vary-nil-cb", "BM-Market", "us")
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-nil-cb", "X-Region", "us")
 	h.ServeRequest(rUs)
 	require.Equal(t, "MISS", respHeader(rUs, header.XCache))
 	require.Equal(t, "market=us", respBody(rUs))

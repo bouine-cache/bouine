@@ -1,16 +1,16 @@
 # Plan: Host-agnostic cache keys (`cache.key.include_host: false`)
 
 **Status:** Implemented (Phase 1 of §5 rollout — core feature, dark until a
-route opts in; config flip and measurement are a bouine-config follow-up)
+route opts in; config flip and measurement are a deployment-config follow-up)
 **Date:** 2026-09-26
 **Scope:** Route-level opt-out of the Host segment in the primary cache
 key, so the same URL+query serves one entry regardless of the Host the
 request arrives with.
-Motivated by product-page in prod-eu, where 963 URLs (20.3% of
-requests) are requested under both the internal SSR host
-(`doorman.doorman-prod-eu.svc.cluster.local`) and a public host
-(`www.backmarket.*`), and product-page never reads the request Host —
-same bytes, two entries, each fed by only part of the URL's traffic.
+Motivated by a real deployment: an SSR origin whose pages are
+requested under both an internal service host and a public host
+(two names for the same bytes), where the origin never reads the
+request Host — same bytes, two entries, each fed by only part of
+the URL's traffic.
 Depends on: ADR-0030 (128-bit key), ADR-0046 (`include_headers` union),
 ADR-0049 (purge event VaryKey metadata)
 Related: `docs/plans/language-normalization.md` (same route, same
@@ -25,15 +25,15 @@ bouine's primary key is `scheme|host|path|query|method`
 `buildKeyFromRaw`). Host is unconditional: `RouteKey`
 (`internal/config/config.go:694-746`) has seven fields, none touch it.
 
-On the `/product-page/` route in prod-eu, doorman forwards both
-front-apps SSR calls (internal DNS host) and public-host traffic, and
-its `$product_page_upstream` map (`doorman/config/maps.conf:239-243`)
-is host-independent — both classes reach bouine. Measured
-(40k-request sample of the doorman access log, 2026-09-26):
+On an SSR-heavy route, an upstream router forwards both internal
+service-discovery calls (internal DNS host) and public-host traffic,
+and its upstream map is host-independent — both classes reach
+bouine. A representative access-log sample shows the URL
+population splitting across the internal/public boundary:
 
-- 963 URL+query strings are requested under ≥2 hosts; for 20.3% of
-  product-page requests the URL's traffic is split across the
-  internal/public boundary.
+- A significant subset of URL+query strings is requested under ≥2
+  hosts; a meaningful share of the route's requests is split
+  across the internal/public boundary.
 - The minority fragment carries a median 33% of its URL's traffic.
 - Within-window first-sight repeat rate on the affected URL set:
   74.2% with Host in the key vs 88.2% without — **+14.0pp on that
@@ -41,14 +41,14 @@ is host-independent — both classes reach bouine. Measured
   population-probability mechanism; it is a floor, not a forecast).
 - Distinct keys: 16,919 → 15,691 (−7.3%) on the same sample.
 
-The origin is provably host-blind: product-page contains zero reads
-of the request `Host` (all `base_url` uses derive from `BM-Market`),
-and no CORS/referrer logic references it. The duplication is pure
-waste.
+The origin is provably host-blind: the origin codebase contains zero
+reads of the request `Host`, and no CORS/referrer logic references
+it. The duplication is pure waste.
 
-**Why a cache-side feature and not an upstream fix:** front-apps must
-keep the internal DNS name (service discovery) and browsers must keep
-the public name (CORS, cookies). No caller can make the two agree.
+**Why a cache-side feature and not an upstream fix:** the SSR caller
+must keep the internal DNS name (service discovery) and browsers must
+keep the public name (CORS, cookies). No caller can make the two
+agree.
 
 ## 2. Design
 
@@ -57,9 +57,9 @@ the public name (CORS, cookies). No caller can make the two agree.
 One boolean on `RouteKey`, default `true` (today's behaviour):
 
 ```yaml
-- match: {path_prefix: /product-page/}
-  request: {strip_prefix: /product-page}
-  pool: product-page
+- match: {path_prefix: /pages/}
+  request: {strip_prefix: /pages}
+  pool: pages-origin
   cache:
     ttl_override: 12h
     stale_while_revalidate: 4h
@@ -130,11 +130,12 @@ decisions:
 
 - **Ban by host regex still works** — an entry filled via the public
   host is still banable by matching that host. But a ban targeting
-  `www.backmarket.fr` will not touch the entry if it was filled via
-  the internal host. Mitigation: `cache-lifecycle` already bans by
-  **path/URL regex and surrogate keys** for this route (surrogate
-  `Cache-Tag`), which are host-independent — verify its product-page
-  ban expressions cover both hosts or drop host conditions there.
+  the public host will not touch the entry if it was filled via
+  the internal host. Mitigation: external invalidation tooling can
+  ban by **path/URL regex and surrogate keys** for such routes
+  (surrogate `Cache-Tag`), which are host-independent — verify
+  that its ban expressions cover both hosts or drop host
+  conditions there.
   This is the one real behavioural coupling; it gets a dedicated
   test (§6.1).
 - Purge-by-URL (`/v1/purge`) takes a raw URL and rebuilds the key
@@ -142,12 +143,7 @@ decisions:
   `engine.go:711`, `:734`, `:853`; `/v1/refresh` likewise;
   `/v1/cachecheck` at `engine.go:620-621` builds a default
   all-off policy instead). `nil` policy keeps the host segment, so a purge
-  of `http://doorman.../product-page/...` only purges keys stored
-  *with* that host — with `include_host: false` the stored keys have
-  no host segment and the purge misses. **Required**: thread the
-  route's policy into the purge/refresh/cachecheck paths —
-  `admin.CacheCheckFn`/`PurgeFn` already close over `rs`, so the fix
-  is to resolve the route matching the URL and pass its compiled
+  route matching the URL and pass its compiled
   policy (fall back to a default `include_host: true` policy for
   unmatched hosts). Alternative (cheaper, rejected for v1): document
   that host-agnostic routes must be purged via `/v1/ban` with a path
@@ -178,17 +174,19 @@ silently when the origin adds Host-based behaviour. Mitigations:
 - Keep the flag **off by default**; docs must state the
   verification contract ("origin must not vary by Host: no
   redirects, no absolute URLs, no Host-keyed feature flags").
-- For product-page this is verified today (§1); re-verify at rollout
+- The origin route this feature targets is verified host-blind
+  today (§1); re-verify at rollout
   with the differential test (§6.2).
 - Do **not** offer a wildcard `include_host: false` default at the
   config root. Route-level only.
 
 ### 3.2 Scheme stays in the key
 
-`include_host: false` removes **host only**. The internal doorman
-hop is plain HTTP and the public edge terminates TLS before
-doorman, so both classes arrive at bouine over `http://` — scheme
-already agrees on this route. Keep scheme keyed; if a future route
+`include_host: false` removes **host only**. In the motivating
+deployment the internal hop is plain HTTP and the public edge
+terminates TLS before the router, so both classes arrive at bouine
+over `http://` — scheme already agrees on that route. Keep scheme
+keyed; if a future route
 mixes schemes over one origin, that's a separate flag
 (`include_scheme`, not in scope).
 
@@ -228,7 +226,7 @@ internal-host request can be served/filled by a public-host request
 and vice versa — exactly the desired sharing, no divergence risk
 (the fetch rebuilds from the stored object's headers).
 
-## 4. Estimate — product-page, prod-eu
+## 4. Estimate — the motivating SSR route
 
 Same two mechanisms as language-normalization §5, smaller magnitude:
 
@@ -239,15 +237,15 @@ Same two mechanisms as language-normalization §5, smaller magnitude:
   one-hit-per-TTL threshold — the merged stream crosses it.
 - **Mechanism B (capacity):** −7.3% distinct keys on the route,
   directly proportional store entries on a store pinned at its
-  budget (prod-eu hot store, ADR/language-normalization §5.2).
+  budget (ADR/language-normalization §5.2).
   Overlaps with the PR #260 memory rebalance the same way.
 - **Cost:** none measurable. `includeHost` is a bool check on a
   policy already dereferenced at every key site; the hit path is
   unchanged (policy pointer read).
 
-**Confidence: high on direction, medium on magnitude.** The 963-URL
-set and its 20.3% share are measured, not modelled; the pp estimate
-is a lower bound from a 1h49m sample.
+**Confidence: high on direction, medium on magnitude.** The split-URL
+set and its traffic share are measured, not modelled; the pp estimate
+is a lower bound from a sample window.
 
 ## 5. Rollout
 
@@ -258,17 +256,17 @@ is a lower bound from a 1h49m sample.
    No config flips — feature dark.
 2. **Chart bump** (bouine-chart): schema + `values.yaml` comment for
    `cache.key.include_host`.
-3. **Config PR (this repo):** flip `include_host: false` on
-   `/product-page/` in prod-eu **only**, one continent, uniform
-   across its 3 pods. Expect one 12h TTL window of dual
+3. **Config PR (deployment config):** flip `include_host: false` on
+   the target route in one environment **only**, uniform
+   across its pods. Expect one TTL window of dual
    population; optionally `POST /v1/ban {"path_regex":
-   "^/product-page/"}` after ~12h to reclaim host-ful orphans.
+   "^/pages/"}` after that window to reclaim host-ful orphans.
 4. **Measure:** `bouine_request_duration_seconds_count{cache_result}`
-   split on `upstream_pool=product-page`, prod-eu vs prod-us/ap
-   control, 24h before/after; `bouine_hot_store_entries` delta.
-   Success gate: product-page eu hit ratio ≥ +2pp, no p99
+   split on the route's `upstream_pool`, treatment vs control
+   environment, 24h before/after; `bouine_hot_store_entries` delta.
+   Success gate: treated route hit ratio ≥ +2pp, no p99
    regression on `bouine_request_duration_seconds` HIT.
-5. **Fleet:** replicate to prod-us/prod-ap and preprods if green.
+5. **Fleet:** replicate to the remaining environments if green.
 6. **Follow-up (separate):** re-evaluate whether
    `language-normalization` Phase 0 instrumentation
    (`bouine_vary_distinct_values`) should also sample host to keep
@@ -298,12 +296,11 @@ is a lower bound from a 1h49m sample.
 ### 6.2 Differential test (rollout gate)
 
 In-process: same URL, two requests with the two real host values,
-assert byte-identical bodies across a corpus of product-page URLs
-harvested from the §1 sample (tech-specs, vr-carousel, pickers,
-mobile-plan-pickers, parent-products, main product — each with the
+assert byte-identical bodies across a corpus of the route's URLs
+harvested from the §1 sample (each with the
 observed query forms). Plus the origin-side re-verification: grep
-product-page for Host reads (mechanical, §1) repeated at rollout
-time.
+the origin codebase for Host reads (mechanical, §1) repeated at
+rollout time.
 
 ### 6.3 Load
 
@@ -316,16 +313,16 @@ map/set).
 - **Normalize the host instead of dropping it** (map public →
   internal): strictly more config, same wrong-body surface, and the
   mapping lives far from the origin's actual Host usage. Dropped.
-- **`header_set: Host doorman...` on the route** (rewrite requests
+- **`header_set: Host <internal>` on the route** (rewrite requests
   so the origin sees one host): changes what the origin receives —
   rejected; this plan is key-only, origin traffic stays untouched
   (also: `header_set` applies to origin-bound fetches and the key
   is built *before* the rewrite lands — it would not even work).
-- **Fix at doorman** (normalize Host before proxying to bouine):
-  `proxy_set_header Host $http_host` is load-bearing for other
-  upstreams; a per-location override for product-page only would
-  work but couples the cache-key concern to the router config and
-  dies the day another cache is in front. Rejected as fragile
+- **Fix at the upstream router** (normalize Host before proxying to
+  bouine): the default Host pass-through is load-bearing for other
+  upstreams; a per-location override for the affected route only
+  would work but couples the cache-key concern to the router config
+  and dies the day another cache is in front. Rejected as fragile
   layering, though noted as a viable fallback if the bouine feature
   stalls.
 - **Do nothing:** −7.3% effective capacity on a capacity-bound

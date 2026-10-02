@@ -115,7 +115,7 @@ func TestFetchAndStore_SameCredentialAlsoNeverCollapses(t *testing.T) {
 		}
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.WriteString("merchant:" + string(ctx.Request.Header.Peek("X-BM-Merchant-Id")))
+		_, _ = ctx.WriteString("merchant:" + string(ctx.Request.Header.Peek("X-Tenant-Id")))
 	}
 	h := testHandler(t, origin)
 
@@ -130,7 +130,7 @@ func TestFetchAndStore_SameCredentialAlsoNeverCollapses(t *testing.T) {
 			// byte-identical URI, tenant selected by a custom header the
 			// cache key does not include.
 			ctx.Request.Header.Set(header.Authorization, "Bearer shared-service-jwt")
-			ctx.Request.Header.Set("X-BM-Merchant-Id", merchant)
+			ctx.Request.Header.Set("X-Tenant-Id", merchant)
 			serveRequest(h, ctx)
 			bodies[i] = respBody(ctx)
 		}()
@@ -195,7 +195,7 @@ func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
 	t.Parallel()
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-BM-Merchant-Id"}, false)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
 
 	var fetches atomic.Int64
 	release := make(chan struct{})
@@ -223,7 +223,7 @@ func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ctx := testCtx("GET", "http://example.com/public?x=1")
-			ctx.Request.Header.Set("X-BM-Merchant-Id", merchant)
+			ctx.Request.Header.Set("X-Tenant-Id", merchant)
 			serveRequest(h, ctx)
 		}()
 	}

@@ -376,9 +376,9 @@ the curated, human-readable summary.
   structured log pipeline. Every "error in PipelineClient(...)" line
   from fasthttp's pipeline worker — dial refusals, EOFs, broken pipes,
   timeouts — went to fasthttp's raw stderr logger and landed in log
-  shippers as unstructured info-level lines (the entire content of the
-  prod-eu log export on 2026-09-16: 59 entries during a single
-  rolling-restart window, 41 of them bouine's own retired-address
+  shippers as unstructured info-level lines (a production log export
+  during a single
+  rolling-restart window: 59 entries, 41 of them bouine's own retired-address
   parking). The per-peer PipelineClient is now built with the
   client-side FastHTTPLogger adapter: records are tagged
   `component=cluster` and classified by transport error — routine
@@ -459,7 +459,7 @@ the curated, human-readable summary.
      The TTL was a hard 24h constant, so a typo in a
      surrogate-key ban poisoned the hit ratio for a full day.
      RFC 9111 §4.4 exempts post-ban copies and the reaper reclaims
-     pre-ban ones, so cache-lifecycle invalidations are safe at
+     pre-ban ones, so external invalidation traffic is safe at
      minutes scale.
 - The fast-path owner-miss hint is only honored on routes with no
   KeyPolicy. The fast path builds keys without the route's
@@ -519,14 +519,15 @@ the curated, human-readable summary.
 ### Fixed
 - The origin client now uses a 64 KiB read buffer, matching the
   data-plane and admin servers, instead of fasthttp's 4 KiB default.
-  Origin responses whose header block exceeds 4 KiB — product-page's
-  `/compare/` responses carry a `Cache-Tag` header with one product
-  UUID per variant (~4-5 KiB on phone comparisons) — failed response
-  header parse with `ErrSmallBuffer` on every attempt: the
+  Origin responses whose header block exceeds 4 KiB — an SSR
+  route's `/compare/` responses carry a `Cache-Tag` header with one
+  product UUID per variant (~4-5 KiB on dense comparisons) — failed
+  response header parse with `ErrSmallBuffer` on every attempt: the
   idempotent retry replayed the same deterministic parse error five
-  times and the request surfaced as a 502 (~1 rps on prod-eu,
-  exclusively on `/product-page/compare/*`, observed from the
-  product-page routing rollout on 2026-09-16).
+  times and the request surfaced as a 502 (~1 rps in one production
+  environment, exclusively on that route's `/compare/*` paths,
+  observed from the
+  routing rollout on 2026-09-16).
 - Cached static routes (cache.enabled: true) no longer return 502
   "no fast client configured" exactly when the cache cannot answer.
   These routes wire the staticfile handler as Upstream and no
@@ -579,7 +580,7 @@ the curated, human-readable summary.
   when a queued caller cancels — exactly the case the 150ms budget
   produces. The wait was previously observed only after the semaphore
   slot was acquired, so the saturation signal the metric exists to
-  surface (prod-eu, 2026-09-12) was invisible whenever the queued
+  surface (a production postmortem on 2026-09-12) was invisible whenever the queued
   caller gave up, and TestPeerFetcher_QueueWaitMeasuredWhenSaturated
   flaked when the observe-vs-cancel race lost.
 - PurgeEvent.VaryKey is documented as metadata. The field's comment
@@ -629,7 +630,7 @@ the curated, human-readable summary.
 ### Fixed
 - After a rolling restart, a pod's cached fasthttp PipelineClient
   for a peer's pre-restart address re-dialed the dead IP every ~3s
-  for the life of the process (observed on prod-eu: ~60
+  for the life of the process (observed in production: ~60
   "error in PipelineClient" log lines per minute toward addresses
   dead since the restart). The v0.5.17 breaker could not stop it: it
   gates new Fetch/Put submissions, and none reach the healed ring.
@@ -653,9 +654,9 @@ the curated, human-readable summary.
   *fasthttp.RequestCtx carrying no deadline — so hung RPCs fell
   back to the transport's 60s DoTimeout default, and only the
   pipeline client's 500ms ReadTimeout eventually killed them. On
-  prod-eu this pinned fetch-semaphore slots behind RPCs slow to fail
+  one production fleet this pinned fetch-semaphore slots behind RPCs slow to fail
   against dead addresses and surfaced as 1-2.5s peer-served "HIT"
-  latencies (prod-eu logged ~3600 dial i/o timeouts/hour to pod IPs
+  latencies (that fleet logged ~3600 dial i/o timeouts/hour to pod IPs
   dead since the previous day's restart, each pinning a fetch slot;
   zero successful fetches above 500ms). All peer-fetch and peer-put
   RPCs are now bounded by the 500ms budget regardless of the
@@ -687,11 +688,13 @@ the curated, human-readable summary.
 - Every ban registration previously rebuilt the full compiled snapshot:
   a fresh 1024-entry list copy plus the three host/path/surrogate maps —
   about 624 KB of garbage per registration once the list sits at
-  banListCap, which is the production steady state (cache-lifecycle
-  registers 100+ surrogate-key bans/s over a list saturated at the cap;
+  banListCap, which is the production steady state (an external
+  invalidation service registers 100+ surrogate-key bans/s over a list
+  saturated at the cap;
   bursts reach 130/s for minutes). With GOGC=200 the heap fills to 3x
   live before GC, so these rebuild bursts showed up as periodic
-  working-set spikes to 13-16 GB on every prod-eu pod during ban storms
+  working-set spikes to 13-16 GB on every pod of the affected fleet
+  during ban storms
   (measured: heap_alloc 6.5 → 13.4 GB in ~4 min at the 08:05 UTC
   storm, heap objects flat — large transient buffers, not object
   growth). Registration now only marks the snapshot dirty and mutates
@@ -858,7 +861,7 @@ the curated, human-readable summary.
 - The admin API now emits an OpenTelemetry server span for
   invalidation calls (`POST /v1/ban`, `/v1/refresh`): the admin server
   previously ran uninstrumented, so a distributed trace initiated by
-  cache-lifecycle ended at the caller's client span. The admin handler
+  an external invalidation service ended at the caller's client span. The admin handler
   chain joins the caller's trace via the propagated W3C traceparent
   (`bouine.admin` span), and a test-only tracing helper lets other
   packages' tests assert on exported spans (PR #653, 06eb7be).
@@ -882,8 +885,8 @@ the curated, human-readable summary.
   filled first. Both of the prior gates skip in this flow: the
   requester's assertion is blank and the storage codec never serialized
   `VaryValue` (always empty over the wire), so `servePeerHit`'s
-  recompute could not run. Observed in preprod on the doorman
-  `/content/` route: an `it-IT` request filled from origin, then an
+  recompute could not run. Observed in a staging environment on a
+  per-locale `/content/` route: an `it-IT` request filled from origin, then an
   `fr-FR` request on another pod got `Content-Language: it-IT` as a
   peer HIT. Two complementary fixes: the owner never serves a Vary
   resolver body from a peer fetch (blank `VaryKey`, non-empty
@@ -902,7 +905,7 @@ the curated, human-readable summary.
   key's owner, which could return the primary-key Vary resolver (the
   first fill's body) for a request selecting a different variant — the
   handler re-checked only freshness, never the Vary dimension. Observed
-  in production on the doorman route, where per-market content differs
+  in production on a per-locale route, where per-market content differs
   only in request headers. Two complementary gates close the hole: the
   requesting node stamps its variant assertion on the peer-fetch RPC
   (the previously ignored `VaryKey` field) and, on receipt, recomputes
@@ -943,7 +946,7 @@ the curated, human-readable summary.
 ### Fixed
 - Vary variants were keyed on the first `Vary` field line only (fasthttp
   `Map.Get`), so an origin sending `Vary: Accept-Encoding,Accept-Language`
-  plus `Vary: BM-Market` produced a variant key that dropped `BM-Market` —
+  plus `Vary: X-Region` produced a variant key that dropped `X-Region` —
   a request differing only in that header was served the wrong market's
   cached body. RFC 9110 §5.2 makes Vary a list-based field: multi-line
   values are equivalent to one comma-joined value. The joined read (GetAll)

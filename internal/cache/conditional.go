@@ -79,8 +79,8 @@ func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	// Vary is replaced wholesale instead of Set per line: Set writes the
 	// first matching entry, so per-line Sets on a stored multi-line Vary
 	// clobber the first slot repeatedly and corrupt the stored list
-	// (e.g. stored "Vary: Accept-Encoding" + "Vary: BM-Market" became
-	// "BM-Market" twice). RFC 9111 §3.2: the 304's field replaces the
+	// (e.g. stored "Vary: Accept-Encoding" + "Vary: X-Region" became
+	// "X-Region" twice). RFC 9111 §3.2: the 304's field replaces the
 	// stored field, and Vary is list-based so all its field lines move
 	// together.
 	if resp304Header.Has(header.Vary) {

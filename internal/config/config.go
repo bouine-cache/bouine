@@ -360,7 +360,7 @@ type Cluster struct {
 	// the TTL only bounds how long PRE-ban copies
 	// keep being rejected — and those are reclaimed by TTL expiry, the
 	// reaper, and exempt refills anyway. The default (24h) is
-	// conservative; cache-lifecycle surrogate invalidations are safe at
+	// conservative; external invalidation surrogate invalidations are safe at
 	// minutes scale, which bounds the hit-ratio damage of an over-broad
 	// ban (a typo currently poisons the hit ratio for the full window).
 	// Zero applies the default; negative values and values below 1s are

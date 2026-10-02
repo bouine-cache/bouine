@@ -244,14 +244,14 @@ func TestEncodeDecodeVaryValueRoundTrip(t *testing.T) {
 	orig := &api.Object{
 		Key:       testkey.Key(0x1234),
 		VaryKey:   "frhash",
-		VaryValue: "Accept-Language, BM-Market",
-		Header:    headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Language", header.Vary, "BM-Market"),
+		VaryValue: "Accept-Language, X-Region",
+		Header:    headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Language", header.Vary, "X-Region"),
 		Body:      []byte("body"),
 		BodySize:  4,
 		StoredAt:  time.Unix(1_700_000_000, 0).UTC(),
 	}
 	// Two Vary field lines in the stored header (the multi-line shape).
-	orig.Header.AppendEntry(header.Vary, "BM-Market")
+	orig.Header.AppendEntry(header.Vary, "X-Region")
 
 	got, err := decodeObject(encodeObject(orig))
 	require.NoError(t, err)

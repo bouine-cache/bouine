@@ -1497,11 +1497,11 @@ func TestBuildRouter_PathRewriteWired(t *testing.T) {
 			},
 			Routes: []config.Route{
 				{
-					Name: "payment-callback",
+					Name: "webhook-callback",
 					Pool: "echo",
 					Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
-						Match:   `^/payment/orchestrator/callback/(.*)$`,
-						Replace: "/scrooge/callback/$1",
+						Match:   `^/public/webhook/(.*)$`,
+						Replace: "/internal/webhook/$1",
 					}},
 				},
 			},
@@ -1524,10 +1524,10 @@ func TestBuildRouter_PathRewriteWired(t *testing.T) {
 	require.Len(t, rs.handlers, 1)
 
 	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.SetRequestURI("/payment/orchestrator/callback/payin123?sig=1")
+	ctx.Request.SetRequestURI("/public/webhook/payin123?sig=1")
 	router.ServeRequest(ctx)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
-	assert.Equal(t, "/scrooge/callback/payin123?sig=1", string(ctx.Response.Body()),
+	assert.Equal(t, "/internal/webhook/payin123?sig=1", string(ctx.Response.Body()),
 		"origin must receive the rewritten path with query preserved")
 
 	// The cache-key contract (keys keep the ORIGINAL public path) is
@@ -1559,7 +1559,7 @@ func TestPolicyForURL(t *testing.T) {
 				{
 					Name:  "pp",
 					Pool:  "echo",
-					Match: config.RouteMatch{PathPrefix: "/product-page/"},
+					Match: config.RouteMatch{PathPrefix: "/pages/"},
 					Cache: config.RouteCache{Key: config.RouteKey{IncludeHost: &no}},
 				},
 			},
@@ -1583,12 +1583,12 @@ func TestPolicyForURL(t *testing.T) {
 
 	// Any host under the route prefix resolves to the host-agnostic
 	// policy: the admin purge path builds the key the data plane does.
-	pol := policyForURL(rs, "http://internal.example.com/product-page/p?x=1")
+	pol := policyForURL(rs, "http://internal.example.com/pages/p?x=1")
 	require.NotNil(t, pol)
-	k1 := cache.BuildKeyFromURL("http://internal.example.com/product-page/p?x=1", pol)
-	k2 := cache.BuildKeyFromURL("http://www.example.com/product-page/p?x=1", pol)
+	k1 := cache.BuildKeyFromURL("http://internal.example.com/pages/p?x=1", pol)
+	k2 := cache.BuildKeyFromURL("http://www.example.com/pages/p?x=1", pol)
 	require.Equal(t, k1, k2, "the resolved policy must be host-agnostic")
-	pol2 := policyForURL(rs, "http://www.example.com/product-page/p")
+	pol2 := policyForURL(rs, "http://www.example.com/pages/p")
 	require.NotNil(t, pol2)
 
 	// Same policy instance the handler serves with — not a recompile.
@@ -1599,12 +1599,12 @@ func TestPolicyForURL(t *testing.T) {
 	assert.Nil(t, policyForURL(rs, "http://example.com/other"))
 	assert.Nil(t, policyForURL(rs, "/relative"))
 	assert.Nil(t, policyForURL(rs, "ht\x00tp://bad"))
-	assert.Nil(t, policyForURL(nil, "http://example.com/product-page/p"))
+	assert.Nil(t, policyForURL(nil, "http://example.com/pages/p"))
 
 	// The resolved policy produces the shared key the data plane uses:
 	// two hosts, one key — the property admin purges rely on.
-	k3 := cache.BuildKeyFromURL("http://internal.example.com/product-page/p?x=1", pol)
-	k4 := cache.BuildKeyFromURL("http://public.example.com/product-page/p?x=1", pol)
+	k3 := cache.BuildKeyFromURL("http://internal.example.com/pages/p?x=1", pol)
+	k4 := cache.BuildKeyFromURL("http://public.example.com/pages/p?x=1", pol)
 	assert.Equal(t, k3, k4)
 }
 

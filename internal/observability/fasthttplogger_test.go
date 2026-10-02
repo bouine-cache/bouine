@@ -79,7 +79,7 @@ func TestFastHTTPLogger_NilLoggerResolvedToNoop(t *testing.T) {
 func TestFastHTTPClientLogger_Classification(t *testing.T) {
 	t.Parallel()
 	// The four shapes fasthttp's pipeline worker actually emits in
-	// production (prod-eu log export 2026-09-16), plus the mid-response
+	// production (production log export 2026-09-16), plus the mid-response
 	// variant. Expected levels follow AGENTS.md §9: routine teardown and
 	// retirement noise carry no operator action (Debug); a degraded peer
 	// (refused dial, timeout) does (Warn).
@@ -91,8 +91,8 @@ func TestFastHTTPClientLogger_Classification(t *testing.T) {
 		{"shutdown drain of a retired address", "peer address retired", "DEBUG"},
 		{"peer closed the connection", "EOF", "DEBUG"},
 		{"peer closed mid-response", "unexpected EOF", "DEBUG"},
-		{"write half of a closed socket", "write tcp 10.88.32.74:53124->10.88.24.67:9000: write: broken pipe", "DEBUG"},
-		{"peer down, refusing dials", "dial tcp 10.88.139.76:9000: connect: connection refused", "WARN"},
+		{"write half of a closed socket", "write tcp 10.0.1.2:53124->10.0.2.3:9000: write: broken pipe", "DEBUG"},
+		{"peer down, refusing dials", "dial tcp 10.0.3.4:9000: connect: connection refused", "WARN"},
 		{"peer RPC timeout", "fasthttp: timeout", "WARN"},
 		{"unknown transport error stays visible", "tls: handshake failure", "WARN"},
 	}
@@ -102,7 +102,7 @@ func TestFastHTTPClientLogger_Classification(t *testing.T) {
 			c := newCaptureLogger()
 			l := NewFastHTTPClientLogger(c, "cluster")
 
-			l.Printf(`error in PipelineClient(%q): %v`, "10.88.24.67:9000", tt.err)
+			l.Printf(`error in PipelineClient(%q): %v`, "10.0.2.3:9000", tt.err)
 
 			out := c.buf.String()
 			assert.Contains(t, out, "level="+tt.level)
@@ -129,6 +129,6 @@ func TestFastHTTPClientLogger_NilLoggerResolvedToNoop(t *testing.T) {
 	t.Parallel()
 	l := NewFastHTTPClientLogger(nil, "cluster")
 	require.NotPanics(t, func() {
-		l.Printf(`error in PipelineClient(%q): %v`, "10.88.24.67:9000", "EOF")
+		l.Printf(`error in PipelineClient(%q): %v`, "10.0.2.3:9000", "EOF")
 	})
 }

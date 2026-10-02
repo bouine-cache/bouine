@@ -187,7 +187,7 @@ func TestPeerFetchHandler_VaryKeyMismatchMiss(t *testing.T) {
 		Key:        key,
 		StatusCode: 200,
 		Body:       []byte("market=fr"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		VaryKey:    "frhash",
 	}
 	frObj.Header = header.NewMap(1)
@@ -210,7 +210,7 @@ func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
 		Key:        key,
 		StatusCode: 200,
 		Body:       []byte("market=fr"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		VaryKey:    "frhash",
 	}
 	frObj.Header = header.NewMap(1)
@@ -253,7 +253,7 @@ func TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion(t *testing.T) {
 }
 
 // TestPeerFetchHandler_ResolverBodyNeverServed closes the resolver-body
-// leak observed in preprod after the first cross-variant fix: a
+// leak observed in production after the first cross-variant fix: a
 // non-owner that misses locally peer-fetches the PRIMARY key with a
 // blank assertion (it has no local object to learn the Vary list from),
 // and the owner's only stored entry under that key is the resolver —
@@ -269,7 +269,7 @@ func TestPeerFetchHandler_ResolverBodyNeverServed(t *testing.T) {
 		Key:        key,
 		StatusCode: 200,
 		Body:       []byte("market=fr"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		VaryKey:    "",
 	}
 	resolverObj.Header = header.NewMap(1)

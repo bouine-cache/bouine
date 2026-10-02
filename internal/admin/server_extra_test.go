@@ -191,7 +191,7 @@ func TestClusterPeers(t *testing.T) {
 // recorded in the ops history the dashboard invalidation page renders.
 // Before this wiring only dashboard-issued invalidations were logged, so
 // a purge issued via POST /v1/purge by an external service (e.g.
-// cache-lifecycle) never appeared in the history.
+// an external invalidation service) never appeared in the history.
 func TestInvalidations_RecordedToOpsLog(t *testing.T) {
 	t.Parallel()
 	type entry struct{ op, arg, result string }

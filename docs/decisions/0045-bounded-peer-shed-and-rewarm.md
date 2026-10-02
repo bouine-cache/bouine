@@ -58,7 +58,7 @@ Three changes, all bounded and local:
    `HotConfig.BanTTL`, default 24h unchanged). RFC 9111 §4.4 exempts
    objects stored after the ban, so the TTL only bounds how long pre-ban
    copies keep being rejected — and the reaper + TTL expiry reclaim
-   those regardless. Cache-lifecycle surrogate invalidations are safe at
+   those regardless. External invalidation surrogate traffic are safe at
    minutes scale; the knob bounds the hit-ratio damage of an over-broad
    ban (a typo currently poisons the hit ratio for the full window).
    Validation: `>= 0` (0 = default), `>= 1s` when set.

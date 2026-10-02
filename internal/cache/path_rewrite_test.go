@@ -24,20 +24,20 @@ func TestRewriteURI_Matrix(t *testing.T) {
 		in       string
 		expected string
 	}{
-		{"nginx callback shape", `^/payment/orchestrator/callback/(.*)$`, "/scrooge/callback/$1",
-			"/payment/orchestrator/callback/payin123", "/scrooge/callback/payin123"},
-		{"nginx shape, nested tail", `^/payment/orchestrator/callback/(.*)$`, "/scrooge/callback/$1",
-			"/payment/orchestrator/callback/a/b/c", "/scrooge/callback/a/b/c"},
-		{"nginx shape, query preserved", `^/payment/orchestrator/callback/(.*)$`, "/scrooge/callback/$1",
-			"/payment/orchestrator/callback/x?sig=1&z=2", "/scrooge/callback/x?sig=1&z=2"},
-		{"query never matched", `^/payment(.*)$`, "/internal$1",
-			"/payment?x=/secret", "/internal?x=/secret"},
+		{"nginx callback shape", `^/public/webhook/(.*)$`, "/internal/webhook/$1",
+			"/public/webhook/payin123", "/internal/webhook/payin123"},
+		{"nginx shape, nested tail", `^/public/webhook/(.*)$`, "/internal/webhook/$1",
+			"/public/webhook/a/b/c", "/internal/webhook/a/b/c"},
+		{"nginx shape, query preserved", `^/public/webhook/(.*)$`, "/internal/webhook/$1",
+			"/public/webhook/x?sig=1&z=2", "/internal/webhook/x?sig=1&z=2"},
+		{"query never matched", `^/public(.*)$`, "/internal$1",
+			"/public?x=/internal", "/internal?x=/internal"},
 		{"query containing question mark kept whole", `^/a/(.*)$`, "/b/$1",
 			"/a/x?y=1?z=2", "/b/x?y=1?z=2"},
 		{"unanchored first match only", `/v1/`, "/v2/",
 			"/api/v1/a/v1/b", "/api/v2/a/v1/b"},
 		{"no match passes through", `^/other/`, "/x/",
-			"/payment/orchestrator/callback/y", "/payment/orchestrator/callback/y"},
+			"/public/webhook/y", "/public/webhook/y"},
 		{"no query input", `^/old/(.*)$`, "/new/$1",
 			"/old/file", "/new/file"},
 		{"exact path capture empty", `^/cb/?$`, "/root",
@@ -94,15 +94,15 @@ func TestRewriteURI_OutputCap(t *testing.T) {
 // SetRequestURIBytes and must not see later mutations of the source.
 func TestRewriteURI_NoAliasMutation(t *testing.T) {
 	t.Parallel()
-	rw := NewPathRewrite(`^/payment/(.*)$`, "/internal/$1")
-	src := []byte("/payment/orchestrator")
+	rw := NewPathRewrite(`^/public/(.*)$`, "/internal/$1")
+	src := []byte("/public/webhook")
 	out := rw.RewriteURI(src)
-	require.Equal(t, "/internal/orchestrator", string(out))
+	require.Equal(t, "/internal/webhook", string(out))
 	// Mutating the source after the rewrite must not change the result.
 	for i := range src {
 		src[i] = 'x'
 	}
-	assert.Equal(t, "/internal/orchestrator", string(out))
+	assert.Equal(t, "/internal/webhook", string(out))
 }
 
 // TestRewriteURI_PassThroughAliasesInput pins the cheap case: when no
@@ -131,13 +131,13 @@ func TestPathRewrite_String(t *testing.T) {
 // URI; no match leaves it untouched.
 func TestPathRewrite_Apply(t *testing.T) {
 	t.Parallel()
-	rw := NewPathRewrite(`^/cb/(.*)$`, "/scrooge/callback/$1")
+	rw := NewPathRewrite(`^/cb/(.*)$`, "/internal/webhook/$1")
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.SetRequestURI("/cb/payin?x=1")
 	rw.Apply(req)
-	assert.Equal(t, "/scrooge/callback/payin?x=1", string(req.RequestURI()))
+	assert.Equal(t, "/internal/webhook/payin?x=1", string(req.RequestURI()))
 
 	req2 := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req2)

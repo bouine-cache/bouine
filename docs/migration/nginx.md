@@ -17,7 +17,7 @@ This document maps NGINX `proxy_cache` directives to bouine config.
 | `proxy_cache_bypass $http_x_no_cache` | Request `Cache-Control: no-cache` | bouine respects RFC 9111 request directives. |
 | `proxy_no_cache $http_set_cookie` | `cache.cookies.allow_set_cookie: false` (default) | Responses with `Set-Cookie` not cached unless opt-in. |
 | `proxy_pass http://backend` | `upstream_pools[].targets: [backend:80]` | |
-| `rewrite ^/payment/orchestrator/callback/(.*)$ /scrooge/callback/$1 break;` | `routes[].request.path_rewrite: {match, replace}` | Regex path rewrite on the origin-bound request. Go RE2 (linear time, no ReDoS); first match replaced; query never matched or modified. Cache key keeps the public path. Mutually exclusive with `strip_prefix`. |
+| `rewrite ^/public/webhook/(.*)$ /internal/webhook/$1 break;` | `routes[].request.path_rewrite: {match, replace}` | Regex path rewrite on the origin-bound request. Go RE2 (linear time, no ReDoS); first match replaced; query never matched or modified. Cache key keeps the public path. Mutually exclusive with `strip_prefix`. |
 | `proxy_pass http://backend/internal/;` (URI rewriting via trailing proxy_pass path) | `routes[].request.strip_prefix: /public` | Only for pure prefix removal; for any other shape use `path_rewrite`. |
 | `proxy_set_header Host $host` | (automatic) | bouine forwards `Host` from the client. |
 | `proxy_next_upstream error timeout` | `health.passive.consecutive_5xx: 5` | Passive health ejection replaces retry-on-error. |
@@ -80,24 +80,24 @@ routes:
 
 NGINX:
 ```nginx
-location ~ ^/payment/orchestrator/callback/* {
-    rewrite ^/payment/orchestrator/callback/(.*)$ /scrooge/callback/$1 break;
-    proxy_pass http://payment-orchestrator:8080;
+location ~ ^/public/webhook/* {
+    rewrite ^/public/webhook/(.*)$ /internal/webhook/$1 break;
+    proxy_pass http://webhook-service:8080;
 }
 ```
 
 bouine:
 ```yaml
 upstream_pools:
-  - name: payment-orchestrator
-    targets: [payment-orchestrator:8080]
+  - name: webhook-service
+    targets: [webhook-service:8080]
 routes:
-  - match: { path_prefix: /payment/orchestrator/callback }
-    pool: payment-orchestrator
+  - match: { path_prefix: /public/webhook }
+    pool: webhook-service
     request:
       path_rewrite:
-        match: ^/payment/orchestrator/callback/(.*)$
-        replace: /scrooge/callback/$1
+        match: ^/public/webhook/(.*)$
+        replace: /internal/webhook/$1
 ```
 
 The pattern is Go RE2 (linear time — no ReDoS; Go rejects repeat counts

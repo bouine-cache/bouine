@@ -290,7 +290,7 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 // reqHeaderMapFromRaw copies a RawRequest's headers into a header.Map —
 // the input format BuildVaryKey (and therefore the wire VaryKey peers
 // compute) is defined over. Keys are interned via header.InternKey, the
-// canonicalizing path headerFromCtx uses, so a wire-typed "bm-market:"
+// canonicalizing path headerFromCtx uses, so a wire-typed "x-region:"
 // looks up the same as the slow path's fasthttp-normalized entry. Values
 // are right-trimmed of OWS because fasthttp's headerScanner trims both
 // ends while parseHeaders only skips leading — without this, a value

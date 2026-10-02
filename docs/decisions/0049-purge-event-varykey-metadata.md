@@ -31,8 +31,8 @@ Three facts make variant-scoped delete wrong, not merely unnecessary:
    `Key.WithVary(xxhash(variant-headers))`. The two canonicalizations
    differ: the store-key path lowercases header *values*
    (`normalizeHeaderValue`), the assertion path keeps case
-   (`normaliseListHeader` preserves `BM-Market: FR` verbatim). Verified
-   by direct hash comparison: for `Vary: BM-Market` with value `FR`
+   (`normaliseListHeader` preserves `X-Region: FR` verbatim). Verified
+   by direct hash comparison: for `Vary: X-Region` with value `FR`
    the store-key hash and the assertion hash disagree. A receiver
    that XORed the assertion into `evt.Key` would build a key that
    matches no stored entry — the purge would silently no-op and stale

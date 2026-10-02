@@ -36,12 +36,12 @@ func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 			_, _ = ctx.WriteString("miss-body")
 		}},
 		Store:     storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
-		PoolName:  "product-page",
+		PoolName:  "pages-origin",
 		RouteName: "products",
 	})
 	pipeline := tracing.FastHTTPMiddleware("bouine.pipeline", h.ServeRequest)
 
-	rctx := testCtx("GET", "http://example.com/product-page/products/42/pickers")
+	rctx := testCtx("GET", "http://example.com/pages/products/42/pickers")
 	pipeline(rctx)
 	require.Equal(t, "MISS", respHeader(rctx, header.XCache))
 
@@ -55,9 +55,9 @@ func TestMissOriginSpanIsChildOfPipeline(t *testing.T) {
 	assert.Equal(t, pipe.SpanContext().SpanID(), origin.Parent().SpanID(),
 		"origin span must be a child of bouine.pipeline")
 	assert.Equal(t, "GET", sink.Attr(origin, "http.method"))
-	assert.Equal(t, "/product-page/products/42/pickers", sink.Attr(origin, "http.path"),
+	assert.Equal(t, "/pages/products/42/pickers", sink.Attr(origin, "http.path"),
 		"slow fetches must be filterable by route path")
-	assert.Equal(t, "product-page", sink.Attr(origin, "upstream_pool"))
+	assert.Equal(t, "pages-origin", sink.Attr(origin, "upstream_pool"))
 	assert.Equal(t, "products", sink.Attr(origin, "http.route"),
 		"slow fetches must be filterable by the bounded route label")
 }

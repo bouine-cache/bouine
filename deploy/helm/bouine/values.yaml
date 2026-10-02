@@ -102,8 +102,8 @@ config:
   #       request:
   #         header_remove: [X-Client-Trace]
   #         path_rewrite:
-  #           match: ^/payment/orchestrator/callback/(.*)$
-  #           replace: /scrooge/callback/$1
+  #           match: ^/public/webhook/(.*)$
+  #           replace: /internal/webhook/$1
   #       response:
   #         header_set:
   #           X-Content-Type-Options: nosniff

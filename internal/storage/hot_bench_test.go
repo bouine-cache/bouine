@@ -235,7 +235,7 @@ func BenchmarkHotStore_Ban_Steady(b *testing.B) {
 
 // BenchmarkHotStore_Ban_SaturatedList measures ban registration against
 // a list pre-filled to banListCap — the production steady state, where
-// cache-lifecycle registers 100+ surrogate bans/s over a list that sits
+// an external invalidation service registers 100+ surrogate bans/s over a list that sits
 // at the cap. The refresh path (re-issued tag) and the evict-append
 // path (distinct tag rotating through a fixed set, keeping the list at
 // cap) are measured separately.

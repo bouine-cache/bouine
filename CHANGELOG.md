@@ -10,6 +10,21 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unsafe methods (POST/PUT/DELETE) can never share an in-flight
+  origin fetch** (ADR-0052, extended). They never did in practice —
+  the dispatcher routes them to the invalidating proxy, which fetches
+  directly — but that guarantee was purely structural: one dispatcher
+  refactor away from leaking a POST into the miss pipeline, where the
+  flight key is the cache key (method included) and two identical
+  POSTs would merge onto one origin mutation, silently dropping the
+  follower's body. The request-collapsing gate (`collapseDenied`) now
+  denies every method outside the safe set (GET, HEAD, OPTIONS) in
+  addition to `Authorization`-bearing requests, at every flight site.
+  Zero behavioral change for GET/HEAD/OPTIONS traffic; zero added
+  allocations on the anonymous miss path.
+
 ## [0.5.25] - 2026-09-30
 
 ### Added

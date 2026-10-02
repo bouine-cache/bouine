@@ -1,10 +1,10 @@
-# ADR-0052: Never collapse requests carrying Authorization
+# ADR-0052: Never collapse authorized or unsafe-method requests
 
 - **Status**: Accepted
-- **Date**: 2026-09-30
+- **Date**: 2026-09-30 (method extension: 2026-10-01)
 - **Deciders**: @bouine-core
 - **Phase**: cache key policy
-- **References**: RFC 9111 §3.5, §5.2.2.1; threat-model T06, T07; ADR-0046 (include_headers union); `internal/cache/collapse.go`
+- **References**: RFC 9111 §3.5, §5.2.2.1, §4.4; threat-model T06, T07; ADR-0046 (include_headers union); `internal/cache/collapse.go`
 
 ## Context and Problem Statement
 
@@ -48,6 +48,23 @@ the request has an `Authorization` header; every flight site
 `doShedRefill`) fetches outside the shared flight when the gate trips.
 Anonymous requests are untouched: their flight keys, collapse behavior,
 and allocation profile are bit-for-bit identical to before.
+
+**Extended (2026-10-01): unsafe methods never share a flight either.**
+`collapseDenied(ri)` is now also true for any method outside the safe
+set (GET, HEAD, OPTIONS — the complement of `isInvalidating`, RFC 9111
+§4.4's invalidating-method definition). This is defense-in-depth, not
+a behavior change: unsafe methods never reach the flight sites today
+because `ServeRequest` dispatches them to `invalidateAndProxy`, which
+fetches directly. But that guarantee is purely structural — one
+dispatcher refactor away from leaking a POST into the miss pipeline —
+and the flight key is the cache key (method included), so two
+identical POSTs would merge onto one origin mutation and silently drop
+the follower's body. The gate makes the invariant local to the flight
+sites: whatever the dispatcher does, a mutation is never parked on
+another caller's flight. The method check runs before the
+Authorization lookup and adds zero allocations on the anonymous GET
+miss path (both forms of `RequestInfo.Method` are checked without
+materializing a string).
 
 The rule is deliberately stricter than identity-equality: it does not
 attempt to prove two callers interchangeable by comparing credentials.

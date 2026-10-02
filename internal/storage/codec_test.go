@@ -120,6 +120,172 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		assert.NotNilf(t, err, "case %s", name)
 	}
 }
+
+// TestEncodeDecodeRoundTripTransientFields pins codec v6 behavior: the
+// transient fields the v5 wire format dropped (CacheControl, OriginAge,
+// and the pre-computed gate/serialization flags) must survive the round
+// trip. They were re-derived approximations before, and the lost
+// RespNoCache/RespMustRevalidate gate silently disabled RFC 9111 §5.2.2
+// revalidation for every peer-put-stored object (see ADR-0053).
+func TestEncodeDecodeRoundTripTransientFields(t *testing.T) {
+	t.Parallel()
+	orig := &api.Object{
+		Key:        testkey.Key(7),
+		StatusCode: 200,
+		Header: headerMap(
+			header.Date, "Mon, 02 Jan 2006 15:04:05 GMT",
+			header.CacheControl, "public, max-age=600",
+			header.Age, "30",
+			header.Connection, "keep-alive",
+		),
+		Body:               []byte("transient"),
+		BodySize:           10,
+		StoredAt:           time.Unix(1_700_000_000, 0).UTC(),
+		TTL:                time.Minute,
+		CacheControl:       "public, max-age=600",
+		OriginAge:          30 * time.Second,
+		HasDate:            true,
+		RespNoCache:        true,
+		RespMustRevalidate: true,
+		HasConnectionList:  true,
+		HasNoCacheFields:   false,
+	}
+
+	got, err := decodeObject(encodeObject(orig))
+	require.NoError(t, err, "decode")
+	assert.Equal(t, orig.CacheControl, got.CacheControl, "CacheControl must round-trip (v6)")
+	assert.Equal(t, orig.OriginAge, got.OriginAge, "OriginAge must round-trip (v6)")
+	assert.Equal(t, orig.HasDate, got.HasDate, "HasDate must round-trip (v6)")
+	assert.Equal(t, orig.RespNoCache, got.RespNoCache, "RespNoCache must round-trip (v6)")
+	assert.Equal(t, orig.RespMustRevalidate, got.RespMustRevalidate, "RespMustRevalidate must round-trip (v6)")
+	assert.Equal(t, orig.HasConnectionList, got.HasConnectionList, "HasConnectionList must round-trip (v6)")
+	assert.Equal(t, orig.HasNoCacheFields, got.HasNoCacheFields, "HasNoCacheFields must round-trip (v6)")
+}
+
+// encodeObjectV5 mirrors the pre-v6 wire format (v5 = v6 minus the
+// transient-field block after Pool). Used to prove decodeObject's
+// rolling-deploy backfill of HasDate and the gate flags on blobs
+// written by an older build (ADR-0053).
+func encodeObjectV5(obj *api.Object) []byte {
+	buf := make([]byte, 0, len(obj.Body)+256)
+	buf = append(buf, objCodecVersionV5)
+	buf = append(buf, obj.Key[:]...)
+	buf = appendString(buf, obj.VaryKey)
+	buf = appendString(buf, obj.VaryValue)
+	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode))
+	buf = binary.AppendVarint(buf, int64(obj.TTL))
+	buf = binary.AppendVarint(buf, int64(obj.StaleWhileRevalidate))
+	buf = binary.AppendVarint(buf, int64(obj.StaleIfError))
+	buf = appendTime(buf, obj.StoredAt)
+	buf = appendTime(buf, obj.LastModified)
+	buf = binary.AppendUvarint(buf, obj.Hits)
+	buf = appendString(buf, obj.ETag)
+	if obj.KeepGrace {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	buf = appendString(buf, obj.Pool)
+	buf = binary.AppendUvarint(buf, uint64(obj.Header.Len()))
+	obj.Header.Range(func(k, v string) bool {
+		buf = appendString(buf, k)
+		buf = appendString(buf, v)
+		return true
+	})
+	buf = binary.AppendUvarint(buf, uint64(len(obj.SurrogateKeys)))
+	for _, sk := range obj.SurrogateKeys {
+		buf = appendString(buf, sk)
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(obj.Body)))
+	buf = append(buf, obj.Body...)
+	return buf
+}
+
+// TestDecodeV5BlobBackfillsHasDate covers warm-tier and peer-wire blobs
+// written by the v5 codec during a rolling deploy: they carry no flags
+// byte, so decodeObject must backfill HasDate from the header map. The
+// stored Date was served TWICE on the fast path otherwise — once from
+// the static head (serializeHead keeps Date) and once synthesized by
+// appendDynamicHeaders — which doorman logged as "duplicate header" at
+// ~100 warnings/hour in prod-eu.
+func TestDecodeV5BlobBackfillsHasDate(t *testing.T) {
+	t.Parallel()
+	obj := &api.Object{
+		Key:        testkey.Key(9),
+		StatusCode: 200,
+		Header: headerMap(
+			header.Date, "Fri, 02 Oct 2026 13:45:11 GMT",
+			header.CacheControl, "public, max-age=600",
+		),
+		Body:     []byte("v5 blob"),
+		BodySize: 8,
+		StoredAt: time.Unix(1_760_000_000, 0).UTC(),
+		TTL:      time.Minute,
+	}
+
+	got, err := decodeObject(encodeObjectV5(obj))
+	require.NoError(t, err, "decode v5 blob")
+	assert.True(t, got.HasDate, "v5 blob with a stored Date must backfill HasDate=true")
+	assert.False(t, got.RespNoCache, "v5 blob: max-age response must backfill RespNoCache=false")
+	assert.False(t, got.RespMustRevalidate, "v5 blob: max-age response must backfill RespMustRevalidate=false")
+	assert.Empty(t, got.CacheControl, "v5 blob: CacheControl is re-derived by callers, not decodeObject")
+
+	// The no-Date negative case must stay false — backfill must not
+	// blanket-set the flag for objects whose origin sent no Date.
+	noDate := &api.Object{
+		Key:        testkey.Key(10),
+		StatusCode: 200,
+		Header:     headerMap(header.ContentType, "text/html"),
+		Body:       []byte("no date"),
+		BodySize:   8,
+		StoredAt:   time.Unix(1_760_000_000, 0).UTC(),
+		TTL:        time.Minute,
+	}
+	got2, err := decodeObject(encodeObjectV5(noDate))
+	require.NoError(t, err, "decode v5 blob without Date")
+	assert.False(t, got2.HasDate, "v5 blob without a stored Date must decode HasDate=false")
+}
+
+// TestDecodeV5BlobBackfillsGateFlags proves the RFC 9111 §5.2.2 gate is
+// restored for pre-v6 blobs: a no-cache response decodes with
+// RespNoCache set, so evaluate() revalidates instead of serving an
+// unvalidated fresh hit — the conformance violation the v5 wire format
+// caused on every peer-put-stored object.
+func TestDecodeV5BlobBackfillsGateFlags(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		cacheControl    string
+		wantNoCache     bool
+		wantMustRevalid bool
+		wantNoCacheList bool
+	}{
+		{"bare no-cache", "no-cache", true, false, false},
+		{"must-revalidate", "max-age=600, must-revalidate", false, true, false},
+		{"proxy-revalidate", "max-age=600, proxy-revalidate", false, true, false},
+		{"no-cache field list", `max-age=600, no-cache="Set-Cookie"`, false, false, true},
+		{"plain max-age", "public, max-age=600", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			obj := &api.Object{
+				Key:        testkey.Key(11),
+				StatusCode: 200,
+				Header:     headerMap(header.CacheControl, tc.cacheControl),
+				Body:       []byte("x"),
+				BodySize:   1,
+				StoredAt:   time.Unix(1_760_000_000, 0).UTC(),
+				TTL:        time.Minute,
+			}
+			got, err := decodeObject(encodeObjectV5(obj))
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantNoCache, got.RespNoCache, "RespNoCache")
+			assert.Equal(t, tc.wantMustRevalid, got.RespMustRevalidate, "RespMustRevalidate")
+			assert.Equal(t, tc.wantNoCacheList, got.HasNoCacheFields, "HasNoCacheFields")
+		})
+	}
+}
 func TestEncodeDecodeObject_RoundTrip(t *testing.T) {
 	t.Parallel()
 	hm := header.NewMap(2)

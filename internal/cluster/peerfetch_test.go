@@ -357,6 +357,46 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 	assert.Equal(t, "origin-main", stored.Pool, "peer put must preserve Pool on the owner")
 }
 
+// TestPeerPutHandler_PreservesTransientFields pins the duplicate-Date
+// fix end to end at the wire boundary (ADR-0053): a non-owner forwards a
+// freshly origin-fetched object carrying Date and no-cache gate flags;
+// the owner's decode must restore them, or every subsequent hit serves
+// two Date lines (the doorman "duplicate header" storm) and a no-cache
+// response degrades into an unvalidated fresh hit.
+func TestPeerPutHandler_PreservesTransientFields(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil)
+	hm := header.NewMap(4)
+	hm.Set(header.Date, "Fri, 02 Oct 2026 13:45:11 GMT")
+	hm.Set(header.CacheControl, "no-cache")
+	hm.Set(header.ContentType, "text/html")
+	obj := &api.Object{
+		Key:                testkey.Key(43),
+		StatusCode:         200,
+		Header:             hm,
+		Body:               []byte("origin fill"),
+		BodySize:           11,
+		TTL:                60 * time.Second,
+		StoredAt:           time.Now(),
+		CacheControl:       "no-cache",
+		OriginAge:          12 * time.Second,
+		HasDate:            true,
+		RespNoCache:        true,
+		RespMustRevalidate: false,
+	}
+	encoded := storage.EncodeObject(obj)
+	ctx := postPut(t, h, encoded, "POST")
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.True(t, stored.HasDate, "stored Date must survive peer put (else hits synthesize a duplicate Date)")
+	assert.True(t, stored.RespNoCache, "no-cache gate must survive peer put (else hits skip revalidation)")
+	assert.Equal(t, obj.CacheControl, stored.CacheControl, "pre-merged CacheControl must survive peer put")
+	assert.Equal(t, obj.OriginAge, stored.OriginAge, "OriginAge must survive peer put")
+}
+
 func TestPeerPutHandler_OnStoreCallback(t *testing.T) {
 	t.Parallel()
 	store := &stubStore{}

@@ -49,10 +49,10 @@ func TestFastPathPoolAttribution(t *testing.T) {
 			// derivation never runs for hand-built configs.
 			Storage: config.Storage{HotMaxBytes: 64 << 20},
 			UpstreamPools: []config.UpstreamPool{
-				{Name: "review-service", Targets: []string{originSrv.Addr}},
+				{Name: "reviews-pool", Targets: []string{originSrv.Addr}},
 			},
 			Routes: []config.Route{
-				{Name: "api", Pool: "review-service", Cache: config.RouteCache{TTLDefault: 60 * time.Second}},
+				{Name: "api", Pool: "reviews-pool", Cache: config.RouteCache{TTLDefault: 60 * time.Second}},
 			},
 			Experimental: config.ExperimentalConfig{H1FastPath: true},
 		},
@@ -102,7 +102,7 @@ func TestFastPathPoolAttribution(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/api/x", Host: addr, Scheme: "http"}
 	fResp, ok := fp.TryHit(req, time.Now())
 	require.True(t, ok, "per-route fast path must hit after warm-up")
-	assert.Equal(t, "review-service", fResp.Pool,
+	assert.Equal(t, "reviews-pool", fResp.Pool,
 		"fast-path hits must carry the route's configured upstream_pool (issue #696)")
 	assert.Equal(t, "HIT", fResp.CacheResult)
 	fp.Release(fResp)
@@ -112,7 +112,7 @@ func TestFastPathPoolAttribution(t *testing.T) {
 	rfp := server.NewRoutedFastPath(rs.router, fp)
 	fResp, ok = rfp.TryHit(req, time.Now())
 	require.True(t, ok)
-	assert.Equal(t, "review-service", fResp.Pool)
+	assert.Equal(t, "reviews-pool", fResp.Pool)
 	assert.Equal(t, "HIT", fResp.CacheResult)
 	rfp.Release(fResp)
 }
@@ -125,9 +125,9 @@ func TestFastPathPoolAttribution_Metrics(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := observability.NewDataPlaneMetrics(reg)
-	m.PreResolveRoutes([]string{"review-service"})
+	m.PreResolveRoutes([]string{"reviews-pool"})
 
-	m.RecordHit("review-service", "HIT", "cache", 200, 13, 500*time.Microsecond)
+	m.RecordHit("reviews-pool", "HIT", "cache", 200, 13, 500*time.Microsecond)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -146,13 +146,13 @@ func TestFastPathPoolAttribution_Metrics(t *testing.T) {
 					result = lp.GetValue()
 				}
 			}
-			if pool == "review-service" && result == "HIT" {
+			if pool == "reviews-pool" && result == "HIT" {
 				found = true
 			}
 			assert.NotEqual(t, "_default", pool, "hits must not collapse into _default")
 		}
 	}
-	assert.True(t, found, "review-service HIT series must exist")
+	assert.True(t, found, "reviews-pool HIT series must exist")
 }
 
 // TestFastPathPoolAttribution_NoneEnabledRoute pins that a deployment

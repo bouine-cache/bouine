@@ -13,12 +13,12 @@ import (
 // BenchmarkPathRewriteURI measures the per-call cost of the regex
 // rewrite on the miss path (the only path it runs on): query split,
 // FindSubmatchIndex, Expand with one capture group, query re-append.
-// Two variants: a matching request (the production payment-callback
+// Two variants: a matching request (the production webhook-callback
 // shape) and a non-matching one (the cheap FindSubmatchIndex nil
 // return).
 func BenchmarkPathRewriteURI(b *testing.B) {
-	rw := NewPathRewrite(`^/payment/orchestrator/callback/(.*)$`, "/scrooge/callback/$1")
-	uri := []byte("/payment/orchestrator/callback/payin_0123456789?sig=abc")
+	rw := NewPathRewrite(`^/public/webhook/(.*)$`, "/internal/webhook/$1")
+	uri := []byte("/public/webhook/payin_0123456789?sig=abc")
 	nomatch := []byte("/unrelated/path/0123456789?sig=abc")
 
 	b.Run("match", func(b *testing.B) {
@@ -62,10 +62,10 @@ func BenchmarkPathRewrite_MissWithRewrite(b *testing.B) {
 		Upstream:    upstream,
 		FastClient:  &benchFastClient{handler: upstream},
 		Store:       store,
-		PathRewrite: NewPathRewrite(`^/payment/orchestrator/callback/(.*)$`, "/scrooge/callback/$1"),
+		PathRewrite: NewPathRewrite(`^/public/webhook/(.*)$`, "/internal/webhook/$1"),
 	})
 
-	base := "http://bench.local/payment/orchestrator/callback/"
+	base := "http://bench.local/public/webhook/"
 
 	b.ResetTimer()
 	b.ReportAllocs()

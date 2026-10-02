@@ -240,7 +240,7 @@ func FuzzEffectiveVary(f *testing.F) {
 	f.Add("Accept-Encoding", "Accept-Language")
 	f.Add("", "Accept-Language")
 	f.Add("Accept-Language", "accept-language")
-	f.Add("Accept-Encoding, Accept-Language", "BM-Market, Accept-Language")
+	f.Add("Accept-Encoding, Accept-Language", "X-Region, Accept-Language")
 	f.Add(" Vary-Case ,  x-lower ", "X-Geo-Region")
 	f.Add("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p", "q,r")
 

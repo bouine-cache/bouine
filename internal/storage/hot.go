@@ -137,7 +137,7 @@ func patternOf(expr api.BanExpr) banPattern {
 // blast radius of an over-broad ban (a typo currently poisons the hit
 // ratio for the full window) via config invalidation.ban_ttl. The
 // reaper + TTL expiry reclaim pre-ban copies and refills are exempt, so
-// a minutes-scale window is sufficient for cache-lifecycle surrogate
+// a minutes-scale window is sufficient for external invalidation surrogate
 // invalidations — the default stays conservative (24h) for behavioral
 // compatibility (ADR-0045).
 const defaultBanTTL = 24 * time.Hour
@@ -331,7 +331,7 @@ type HotConfig struct {
 	// reaper prunes it. Zero applies the built-in default (24 h). A
 	// shorter window bounds the blast radius of an over-broad ban: the
 	// reaper + TTL expiry reclaim pre-ban copies and refills are exempt,
-	// so cache-lifecycle surrogate invalidations need only minutes.
+	// so external invalidation surrogate invalidations need only minutes.
 	BanTTL time.Duration
 	// Slab enables the mmap'd slab allocator for body bytes. When
 	// true, bodies are allocated from mmap'd regions instead of Go
@@ -834,7 +834,7 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	// tagged entries — all of that work is redundant with the lazy
 	// check, and its lock holds stall the hit path during ban storms
 	// (measured: ~2.7 ms per scan over ~500K entries, shard write
-	// lock held throughout). cache-lifecycle invalidations are 100%
+	// lock held throughout). external invalidation traffic are 100%
 	// surrogate-key bans, so this skips the scan for the entire
 	// production storm workload. Host/path bans and multi-condition
 	// (opaque) bans keep the coalesced scan below.

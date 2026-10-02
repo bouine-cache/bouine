@@ -22,11 +22,10 @@ is not storage — no entry is written, the follower attaches to a live
 response stream — so nothing stopped an authorized request from
 receiving a *different* caller's authorized response.
 
-This was not hypothetical. In production (2026-09-29, the
-badoom3-merchants funnel behind Back Market's doorman), a backend
-service issued one request per merchant with a byte-identical
+This was not hypothetical. In production, a backend
+service issued one request per tenant with a byte-identical
 URI+Host and a shared service JWT in `Authorization`, differing only
-in a tenant-selecting custom header (`X-BM-Merchant-Id`). The origin
+in a tenant-selecting custom header. The origin
 selects the tenant from that header; the cache key did not include it.
 Concurrent per-tenant requests collapsed onto one leader's fetch, and
 every follower received the leader's tenant's data — a cross-tenant

@@ -16,7 +16,7 @@ import (
 
 // TestAdmin_PropagatesTraceContext verifies the admin server joins the
 // incoming W3C trace: the span started for POST /v1/ban inherits the
-// traceparent sent by the invalidation caller (cache-lifecycle).
+// traceparent sent by the invalidation caller.
 func TestAdmin_PropagatesTraceContext(t *testing.T) {
 	rec := &tracingtest.SpanRecorder{}
 	setupTracingForTest(t, rec)

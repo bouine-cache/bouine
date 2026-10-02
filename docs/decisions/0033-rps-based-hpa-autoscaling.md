@@ -28,7 +28,7 @@ CPU side effects.
 
 ## Decision Drivers
 
-- Prod-eu HPA flapped between 3–10 pods over 3 days on ~225 RPS
+- In one production environment the HPA flapped between 3–10 pods over 3 days on ~225 RPS
 - Hit rate dropped from 64% to 31% partly due to pod churn
 - CPU is a noisy proxy for cache load
 
@@ -37,7 +37,7 @@ CPU side effects.
 ### Option 1: Keep CPU-only, tune thresholds
 
 Raise `averageValue` and add scale-up stabilization. Already done as
-an immediate fix (bouine-config PR #147), but CPU remains a noisy
+an immediate fix (deployment-config PR #147), but CPU remains a noisy
 signal.
 
 ### Option 2: Add RPS-based Pods custom metric

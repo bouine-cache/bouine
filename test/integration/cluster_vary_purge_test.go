@@ -42,7 +42,7 @@ func TestStrong_PurgeVariantIsolation(t *testing.T) {
 	fill := func(n int, lang string) *driver.Response {
 		return s.GetWithHostAndHeaders(t, n, path, driver.CrossNodeHost, map[string]string{
 			"Accept-Language": lang,
-			"BM-Market":       "FR",
+			"X-Region":        "FR",
 		})
 	}
 	purgeURL := "http://" + driver.CrossNodeHost + path

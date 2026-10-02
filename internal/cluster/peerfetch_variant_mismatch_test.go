@@ -48,7 +48,7 @@ func TestPeerFetchHandler_VariantMismatchMetric(t *testing.T) {
 		Key:        key,
 		StatusCode: 200,
 		Body:       []byte("market=fr"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		VaryKey:    "frhash",
 	}
 	frObj.Header = header.NewMap(1)
@@ -67,7 +67,7 @@ func TestPeerFetchHandler_VariantMismatchMetric(t *testing.T) {
 		Key:        testkey.Key(12),
 		StatusCode: 200,
 		Body:       []byte("resolver"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 	}
 	resolver.Header = header.NewMap(1)
 	resolver.Header.AppendEntry("Cache-Control", "max-age=60")
@@ -91,7 +91,7 @@ func TestPeerFetchHandler_VariantMismatchMetricNil(t *testing.T) {
 		Key:        key,
 		StatusCode: 200,
 		Body:       []byte("market=fr"),
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		VaryKey:    "frhash",
 	}
 	frObj.Header = header.NewMap(1)

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestStrong_MultiLineVaryPeerResolverLeak replays the exact preprod
+// TestStrong_MultiLineVaryPeerResolverLeak replays the exact production
 // flow: the FIRST request for a fresh URL lands on a non-owner (here:
 // node 1). Its local lookup misses, so it peer-fetches the PRIMARY key
 // with a blank assertion. The owner (whoever owns the primary) must
@@ -25,7 +25,7 @@ func TestStrong_MultiLineVaryPeerResolverLeak(t *testing.T) {
 	path := "/vary-multiline?x=leak"
 	resp := s.GetWithHeaders(t, 0, path, map[string]string{
 		"Accept-Language": "fr-FR,fr;q=0.9",
-		"BM-Market":       "FR",
+		"X-Region":        "FR",
 	})
 	require.Contains(t, string(resp.Body), "lang=fr-FR")
 
@@ -41,7 +41,7 @@ func TestStrong_MultiLineVaryPeerResolverLeak(t *testing.T) {
 		for _, n := range s.AliveNodes() {
 			resp := s.GetWithHeaders(t, n, path, map[string]string{
 				"Accept-Language": lang,
-				"BM-Market":       "FR",
+				"X-Region":        "FR",
 			})
 			body := string(resp.Body)
 			want := "lang=" + strings.SplitN(lang, ",", 2)[0]

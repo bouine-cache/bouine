@@ -215,7 +215,7 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 		top = s.rateLimitMiddleware(limited, s.cfg.RateLimitPerSecond)
 	}
 	// Outermost: OTel server span. Extracts the W3C traceparent the
-	// invalidation caller (cache-lifecycle) propagates on /v1/ban and
+	// invalidation caller propagates on /v1/ban and
 	// /v1/refresh, joining the platform trace into bouine. Skipped for the
 	// dashboard subtree, which has its own handler below.
 	traced := tracing.FastHTTPMiddleware("bouine.admin", top)

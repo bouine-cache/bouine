@@ -657,8 +657,8 @@ func varyContainsStarBytes(vary []byte) bool {
 // lines is equivalent to one comma-joined value. The variant key and
 // the refresh registry must see every field name — Get (first line
 // only) silently dropped the later lines and collapsed distinct
-// variants (e.g. "Vary: Accept-Encoding" + "Vary: BM-Market" stored a
-// key that ignored BM-Market, serving one market's body to another).
+// variants (e.g. "Vary: Accept-Encoding" + "Vary: X-Region" stored a
+// key that ignored X-Region, serving one market's body to another).
 // Single-line Vary returns the stored value directly.
 func joinedVary(h header.Map) string {
 	return h.GetAll(header.Vary)

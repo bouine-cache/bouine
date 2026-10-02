@@ -13,7 +13,7 @@ import (
 
 // bigHeaderHandler returns a fasthttp.RequestHandler emitting a single
 // Cache-Tag header whose value is headerLen bytes, mirroring
-// product-page's /compare/ responses: one header carrying one product
+// pages-origin's /compare/ responses: one header carrying one product
 // UUID per variant, ~4-5 KB in total. fasthttp's default client
 // ReadBufferSize is 4096, so a response header block larger than that
 // fails to parse (ErrSmallBuffer) and the fetch surfaces as a 502 after
@@ -22,7 +22,7 @@ func bigHeaderHandler(headerLen int) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		var sb strings.Builder
 		for sb.Len() < headerLen {
-			fmt.Fprintf(&sb, "prod-eu-%08d,", ctx.ID())
+			fmt.Fprintf(&sb, "production-%08d,", ctx.ID())
 		}
 		value := sb.String()
 		ctx.Response.Header.Set("Cache-Tag", value[:headerLen])
@@ -52,7 +52,7 @@ func bigHeaderOrigin(t *testing.T, headerLen int) string {
 // TestPool_FetchesOversizedResponseHeaders guards the origin client's
 // ReadBufferSize against fasthttp's 4 KiB default: an origin response
 // whose header block exceeds it must fetch successfully instead of
-// failing header parse (prod-eu /product-page/compare/* 502s caused by
+// failing header parse (production /pages/compare/* 502s caused by
 // a ~4 KB Cache-Tag header).
 func TestPool_FetchesOversizedResponseHeaders(t *testing.T) {
 	t.Parallel()

@@ -86,9 +86,9 @@ func TestParseMemberlistLine(t *testing.T) {
 		},
 		{
 			name:    "info with prefix",
-			line:    "2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed",
+			line:    "2026/07/05 09:37:37 [INFO] memberlist: Marking node peer-b as failed",
 			wantLvl: "INFO",
-			wantMsg: "Marking node bouine-2 as failed",
+			wantMsg: "Marking node peer-b as failed",
 		},
 		{
 			name:    "no level token falls back to info",
@@ -163,7 +163,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"2026/07/05 09:37:34 [WARN] memberlist: Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured\n",
 		"2026/07/05 09:37:35 [ERR] memberlist: Failed to encode message for broadcast: eof\n",
 		"2026/07/05 09:37:36 [DEBUG] memberlist: Using dynamic bind port 42321\n",
-		"2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed\n",
+		"2026/07/05 09:37:37 [INFO] memberlist: Marking node peer-b as failed\n",
 	}
 	for _, l := range lines {
 		_, err := a.Write([]byte(l))
@@ -178,7 +178,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured",
 		"Failed to encode message for broadcast: eof",
 		"Using dynamic bind port 42321",
-		"Marking node bouine-2 as failed",
+		"Marking node peer-b as failed",
 	}
 	for i, rec := range records {
 		assert.Equal(t, wantLevels[i], rec["level"])

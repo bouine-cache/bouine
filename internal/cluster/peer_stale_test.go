@@ -250,7 +250,7 @@ func TestPeerFetcher_PutRespectsBlacklist(t *testing.T) {
 // ---- stale PipelineClient retirement ----
 
 // TestPeerFetcher_RetireAddress_ParksDial covers the residual v0.5.17
-// defect observed in prod-eu: after a rolling restart, fasthttp's
+// defect observed in production: after a rolling restart, fasthttp's
 // pipeline worker for a dead peer address re-dials it forever (its
 // restart loop has no exit on dial failure and PipelineClient has no
 // Close). RetireAddress must evict the client and park its dial: no
@@ -400,7 +400,7 @@ func TestCluster_PeerAddressChange_RetiresOldAddress(t *testing.T) {
 		"only the address replaced by a restart must be retired, an unchanged re-add must not")
 }
 
-// TestCluster_ReconcilePrune_RetiresAddress reproduces the prod-eu
+// TestCluster_ReconcilePrune_RetiresAddress reproduces the production
 // scenario where a peer dies without a delivered NotifyLeave and the
 // reconcile pass prunes it: the pruned peer's address must reach the
 // retire callback so the fetcher evicts its stale PipelineClient. (The
@@ -538,7 +538,7 @@ func TestPeerFetcher_RetiredAddrNotResurrectedByStaleOwner(t *testing.T) {
 // a queued fetch's wait for a slot must be observable in
 // bouine_peer_fetch_queue_wait_seconds — the RPC-duration histogram
 // starts after the semaphore and cannot see it. This is the signal
-// that was missing during the 2026-09-12 prod-eu incident (peer-served
+// that was missing during the 2026-09-12 production incident (peer-served
 // "HITs" queueing behind dead-address dials with a clean fetch
 // histogram).
 func TestPeerFetcher_QueueWaitMeasuredWhenSaturated(t *testing.T) {

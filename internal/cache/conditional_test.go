@@ -135,22 +135,22 @@ func TestMergeHeaders304(t *testing.T) {
 	t.Run("replaces_multi_line_vary_wholesale", func(t *testing.T) {
 		t.Parallel()
 		storedLines := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
-		storedLines.AppendEntry(header.Vary, "BM-Market")
+		storedLines.AppendEntry(header.Vary, "X-Region")
 		stored := &api.Object{Header: storedLines}
 		resp304Lines := headerMap(header.Vary, "Accept-Encoding")
-		resp304Lines.AppendEntry(header.Vary, "BM-Market")
+		resp304Lines.AppendEntry(header.Vary, "X-Region")
 		MergeHeaders304(stored, resp304Lines)
 		// The 304's Vary replaces the stored one line-for-line; per-line
 		// Set would clobber the first slot and corrupt the stored list.
-		assert.Equal(t, []string{"Accept-Encoding", "BM-Market"}, varyLines(stored.Header))
+		assert.Equal(t, []string{"Accept-Encoding", "X-Region"}, varyLines(stored.Header))
 	})
 	t.Run("keeps_stored_vary_when_304_omits_it", func(t *testing.T) {
 		t.Parallel()
 		storedLines := headerMap(header.Vary, "Accept-Encoding")
-		storedLines.AppendEntry(header.Vary, "BM-Market")
+		storedLines.AppendEntry(header.Vary, "X-Region")
 		stored := &api.Object{Header: storedLines}
 		MergeHeaders304(stored, headerMap(header.CacheControl, "max-age=120"))
-		assert.Equal(t, []string{"Accept-Encoding", "BM-Market"}, varyLines(stored.Header))
+		assert.Equal(t, []string{"Accept-Encoding", "X-Region"}, varyLines(stored.Header))
 	})
 }
 

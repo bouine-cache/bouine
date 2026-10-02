@@ -201,7 +201,7 @@ routes:
     request:
       strip_prefix: /api/v1
   - match:
-      path_prefix: /payment/orchestrator/callback/
+      path_prefix: /public/webhook/
     pool: origin
     cache:
       ttl_default: 60s
@@ -210,8 +210,8 @@ routes:
         # Rewrites the public callback prefix onto the origin's /echo
         # endpoint so integration tests can assert on the exact URI
         # the origin received (it echoes "uri <path>"). e.g.
-        # /payment/orchestrator/callback/echo?x=1 -> /echo?x=1.
-        match: ^/payment/orchestrator/callback/(.*)$
+        # /public/webhook/echo?x=1 -> /echo?x=1.
+        match: ^/public/webhook/(.*)$
         replace: /$1
   - match: {}
     pool: origin

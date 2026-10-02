@@ -109,7 +109,7 @@ const (
 	// intra-cluster (same VPC, usually the same zone): healthy dials
 	// complete in single-digit milliseconds. The previous 2s meant a
 	// dead address held a fetch slot for the full window before erroring
-	// — on prod-eu, fetches queued behind dial timeouts to pod IPs that
+	// — on production, fetches queued behind dial timeouts to pod IPs that
 	// died during a rolling restart showed up as 1–2.5s "HIT" latencies
 	// (a peer-served hit is attributed X-Cache: HIT). 200ms is ~40 round
 	// trips of headroom and stays comfortably above the fetch RPC
@@ -204,7 +204,7 @@ type PeerFetcher struct {
 	// histogram starts after the semaphore, so a saturated fetch
 	// pipeline (bursts, or slots pinned by fetches slow to fail against
 	// dead addresses) was invisible: fetch RPCs looked healthy while
-	// requests queued — on prod-eu, peer-served "HITs" sat in the
+	// requests queued — on production, peer-served "HITs" sat in the
 	// 1–2.5s duration bucket with a clean fetch histogram. This metric
 	// makes the queue the first thing the dashboards see.
 	pQueueWait prometheus.Observer
@@ -474,7 +474,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 		// The pipeline worker logs every connection failure through its
 		// Logger — fasthttp's default is a raw log.Logger on stderr, which
 		// bypasses the slog pipeline and lands in log shippers as
-		// unstructured info-level lines (seen in prod-eu). Classify through
+		// unstructured info-level lines (seen in production). Classify through
 		// the client adapter: routine teardown noise (EOF, broken pipe,
 		// retired-address parking) at Debug, degraded peers at Warn.
 		Logger: observability.NewFastHTTPClientLogger(f.logger, "cluster"),

@@ -264,8 +264,8 @@ func TestJoinedVary_MultiLine(t *testing.T) {
 	t.Parallel()
 	// Build the multi-line shape via AppendEntry.
 	multi := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
-	multi.AppendEntry(header.Vary, "BM-Market")
-	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", joinedVary(multi))
+	multi.AppendEntry(header.Vary, "X-Region")
+	require.Equal(t, "Accept-Encoding,Accept-Language, X-Region", joinedVary(multi))
 	// Single-line Vary passes through unchanged.
 	single := headerMap(header.Vary, "Accept-Encoding")
 	require.Equal(t, "Accept-Encoding", joinedVary(single))
@@ -279,9 +279,9 @@ func TestJoinedVary_MultiLine(t *testing.T) {
 func TestJoinedVary_VariantKeysDistinguishLaterLines(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	vary := "Accept-Encoding,Accept-Language, BM-Market"
-	fr := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "fr")
-	us := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "us")
+	vary := "Accept-Encoding,Accept-Language, X-Region"
+	fr := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "X-Region", "fr")
+	us := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "X-Region", "us")
 	kFr := VariantKey(primary, vary, fr, nil)
 	kUs := VariantKey(primary, vary, us, nil)
 	require.NotEqual(t, kFr, kUs)
@@ -291,8 +291,8 @@ func TestJoinedVary_VariantKeysDistinguishLaterLines(t *testing.T) {
 // TestHandler_MultiLineVaryDistinctVariants is the end-to-end regression
 // for the production incident: an origin that sends Vary across two
 // field lines ("Vary: Accept-Encoding,Accept-Language" +
-// "Vary: BM-Market") stored objects under a variant key that ignored
-// BM-Market, so a second market was served the first market's cached
+// "Vary: X-Region") stored objects under a variant key that ignored
+// X-Region, so a second market was served the first market's cached
 // body without touching the origin.
 func TestHandler_MultiLineVaryDistinctVariants(t *testing.T) {
 	t.Parallel()
@@ -301,33 +301,33 @@ func TestHandler_MultiLineVaryDistinctVariants(t *testing.T) {
 		originHits++
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.Response.Header.Set(header.Vary, "Accept-Encoding,Accept-Language")
-		ctx.Response.Header.Add(header.Vary, "BM-Market")
+		ctx.Response.Header.Add(header.Vary, "X-Region")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("X-Region"))))
 	}
 	h := testHandler(t, upstream)
 
 	r1 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r1.Request.Header.Set("BM-Market", "fr")
+	r1.Request.Header.Set("X-Region", "fr")
 	h.ServeRequest(r1)
 	require.Equal(t, "MISS", respHeader(r1, header.XCache))
 	require.Equal(t, "market=fr", respBody(r1))
 
 	r2 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r2.Request.Header.Set("BM-Market", "us")
+	r2.Request.Header.Set("X-Region", "us")
 	h.ServeRequest(r2)
 	require.Equal(t, "MISS", respHeader(r2, header.XCache),
-		"a different BM-Market must not hit the first market's variant")
+		"a different X-Region must not hit the first market's variant")
 	require.Equal(t, "market=us", respBody(r2))
 
 	r3 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r3.Request.Header.Set("BM-Market", "fr")
+	r3.Request.Header.Set("X-Region", "fr")
 	h.ServeRequest(r3)
 	require.Equal(t, "HIT", respHeader(r3, header.XCache))
 	require.Equal(t, "market=fr", respBody(r3))
 
 	r4 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r4.Request.Header.Set("BM-Market", "us")
+	r4.Request.Header.Set("X-Region", "us")
 	h.ServeRequest(r4)
 	require.Equal(t, "HIT", respHeader(r4, header.XCache))
 	require.Equal(t, "market=us", respBody(r4))
@@ -342,26 +342,26 @@ func TestHandler_MultiLineVaryFastPathDistinctVariants(t *testing.T) {
 	upstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.Response.Header.Set(header.Vary, "Accept-Encoding,Accept-Language")
-		ctx.Response.Header.Add(header.Vary, "BM-Market")
+		ctx.Response.Header.Add(header.Vary, "X-Region")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("X-Region"))))
 	}
 	h := testHandler(t, upstream)
 
 	r1 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r1.Request.Header.Set("BM-Market", "fr")
+	r1.Request.Header.Set("X-Region", "fr")
 	h.ServeRequest(r1)
 	require.Equal(t, "MISS", respHeader(r1, header.XCache))
 
 	r2 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r2.Request.Header.Set("BM-Market", "fr")
+	r2.Request.Header.Set("X-Region", "fr")
 	h.ServeRequest(r2)
 	require.Equal(t, "HIT", respHeader(r2, header.XCache))
 	require.Equal(t, "market=fr", respBody(r2))
 
 	// Distinct market must miss and fetch its own variant.
 	r3 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
-	r3.Request.Header.Set("BM-Market", "us")
+	r3.Request.Header.Set("X-Region", "us")
 	h.ServeRequest(r3)
 	require.Equal(t, "MISS", respHeader(r3, header.XCache))
 	require.Equal(t, "market=us", respBody(r3))
@@ -372,13 +372,13 @@ func TestHandler_MultiLineVaryFastPathDistinctVariants(t *testing.T) {
 func TestBuildObject_MultiLineVaryValue(t *testing.T) {
 	t.Parallel()
 	resMap := headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding,Accept-Language")
-	resMap.AppendEntry(header.Vary, "BM-Market")
+	resMap.AppendEntry(header.Vary, "X-Region")
 	res := fetchResult{StatusCode: 200, Header: fromHeaderMap(resMap), Body: []byte("body")}
 	ri := requestInfoFromHTTP("http://example.com/page", "/page",
-		headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "fr"))
+		headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "X-Region", "fr"))
 	obj := buildObject(testkey.Key(1), ri, res, resMap, nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
-	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", obj.VaryValue)
+	require.Equal(t, "Accept-Encoding,Accept-Language, X-Region", obj.VaryValue)
 	require.NotEmpty(t, obj.VaryKey)
 	// The stored header map keeps both field lines; WriteToFastHTTP and
 	// GetAll on the stored map reproduce the same joined value.
@@ -395,7 +395,7 @@ func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	multi := headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding,Accept-Language")
-	multi.AppendEntry(header.Vary, "BM-Market")
+	multi.AppendEntry(header.Vary, "X-Region")
 	stale := &api.Object{
 		Key:        BuildKeyFromURL("http://example.com/test", nil),
 		StatusCode: 200,
@@ -415,13 +415,13 @@ func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
 	}
 
 	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
-	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", refreshed.VaryValue)
+	require.Equal(t, "Accept-Encoding,Accept-Language, X-Region", refreshed.VaryValue)
 }
 
 // TestMultiLineVary_FastPathVariantHIT is the h1parser fast-path
 // regression for the production incident: a stored object whose
 // VaryValue is the RFC-9110 §5.2 join of two Vary field lines
-// ("Accept-Encoding,Accept-Language" + "BM-Market") must be resolved
+// ("Accept-Encoding,Accept-Language" + "X-Region") must be resolved
 // via VariantKeyFromRaw on the full joined list. Hashing only the
 // first line's fields served one market's body to another without
 // touching the origin. Mirrors TestHandler_MultiLineVaryFastPathDistinctVariants
@@ -439,12 +439,12 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 	}
 	primary := buildKeyFromRaw(reqBase, nil)
 
-	vary := "Accept-Encoding,Accept-Language, BM-Market"
+	vary := "Accept-Encoding,Accept-Language, X-Region"
 	// The stored header map keeps the original two field lines, exactly
 	// as the incident response carried them; the RFC-joined list lives
 	// in VaryValue.
 	varyLines := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
-	varyLines.AppendEntry(header.Vary, "BM-Market")
+	varyLines.AppendEntry(header.Vary, "X-Region")
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
@@ -467,7 +467,7 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 		}
 		req.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
 		req.Headers[1] = api.RawHeader{Key: "Accept-Language", Value: "en"}
-		req.Headers[2] = api.RawHeader{Key: "BM-Market", Value: market}
+		req.Headers[2] = api.RawHeader{Key: "X-Region", Value: market}
 		req.RecomputeScanFlags()
 		return req
 	}
@@ -477,7 +477,7 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 		"the joined Vary list must produce a non-primary variant key")
 
 	// The incident stored the fr variant under a key that ignored
-	// BM-Market; pin that the key the fast path now computes is
+	// X-Region; pin that the key the fast path now computes is
 	// market-sensitive.
 	usKey := VariantKeyFromRaw(primary, vary, marketReq("us"), nil)
 	require.NotEqual(t, frKey, usKey, "distinct markets must hash to distinct variant keys")
@@ -506,7 +506,7 @@ func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
 
 	// A different market must not hit the fr variant.
 	resp2, ok := fp.TryHit(marketReq("us"), time.Now())
-	assert.False(t, ok, "a different BM-Market must not hit the fr variant")
+	assert.False(t, ok, "a different X-Region must not hit the fr variant")
 	assert.Nil(t, resp2)
 }
 
@@ -534,14 +534,14 @@ func TestNewKeyPolicy_IncludeHeadersNormalized(t *testing.T) {
 func TestEffectiveVary_IncludeEmptyPassthrough(t *testing.T) {
 	t.Parallel()
 	multi := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
-	multi.AppendEntry(header.Vary, "BM-Market")
+	multi.AppendEntry(header.Vary, "X-Region")
 	for name, policy := range map[string]*KeyPolicy{
 		"nil policy":    nil,
 		"empty include": includePolicy(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market",
+			require.Equal(t, "Accept-Encoding,Accept-Language, X-Region",
 				effectiveVary(multi, policy))
 		})
 	}
@@ -593,18 +593,18 @@ func TestEffectiveVary_Union(t *testing.T) {
 		{
 			name:    "response field also in include appears once",
 			varyMap: headerMap(header.Vary, "Accept-Language"),
-			include: []string{"accept-language", "BM-Market"},
-			want:    "accept-language, bm-market",
+			include: []string{"accept-language", "X-Region"},
+			want:    "accept-language, x-region",
 		},
 		{
 			name: "multi-line vary unions and dedupes",
 			varyMap: func() header.Map {
 				m := headerMap(header.Vary, "Accept-Encoding, Accept-Language")
-				m.AppendEntry(header.Vary, "BM-Market")
+				m.AppendEntry(header.Vary, "X-Region")
 				return m
 			}(),
 			include: []string{"X-Region", "accept-language"},
-			want:    "accept-encoding, accept-language, bm-market, x-region",
+			want:    "accept-encoding, accept-language, x-region",
 		},
 		{
 			name:    "mixed-case include lowercased",
@@ -628,7 +628,7 @@ func TestEffectiveVary_Union(t *testing.T) {
 func TestEffectiveVary_DeterministicAcrossIncludeOrder(t *testing.T) {
 	t.Parallel()
 	m := headerMap(header.Vary, "Accept-Encoding")
-	a := effectiveVary(m, includePolicy("X-Region", "Accept-Language", "BM-Market"))
-	b := effectiveVary(m, includePolicy("bm-market", "x-region", "ACCEPT-LANGUAGE"))
+	a := effectiveVary(m, includePolicy("X-Region", "Accept-Language", "X-Region"))
+	b := effectiveVary(m, includePolicy("x-region", "x-region", "ACCEPT-LANGUAGE"))
 	require.Equal(t, a, b)
 }

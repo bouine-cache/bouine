@@ -15,7 +15,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// TestPeerFetcher_PipelineClientLoggerWired pins the fix for the prod-eu
+// TestPeerFetcher_PipelineClientLoggerWired pins the fix for the production
 // log export (2026-09-16): every entry was "error in PipelineClient(...)"
 // emitted by fasthttp's pipeline worker through its stderr defaultLogger,
 // bypassing slog entirely. The per-peer PipelineClient must carry the

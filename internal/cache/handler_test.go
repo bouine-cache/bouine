@@ -3475,26 +3475,26 @@ func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
 	// pre-fix Vary resolver fill) and returns it for any fetch of that
 	// primary key, regardless of the requesting variant.
 	riFr := requestInfoFromHTTP("http://example.com/vary-peer", "/vary-peer",
-		headerMap("BM-Market", "fr"))
+		headerMap("X-Region", "fr"))
 	frObj := &api.Object{
 		StatusCode: 200,
-		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
 		Body:       []byte("market=fr"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		// VaryKey stamped at cache-fill time with the fr selecting set.
-		VaryKey: BuildVaryKey("BM-Market", riFr.Header, nil),
+		VaryKey: BuildVaryKey("X-Region", riFr.Header, nil),
 	}
 	frObj.CacheControl = "max-age=60"
 
 	var peerFetchVary atomic.Pointer[string]
 	originUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
-		ctx.Response.Header.Set(header.Vary, "BM-Market")
+		ctx.Response.Header.Set(header.Vary, "X-Region")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("X-Region"))))
 	}
 	h := NewHandler(HandlerConfig{
 		Upstream:   originUpstream,
@@ -3511,7 +3511,7 @@ func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
 
 	// A cold non-owner requests the us market: the peer returns the fr
 	// body; the handler must treat it as a miss and fetch from origin.
-	rUs := testCtxWithHeader("GET", "http://example.com/vary-peer", "BM-Market", "us")
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-peer", "X-Region", "us")
 	h.ServeRequest(rUs)
 	require.Equal(t, "MISS", respHeader(rUs, header.XCache),
 		"a peer fetch that returns another variant's body must be treated as a miss")
@@ -3527,19 +3527,19 @@ func TestHandleCacheMiss_PeerFetchMatchingVariantServes(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	riFr := requestInfoFromHTTP("http://example.com/vary-peer-match", "/vary-peer-match",
-		headerMap("BM-Market", "fr"))
+		headerMap("X-Region", "fr"))
 	frObj := &api.Object{
 		StatusCode: 200,
-		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
 		Body:       []byte("market=fr"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
-		VaryValue:  "BM-Market",
+		VaryValue:  "X-Region",
 		// VaryKey stamped at cache-fill time with the fr selecting set —
 		// identical to what the requesting node recomputes for its fr
 		// request, so the peer hit must be served.
-		VaryKey: BuildVaryKey("BM-Market", riFr.Header, nil),
+		VaryKey: BuildVaryKey("X-Region", riFr.Header, nil),
 	}
 	frObj.CacheControl = "max-age=60"
 	h := NewHandler(HandlerConfig{
@@ -3555,7 +3555,7 @@ func TestHandleCacheMiss_PeerFetchMatchingVariantServes(t *testing.T) {
 		},
 	})
 
-	r := testCtxWithHeader("GET", "http://example.com/vary-peer-match", "BM-Market", "fr")
+	r := testCtxWithHeader("GET", "http://example.com/vary-peer-match", "X-Region", "fr")
 	h.ServeRequest(r)
 	require.Equal(t, "HIT", respHeader(r, header.XCache))
 	require.Equal(t, "peer", respHeader(r, header.XCacheSource))
@@ -4808,9 +4808,9 @@ func TestIncludeHeaders_304VaryStarFailsSafe(t *testing.T) {
 // resolve instead of rejecting every peer hit.
 func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	t.Parallel()
-	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "BM-Market"}, false)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "X-Region"}, false)
 
-	wire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nBM-Market: US\r\n\r\n"
+	wire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nX-Region: US\r\n\r\n"
 
 	// The requester's view: the request head parsed by the h1parser
 	// (the production header stage via the test bridge), the same way
@@ -4830,7 +4830,7 @@ func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 	// An object stored with the union as VaryValue: origin sent
 	// "Vary: Accept-Encoding", include list contributed the rest.
 	varyValue := effectiveVary(headerMap(header.Vary, "Accept-Encoding"), policy)
-	require.Equal(t, "accept-encoding, accept-language, bm-market", varyValue)
+	require.Equal(t, "accept-encoding, accept-language, x-region", varyValue)
 
 	// The owner's stored VaryKey (buildObject) vs the requester-side
 	// gate's recomputation: identical wire bytes must produce
@@ -4842,7 +4842,7 @@ func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
 
 	// A different Accept-Language must NOT match the stored VaryKey —
 	// the cross-variant body-swap guard.
-	otherWire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nBM-Market: US\r\n\r\n"
+	otherWire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nX-Region: US\r\n\r\n"
 	var other fasthttp.RequestCtx
 	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(otherWire))))
 	otherVK := BuildVaryKey(varyValue, headerFromCtx(&other), nil)

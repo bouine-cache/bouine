@@ -16,7 +16,7 @@ import (
 // public path (miss → hit round trip under the public URL).
 func TestPathRewrite_OriginSeesRewrittenPath(t *testing.T) {
 	s := sharedCluster(t, "strong")
-	path := "/payment/orchestrator/callback/echo?sig=integration"
+	path := "/public/webhook/echo?sig=integration"
 
 	r := s.Get(t, 0, path)
 	require.Equal(t, 200, r.StatusCode)

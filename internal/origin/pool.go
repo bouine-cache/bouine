@@ -289,7 +289,7 @@ func newOriginClient(cc clientConfig) *fasthttp.Client {
 		WriteTimeout:        5 * time.Minute,
 		// fasthttp's default read buffer is 4 KiB, capping the
 		// parseable response-header block at that size. Origins
-		// emitting a single large header — product-page's /compare/
+		// emitting a single large header — pages-origin's /compare/
 		// Cache-Tag carries one product UUID per variant, ~4-5 KB —
 		// exceed it, and every fetch fails with ErrSmallBuffer: the
 		// idempotent retries replay the same deterministic parse error

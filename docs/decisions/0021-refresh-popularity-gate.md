@@ -9,7 +9,7 @@
 `refresh_before_expiry` (ADR-0016) schedules a background conditional
 revalidation for every cached object on enabled routes, regardless of
 whether anyone is accessing the object. For routes with many distinct
-long-tail paths (e.g. `/product-page/` with 100k products, only 5k
+long-tail paths (e.g. a catalog route with 100k products, only 5k
 accessed per minute), this generates massive upstream traffic for
 objects nobody is looking at.
 

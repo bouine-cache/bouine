@@ -660,7 +660,7 @@
       "default": 40
     },
     "updateStrategy": {
-      "description": "StatefulSet rolling update strategy.",
+      "description": "StatefulSet update strategy.",
       "type": "object",
       "properties": {
         "type": {
@@ -671,15 +671,28 @@
           ],
           "default": "RollingUpdate"
         },
-        "maxUnavailable": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 1
-        },
-        "partition": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0
+        "rollingUpdate": {
+          "description": "Raw Kubernetes StatefulSet rolling-update values.",
+          "type": "object",
+          "properties": {
+            "maxUnavailable": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            },
+            "partition": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "default": {}
         }
       }
     },

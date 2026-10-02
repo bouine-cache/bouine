@@ -10,6 +10,15 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- Helm chart StatefulSet rolling-update settings are now passed through from
+  `updateStrategy.rollingUpdate` as raw Kubernetes values. The default is an
+  empty object, so the chart no longer emits the beta `maxUnavailable` field
+  on GKE versions that silently drop it and cause permanent Argo CD drift.
+  Existing overrides move `maxUnavailable` and `partition` under
+  `updateStrategy.rollingUpdate`.
+
 ## [0.5.25] - 2026-09-30
 
 ### Added

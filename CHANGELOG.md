@@ -10,6 +10,35 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cached responses no longer carry a duplicate `Date` header**
+  (ADR-0053). Objects forwarded cluster-to-cluster (peer put) and
+  warm-tier blobs decoded with the pre-v6 wire codec lost the
+  pre-computed `HasDate` flag, so every fast-path hit emitted the
+  stored origin `Date` *and* a freshly synthesized one — logged by
+  downstream nginx as `upstream sent duplicate header line` at
+  ~100 warnings/hour in prod-eu. The object codec now carries
+  `HasDate` (and the other transient flags) on the wire; pre-v6
+  blobs are backfilled at decode time, and both Date-emitting sites
+  re-check the header map when the flag is false.
+- **`no-cache` and `must-revalidate` responses stored via peer put no
+  longer serve unvalidated fresh hits** (ADR-0053). The same lost-flag
+  bug zeroed `RespNoCache`/`RespMustRevalidate`, silently disabling
+  RFC 9111 §5.2.2 revalidation for such objects on the owner node;
+  `no-cache="fields"` field stripping was skipped as well. The codec
+  v6 flags byte carries both gate flags; pre-v6 blobs re-derive them
+  from the stored `Cache-Control`.
+- **Warm-tier promotion no longer clobbers merged `Cache-Control` and
+  apparent-age-adjusted `OriginAge`**: the re-derivation in
+  `TieredStore.Get` now only fills empty fields instead of
+  overwriting both with single-header approximations.
+- **The RFC 9111 §5.2 Cache-Control tokenizer moved to the
+  `pkg/header` shared kernel** (ADR-0053) so the storage layer can
+  re-derive transient flags at decode time; `internal/cache` keeps
+  API-compatible aliases (`cache.ParseCacheControl`,
+  `cache.Directives`), so no call-site changes were required.
+
 ## [0.5.25] - 2026-09-30
 
 ### Added

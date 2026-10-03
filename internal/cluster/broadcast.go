@@ -278,7 +278,7 @@ func (b *Broadcaster) flushPurgeBatch(evts []api.PurgeEvent) {
 		return
 	}
 	flushBatch(b, "purge_batch", "/v1/peer/purge/batch", evts, evts[0].Issuer,
-		EncodePurgeBatchHTTP, EncodePurgeBatchGossip)
+		EncodePurgeBatchHTTP, EncodePurgeBatchGossipBudgeted)
 }
 
 // flushRefreshBatch delivers one batch of refresh events, mirroring
@@ -290,17 +290,17 @@ func (b *Broadcaster) flushRefreshBatch(evts []api.RefreshEvent) {
 		return
 	}
 	flushBatch(b, "refresh_batch", "/v1/peer/refresh/batch", evts, evts[0].Issuer,
-		EncodeRefreshBatchHTTP, EncodeRefreshBatchGossip)
+		EncodeRefreshBatchHTTP, EncodeRefreshBatchGossipBudgeted)
 }
 
 // flushBatch delivers one batch of invalidation events: one batch frame
-// posted to each live peer (strong mode) plus one gossip batch frame.
-// Each encoder is called at most once, so encoding happens at most once
-// per delivery path. Fan-out is detached from request contexts by
-// design: batch events may originate from many request goroutines and
-// must survive their cancellation; postBinary bounds each call by
-// broadcastTimeout internally.
-func flushBatch[E any](b *Broadcaster, typ, path string, evts []E, issuer string, httpEncode, gossipEncode func([]E) ([]byte, error)) {
+// posted to each live peer (strong mode) plus gossip batch frames sized
+// to memberlist's UDP window (issue #754). Each encoder is called at most
+// once, so encoding happens at most once per delivery path. Fan-out is
+// detached from request contexts by design: batch events may originate
+// from many request goroutines and must survive their cancellation;
+// postBinary bounds each call by broadcastTimeout internally.
+func flushBatch[E any](b *Broadcaster, typ, path string, evts []E, issuer string, httpEncode func([]E) ([]byte, error), gossipEncodeBudgeted func([]E, int) ([][]byte, error)) {
 	// Detached fan-out context; see comment above.
 	fanoutCtx := context.WithoutCancel(context.Background())
 	if body, err := httpEncode(evts); err != nil {
@@ -312,9 +312,16 @@ func flushBatch[E any](b *Broadcaster, typ, path string, evts []E, issuer string
 
 	// All modes: enqueue via gossip. In strong mode this is redundant
 	// delivery (peer admin may be temporarily unreachable). In eventual
-	// mode this is the sole delivery path for invalidations.
-	if body, err := gossipEncode(evts); err == nil {
-		b.cluster.QueueBroadcast(body)
+	// mode this is the sole delivery path for invalidations. Frames are
+	// split to gossipFrameBudget: memberlist never returns a frame larger
+	// than its UDP window, so an oversized frame would be re-queued
+	// forever (issue #754).
+	if frames, err := gossipEncodeBudgeted(evts, gossipFrameBudget); err == nil {
+		for _, frame := range frames {
+			b.cluster.QueueBroadcast(frame)
+		}
+	} else {
+		b.logger.Warn(typ+" gossip encode failed", "error", err, "events", len(evts))
 	}
 	b.logger.Info("gossiped "+typ+" to peers",
 		"events", len(evts),

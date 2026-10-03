@@ -15,6 +15,16 @@ const batchMaxEvents = 4096
 // batchCountLen is the width of the batch event count field.
 const batchCountLen = 4
 
+// gossipFrameBudget is the maximum size of a batch frame enqueued for
+// gossip delivery. memberlist calls GetBroadcasts with
+// UDPBufferSize (1400 on the default LAN config we use) minus the
+// compound-header (2), label (0) and userMsg (1) overheads — ≈1,397
+// bytes per gossip round, shared with memberlist's own traffic. Frames
+// above the budget never fit and are re-queued forever (issue #754);
+// 1300 leaves headroom for co-resident memberlist state messages in the
+// same compound datagram.
+const gossipFrameBudget = 1300
+
 // batchCodec holds the per-event table entries for one batch kind.
 // All four batch encoders/decoders (purge/refresh × gossip/HTTP) share
 // this skeleton via encodeFrame/decodeFrame; only the payload put/
@@ -26,6 +36,52 @@ type batchCodec[E any] struct {
 	kind       string                                    // human-readable name for decode-error messages
 	msgType    byte                                      // 0 for HTTP frames (no msgType byte)
 	gossip     bool                                      // true for gossip frames (msgType byte present)
+}
+
+// encodeBudgeted serializes evts into a series of batch frames, each
+// sized to at most budget bytes. memberlist drains gossip frames under
+// a UDP datagram budget (UDPBufferSize 1400 minus compound/label/userMsg
+// overheads, ≈1,395 bytes on default LAN config); a frame above that
+// budget never fits a gossip round, so it must never be enqueued.
+// A zero or negative budget disables splitting (frames stay whole).
+// Each sub-batch is a standalone frame, so the receiver applies
+// whatever subset arrives.
+func (c batchCodec[E]) encodeBudgeted(evts []E, budget int) ([][]byte, error) {
+	if len(evts) == 0 {
+		return nil, nil
+	}
+	if budget <= 0 {
+		body, err := c.encode(evts)
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{body}, nil
+	}
+	var frames [][]byte
+	start := 0
+	for start < len(evts) {
+		// Accumulate events until adding the next would exceed the
+		// budget; the first event is always taken so a single
+		// over-budget event still encodes (it is dropped later at the
+		// queue, with a metric, rather than silently here).
+		frame := frameLen(c.gossip, batchCountLen)
+		end := start
+		for end < len(evts) {
+			n := frame + c.payloadLen(evts[end])
+			if end > start && n > budget {
+				break
+			}
+			frame = n
+			end++
+		}
+		body, err := c.encode(evts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, body)
+		start = end
+	}
+	return frames, nil
 }
 
 // encode serializes evts into a single batch frame: magic, version,
@@ -114,6 +170,16 @@ func EncodePurgeBatchGossip(evts []api.PurgeEvent) ([]byte, error) {
 	return purgeBatchGossip.encode(evts)
 }
 
+// EncodePurgeBatchGossipBudgeted serializes a batch of PurgeEvents into
+// one or more gossip frames, each no larger than budget bytes (issue
+// #754). Frames above memberlist's UDP gossip window are never
+// deliverable, so the batch is split into standalone sub-batches the
+// receiver applies independently. Use gossipFrameBudget for gossip
+// delivery; pass 0 or less to emit a single unsplit frame.
+func EncodePurgeBatchGossipBudgeted(evts []api.PurgeEvent, budget int) ([][]byte, error) {
+	return purgeBatchGossip.encodeBudgeted(evts, budget)
+}
+
 // DecodePurgeBatchGossip decodes a batch gossip frame into its events.
 func DecodePurgeBatchGossip(buf []byte) ([]api.PurgeEvent, error) {
 	return purgeBatchGossip.decode(buf)
@@ -134,6 +200,13 @@ func DecodePurgeBatchHTTP(buf []byte) ([]api.PurgeEvent, error) {
 // single gossip frame.
 func EncodeRefreshBatchGossip(evts []api.RefreshEvent) ([]byte, error) {
 	return refreshBatchGossip.encode(evts)
+}
+
+// EncodeRefreshBatchGossipBudgeted serializes a batch of RefreshEvents
+// into one or more gossip frames, each no larger than budget bytes
+// (issue #754). Same contract as EncodePurgeBatchGossipBudgeted.
+func EncodeRefreshBatchGossipBudgeted(evts []api.RefreshEvent, budget int) ([][]byte, error) {
+	return refreshBatchGossip.encodeBudgeted(evts, budget)
 }
 
 // DecodeRefreshBatchGossip decodes a batch refresh gossip frame.

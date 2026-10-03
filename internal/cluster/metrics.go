@@ -43,6 +43,12 @@ type Metrics struct {
 	// unbatched delivery (delivery preserved, batching win lost).
 	// See ADR-0044.
 	BroadcastOverflows prometheus.Counter
+	// GossipOversizedDrops counts gossip frames dropped because they
+	// cannot fit memberlist's UDP gossip window even in an empty
+	// round. Non-zero indicates a bug or a pathological single event:
+	// batches are split at enqueue time, so this guard should stay at
+	// zero. See issue #754.
+	GossipOversizedDrops prometheus.Counter
 	// PeerFetchVariantMismatch counts peer-fetch RPCs rejected by the
 	// RFC 9111 §4.1 variant-assertion gate, labelled by side:
 	// "server" (the owner answered a requested variant with another
@@ -104,6 +110,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_broadcast_overflows_total",
 			Help:      "Invalidation batcher queue overflows. Events fall back to unbatched delivery; delivery is preserved.",
 		}),
+		GossipOversizedDrops: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_gossip_oversized_drops_total",
+			Help:      "Gossip frames dropped because they cannot fit the UDP gossip window. Non-zero indicates a bug or a pathological event; see issue #754.",
+		}),
 		PeerFetchVariantMismatch: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "peer_fetch_variant_mismatch_total",
@@ -118,6 +129,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.GossipDrops,
 		m.RingEmpty,
 		m.BroadcastOverflows,
+		m.GossipOversizedDrops,
 		m.PeerFetchVariantMismatch,
 	)
 	return m
@@ -182,6 +194,14 @@ func (m *Metrics) IncBroadcastOverflow() {
 		return
 	}
 	m.BroadcastOverflows.Inc()
+}
+
+// IncGossipOversizedDrop increments the oversized-frame drop counter.
+func (m *Metrics) IncGossipOversizedDrop() {
+	if m == nil || m.GossipOversizedDrops == nil {
+		return
+	}
+	m.GossipOversizedDrops.Inc()
 }
 
 // IncPeerFetchVariantMismatch increments the variant-mismatch counter

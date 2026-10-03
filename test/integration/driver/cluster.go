@@ -729,6 +729,29 @@ func (s *ClusterStack) Purge(t *testing.T, n int, targetURL string) {
 	s.adminPost(t, n, "/v1/purge", body)
 }
 
+// PostWithHost performs a data-plane POST against node n's /hit path,
+// optionally overriding the Host header (use driver.CrossNodeHost so
+// every node derives the same cache key). The origin echoes
+// "post <timestamp>" on /hit.
+func (s *ClusterStack) PostWithHost(t *testing.T, n int, path, host string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	if host != "" {
+		req.UseHostHeader = true
+		req.Header.SetHost(host)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return responseFromFastHTTP(resp)
+}
+
 // Ban sends POST /v1/ban to node n.
 func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 	t.Helper()

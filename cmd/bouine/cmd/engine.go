@@ -209,7 +209,7 @@ func (e *engine) run(ctx context.Context) error {
 	seq.Gate().MarkReady("store-loaded")
 	updateStartupMetrics(seq, rs.startupMetrics)
 
-	handler := e.buildDataPlane(rs)
+	handler := e.buildDataPlane(rs) //nolint:contextcheck // routes may fan invalidations out via the broadcaster, which detaches by design
 
 	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
@@ -708,6 +708,29 @@ func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
 		}
 	}
 	return nil
+}
+
+// dataPlanePurgeBroadcast builds the cache handler hook that fans a
+// data-plane invalidation (POST/PUT/DELETE, RFC 9111 §4.4) out to
+// cluster peers. Wired in every cluster mode: in strong mode the
+// invalidating request lands on a non-owner with probability (N-1)/N
+// behind a front load balancer while only the owner stores the key, and
+// in eventual mode every node caches independently, so a local-only
+// purge fixes exactly one node either way. The broadcaster detaches
+// from any request lifecycle and coalesces bursts behind its 10 ms
+// flush window (ADR-0044), so per-request cost is one enqueue. Nil when
+// the engine runs single-node.
+func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
+	if rs.broadcaster == nil {
+		return nil
+	}
+	b := rs.broadcaster
+	return func(key api.Key) {
+		// Deliberately detached: the fan-out is bounded by the
+		// broadcaster's broadcastTimeout, not by the triggering
+		// request's lifecycle (same contract as the admin purge path).
+		b.BroadcastPurge(context.Background(), key, "") //nolint:contextcheck // detached fan-out by design
+	}
 }
 
 // softPurgeKey marks the cached object for key as stale across all

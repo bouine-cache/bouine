@@ -402,6 +402,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				}()
 			}
 		}
+		// Data-plane invalidation fan-out (issue #753).
+		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
@@ -512,6 +514,9 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 				}()
 			}
 		}
+		// Data-plane invalidation fan-out for cache-enabled static routes;
+		// same rationale as the proxied-route wiring (issue #753).
+		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		handler = cached.ServeRequest

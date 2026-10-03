@@ -2078,3 +2078,76 @@ func TestPeerVaryGateHeaderParity(t *testing.T) {
 		})
 	}
 }
+
+// TestFastPathHitEmitsSingleDateLine pins the doorman "duplicate
+// header" regression (ADR-0053): a fast-path hit over an object whose
+// HasDate flag was lost on the wire (peer-put decode of a pre-v6 blob)
+// used to emit the stored Date from the static head AND a synthesized
+// one from appendDynamicHeaders. Whatever the flags say, the composed
+// wire head must contain exactly one Date line.
+func TestFastPathHitEmitsSingleDateLine(t *testing.T) {
+	t.Parallel()
+	countDateLines := func(head []byte) int {
+		return strings.Count(string(head), "\r\nDate: ")
+	}
+
+	t.Run("object with a stored Date and HasDate true", func(t *testing.T) {
+		t.Parallel()
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+		fp := NewFastPathHandlerFromStore(store)
+		req := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
+		key := buildKeyFromRaw(req, nil)
+		hm := header.NewMap(4)
+		hm.Set(header.Date, "Thu, 01 Oct 2026 13:12:02 GMT")
+		hm.Set(header.CacheControl, "public, max-age=600")
+		hm.Set(header.ContentType, "text/html")
+		obj := &api.Object{
+			Key:        key,
+			StatusCode: 200,
+			Header:     hm,
+			Body:       []byte("hello"),
+			BodySize:   5,
+			StoredAt:   time.Now(),
+			TTL:        60 * time.Second,
+			HasDate:    true,
+		}
+		require.NoError(t, store.Put(context.Background(), key, obj))
+		resp, ok := fp.TryHit(req, time.Now())
+		require.True(t, ok)
+		require.NotNil(t, resp)
+		assert.Equal(t, 1, countDateLines(resp.HeaderBuf),
+			"the stored origin Date must be the only Date line on the wire")
+		fp.Release(resp)
+	})
+
+	t.Run("object whose HasDate flag was lost on the wire (pre-v6 decode)", func(t *testing.T) {
+		t.Parallel()
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+		fp := NewFastPathHandlerFromStore(store)
+		req := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
+		key := buildKeyFromRaw(req, nil)
+		hm := header.NewMap(4)
+		hm.Set(header.Date, "Thu, 01 Oct 2026 13:12:02 GMT")
+		hm.Set(header.CacheControl, "public, max-age=600")
+		hm.Set(header.ContentType, "text/html")
+		// HasDate deliberately false while the map still carries Date:
+		// exactly what the v5 wire decode produced on the owner after a
+		// peer put (ADR-0053). The head must still contain only one Date.
+		obj := &api.Object{
+			Key:        key,
+			StatusCode: 200,
+			Header:     hm,
+			Body:       []byte("hello"),
+			BodySize:   5,
+			StoredAt:   time.Now(),
+			TTL:        60 * time.Second,
+		}
+		require.NoError(t, store.Put(context.Background(), key, obj))
+		resp, ok := fp.TryHit(req, time.Now())
+		require.True(t, ok)
+		require.NotNil(t, resp)
+		assert.Equal(t, 1, countDateLines(resp.HeaderBuf),
+			"a lost HasDate flag must not duplicate the Date line (doorman duplicate-header storm)")
+		fp.Release(resp)
+	})
+}

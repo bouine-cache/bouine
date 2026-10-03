@@ -255,10 +255,13 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	// Peer-fetch responses arrive as fully materialized api.Object
 	// encodings (issue #187 codec): restore the transient fields the
-	// wire codec does not carry — the warm tier does the same on load
-	// (storage/tiered.go; OriginAge is left to its header-parse fallback
-	// in effectiveOriginAge) — so evaluate and serializeResponse
-	// see the same state they would for a local hit.
+	// wire codec does not carry for pre-v6 blobs — decodeObject already
+	// backfills v6-restored values and v5 gate flags (ADR-0053), so these
+	// fallbacks only run when the decoded object came in without them
+	// (legacy build in a mixed-version fleet during a rolling deploy).
+	// OriginAge is left to its header-parse fallback in
+	// effectiveOriginAge — so evaluate and serializeResponse see the
+	// same state they would for a local hit.
 	if peerObj.CacheControl == "" {
 		peerObj.CacheControl = peerObj.Header.Get(header.CacheControl)
 		cc := ParseCacheControl(peerObj.CacheControl)
@@ -505,8 +508,14 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
-	// it). Only synthesize a Date when the stored object has none.
-	if !obj.HasDate {
+	// it). Only synthesize a Date when the stored object has none. The
+	// header-map check is the safety net for objects whose HasDate flag
+	// was lost in transit (pre-v6 wire decode, ADR-0053): without it the
+	// composed head carried the stored Date AND a synthesized one, and
+	// downstream nginx logged "upstream sent duplicate header line" per
+	// request. The flag short-circuits the scan in the common case;
+	// the fallback runs at most once per composed second, never per hit.
+	if !obj.HasDate && !obj.Header.Has(header.Date) {
 		hbuf = append(hbuf, header.Date...)
 		hbuf = append(hbuf, ": "...)
 		hbuf = append(hbuf, dateStr...)

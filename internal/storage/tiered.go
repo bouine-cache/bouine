@@ -532,24 +532,33 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		t.evictWarm(key)
 		return nil, "", nil
 	}
-	// Re-derive transient fields not serialised to disk (tagged json:"-").
-	// CacheControl and OriginAge are recalculated here so Evaluate and
-	// ComputeAge work without re-parsing headers on every hit. SerializedHead
-	// is left nil — the H1 fast-path falls back to appendResponseHeaders
-	// (header iteration) for warm-tier objects until they are re-stored
-	// via buildObject on a subsequent cache fill.
-	if cc := loaded.Header.Get(header.CacheControl); cc != "" {
-		loaded.CacheControl = cc
-	}
-	if age := loaded.Header.Get(header.Age); age != "" {
-		var secs int64
-		for _, b := range []byte(age) {
-			if b < '0' || b > '9' {
-				break
-			}
-			secs = secs*10 + int64(b-'0')
+	// Re-derive the pre-v6 transient fields (tagged json:"-"): pre-v6
+	// blobs carry no CacheControl/OriginAge on the wire, so they are
+	// recalculated here so Evaluate and ComputeAge work without
+	// re-parsing headers on every hit. Codec v6 blobs (ADR-0053) already
+	// carry both values — including the multi-line-merged CacheControl
+	// and the apparent-age-adjusted OriginAge that buildObject computed
+	// at fill time — and MUST NOT be overwritten by these single-header
+	// approximations. SerializedHead is left nil — the H1 fast-path
+	// falls back to appendResponseHeaders (header iteration) for
+	// warm-tier objects until they are re-stored via buildObject on a
+	// subsequent cache fill.
+	if loaded.CacheControl == "" {
+		if cc := loaded.Header.Get(header.CacheControl); cc != "" {
+			loaded.CacheControl = cc
 		}
-		loaded.OriginAge = time.Duration(secs) * time.Second
+	}
+	if loaded.OriginAge == 0 {
+		if age := loaded.Header.Get(header.Age); age != "" {
+			var secs int64
+			for _, b := range []byte(age) {
+				if b < '0' || b > '9' {
+					break
+				}
+				secs = secs*10 + int64(b-'0')
+			}
+			loaded.OriginAge = time.Duration(secs) * time.Second
+		}
 	}
 	// Promote to hot tier (best-effort: ignore error).
 	_ = t.hot.Put(ctx, key, loaded)

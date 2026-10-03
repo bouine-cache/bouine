@@ -12,6 +12,19 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **A `HEAD` exchange can no longer poison the cache with an empty
+  body.** When a stale object was revalidated by a `HEAD` request and the
+  origin answered `200` (content changed), the empty HEAD response was
+  stored under the shared GET cache key, so every subsequent `GET` served
+  an empty body as a cache hit until TTL expiry. In strong cluster mode
+  the empty-body object was also forwarded to the key's owner, blanking
+  the resource fleet-wide. The same poison was reachable through the
+  background fetchers: a `HEAD` inside a stale-while-revalidate window
+  (or a shed refill) scheduled an origin refresh whose empty-body
+  response replaced the stored object. `HEAD` exchanges now never
+  replace a stored object, and background refreshes remap `HEAD` to
+  `GET` (RFC 9110 §9.3.2) so they reproduce the stored representation.
+  Revalidation answered by `304` was and remains correct.
 - Helm chart StatefulSet rolling-update settings are now passed through from
   `updateStrategy.rollingUpdate` as raw Kubernetes values. The default is an
   empty object, so the chart no longer emits the beta `maxUnavailable` field

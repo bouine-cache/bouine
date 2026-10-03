@@ -2414,6 +2414,16 @@ func (h *Handler) writeAndMaybeStore(
 	}
 	h.applyResponseRewrites(dst)
 
+	// A HEAD exchange must never (re)store an object: the origin's
+	// response to the revalidation or miss carries no body, and HEAD
+	// shares the GET cache key — storing would replace a live body with
+	// an empty one served to every subsequent GET (issue #752). The
+	// streaming miss path applies the same guard (streamMissBuffered's
+	// !isHEAD).
+	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
+		return
+	}
+
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).

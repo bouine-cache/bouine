@@ -12,6 +12,12 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- Helm chart StatefulSet rolling-update settings are now passed through from
+  `updateStrategy.rollingUpdate` as raw Kubernetes values. The default is an
+  empty object, so the chart no longer emits the beta `maxUnavailable` field
+  on GKE versions that silently drop it and cause permanent Argo CD drift.
+  Existing overrides move `maxUnavailable` and `partition` under
+  `updateStrategy.rollingUpdate`.
 - **Cached responses no longer carry a duplicate `Date` header**
   (ADR-0053). Objects forwarded cluster-to-cluster (peer put) and
   warm-tier blobs decoded with the pre-v6 wire codec lost the

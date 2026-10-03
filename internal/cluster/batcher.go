@@ -10,8 +10,11 @@ import (
 
 // broadcastBatchSize is the event count that triggers an immediate
 // flush of the invalidation batcher (ADR-0044). 256 events × ~50 B per
-// purge event ≈ 13 KiB, well inside memberlist's UDP gossip budget
-// and a single HTTP request.
+// purge event ≈ 13 KiB, well inside a single HTTP request body (the
+// 4 MiB admin cap). The gossip path cannot carry a frame that large —
+// memberlist's UDP window is ~1.4 KiB — so flushBatch splits the
+// encoded events into budget-sized gossip frames at flush time instead
+// of shrinking the batch (issue #754).
 const broadcastBatchSize = 256
 
 // broadcastBatchFlushInterval bounds how long an event may wait in

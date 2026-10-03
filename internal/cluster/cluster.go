@@ -564,8 +564,27 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	}
 }
 
+// gossipMaxFrame is the largest frame data the memberlist delegate drain
+// can ever deliver in one gossip round. memberlist calls GetBroadcasts
+// with the limit UDPBufferSize (DefaultLANConfig: 1400) minus the
+// compound-header (2) and label (0) overheads, and charges each frame
+// a per-entry overhead of compoundOverhead+userMsgOverhead (3):
+// 1400-2-0-3 = 1395. Frames larger than this can never fit any round
+// and are dropped at drain time rather than re-queued forever
+// (issue #754). Update alongside the pinned memberlist version and
+// the DefaultLANConfig in New.
+const gossipMaxFrame = 1395
+
 // GetBroadcasts returns pending broadcast messages up to the byte limit.
 // memberlist calls this on every gossip round; we drain the queue.
+// A frame that can never fit even a full gossip round is dropped with a
+// metric instead of being re-queued forever: memberlist has no escape
+// hatch for oversized delegate frames, so re-queuing would wedge the
+// queue (issue #754). The batcher splits batch frames at enqueue time
+// (EncodePurgeBatchGossipBudgeted), so this valve only fires on
+// regressions or pathological single events. Frames that fit a full
+// round but not the remaining budget of this round (memberlist's own
+// traffic may already fill it) are re-queued as before.
 func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 	c.gossipMu.Lock()
 	defer c.gossipMu.Unlock()
@@ -576,6 +595,16 @@ func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 	used := 0
 	var remaining []gossipBroadcast
 	for _, b := range c.gossipQueue {
+		if len(b.data) > gossipMaxFrame {
+			// Cannot fit any gossip round; waiting cannot change
+			// that. Drop and count it.
+			c.metrics.Load().IncGossipOversizedDrop()
+			c.logger.Warn("cluster: dropping oversized gossip frame",
+				"bytes", len(b.data),
+				"cap", gossipMaxFrame,
+			)
+			continue
+		}
 		if used+overhead+len(b.data) > limit {
 			remaining = append(remaining, b)
 			continue

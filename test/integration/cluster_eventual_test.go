@@ -3,6 +3,7 @@
 package integration_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,6 +67,51 @@ func TestEventual_PurgePropagationGossip(t *testing.T) {
 	})
 }
 
+// TestEventual_PurgeBatchPropagationGossip verifies that a large
+// admin purge batch propagates via gossip in eventual mode (issue
+// #754): a single oversized batch frame cannot fit memberlist's UDP
+// gossip window, so it must be split into budget-sized frames that
+// every peer applies.
+//
+// NOTE: keep this test above TestEventual_BanPropagationGossip in the
+// file: that test issues a `.*` host ban on the shared stack, and bans
+// stay active for the whole suite, so nothing can HIT afterwards.
+func TestEventual_PurgeBatchPropagationGossip(t *testing.T) {
+	s := sharedCluster(t, "eventual")
+
+	paths := make([]string, 100)
+	urls := make([]string, len(paths))
+	for i := range paths {
+		paths[i] = fmt.Sprintf("/hit?x=eventual-purge-batch-%d", i)
+		urls[i] = "http://" + driver.CrossNodeHost + paths[i]
+	}
+
+	// Warm every node for every path until all report HIT.
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			s.GetWithHost(t, i, p, crossNodeHost)
+			driver.RetryUntil(t, 5*time.Second, 200*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return resp.Header.Get("X-Cache") == "HIT"
+			})
+		}
+	}
+
+	// One 100-key batched purge on node 0: gossip is the sole
+	// invalidation path in eventual mode, so this fails without
+	// frame splitting.
+	s.PurgeBatch(t, 0, urls)
+
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			driver.RetryUntil(t, driver.GossipConvergence, 500*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return resp.Header.Get("X-Cache") != "HIT"
+			})
+		}
+	}
+}
+
 func TestEventual_BanPropagationGossip(t *testing.T) {
 	s := sharedCluster(t, "eventual")
 	path := "/hit?x=eventual-ban"
@@ -87,6 +133,10 @@ func TestEventual_BanPropagationGossip(t *testing.T) {
 	})
 }
 
+// TestEventual_StaleDuringConvergence verifies that a node that
+// fetched during the convergence window does not serve stale content
+// once the purge gossip lands. It runs after the ban test, but its
+// assertion (!= "HIT") holds trivially under the suite's `.*` ban.
 func TestEventual_StaleDuringConvergence(t *testing.T) {
 	s := sharedCluster(t, "eventual")
 	path := "/hit?x=eventual-stale"

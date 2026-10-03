@@ -95,6 +95,17 @@ the curated, human-readable summary.
   replace a stored object, and background refreshes remap `HEAD` to
   `GET` (RFC 9110 §9.3.2) so they reproduce the stored representation.
   Revalidation answered by `304` was and remains correct.
+- **Large invalidation batches now propagate over gossip** (issue
+  #754). Batches flushed at 256 events encoded to a single gossip
+  frame of ~10 KiB — far above memberlist's ~1.4 KiB UDP gossip
+  window — so the frame never fit any gossip round and was re-queued
+  forever: eventual-mode clusters silently lost the whole batch's
+  invalidations, and every cluster mode grew the gossip queue without
+  bound. Batch frames are now split at flush time into standalone
+  sub-frames (≤ 1,300 bytes each), and the gossip drain drops — with a
+  `bouine_cluster_gossip_oversized_drops_total` metric — any frame
+  that could never fit a gossip round, so a regression can no longer
+  wedge the queue. HTTP fan-out is unaffected.
 - Helm chart StatefulSet rolling-update settings are now passed through from
   `updateStrategy.rollingUpdate` as raw Kubernetes values. The default is an
   empty object, so the chart no longer emits the beta `maxUnavailable` field

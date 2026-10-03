@@ -1601,6 +1601,19 @@ func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.K
 	h.triggerBgRevalidate(ri, key, stale)
 }
 
+// remapHeadToGet converts a HEAD method to GET for background origin
+// fetches that refresh a stored object (SWR revalidation, shed refill):
+// the stored object is the GET representation, and HEAD differs from
+// GET only by the omitted body (RFC 9110 §9.3.2), so fetching HEAD
+// would refresh the object with an empty body (issue #752). The fast
+// path applies the same remap (requestInfoFromRaw).
+func remapHeadToGet(method string) string {
+	if method == "HEAD" {
+		return "GET"
+	}
+	return method
+}
+
 // requestInfoFromRaw builds an owned RequestInfo from a RawRequest.
 // The RawRequest's string fields alias the h1parser read buffer, so all
 // strings are copied into owned memory — the fast-path equivalent of
@@ -1611,10 +1624,7 @@ func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
 	if req.Query != "" {
 		uri += "?" + req.Query
 	}
-	method := req.Method
-	if method == "HEAD" {
-		method = "GET"
-	}
+	method := remapHeadToGet(req.Method)
 	ri := RequestInfo{
 		Method: method,
 		URI:    uri,
@@ -2285,8 +2295,13 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 	// reused by the next keep-alive request the moment our handler
 	// returns. The background goroutine must not read them after that.
 	// ri.Header is an owned header.Map (headerFromCtx copies) — safe as is.
+	// HEAD is remapped to GET: the background fetch must reproduce the
+	// stored GET representation, and HEAD differs from GET only by the
+	// omitted body (RFC 9110 §9.3.2) — fetching HEAD would refresh the
+	// stored object with an empty body (issue #752). Same remap the fast
+	// path applies (requestInfoFromRaw).
 	bgReq := RequestInfo{
-		Method: ri.GetMethod(),
+		Method: remapHeadToGet(ri.GetMethod()),
 		URI:    ri.GetURI(),
 		Host:   ri.GetHost(),
 		Path:   ri.GetPath(),
@@ -2419,7 +2434,10 @@ func (h *Handler) writeAndMaybeStore(
 	// shares the GET cache key — storing would replace a live body with
 	// an empty one served to every subsequent GET (issue #752). The
 	// streaming miss path applies the same guard (streamMissBuffered's
-	// !isHEAD).
+	// !isHEAD). Background fetchers (doBackgroundRevalidate,
+	// doShedRefill) never reach this guard — they remap HEAD→GET when
+	// materializing their origin request (remapHeadToGet) so the
+	// refresh reproduces the stored GET representation instead.
 	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		return
 	}
@@ -2816,9 +2834,11 @@ func (h *Handler) triggerShedRefill(ri RequestInfo, key api.Key) {
 	// which are reused by the next keep-alive request the moment the
 	// handler returns. The background goroutine must not read them after
 	// that. ri.Header is an owned header.Map (headerFromCtx copies) —
-	// safe as is.
+	// safe as is. HEAD is remapped to GET for the same reason as the SWR
+	// revalidation goroutine: the refill must reproduce the stored GET
+	// representation, never an empty HEAD body (issue #752).
 	bgReq := RequestInfo{
-		Method: ri.GetMethod(),
+		Method: remapHeadToGet(ri.GetMethod()),
 		URI:    ri.GetURI(),
 		Host:   ri.GetHost(),
 		Path:   ri.GetPath(),

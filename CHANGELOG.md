@@ -12,6 +12,14 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Data-plane invalidation now propagates across the cluster.** A
+  `POST`/`PUT`/`DELETE` request (RFC 9111 §4.4 invalidation, including
+  `Location`/`Content-Location`-derived keys) previously purged only the
+  receiving node's local store. In strong mode an invalidating request
+  landing on a non-owner left the owner serving stale content until TTL;
+  in eventual mode every other node stayed stale. Invalidations from the
+  data plane now broadcast to peers through the same batching pipeline
+  (ADR-0044) as the admin purge API, in every cluster mode.
 - **A `HEAD` revalidation can no longer poison the cache with an empty
   body.** When a stale object was revalidated by a `HEAD` request and the
   origin answered `200` (content changed), the empty HEAD response was

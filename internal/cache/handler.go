@@ -272,6 +272,9 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// purgeBroadcast fans a data-plane invalidation out to peers; one
+	// call per purged key. Nil in single-node mode.
+	purgeBroadcast func(key api.Key)
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
@@ -426,6 +429,16 @@ type HandlerConfig struct {
 	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// PurgeBroadcast, if non-nil, fans a data-plane purge out to cluster
+	// peers. Called once per key invalidated by an unsafe method
+	// (POST/PUT/DELETE, RFC 9111 §4.4) — including Location/
+	// Content-Location-derived keys — after the local purge, regardless
+	// of the local owned result: in strong mode the owner holds the
+	// object while the invalidating request may land on a non-owner, so
+	// owned=false never means "nobody has it". Nil in single-node mode.
+	// Implementations coalesce bursts (the cluster broadcaster batches
+	// behind a 10 ms flush window), so per-request cost is one enqueue.
+	PurgeBroadcast func(key api.Key)
 	// OnPeerVariantMismatch, if non-nil, is called when the handler
 	// rejects a peer-fetched object because its stored variant does
 	// not select this request (RFC 9111 §4.1 assertion re-verified on
@@ -764,6 +777,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		peerFetch:               cfg.PeerFetch,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,
+		purgeBroadcast:          cfg.PurgeBroadcast,
 		allowSetCookie:          cfg.AllowSetCookie,
 		maxObjectSize:           cfg.MaxObjectSize,
 		maxVariants:             cfg.MaxVariants,
@@ -2611,14 +2625,14 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 	getRI := requestInfoFromCtx(ctx)
 	getRI.Method = "GET"
 	key := BuildKey(getRI, h.policy)
-	_, _ = h.Purge(ctx, key)
+	h.purgeAndBroadcast(ctx, key)
 
 	// Evict Content-Location and Location URLs (RFC 9111 §4.4).
 	for _, hdr := range []string{header.ContentLocation, header.Location} {
 		if loc := string(resp.Header.Peek(hdr)); loc != "" {
 			locKey := h.buildLocationKey(ctx, loc)
 			if !locKey.IsZero() {
-				_, _ = h.Purge(ctx, locKey)
+				h.purgeAndBroadcast(ctx, locKey)
 			}
 		}
 	}
@@ -2628,6 +2642,19 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 	// dropped this rule (no equivalent section), but the behavior is kept
 	// intentionally for Varnish parity.
 	h.maybeStorePostResponseFast(ctx, getRI, key, resp)
+}
+
+// purgeAndBroadcast invalidates key locally, then fans the purge out
+// to cluster peers (issue #753). The broadcast fires regardless of the
+// local purge's owned result: in strong mode the key's owner holds the
+// object while this node may be a non-owner with an empty local store,
+// and in eventual mode every node caches independently. No-op wiring
+// (single-node) reduces to the plain local purge.
+func (h *Handler) purgeAndBroadcast(ctx *fasthttp.RequestCtx, key api.Key) {
+	_, _ = h.Purge(ctx, key)
+	if h.purgeBroadcast != nil {
+		h.purgeBroadcast(key)
+	}
 }
 
 // maybeStorePostResponseFast stores a successful POST response under

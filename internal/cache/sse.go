@@ -122,12 +122,12 @@ func (h *Handler) purgeAfterSSEProxy(ctx *fasthttp.RequestCtx, sf *streamFetchRe
 	getRI := requestInfoFromCtx(ctx)
 	getRI.Method = "GET"
 	key := BuildKey(getRI, h.policy)
-	_, _ = h.Purge(ctx, key)
+	h.purgeAndBroadcast(ctx, key)
 
 	for _, hdr := range []string{header.ContentLocation, header.Location} {
 		if loc := string(sf.resp.Header.Peek(hdr)); loc != "" {
 			if locKey := h.buildLocationKey(ctx, loc); !locKey.IsZero() {
-				_, _ = h.Purge(ctx, locKey)
+				h.purgeAndBroadcast(ctx, locKey)
 			}
 		}
 	}

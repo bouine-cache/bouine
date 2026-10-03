@@ -336,11 +336,9 @@ func TestHandler_HeadServedFromCache(t *testing.T) {
 // expireStoredObject rewinds the stored object's StoredAt past its TTL
 // so the next request revalidates instead of hitting (the reaper is not
 // waited for). Test helper for issue #752.
-func expireStoredObject(t *testing.T, h *Handler, url string) {
+func expireStoredObject(t *testing.T, h *Handler, path string) {
 	t.Helper()
-	ri := requestInfoFromHTTP(url, "/hd", header.Map{})
-	_ = ri
-	key := BuildKeyFast([]byte("GET"), []byte("/hd"), []byte("example.com"), []byte("/hd"), false, nil)
+	key := BuildKeyFast([]byte("GET"), []byte(path), []byte("example.com"), []byte(path), false, nil)
 	obj, _, err := h.store.Get(t.Context(), key)
 	require.NoError(t, err)
 	require.NotNil(t, obj, "expected the warm GET to have stored the object")
@@ -387,7 +385,7 @@ func TestHandler_HeadRevalidate_Origin200_MustNotReplaceStoredBody(t *testing.T)
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 	require.Equal(t, "original-body", respBody(rr))
 
-	expireStoredObject(t, h, "http://example.com/hd")
+	expireStoredObject(t, h, "/hd")
 
 	hr := testCtx("HEAD", "http://example.com/hd")
 	h.ServeRequest(hr)
@@ -437,12 +435,7 @@ func TestHandler_HeadRevalidate_Origin304_KeepsStoredBody(t *testing.T) {
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 	require.Equal(t, "full-body", respBody(rr))
 
-	key := BuildKeyFast([]byte("GET"), []byte("/hd304"), []byte("example.com"), []byte("/hd304"), false, nil)
-	obj, _, err := h.store.Get(t.Context(), key)
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	obj.StoredAt = obj.StoredAt.Add(-2 * obj.TTL)
-	require.NoError(t, h.store.Put(t.Context(), key, obj))
+	expireStoredObject(t, h, "/hd304")
 
 	hr := testCtx("HEAD", "http://example.com/hd304")
 	h.ServeRequest(hr)
@@ -507,12 +500,7 @@ func TestHandler_HeadRevalidate_Origin200_RingChangeNoPeerPut(t *testing.T) {
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 	assert.Empty(t, peerPutBodies, "owner-local fill does not forward to itself")
 
-	key := BuildKeyFast([]byte("GET"), []byte("/hd-owner"), []byte("example.com"), []byte("/hd-owner"), false, nil)
-	obj, _, err := h.store.Get(t.Context(), key)
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	obj.StoredAt = obj.StoredAt.Add(-2 * obj.TTL)
-	require.NoError(t, h.store.Put(t.Context(), key, obj))
+	expireStoredObject(t, h, "/hd-owner")
 
 	// Ring change: the key now belongs to another node.
 	isLocal.Store(false)
@@ -522,6 +510,111 @@ func TestHandler_HeadRevalidate_Origin200_RingChangeNoPeerPut(t *testing.T) {
 	require.Equal(t, "MISS", respHeader(hr, header.XCache))
 	assert.Equal(t, int32(0), peerPutCalls.Load(),
 		"the HEAD-200 revalidation must not forward an empty-body object to the new owner (issue #752)")
+}
+
+// TestHandler_HeadSWR_BgRevalidate_RefreshesWithRealBody pins the
+// third poison route of issue #752: a HEAD served as StaleHit inside a
+// stale-while-revalidate window triggers a background revalidation
+// whose origin fetch previously carried Method=HEAD, so the origin's
+// empty-body 200 replaced the stored GET object. The background fetch
+// now remaps HEAD→GET (remapHeadToGet), so the refresh carries the
+// changed content — never an empty body.
+func TestHandler_HeadSWR_BgRevalidate_RefreshesWithRealBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			// Content changed: full 200. A conditional HEAD gets no
+			// body (RFC 9110 §9.3.2); a conditional GET gets the new
+			// body. The background revalidation must send GET.
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v2"`)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			if !ctx.IsHead() {
+				_, _ = ctx.WriteString("changed-body")
+			}
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=600")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.WriteString("original-body")
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/hd-swr")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "original-body", respBody(rr))
+
+	key := BuildKeyFast([]byte("GET"), []byte("/hd-swr"), []byte("example.com"), []byte("/hd-swr"), false, nil)
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	// Expire past max-age=1 but inside the swr=600 window.
+	obj.StoredAt = obj.StoredAt.Add(-2 * time.Second)
+	require.NoError(t, h.store.Put(t.Context(), key, obj))
+
+	hr := testCtx("HEAD", "http://example.com/hd-swr")
+	h.ServeRequest(hr)
+	require.Equal(t, "STALE", respHeader(hr, header.XCache))
+
+	// The background revalidation must land the changed content —
+	// an empty body here is the exact poison of issue #752.
+	require.Eventually(t, func() bool {
+		o, _, err := h.store.Get(t.Context(), key)
+		return err == nil && o != nil && string(o.Body) == "changed-body"
+	}, 3*time.Second, 10*time.Millisecond,
+		"HEAD-triggered SWR revalidation must refresh with the GET body, never store an empty one (issue #752)")
+
+	gr := testCtx("GET", "http://example.com/hd-swr")
+	h.ServeRequest(gr)
+	require.Equal(t, "changed-body", respBody(gr))
+}
+
+// TestHandler_HeadShedRefill_StoresRealBody pins the shed-refill half
+// of the background-fetch fix: a HEAD whose miss is shed (fetch slots
+// full) schedules doShedRefill, whose origin fetch previously carried
+// Method=HEAD and would have stored an empty body. The refill now
+// remaps HEAD→GET (remapHeadToGet), so the store ends with the real
+// body.
+func TestHandler_HeadShedRefill_StoresRealBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		if !ctx.IsHead() {
+			_, _ = ctx.WriteString("real-body")
+		}
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	key := BuildKeyFast([]byte("GET"), []byte("/hd-shed"), []byte("example.com"), []byte("/hd-shed"), false, nil)
+	ri := requestInfoFromCtx(testCtx("HEAD", "http://example.com/hd-shed"))
+	h.triggerShedRefill(ri, key)
+
+	require.Eventually(t, func() bool {
+		o, _, err := h.store.Get(t.Context(), key)
+		return err == nil && o != nil && string(o.Body) == "real-body"
+	}, 3*time.Second, 10*time.Millisecond,
+		"shed refill for a HEAD request must fetch and store the GET body, never an empty one (issue #752)")
 }
 
 func testHandlerStayinAlive(t *testing.T, upstream fasthttp.RequestHandler) *Handler {

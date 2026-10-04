@@ -13,15 +13,16 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// collapse_test.go pins the request-collapsing gate (ADR-0052): a
-// request carrying Authorization never shares an in-flight origin
-// response with any other request. The storage gates (RFC 9111 §3.5)
-// never governed this path; these tests are the in-flight equivalent.
+// collapse_test.go pins the request-collapsing gate (ADR-0052 for
+// Authorization, ADR-0054 for Cookie): a request carrying Authorization
+// or Cookie never shares an in-flight origin response with any other
+// request. The storage gates (RFC 9111 §3.5) never governed this path;
+// these tests are the in-flight equivalent.
 
 func TestCollapseDenied_AnonymousRequestsCollapse(t *testing.T) {
 	t.Parallel()
-	// No Authorization — the gate must not apply; anonymous traffic
-	// keeps today's behavior bit-for-bit.
+	// No Authorization, no Cookie — the gate must not apply; anonymous
+	// traffic keeps today's behavior bit-for-bit.
 	require.False(t, collapseDenied(RequestInfo{}))
 	require.False(t, collapseDenied(RequestInfo{Header: header.Map{}}))
 }
@@ -37,6 +38,23 @@ func TestCollapseDenied_AuthorizedRequestsNeverCollapse(t *testing.T) {
 		ri.Header.Set(header.Authorization, cred)
 		require.True(t, collapseDenied(ri), "Authorization %q must never collapse", cred)
 	}
+}
+
+func TestCollapseDenied_CookiedRequestsNeverCollapse(t *testing.T) {
+	t.Parallel()
+	// ADR-0054: any Cookie value removes the request from the collapsing
+	// space — a session cookie selects per-user SSR content, and "same
+	// cookie string ⇒ same user" is exactly the assumption a shared
+	// cache cannot verify (the ADR-0052 argument, applied to cookies).
+	for _, c := range []string{"sid=abc", "session=x; theme=dark", "a=b"} {
+		ri := RequestInfo{}
+		ri.Header.Set(header.Cookie, c)
+		require.True(t, collapseDenied(ri), "Cookie %q must never collapse", c)
+	}
+	// The gate composes: Authorization OR Cookie, either alone suffices.
+	ri := RequestInfo{}
+	ri.Header.Set(header.Authorization, "Bearer t")
+	require.True(t, collapseDenied(ri))
 }
 
 // TestFetchAndStore_NoCrossCredentialCollapse pins the in-flight gate
@@ -91,6 +109,59 @@ func TestFetchAndStore_NoCrossCredentialCollapse(t *testing.T) {
 		"callers with different Authorization must not share a flight")
 	require.Equal(t, "cred:token-a", bodies[0])
 	require.Equal(t, "cred:token-b", bodies[1])
+}
+
+// TestFetchAndStore_NoCrossCookieCollapse pins the ADR-0054 in-flight
+// gate end to end: two concurrent misses for the same URI carrying
+// different session cookies must each perform their own origin fetch
+// and each receive their own user's SSR render. The origin echoes the
+// Cookie back in the body, so a collapsed (broken) run returns the
+// leader's page to the follower. This runs on a DEFAULT route — no
+// bypass_on_cookie — because the collapse refusal is unconditional:
+// it is the in-flight half of the cookie contract, independent of the
+// per-route pass flag (the cache-tests other-cookie case is sequential
+// serving from store, which this does not touch).
+func TestFetchAndStore_NoCrossCookieCollapse(t *testing.T) {
+	t.Parallel()
+
+	var fetches atomic.Int64
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		n := fetches.Add(1)
+		if n <= 2 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("page:" + string(ctx.Request.Header.Peek(header.Cookie)))
+	}
+	h := testHandler(t, origin)
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 2)
+	for i, sid := range []string{"sid=user-a", "sid=user-b"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("GET", "http://example.com/profile")
+			ctx.Request.Header.Set(header.Cookie, sid)
+			serveRequest(h, ctx)
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	for fetches.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(2), fetches.Load(),
+		"callers with different Cookie values must not share a flight")
+	require.Equal(t, "page:sid=user-a", bodies[0])
+	require.Equal(t, "page:sid=user-b", bodies[1])
 }
 
 // TestFetchAndStore_SameCredentialAlsoNeverCollapses pins the strict

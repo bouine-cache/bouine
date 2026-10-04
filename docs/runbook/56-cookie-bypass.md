@@ -20,7 +20,18 @@ non-empty `Cookie` header never touches the cache:
 Anonymous requests on the same route are unchanged (full MISS/HIT
 semantics), and POST/PUT/DELETE still invalidates the shared GET key
 (RFC 9111 §4.4) regardless of cookies. Default-off routes are
-bit-identical — the cache-tests `other-cookie` case keeps passing.
+bit-identical for serving and storage — the cache-tests
+`other-cookie` case keeps passing.
+
+**The in-flight half is unconditional** (ADR-0054): on every route,
+flag or not, a cookied request never shares a singleflight with
+another request (the ADR-0052 Authorization refusal, extended to
+Cookie). Concurrent cookied misses on one URL each perform their own
+origin fetch — see [runbook 55](55-collapse-identity.md) for the
+origin-load expectations. The flag adds the serving/storage refusal
+on top; without it a cookied request may still be *served* a stored
+response per RFC 9111, which is correct for cookie-agnostic content
+and the reason the default is off.
 
 ## When to enable it
 
@@ -31,8 +42,10 @@ the other knobs do not compose into safety for that shape:
 - `Set-Cookie` blocking does not fire (SSR origins read the cookie;
   they emit `Set-Cookie` once at login, not per render).
 - `cache.key.include_headers: [Cookie]` keys a variant per session
-  (blows past `max_variants` into silent non-caching) and does not
-  stop in-flight sharing between users.
+  (blows past `max_variants` into silent non-caching) and, before
+  ADR-0054, did not stop in-flight sharing between users (the
+  unconditional collapse refusal now does — but variants still
+  explode).
 - Stale-if-error/SWR would serve one user's stored body to another.
 
 ## Cost and how to see it

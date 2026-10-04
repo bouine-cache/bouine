@@ -3,6 +3,7 @@ package storage
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -336,15 +337,20 @@ func literalOfBody(body string) (string, bool) {
 // recompiled lazily on the next snapshot() read, so a batch of N
 // registrations costs one O(list) compile, not N.
 type banListState struct {
-	snap *banSnapshot
+	// snap is published atomically so the hit path reads it without
+	// the mutex: every cache hit (hot and warm tiers, fast path
+	// included) consults it, and the mutex serializes all cores on one
+	// cache line where an uncontended load does not (issue #757).
+	snap atomic.Pointer[banSnapshot]
 	list []activeBan
 	// ttl is how long a ban stays in the list before prune paths drop
 	// it. Zero applies defaultBanTTL. Configured per store via
 	// HotConfig.BanTTL (invalidation.ban_ttl) so operators can bound the
 	// blast radius of an over-broad ban.
 	ttl time.Duration
-	// dirty records that list changed since snap was compiled.
-	dirty bool
+	// dirty records that list changed since snap was compiled. Atomic
+	// so the lock-free snapshot() can check it without the mutex.
+	dirty atomic.Bool
 	mu    sync.Mutex
 }
 
@@ -390,7 +396,7 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	}
 	b.list = pruned
 	if refreshed {
-		b.dirty = true
+		b.dirty.Store(true)
 		return
 	}
 	ban := activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat}
@@ -400,34 +406,53 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	} else {
 		b.list = append(b.list, ban)
 	}
-	b.dirty = true
+	b.dirty.Store(true)
 }
 
 // pruneExpired rebuilds the state as of now, dropping bans older than
 // banTTL. Called by the TTL reaper each tick so a quiet day after a
-// storm does not keep taxing hits for the full 24 h window. Returns
-// whether any ban was dropped.
-func (b *banListState) pruneExpired(now time.Time) bool {
+// storm does not keep taxing hits for the full 24 h window.
+func (b *banListState) pruneExpired(now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	before := len(b.list)
 	b.rebuildLocked(now)
-	return len(b.list) != before
 }
 
-// snapshot returns the current compiled view. When registrations have
-// marked the state dirty, the snapshot is recompiled first (pruning
-// expired bans per compileBanSnapshot's precondition); otherwise the
-// previously published immutable snapshot is returned as-is. The hit
-// path therefore pays the O(list) compile at most once per
-// registration batch.
+// emptyBanSnapshot is the shared zero-view served before the first
+// compile (a zero-value banListState never rebuilt its snapshot).
+// Equivalent to compileBanSnapshot(nil) but allocated once.
+var emptyBanSnapshot = &banSnapshot{
+	hosts:      map[string]time.Time{},
+	paths:      map[string]time.Time{},
+	surrogates: map[string]time.Time{},
+}
+
+// snapshot returns the current compiled view without ever parking the
+// caller on the mutex. Clean (steady) state: one atomic load. When
+// registrations have marked the state dirty, exactly one caller wins the
+// TryLock and recompiles while the rest keep serving the previous
+// snapshot — enforcement lags by at most one rebuild (~µs) during a
+// registration batch, where the previous design parked every concurrent
+// hit behind that same rebuild. The TryLock loser's fallback chain
+// covers the pre-first-compile zero value.
+//
+// The amortization contract is preserved: a batch of N registrations
+// still costs one rebuild, now paid by whichever hit first observes the
+// dirty flag instead of by all of them (issue #757).
 func (b *banListState) snapshot() *banSnapshot {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.dirty || b.snap == nil {
-		b.rebuildLocked(time.Now())
+	if s := b.snap.Load(); s != nil && !b.dirty.Load() {
+		return s
 	}
-	return b.snap
+	if b.mu.TryLock() {
+		if b.dirty.Load() || b.snap.Load() == nil {
+			b.rebuildLocked(time.Now())
+		}
+		b.mu.Unlock()
+	}
+	if s := b.snap.Load(); s != nil {
+		return s
+	}
+	return emptyBanSnapshot
 }
 
 // rebuildLocked prunes bans older than the configured TTL and
@@ -443,8 +468,8 @@ func (b *banListState) rebuildLocked(now time.Time) {
 		pruned = append(pruned, ban)
 	}
 	b.list = pruned
-	b.snap = compileBanSnapshot(b.list)
-	b.dirty = false
+	b.snap.Store(compileBanSnapshot(b.list))
+	b.dirty.Store(false)
 }
 
 // len reports the active ban count (tests and metrics).

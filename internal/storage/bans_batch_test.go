@@ -16,9 +16,7 @@ import (
 // snapPtr returns the identity of the currently compiled snapshot so
 // tests can observe whether a registration rebuilt it eagerly.
 func snapPtr(b *banListState) *banSnapshot {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.snap
+	return b.snap.Load()
 }
 
 // TestBanRegister_DoesNotRebuildSnapshotEagerly pins the amortization

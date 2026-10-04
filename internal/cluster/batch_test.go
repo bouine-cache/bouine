@@ -176,6 +176,47 @@ func TestBatcher_IdleDeliversSynchronously(t *testing.T) {
 	require.Len(t, rbatch, 1)
 }
 
+// TestBatcher_AsyncEnqueueNeverDeliversSynchronously pins the contract
+// the data-plane invalidation hook relies on (issue #753): the async
+// variant never returns the idle-queue synchronous flush, so a proxied
+// request's fan-out cost is one enqueue; the flush loop delivers the
+// event instead. Overflow keeps the delivery-preserving fallback.
+func TestBatcher_AsyncEnqueueNeverDeliversSynchronously(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var purges int
+	b := newInvalidationBatcher(
+		nil,
+		nil,
+		func(evts []api.PurgeEvent) { mu.Lock(); purges += len(evts); mu.Unlock() },
+		func([]api.RefreshEvent) {},
+		func() {},
+	)
+	defer b.close()
+
+	// Idle queue: the sync variant would deliver synchronously; the
+	// async variant must queue for the flush loop.
+	batch, deliver := b.enqueuePurgeAsync(api.PurgeEvent{Issuer: "n0", Seq: 1})
+	require.False(t, deliver, "async enqueue must never take the idle synchronous path")
+	require.Nil(t, batch)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return purges == 1
+	}, broadcastBatchFlushInterval*10, time.Millisecond,
+		"flush loop must deliver the async-enqueued event")
+
+	// Overflow: delivery is preserved via the unbatched fallback.
+	for i := range broadcastQueueCap + 1 {
+		b.purgeMu.Lock()
+		b.purgeQueue = append(b.purgeQueue, api.PurgeEvent{Issuer: "n0", Seq: uint64(100 + i)})
+		b.purgeMu.Unlock()
+	}
+	over, deliver := b.enqueuePurgeAsync(api.PurgeEvent{Issuer: "n0", Seq: 999})
+	require.True(t, deliver, "overflow must return the unbatched fallback batch")
+	require.Len(t, over, 1)
+}
+
 // TestBatcher_StormCoalescesAndFlushes verifies the storm path: once
 // events are queued, subsequent events coalesce and the interval
 // flush delivers them as one batch.
@@ -224,14 +265,14 @@ func TestGossipPurgeBatch_AppliesAndDedups(t *testing.T) {
 	c.seqs = newSeqTracker() // minimalCluster skips New; wire the tracker explicitly
 	var mu sync.Mutex
 	var applied []api.PurgeEvent
-	c.inv = Invalidator{
+	c.SetInvalidator(Invalidator{
 		PurgeFn: func(_ context.Context, evt api.PurgeEvent) error {
 			mu.Lock()
 			applied = append(applied, evt)
 			mu.Unlock()
 			return nil
 		},
-	}
+	})
 	body, err := EncodePurgeBatchGossip(samplePurgeEvents(8))
 	require.NoError(t, err)
 

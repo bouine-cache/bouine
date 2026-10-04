@@ -113,8 +113,14 @@ type Member struct {
 //
 // Stable.
 type Cluster struct {
-	local  api.PeerInfo
-	inv    Invalidator
+	local api.PeerInfo
+	// inv is stored atomically: memberlist's packet-handler goroutine
+	// (started inside memberlist.Create, before SetInvalidator can be
+	// called) reads the callbacks on every gossip frame — the same
+	// reason the slogAdapter and metrics fields hold atomics. A plain
+	// field raced with SetInvalidator under -race in the integration
+	// suite.
+	inv    atomic.Pointer[Invalidator]
 	logger observability.Logger
 	ml     *memberlist.Memberlist
 	ring   *ring
@@ -217,7 +223,7 @@ func New(cfg Config) (*Cluster, error) {
 		}
 		var port int
 		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-			return nil, fmt.Errorf("cluster: bad port in %q: %w", cfg.BindAddr, err)
+			return nil, fmt.Errorf("cluster: bad port in bind addr %q: %w", cfg.BindAddr, err)
 		}
 		mlCfg.BindAddr = host
 		mlCfg.BindPort = port
@@ -233,6 +239,15 @@ func New(cfg Config) (*Cluster, error) {
 		}
 		mlCfg.AdvertiseAddr = host
 		mlCfg.AdvertisePort = port
+	} else if cfg.BindAddr != "" {
+		// Advertise what we bind. Without this, memberlist announces its
+		// default advertise address (interface IP : 7946) for every node;
+		// two clusters whose nodes share names but bind different ports
+		// then reconcile each other's membership over that address
+		// (observed in the integration suite: the strong and eventual
+		// stacks merged into one memberlist cluster and a booting node
+		// received a foreign stack's purge frame mid-build).
+		mlCfg.AdvertiseAddr, mlCfg.AdvertisePort = mlCfg.BindAddr, mlCfg.BindPort
 	}
 
 	ml, err := memberlist.Create(mlCfg)
@@ -400,7 +415,8 @@ func (c *Cluster) handleBinaryGossip(msg []byte) {
 
 // handleGossipPurge applies a single purge gossip frame.
 func (c *Cluster) handleGossipPurge(msg []byte) {
-	if c.inv.PurgeFn == nil {
+	inv := c.inv.Load()
+	if inv == nil || inv.PurgeFn == nil {
 		return
 	}
 	evt, err := DecodePurgeGossip(msg)
@@ -413,7 +429,7 @@ func (c *Cluster) handleGossipPurge(msg []byte) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
 	defer cancel()
-	if err := c.inv.PurgeFn(ctx, evt); err != nil {
+	if err := inv.PurgeFn(ctx, evt); err != nil {
 		c.logger.Warn("cluster: gossip purge apply failed", "error", err)
 		return
 	}
@@ -429,7 +445,8 @@ func (c *Cluster) handleGossipPurge(msg []byte) {
 // deduping events already delivered via the HTTP fan-out path
 // (ADR-0044).
 func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
-	if c.inv.PurgeFn == nil {
+	inv := c.inv.Load()
+	if inv == nil || inv.PurgeFn == nil {
 		return
 	}
 	evts, err := DecodePurgeBatchGossip(msg)
@@ -443,7 +460,7 @@ func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		err := c.inv.PurgeFn(ctx, evt)
+		err := inv.PurgeFn(ctx, evt)
 		cancel()
 		if err != nil {
 			c.logger.Warn("cluster: gossip purge batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
@@ -459,7 +476,8 @@ func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
 
 // handleGossipBan applies a single ban gossip frame.
 func (c *Cluster) handleGossipBan(msg []byte) {
-	if c.inv.BanFn == nil {
+	inv := c.inv.Load()
+	if inv == nil || inv.BanFn == nil {
 		return
 	}
 	evt, err := DecodeBanGossip(msg)
@@ -472,7 +490,7 @@ func (c *Cluster) handleGossipBan(msg []byte) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
 	defer cancel()
-	if err := c.inv.BanFn(ctx, evt); err != nil {
+	if err := inv.BanFn(ctx, evt); err != nil {
 		c.logger.Warn("cluster: gossip ban apply failed", "error", err)
 		return
 	}
@@ -485,7 +503,8 @@ func (c *Cluster) handleGossipBan(msg []byte) {
 
 // handleGossipRefresh applies a single refresh gossip frame.
 func (c *Cluster) handleGossipRefresh(msg []byte) {
-	if c.inv.RefreshFn == nil {
+	inv := c.inv.Load()
+	if inv == nil || inv.RefreshFn == nil {
 		return
 	}
 	evt, err := DecodeRefreshGossip(msg)
@@ -498,7 +517,7 @@ func (c *Cluster) handleGossipRefresh(msg []byte) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
 	defer cancel()
-	if err := c.inv.RefreshFn(ctx, evt); err != nil {
+	if err := inv.RefreshFn(ctx, evt); err != nil {
 		c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
 		return
 	}
@@ -513,7 +532,8 @@ func (c *Cluster) handleGossipRefresh(msg []byte) {
 // handleGossipRefreshBatch applies a batched refresh gossip frame,
 // deduping events already delivered via the HTTP fan-out path.
 func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
-	if c.inv.RefreshFn == nil {
+	inv := c.inv.Load()
+	if inv == nil || inv.RefreshFn == nil {
 		return
 	}
 	evts, err := DecodeRefreshBatchGossip(msg)
@@ -527,7 +547,7 @@ func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		err := c.inv.RefreshFn(ctx, evt)
+		err := inv.RefreshFn(ctx, evt)
 		cancel()
 		if err != nil {
 			c.logger.Warn("cluster: gossip refresh batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
@@ -946,8 +966,11 @@ func (c *Cluster) SetMetrics(m *Metrics) {
 }
 
 // SetInvalidator registers callbacks for applying purge and ban events
-// received via gossip. Must be called before Join.
-func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
+// received via gossip. Safe to call after New: memberlist's packet
+// handlers read the callbacks through the atomic pointer, so a
+// bootstrap-phase SetInvalidator cannot race a gossip frame received
+// before the call.
+func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv.Store(&inv) }
 
 // SetOnPeerRetired registers the retire/unretire callbacks. retire is
 // invoked with a peer's address when that address stops being current

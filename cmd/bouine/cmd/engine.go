@@ -209,7 +209,8 @@ func (e *engine) run(ctx context.Context) error {
 	seq.Gate().MarkReady("store-loaded")
 	updateStartupMetrics(seq, rs.startupMetrics)
 
-	handler := e.buildDataPlane(rs) //nolint:contextcheck // routes may fan invalidations out via the broadcaster, which detaches by design
+	handler := e.buildDataPlane(rs)
+	rs.wireGossipInvalidator() // after buildDataPlane: the callbacks iterate rs.handlers, which buildRouter appends
 
 	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
@@ -343,23 +344,33 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		cfCancel:       cfCancel,
 		seq:            seq,
 	}
-	// Wire the gossip invalidator after rs is created so the purge
-	// closure can call rs.purgeKey for variant-aware deletion.
-	if clusterNode != nil {
-		clusterNode.SetInvalidator(cluster.Invalidator{
-			PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
-				return rs.purgeKey(ctx, evt.Key)
-			},
-			BanFn: func(ctx context.Context, evt api.BanEvent) error {
-				_, err := store.Ban(ctx, evt.Predicate)
-				return err
-			},
-			RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
-				return rs.softPurgeKey(ctx, evt.Key)
-			},
-		})
-	}
 	return rs, shutdownTracer, nil
+}
+
+// wireGossipInvalidator registers the purge/ban/refresh callbacks that
+// apply gossip-received invalidations to rs. Called AFTER buildDataPlane
+// completes: the callbacks iterate rs.handlers, which buildRouter is
+// still appending during initSubsystems — registering earlier lets a
+// gossip frame arriving in that window (a peer retransmitting while
+// this node joins mid-boot) race the handler-table append. Before Join
+// a node receives no peer frames, so registering at this point drops
+// nothing.
+func (rs *runState) wireGossipInvalidator() {
+	if rs.clusterNode == nil {
+		return
+	}
+	rs.clusterNode.SetInvalidator(cluster.Invalidator{
+		PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
+			return rs.purgeKey(ctx, evt.Key)
+		},
+		BanFn: func(ctx context.Context, evt api.BanEvent) error {
+			_, err := rs.store.Ban(ctx, evt.Predicate)
+			return err
+		},
+		RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
+			return rs.softPurgeKey(ctx, evt.Key)
+		},
+	})
 }
 
 // updateStartupMetrics syncs the readiness gate condition states into
@@ -716,20 +727,27 @@ func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
 // invalidating request lands on a non-owner with probability (N-1)/N
 // behind a front load balancer while only the owner stores the key, and
 // in eventual mode every node caches independently, so a local-only
-// purge fixes exactly one node either way. The broadcaster detaches
-// from any request lifecycle and coalesces bursts behind its 10 ms
-// flush window (ADR-0044), so per-request cost is one enqueue. Nil when
-// the engine runs single-node.
+// purge fixes exactly one node either way.
+//
+// The hook uses BroadcastPurgeAsync — enqueue-only, never a synchronous
+// flush: the hook fires inside a proxied client request, and the
+// batcher's idle path would block that request's response on per-peer
+// HTTP fan-out (up to broadcastTimeout per peer in strong mode), taxing
+// every invalidating request with the cluster's slowest peer. The
+// flush loop delivers within broadcastBatchFlushInterval (10 ms,
+// ADR-0044) — the same bound every coalesced event already accepts —
+// against an invalidation gap that was previously unbounded (stale
+// until TTL). The admin API keeps the synchronous variant: its
+// returned-purge-has-fanned-out contract does not apply to a proxied
+// response, which is the origin's answer, not ours. Nil when the engine
+// runs single-node.
 func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
 	if rs.broadcaster == nil {
 		return nil
 	}
 	b := rs.broadcaster
 	return func(key api.Key) {
-		// Deliberately detached: the fan-out is bounded by the
-		// broadcaster's broadcastTimeout, not by the triggering
-		// request's lifecycle (same contract as the admin purge path).
-		b.BroadcastPurge(context.Background(), key, "") //nolint:contextcheck // detached fan-out by design
+		b.BroadcastPurgeAsync(key, "")
 	}
 }
 

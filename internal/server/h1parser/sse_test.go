@@ -92,9 +92,13 @@ func TestFallThrough_StreamedResponseRearmsWriteDeadline(t *testing.T) {
 		t.Fatal("handleFallThrough did not return within 5s")
 	}
 
-	// One absolute arm (before WriteTo) plus one re-arm per body write:
-	// the terminal chunk also writes, so strictly more arms than events.
-	assert.GreaterOrEqual(t, counting.arms.Load(), int64(events+1),
+	// One absolute arm (before WriteTo) plus one re-arm per conn Write:
+	// the write granularity is fasthttp's choice, so pin the contract, not
+	// the count. fasthttp >= master fe1f9ff coalesces the terminal chunk
+	// with the trailer section into a single buffered write, and 4bd60fd
+	// sends the buffered data + stream chunks as fewer, larger writes —
+	// either way every conn Write must observe a fresh deadline.
+	assert.GreaterOrEqual(t, counting.arms.Load(), int64(2),
 		"a streamed response must re-arm the write deadline per Write")
 }
 

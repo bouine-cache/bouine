@@ -52,6 +52,25 @@ the curated, human-readable summary.
   cost one origin fetch per caller, bounded by the fetch semaphore
   and shed machinery — the same trade ADR-0052 made for authorized
   traffic.
+- **All Go dependencies bumped**. `fasthttp` moves to the released
+  `v1.75.0`, picking up the
+  upstream hot-path work: one-pass validating header parsing, 8-byte
+  scanning of header values/control bytes/target, memoized authority
+  parsing, cached Date header line, writev-based response serialization
+  for large bodies, fewer copies in header serialization, and
+  redundant-deadline-skipping on client connections; the tag also
+  carries a CL.0-style desync fix (unread streamed request bodies are
+  drained or the connection closed), a zero-length suffix range fix,
+  and a drain-vs-response ordering fix. Also bumps
+  OTel 1.46 → 1.47 (PeriodicReader data-race fix, hex-table
+  traceparent decoding), gRPC 1.83.2 → 1.84.0 (idleness-stuck RPC fix,
+  STS token-leak fix), prometheus/common 0.71 → 0.72 (OpenMetrics 2
+  encoding, faster JSON sample unmarshaling), klauspost/compress
+  1.20.0 → 1.20.1, molecule-man/go-brrr 1.0.1 → 1.2.0,
+  golang.org/x/net 0.58 → 0.59, and the genproto pins. The SSE
+  fall-through test now pins the per-Write deadline re-arm contract
+  rather than fasthttp's internal write granularity (upstream now
+  coalesces the terminal chunk with the trailer section).
 
 ### Fixed
 

@@ -166,35 +166,56 @@ func TestBanSnapshot_FirstReadAfterRegistrationEnforcesNewBan(t *testing.T) {
 }
 
 // TestBanSnapshot_TryLockLoserServesPreviousSnapshot pins the
-// staleness semantics of the TryLock race: while a rebuild is in
-// flight (mutex held), concurrent readers serve the previous snapshot
-// rather than parking — and once the rebuild completes, new bans are
-// enforced.
+// staleness semantics of the TryLock race: with the state dirty and a
+// rebuild in flight (mutex held), concurrent readers take the loser
+// path and serve the previous snapshot rather than parking — the new
+// ban is enforced only after the rebuild completes.
 func TestBanSnapshot_TryLockLoserServesPreviousSnapshot(t *testing.T) {
 	t.Parallel()
 	b := &banListState{ttl: time.Hour}
-	pred, err := compileBanPredicate(api.BanExpr{HostRegex: `^base\.example\.com$`})
+	basePred, err := compileBanPredicate(api.BanExpr{HostRegex: `^base\.example\.com$`})
 	require.NoError(t, err)
-	b.register(api.BanExpr{HostRegex: `^base\.example\.com$`}, pred, time.Now())
+	b.register(api.BanExpr{HostRegex: `^base\.example\.com$`}, basePred, time.Now())
 	require.NotNil(t, b.snapshot())
+	before := snapPtr(b)
 
-	// Hold the mutex the way a rebuild would; readers must not park.
+	// A registration marks the state dirty; the rebuild has not run.
+	newPred, err := compileBanPredicate(api.BanExpr{HostRegex: `^new\.example\.com$`})
+	require.NoError(t, err)
+	b.register(api.BanExpr{HostRegex: `^new\.example\.com$`}, newPred, time.Now())
+	require.True(t, b.dirty.Load())
+
+	// Hold the mutex the way an in-flight rebuild would. The readers
+	// cannot win the TryLock: they must take the loser path and serve
+	// the pre-batch snapshot without parking.
 	b.mu.Lock()
 	served := make(chan *banSnapshot, 8)
 	for range 8 {
 		go func() { served <- b.snapshot() }()
 	}
+	newObj := banTestObj("new.example.com", "/p", time.Hour)
 	for range 8 {
 		select {
 		case s := <-served:
 			require.NotNil(t, s, "reader must serve the previous snapshot, never nil")
 			assert.True(t, s.matches(banTestObj("base.example.com", "/p", time.Hour)),
-				"served snapshot must remain enforceable")
+				"served snapshot must keep enforcing existing bans")
+			assert.False(t, s.matches(newObj),
+				"a dirty-but-unbuilt snapshot serves the PREVIOUS view — the new ban lands with the rebuild")
 		case <-time.After(2 * time.Second):
+			b.mu.Unlock()
 			t.Fatal("snapshot() parked on the mutex — readers must not block")
 		}
 	}
 	b.mu.Unlock()
+
+	// Sanity: no reader rebuilt while the mutex was held (all served
+	// the pre-batch view); the test's own post-unlock read wins the
+	// TryLock, rebuilds, and enforces the new ban.
+	assert.Same(t, before, snapPtr(b), "no rebuild may happen while the mutex is held")
+	s := b.snapshot()
+	assert.NotSame(t, before, snapPtr(b), "the post-unlock read must have rebuilt")
+	assert.True(t, s.matches(newObj), "the completed rebuild must enforce the new ban")
 }
 
 // TestBanSnapshot_ReaperPrunePublishesNewSnapshot pins that the
@@ -261,13 +282,16 @@ func TestBanSnapshot_HitPathServesStoredBansDuringBatch(t *testing.T) {
 // BenchmarkGate entries for the ban-snapshot read path (issue #757).
 // Budgets are enforced in bench/run.sh's BUDGETS map.
 
+// BenchmarkGate_HotStore_Get_Hit_BanSnapshotRead measures the clean
+// steady-state snapshot read the hit path pays on every lookup (one
+// active ban compiled, matching nothing): a single atomic load must
+// stay allocation-free.
 func BenchmarkGate_HotStore_Get_Hit_BanSnapshotRead(b *testing.B) {
-	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	defer func() { _ = s.Close(context.Background()) }()
-	k := testkey.Hash([]byte("bench-ban-read"))
-	_ = s.Put(context.Background(), k, obj(k, 1024))
 	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: `^banned\.example\.com$`})
 	o := banTestObj("clean.example.com", "/p", time.Hour)
+	_ = s.MatchesActiveBan(o) // compile so the loop measures the clean read
 
 	b.ResetTimer()
 	b.ReportAllocs()

@@ -534,6 +534,43 @@ routes:
 	assert.Equal(t, time.Duration(int64(1)*60*60*1e9), cfg.Routes[0].Cache.TTLOverride)
 }
 
+func TestParse_BypassOnCookie_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.NotNil(t, cfg.Routes[0].Cache.BypassOnCookie)
+	assert.True(t, *cfg.Routes[0].Cache.BypassOnCookie)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestParse_BypassOnCookie_DefaultNil(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	assert.Nil(t, cfg.Routes[0].Cache.BypassOnCookie, "bypass_on_cookie must default to nil (off)")
+	require.NoError(t, cfg.Validate())
+}
+
 func TestValidate_TTLOverride_NegativeRejected(t *testing.T) {
 	t.Parallel()
 	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}

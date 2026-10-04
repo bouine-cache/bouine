@@ -362,6 +362,11 @@ type Handler struct {
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
 	allowSetCookie bool // when false (default), Set-Cookie blocks caching
+	// bypassOnCookie routes cookied requests entirely around the cache
+	// (ADR-0054, cache.bypass_on_cookie): no lookup, no storage, no
+	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
+	// cache-tests other-cookie optimal case.
+	bypassOnCookie bool
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
@@ -578,6 +583,13 @@ type HandlerConfig struct {
 	// stored object so subsequent HITs do not replay another user's
 	// cookies.
 	AllowSetCookie bool
+	// BypassOnCookie routes requests carrying a non-empty Cookie
+	// header entirely around the cache (ADR-0054): no lookup, no
+	// storage, no in-flight sharing. Designed for personalized SSR
+	// routes where the origin renders per-user content from the
+	// request cookie. Default (false): cookied requests participate in
+	// the cache per RFC 9111.
+	BypassOnCookie bool
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
@@ -765,6 +777,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,
 		allowSetCookie:          cfg.AllowSetCookie,
+		bypassOnCookie:          cfg.BypassOnCookie,
 		maxObjectSize:           cfg.MaxObjectSize,
 		maxVariants:             cfg.MaxVariants,
 		maxResponseBytes:        cfg.MaxResponseBytes,
@@ -1290,6 +1303,28 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// every origin-bound copy do, so the rewrite must land before
 	// lookup. No-op for routes without directives.
 	h.rewriteRequestCtx(ctx)
+
+	// Cookie bypass (ADR-0054, cache.bypass_on_cookie): a cookied
+	// request on a route that opted in never touches the cache — no
+	// lookup, no storage, no in-flight sharing. The check is a single
+	// non-empty Peek, and the flag is read from a bool field resolved
+	// at handler build time, so flag-off routes pay one Peek of a
+	// header fasthttp already parsed. Placed after rewriteRequestCtx
+	// so request.header_remove can strip the Cookie header before the
+	// check, and before lookup so no store read is ever performed.
+	// SSE intent wins the dispatch: handleSSE already streams live
+	// with never-cache semantics, which satisfies the same "never
+	// stored, never shared" contract (the SSE fetch never collapses
+	// and never buffers into the store).
+	if h.bypassOnCookie && len(ctx.Request.Header.Peek(header.Cookie)) > 0 {
+		if h.sseIntent(ctx) {
+			h.handleSSE(ctx)
+			return
+		}
+		ctx.SetUserValue("cacheKey", api.Key{})
+		h.handleBypass(ctx)
+		return
+	}
 
 	now := time.Now()
 	primaryKey, key, obj, src := h.lookup(ctx)

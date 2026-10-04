@@ -10,6 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- **`cache.bypass_on_cookie` per-route flag (ADR-0054, issue #762)**.
+  When enabled, a request carrying any non-empty `Cookie` header never
+  touches the cache on that route: no lookup, no storage, no in-flight
+  sharing — the request proxies to origin (Varnish `return (pass)` on
+  `req.http.Cookie`). Designed for personalized SSR HTML: an origin
+  that renders per-user content from the request cookie must never see
+  its response stored under a shared key (served to other users) or
+  handed to a concurrent singleflight follower (another user's body
+  in-flight). Default off: cookied requests participate in the cache
+  per RFC 9111, and the cache-tests `other-cookie` optimal case keeps
+  passing. SSE-intent requests keep live-stream semantics; invalidating
+  methods (POST/PUT/DELETE) keep invalidating the shared key. Flag-on
+  routes pay one Cookie-header presence check; flag-off routes one
+  Peek.
+
 ### Fixed
 
 - Helm chart StatefulSet rolling-update settings are now passed through from

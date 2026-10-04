@@ -91,6 +91,12 @@ const (
 	// request.
 	RetryAfter = "Retry-After"
 
+	// Cookie — RFC 6265 §4.2. Request cookie. May appear multiple
+	// times; the cache-bypass guard (ADR-0054) treats presence of any
+	// value as the bypass trigger. The canonical MIME form is "Cookie"
+	// (fasthttp canonicalizes identically).
+	Cookie = "Cookie"
+
 	// SetCookie — RFC 6265 §4.1. Response cookie. May appear multiple
 	// times.
 	SetCookie = "Set-Cookie"

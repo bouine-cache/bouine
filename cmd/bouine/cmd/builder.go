@@ -362,6 +362,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:              rc.Cache.StaleIfError,
 			AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+			BypassOnCookie:          rc.Cache.BypassOnCookie != nil && *rc.Cache.BypassOnCookie,
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,

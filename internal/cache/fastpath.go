@@ -59,6 +59,15 @@ type FastPathHandler struct {
 	cachedDate     atomic.Pointer[string]
 	poolName       string
 	cachedDateUnix atomic.Int64
+	// bypassOnCookie mirrors the owning Handler's cache.bypass_on_cookie
+	// flag (ADR-0054). When true, TryHit declines cookied requests so
+	// they fall through to the slow path's ServeRequest, which routes
+	// them to handleBypass — no lookup, no storage, no in-flight
+	// sharing. False (default) keeps the fast path's behavior
+	// unchanged: the flag test is a single bool read paid on every
+	// request, with the header scan (req.Header) only on flag-on
+	// routes' cookied requests.
+	bypassOnCookie bool
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's
@@ -72,10 +81,11 @@ type FastPathHandler struct {
 // flag opt-in (issue #696).
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:    h.store,
-		owner:    h,
-		poolName: h.poolName,
-		policy:   h.policy,
+		store:          h.store,
+		owner:          h,
+		poolName:       h.poolName,
+		policy:         h.policy,
+		bypassOnCookie: h.bypassOnCookie,
 	}
 }
 
@@ -125,6 +135,21 @@ func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.Pee
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
+	// Cookie bypass (ADR-0054): decline before the store Get so a
+	// cookied request never reads — or is later served from — the
+	// cache on routes that opted in. The h1parser falls through to
+	// the slow path, whose ServeRequest runs handleBypass. req.Header
+	// scans the already-parsed array, no re-parse.
+	if f.bypassOnCookie && req.Header(header.Cookie) != "" {
+		return nil, false
+	}
+	return f.tryHit(req, now)
+}
+
+// tryHit serves the qualified hit path; TryHit gates on the cookie
+// bypass first. Split so the gate stays a one-branch guard on the
+// entry function (gocyclo).
+func (f *FastPathHandler) tryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
 	reqCC, ok := qualifiesForFastPath(req)
 	if !ok {
 		return nil, false

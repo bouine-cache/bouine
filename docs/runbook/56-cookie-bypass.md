@@ -51,6 +51,9 @@ the other knobs do not compose into safety for that shape:
   anonymous users get cached HTML.
 - SSE (`Accept: text/event-stream`) requests: unchanged — live
   stream, never cached, never collapsed.
+- Dashboard insight `config-cookie-bypass-missing` gone: the route
+  either has the flag on, no longer stores (`ttl_default`/
+  `ttl_override` removed), or the cookied share dropped below 5%.
 
 ## Failure modes
 
@@ -60,3 +63,4 @@ the other knobs do not compose into safety for that shape:
 | Hit ratio dropped after enabling | Cookied share of traffic is bypassing | Check `cache_result="BYPASS"` before rollout; scope the flag to personalization-relevant path prefixes |
 | Logged-in user still sees another user's page | Flag not on the matching route (router matches first host+prefix entry), or the page is served by an origin cache | `bouine cachecheck` the URL; verify the route that matched |
 | `X-Cache: BYPASS` on anonymous requests | An upstream proxy/ingress injects a Cookie header | Inspect request headers at bouine; strip injected cookies at the ingress |
+| Insight `config-cookie-bypass-missing` fires | The route stores responses (ttl_default/ttl_override) while ≥5% of its traffic carries cookies — the personalized-SSR leak shape | Verify the origin truly renders per-user; if yes set `bypass_on_cookie: true`, if no raise the threshold or remove ttl_default |

@@ -33,6 +33,7 @@ func init() {
 		ruleClusterPeerStale,
 		ruleConfigKeyQueryParams,
 		ruleConfigAllowSetCookie,
+		ruleConfigCookieBypassMissing,
 		ruleConfigJitterZero,
 		// Tier 1: config-derived standing insights.
 		ruleConfigTLSBelow12,
@@ -677,6 +678,75 @@ func ruleConfigAllowSetCookie(data InsightData) *Insight {
 		Action:   "/dashboard/config",
 	}
 }
+
+// ruleConfigCookieBypassMissing fires when a route that stores
+// responses is receiving cookie-bearing traffic without
+// bypass_on_cookie (ADR-0054, issue #762). The storing condition is
+// operator-visible: ttl_default > 0 or ttl_override > 0 make
+// no-freshness responses storable — the exact knob that turns a
+// personalized SSR page into a stored cross-user leak, because the
+// Set-Cookie block (ADR-0012) never fires for origins that only
+// READ the cookie. The traffic condition is measured: at least
+// cookieBypassMinRequests requests in the window with at least
+// cookieBypassMinCookiedPct% carrying a Cookie header — analytics
+// noise alone won't fire it, and a route with real cookie traffic
+// will.
+func ruleConfigCookieBypassMissing(data InsightData) *Insight {
+	var triggered []string
+	var worstCookiedPct float64
+	var worstEvidence string
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		if !isCacheEnabled(r) {
+			continue
+		}
+		if r.Cache.BypassOnCookie != nil && *r.Cache.BypassOnCookie {
+			continue
+		}
+		storing := r.Cache.TTLDefault > 0 || r.Cache.TTLOverride > 0
+		if !storing {
+			continue
+		}
+		for _, rs := range data.RouteStats {
+			if rs.Route != r.Name || rs.Requests < cookieBypassMinRequests {
+				continue
+			}
+			cookiedPct := float64(rs.Cookied) / float64(rs.Requests) * 100
+			if cookiedPct < cookieBypassMinCookiedPct {
+				continue
+			}
+			triggered = append(triggered, r.Name)
+			if cookiedPct > worstCookiedPct {
+				worstCookiedPct = cookiedPct
+				worstEvidence = fmt.Sprintf("cookied: %d / requests: %d (%.0f%%), ttl_default: %s, ttl_override: %s",
+					rs.Cookied, rs.Requests, cookiedPct, r.Cache.TTLDefault, r.Cache.TTLOverride)
+			}
+			break
+		}
+	}
+	if len(triggered) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-cookie-bypass-missing",
+		Severity: SeverityMed,
+		Category: CategoryConfig,
+		Title:    fmt.Sprintf("Route %s caches cookie-bearing traffic without bypass_on_cookie", triggered[0]),
+		Detail: fmt.Sprintf("%d route(s) store responses (ttl_default/ttl_override) while serving cookie-bearing requests without bypass_on_cookie — personalized content can be stored and served cross-user (ADR-0054)",
+			len(triggered)),
+		Evidence: worstEvidence,
+		Routes:   truncateRoutes(triggered),
+		Action:   "/dashboard/config",
+	}
+}
+
+// cookieBypassMinRequests and cookieBypassMinCookiedPct gate the
+// cookie-bypass insight: small-sample routes and analytics-cookie-only
+// noise must not fire it, but any route with a real cookied share will.
+const (
+	cookieBypassMinRequests   = 100
+	cookieBypassMinCookiedPct = 5.0
+)
 
 func ruleConfigJitterZero(data InsightData) *Insight {
 	var triggered []string

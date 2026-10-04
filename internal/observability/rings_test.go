@@ -84,10 +84,10 @@ func TestRequestRing_SnapshotWraparound(t *testing.T) {
 func TestRouteRing_RecordAndFlush(t *testing.T) {
 	t.Parallel()
 	r := &RouteRing{}
-	r.RecordRoute("/api/v1", "HIT", 200, 10)
-	r.RecordRoute("/api/v1", "HIT", 200, 10)
-	r.RecordRoute("/api/v1", "MISS", 200, 20)
-	r.RecordRoute("/static", "HIT", 200, 5)
+	r.RecordRoute("/api/v1", "HIT", 200, 10, false)
+	r.RecordRoute("/api/v1", "HIT", 200, 10, false)
+	r.RecordRoute("/api/v1", "MISS", 200, 20, false)
+	r.RecordRoute("/static", "HIT", 200, 5, false)
 	r.Flush(time.Now())
 
 	stats := r.RouteStats(1)
@@ -108,13 +108,51 @@ func TestRouteRing_RecordAndFlush(t *testing.T) {
 	}
 }
 
+// TestRouteRing_CookiedCounter pins the ADR-0054 insight signal: the
+// cookied flag flows RecordRoute → Flush → RouteStats and merges
+// across summaries, so the cookie-bypass rule can size the cookied
+// share per route.
+func TestRouteRing_CookiedCounter(t *testing.T) {
+	t.Parallel()
+	r := &RouteRing{}
+	r.RecordRoute("/ssr", "HIT", 200, 10, true)
+	r.RecordRoute("/ssr", "MISS", 200, 20, true)
+	r.RecordRoute("/ssr", "HIT", 200, 10, false)
+	r.RecordRoute("/static", "HIT", 200, 5, false)
+	r.Flush(time.Now())
+
+	stats := r.RouteStats(1)
+	byRoute := map[string]RouteStat{}
+	for _, s := range stats {
+		byRoute[s.Route] = s
+	}
+
+	ssr, ok := byRoute["/ssr"]
+	require.True(t, ok)
+	assert.Equal(t, int64(3), ssr.Requests)
+	assert.Equal(t, int64(2), ssr.Cookied, "two of three /ssr requests were cookied")
+
+	st, ok := byRoute["/static"]
+	require.True(t, ok)
+	assert.Equal(t, int64(0), st.Cookied)
+
+	// Cluster merge: summaries sum Cookied per route.
+	merged := mergeRouteStatsList([]MetricsSummary{
+		{RouteStats: []RouteStat{{Route: "/ssr", Requests: 2, Cookied: 1}}},
+		{RouteStats: []RouteStat{{Route: "/ssr", Requests: 3, Cookied: 2}}},
+	})
+	require.Len(t, merged, 1)
+	assert.Equal(t, int64(5), merged[0].Requests)
+	assert.Equal(t, int64(3), merged[0].Cookied)
+}
+
 func TestRouteRing_Sparkline(t *testing.T) {
 	t.Parallel()
 	r := &RouteRing{}
 	now := time.Now()
 	for i := range 10 {
 		for range i + 1 {
-			r.RecordRoute("/test", "HIT", 200, 10)
+			r.RecordRoute("/test", "HIT", 200, 10, false)
 		}
 		r.Flush(now.Add(time.Duration(i) * time.Minute))
 	}
@@ -153,7 +191,7 @@ func TestRings_SaveLoad(t *testing.T) {
 	ri := NewRings("node-1")
 	ri.Request.RecordRequest("HIT", 200, 10)
 	ri.Request.Flush(time.Now())
-	ri.Route.RecordRoute("/test", "HIT", 200, 10)
+	ri.Route.RecordRoute("/test", "HIT", 200, 10, false)
 	ri.Route.Flush(time.Now())
 
 	err := ri.Save(path)
@@ -231,9 +269,9 @@ func TestRequestRing_RecordRequestZeroAllocs(t *testing.T) {
 // steady-state path (route already known).
 func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
 	r := &RouteRing{}
-	r.RecordRoute("/api/v1", "HIT", 200, 10) // seed so LoadOrStore hits fast path
+	r.RecordRoute("/api/v1", "HIT", 200, 10, false) // seed so LoadOrStore hits fast path
 	allocs := testing.AllocsPerRun(200, func() {
-		r.RecordRoute("/api/v1", "HIT", 200, 10)
+		r.RecordRoute("/api/v1", "HIT", 200, 10, false)
 	})
 	assert.Equal(t, float64(0), allocs)
 }
@@ -247,14 +285,14 @@ func TestRouteRing_CapEnforced(t *testing.T) {
 	r := &RouteRing{}
 	// Fill up to the cap.
 	for i := range routeRingCap {
-		r.RecordRoute("route-"+strconv.Itoa(i), "HIT", 200, 10)
+		r.RecordRoute("route-"+strconv.Itoa(i), "HIT", 200, 10, false)
 	}
 	assert.Equal(t, int64(routeRingCap), r.size.Load(),
 		"size should equal routeRingCap after filling")
 
 	// These should be silently dropped.
-	r.RecordRoute("overflow-1", "HIT", 200, 10)
-	r.RecordRoute("overflow-2", "HIT", 200, 10)
+	r.RecordRoute("overflow-1", "HIT", 200, 10, false)
+	r.RecordRoute("overflow-2", "HIT", 200, 10, false)
 
 	// size must not have grown beyond the cap (best-effort, single-goroutine
 	// so no TOCTOU concern here).
@@ -280,11 +318,11 @@ func BenchmarkRequestRing_RecordRequest(b *testing.B) {
 // BenchmarkRouteRing_RecordRoute measures steady-state route recording.
 func BenchmarkRouteRing_RecordRoute(b *testing.B) {
 	r := &RouteRing{}
-	r.RecordRoute("/api", "HIT", 200, 10) // seed
+	r.RecordRoute("/api", "HIT", 200, 10, false) // seed
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		r.RecordRoute("/api", "HIT", 200, 10)
+		r.RecordRoute("/api", "HIT", 200, 10, false)
 	}
 }
 

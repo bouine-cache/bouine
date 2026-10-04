@@ -477,6 +477,65 @@ func TestRuleConfigRouteStripsCacheHeaders(t *testing.T) {
 	require.Nil(t, ins)
 }
 
+func TestRuleConfigCookieBypassMissing(t *testing.T) {
+	t.Parallel()
+	// The firing shape: a storing route (ttl_default) whose measured
+	// traffic carries cookies, with no bypass_on_cookie.
+	cfg := baseConfig()
+	cfg.Routes[0].Cache.TTLDefault = 30 * time.Second
+	data := InsightData{
+		Config: cfg,
+		RouteStats: []observability.RouteStat{
+			{Route: "api", Requests: 500, Cookied: 200}, // 40% cookied
+		},
+	}
+	ins := ruleConfigCookieBypassMissing(data)
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
+	assert.Equal(t, []string{"api"}, ins.Routes)
+	assert.Contains(t, ins.Detail, "bypass_on_cookie")
+
+	// Fix applied: the flag is on — rule must not fire.
+	on := true
+	cfg.Routes[0].Cache.BypassOnCookie = &on
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Not storing: ttl_default unset (origin directives govern storage
+	// and the Set-Cookie block still applies) — no insight.
+	off := false
+	cfg.Routes[0].Cache.BypassOnCookie = &off
+	cfg.Routes[0].Cache.TTLDefault = 0
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Storing but cookie share below threshold — analytics noise must
+	// not fire it.
+	cfg.Routes[0].Cache.TTLDefault = 30 * time.Second
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 500, Cookied: 10}, // 2%
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Storing with a real cookied share but too few samples — small
+	// routes must not fire it.
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 50, Cookied: 40}, // 80% but n=50
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// ttl_override is also a storing knob: same firing shape.
+	cfg.Routes[0].Cache.TTLDefault = 0
+	cfg.Routes[0].Cache.TTLOverride = time.Minute
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 500, Cookied: 200},
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.NotNil(t, ins)
+}
+
 // ── Tier 2 tests ─────────────────────────────────────────────────────
 
 func TestRuleCacheHighEvictionRate(t *testing.T) {

@@ -26,6 +26,15 @@ the curated, human-readable summary.
   methods (POST/PUT/DELETE) keep invalidating the shared key. Flag-on
   routes pay one Cookie-header presence check; flag-off routes one
   Peek.
+- **Dashboard insight `config-cookie-bypass-missing`** (ADR-0054).
+  The dashboard now counts cookie-bearing requests per route
+  (`RouteStat.Cookied`, dashboard ring only — no new Prometheus
+  label) and fires a MED insight when a route stores responses
+  (`ttl_default`/`ttl_override` > 0) while ≥5% of its measured
+  traffic carries a Cookie header and `bypass_on_cookie` is off —
+  the personalized-SSR leak shape (origin reads the cookie, so the
+  Set-Cookie storage block never fires). Surfaces the footgun
+  without changing any default.
 
 ### Fixed
 

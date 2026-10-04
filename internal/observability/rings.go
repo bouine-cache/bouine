@@ -211,11 +211,16 @@ func (r *RequestRing) Snapshot(n int) []RequestBucket {
 
 // RouteBucket holds per-route aggregated counters for one minute.
 type RouteBucket struct {
-	Route     string
-	Requests  int64
-	Hits      int64
-	Misses    int64
-	Errors    int64 // HTTP 5xx
+	Route    string
+	Requests int64
+	Hits     int64
+	Misses   int64
+	Errors   int64 // HTTP 5xx
+	// Cookied counts requests carrying a non-empty Cookie header.
+	// The signal behind the cookie-bypass insight rule (ADR-0054): a
+	// route that stores responses while serving cookied traffic is the
+	// personalized-SSR leak shape unless bypass_on_cookie is on.
+	Cookied   int64
 	LatHist   LatencyHistogram
 	Timestamp int64
 }
@@ -237,6 +242,7 @@ type routeCounters struct {
 	hits     atomic.Int64
 	misses   atomic.Int64
 	errors   atomic.Int64
+	cookied  atomic.Int64
 	latHist  [latencyHistBuckets]atomic.Int64
 }
 
@@ -244,9 +250,12 @@ type routeCounters struct {
 // xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
 // statusCode is used to track 5xx errors per route.
 // durMs is the request duration in milliseconds, used for per-route latency.
+// cookied reports whether the request carried a non-empty Cookie header —
+// the insight signal for cookie-bypass coverage (ADR-0054); it does not
+// feed Prometheus (no new label; cardinality rules §9).
 // New routes are silently dropped once routeRingCap distinct routes are
 // tracked (best-effort, same TOCTOU as URLRing).
-func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64) {
+func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64, cookied bool) {
 	v, ok := r.liveRoutes.Load(route)
 	if !ok {
 		if r.size.Load() >= routeRingCap {
@@ -260,6 +269,9 @@ func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int6
 	}
 	c := v.(*routeCounters)
 	c.requests.Add(1)
+	if cookied {
+		c.cookied.Add(1)
+	}
 	switch xCache {
 	case "HIT":
 		c.hits.Add(1)
@@ -284,6 +296,7 @@ func (r *RouteRing) Flush(now time.Time) {
 			Hits:      c.hits.Swap(0),
 			Misses:    c.misses.Swap(0),
 			Errors:    c.errors.Swap(0),
+			Cookied:   c.cookied.Swap(0),
 			Timestamp: ts,
 		}
 		for i := range c.latHist {
@@ -319,6 +332,7 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 		s.Hits += b.Hits
 		s.Misses += b.Misses
 		s.Errors += b.Errors
+		s.Cookied += b.Cookied
 		s.LatHist = s.LatHist.Merge(b.LatHist)
 	}
 
@@ -364,6 +378,7 @@ type RouteStat struct {
 	Hits      int64
 	Misses    int64
 	Errors    int64 // HTTP 5xx
+	Cookied   int64 // requests carrying a Cookie header (ADR-0054 signal)
 	P99MS     int64
 	HitPct    float64 // 0-100
 }
@@ -662,6 +677,7 @@ func mergeRouteStatsList(summaries []MetricsSummary) []RouteStat {
 			a.Requests += rs.Requests
 			a.Hits += rs.Hits
 			a.Misses += rs.Misses
+			a.Cookied += rs.Cookied
 			if len(rs.Sparkline) == sparklinePoints {
 				if len(a.Sparkline) != sparklinePoints {
 					a.Sparkline = make([]int64, sparklinePoints)

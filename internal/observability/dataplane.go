@@ -825,7 +825,7 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 
 		m.recordFastHTTPMetrics(statusCode, status, pool, cacheResult, source, dur, bytesOut)
 
-		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header)
+		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header, len(ctx.Request.Header.Peek(header.Cookie)) > 0)
 
 		if m.accessLog != nil {
 			msg := accessLogMessage(cacheResult, statusCode)
@@ -985,14 +985,14 @@ func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
 // can early-return on HIT without the caller materializing header strings;
 // path is passed as []byte and converted only when the URL ring actually
 // records (sampling gate first).
-func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultIdx int, status int, route string, path []byte, elapsed time.Duration, hdr *fasthttp.ResponseHeader) {
+func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultIdx int, status int, route string, path []byte, elapsed time.Duration, hdr *fasthttp.ResponseHeader, cookied bool) {
 	if m.Rings == nil || cacheResultIdx == 0 { // 0 == HIT
 		return
 	}
 	durMs := elapsed.Milliseconds()
 	m.Rings.Request.RecordRequest(cacheResult, status, durMs)
 	if route != "_default" {
-		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs)
+		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs, cookied)
 	}
 	m.Rings.URL.RecordURL(string(path), route, cacheResult)
 	if m.Rings.HeaderRing != nil && (cacheResultIdx == 1 || cacheResultIdx == 4) { // MISS or BYPASS

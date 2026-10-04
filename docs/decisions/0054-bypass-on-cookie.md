@@ -110,6 +110,14 @@ so a cookied request never moves cookie-bearing data across nodes.
   request share — the metric (`cache_result="BYPASS"`) makes it
   visible before rollout. Cookie presence is conservative: analytics
   cookies bypass too.
+- **Insight safety net**: the dashboard fires
+  `config-cookie-bypass-missing` when a route stores responses
+  (ttl_default/ttl_override > 0) while ≥5% of its measured traffic
+  carries a Cookie header and the flag is off — the personalized-SSR
+  footgun becomes visible without breaking the default. The signal is
+  a per-route cookied counter in the dashboard route ring
+  (`RouteStat.Cookied`), not a new Prometheus label (cardinality
+  rules §9).
 - **Neutral**: `include_headers` remains available for routes that
   *do* want cookie-keyed variants (multi-user-safe content); the two
   knobs are independent.

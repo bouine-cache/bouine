@@ -101,6 +101,25 @@ func (b *invalidationBatcher) enqueuePurge(evt api.PurgeEvent) ([]api.PurgeEvent
 	return []api.PurgeEvent{evt}, true
 }
 
+// enqueuePurgeAsync absorbs a purge event for coalesced delivery only:
+// unlike enqueuePurge it never returns the idle-queue synchronous
+// flush, so the caller (the data-plane invalidation hook inside a
+// proxied request) never blocks its response on per-peer fan-out.
+// Overflow keeps the documented fallback contract (unbatched immediate
+// send, delivery preserved) by returning (batch, true).
+func (b *invalidationBatcher) enqueuePurgeAsync(evt api.PurgeEvent) ([]api.PurgeEvent, bool) {
+	b.purgeMu.Lock()
+	if len(b.purgeQueue) >= broadcastQueueCap {
+		b.purgeMu.Unlock()
+		b.onOverflow()
+		return []api.PurgeEvent{evt}, true
+	}
+	b.purgeQueue = append(b.purgeQueue, evt)
+	b.purgeMu.Unlock()
+	b.signal()
+	return nil, false
+}
+
 // donePurgeFlush clears the synchronous-flush window. Called by the
 // caller after its synchronous flushPurge returns.
 func (b *invalidationBatcher) donePurgeFlush() {

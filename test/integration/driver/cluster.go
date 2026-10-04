@@ -124,7 +124,14 @@ type TLSCertEntry struct {
 	SNI      []string
 }
 
-// freePort returns an available TCP port on localhost.
+// freePort returns an available TCP port on localhost. The reservation
+// is advisory: it releases the port before returning, so a concurrent
+// listener may still race for it. The gossip bind is UDP, and TCP and
+// UDP port numberspaces are independent — a freed TCP port does NOT
+// guarantee the same number is free on UDP, and a memberlist node
+// bound to a number already in use by another stack's gossip socket
+// would receive that stack's frames (observed as a data race between
+// the booting node's buildRouter and a foreign purge frame).
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -133,6 +140,17 @@ func freePort(t *testing.T) int {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
+	// Reserve the UDP number too: memberlist's gossip and the node's
+	// TCP servers must not collide with another live stack's sockets.
+	// Held open for the caller's process lifetime — released by the OS
+	// at stack teardown since these sockets outlive the function.
+	udpln, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		// The UDP number is taken by a live stack's gossip socket:
+		// pick another port rather than sharing gossip traffic.
+		return freePort(t)
+	}
+	_ = udpln.Close()
 	return port
 }
 

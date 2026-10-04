@@ -112,6 +112,42 @@ func (b *Broadcaster) Close() {
 	}
 }
 
+// BroadcastPurgeAsync enqueues a purge event for coalesced delivery
+// without ever fanning out synchronously on the idle queue: the flush
+// loop delivers it within broadcastBatchFlushInterval. This is the
+// variant for callers that live inside a proxied client request — the
+// data-plane invalidation hook (POST/PUT/DELETE, RFC 9111 §4.4) — where
+// the idle-path synchronous flush would block the client's response on
+// per-peer HTTP fan-out (up to broadcastTimeout per peer in strong
+// mode) and tax every invalidating request with the cluster's slowest
+// peer. The ≤10 ms propagation delay is the same bound every coalesced
+// event already accepts (ADR-0044), and it removes an invalidation gap
+// that was measured in TTL, not milliseconds. The admin API keeps the
+// synchronous BroadcastPurge: a returned purge has already fanned out.
+func (b *Broadcaster) BroadcastPurgeAsync(key api.Key, varyKey string) {
+	evt := api.PurgeEvent{
+		Key:      key,
+		VaryKey:  varyKey,
+		Issuer:   b.cluster.cfg.NodeName,
+		IssuedAt: time.Now(),
+		Seq:      b.seq.Add(1),
+	}
+	if b.batcher == nil {
+		// No batcher (some tests construct a Broadcaster without one):
+		// fall back to a synchronous flush — there is no flush loop to
+		// defer to.
+		b.flushPurgeBatch([]api.PurgeEvent{evt})
+		return
+	}
+	if batch, ok := b.batcher.enqueuePurgeAsync(evt); ok {
+		// Queue full: the documented overflow contract (unbatched
+		// immediate send) preserves delivery; same fallback as
+		// enqueuePurge, not a silent drop.
+		b.flushPurgeBatch(batch)
+		b.batcher.donePurgeFlush()
+	}
+}
+
 // BroadcastPurge sends a purge event for key to all live peers.
 // In strong mode it posts to each peer's admin API and also enqueues
 // via gossip for redundant delivery. In eventual mode it sends via

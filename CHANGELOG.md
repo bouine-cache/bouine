@@ -36,6 +36,23 @@ the curated, human-readable summary.
   Set-Cookie storage block never fires). Surfaces the footgun
   without changing any default.
 
+### Changed
+
+- **Requests carrying a `Cookie` header no longer share in-flight
+  origin fetches (ADR-0054)**. `collapseDenied` (the ADR-0052 gate
+  that already refuses `Authorization`) now refuses Cookie-carrying
+  requests too, unconditionally on every route: concurrent cookied
+  misses on one URL each perform their own origin fetch, so a
+  follower can never receive another user's in-flight SSR render.
+  Cookied requests keep participating in the cache per RFC 9111 —
+  stored responses are still served to them — so the cache-tests
+  `other-cookie` optimal case keeps passing (it asserts sequential
+  serving from store, never concurrent fetching). Anonymous requests
+  keep collapsing bit-for-bit. Same-URL concurrent cookied bursts now
+  cost one origin fetch per caller, bounded by the fetch semaphore
+  and shed machinery — the same trade ADR-0052 made for authorized
+  traffic.
+
 ### Fixed
 
 - Helm chart StatefulSet rolling-update settings are now passed through from

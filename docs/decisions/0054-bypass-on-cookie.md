@@ -1,4 +1,4 @@
-# ADR-0054: Per-route cookie bypass (cache.bypass_on_cookie)
+# ADR-0054: Cookie request gating — unconditional in-flight refusal, per-route cache bypass (cache.bypass_on_cookie)
 
 - **Status**: Accepted
 - **Date**: 2026-10-04
@@ -62,7 +62,27 @@ The result is a two-vector leak:
 
 ## Decision
 
-Add `cache.bypass_on_cookie` (`*bool`, default nil/off) to `RouteCache`.
+The cookie contract has two halves with different scopes:
+
+**In-flight refusal is unconditional** (every route, default
+behavior): `collapseDenied` refuses requests carrying a Cookie header
+exactly as it refuses Authorization (ADR-0052). A cookied request
+never parks on — or leads — a shared singleflight: concurrent cookied
+misses on one URL each perform their own origin fetch. The
+ADR-0052 rationale transfers directly: "same cookie string ⇒ same
+user" is an assumption a shared cache cannot verify, and an SSR
+origin renders per-user content from the cookie, so a follower parked
+on another user's fetch receives that user's body. This does not
+affect conformance: `other-cookie` is a *sequential serve-from-store*
+assertion — the cookied request there never fetches at all — and
+collapsing is by definition a *concurrent fetch* behavior that the
+conformance suite does not exercise. Anonymous requests keep
+collapsing bit-for-bit; the cost (one fetch per concurrent cookied
+caller) is bounded by the fetch semaphore and shed machinery, same
+as the Authorization refusal.
+
+**Serving/storage refusal is per-route opt-in**: add
+`cache.bypass_on_cookie` (`*bool`, default nil/off) to `RouteCache`.
 When enabled on a route, a request carrying any non-empty `Cookie`
 header:
 
@@ -71,9 +91,9 @@ header:
    can reach the request;
 2. **never stores** — the response proxies via `handleBypass`
    (streamBypass), which does not write the store;
-3. **never shares an in-flight fetch** — the branch runs before the
-   miss/collapse machinery, so no singleflight participation (the
-   ADR-0052 refusal generalized: presence, not identity);
+3. **never shares an in-flight fetch** — guaranteed unconditionally
+   by the in-flight half above (and doubly by this branch running
+   before the miss/collapse machinery on opted-in routes);
 4. **preserves SSE semantics** — SSE-intent requests keep
    `handleSSE` (live stream, idle-bounded reads, never cached, never
    collapsed), which already satisfies the same contract;
@@ -103,13 +123,18 @@ so a cookied request never moves cookie-bearing data across nodes.
 
 ## Consequences
 
-- **Positive**: the leak vectors are closed for opted-in routes with
-  zero origin-cooperation; anonymous traffic keeps full cache
-  benefit; default routes are bit-identical (conformance preserved).
+- **Positive**: the in-flight leak vector is closed on **every**
+  route, zero configuration, zero origin-cooperation; on opted-in
+  routes the stored/served vectors close too; anonymous traffic
+  keeps full cache benefit (collapsing included); the cache-tests
+  `other-cookie` optimal case keeps passing (sequential
+  serve-from-store, untouched by the in-flight rule).
 - **Negative**: hit ratio on opted-in routes drops by the cookied
   request share — the metric (`cache_result="BYPASS"`) makes it
   visible before rollout. Cookie presence is conservative: analytics
-  cookies bypass too.
+  cookies bypass too. Unconditionally, same-URL concurrent cookied
+  bursts cost one origin fetch per caller (the ADR-0052 trade,
+  applied to cookies).
 - **Insight safety net**: the dashboard fires
   `config-cookie-bypass-missing` when a route stores responses
   (ttl_default/ttl_override > 0) while ≥5% of its measured traffic
@@ -126,10 +151,21 @@ so a cookied request never moves cookie-bearing data across nodes.
 
 ## Notes
 
+The collapse-refusal half landed **unconditional** rather than
+flag-gated deliberately: the in-flight leak requires no operator
+misconfiguration (any two concurrent cookied users on one URL
+trigger it), the fix has no observable cost for correct traffic
+(anonymous collapsing untouched, cookied requests were never
+*correctly* shareable), and conformance does not exercise concurrent
+fetches — so gating it per route would sell safety à la carte for a
+risk that exists by default. The serving/storage half remains
+per-route opt-in because refusing the *cache* for cookied requests
+IS observable (hit ratio, `other-cookie` is adjacent) and trades off
+against routes that genuinely cache cookie-agnostic content.
+
 The alternative "store+collapse gate only" (anonymous cached HTML
-still served to cookied users, matching `other-cookie` more
-aggressively) was rejected for this phase: it is correct only when
-every personalized render carries `private`/`no-store`, an origin
-invariant bouine cannot verify. It can be added later as a separate
-knob without breaking this one (config is additive per
-AGENTS.md §13).
+still served to cookied users) was rejected for the flag half: it is
+correct only when every personalized render carries
+`private`/`no-store`, an origin invariant bouine cannot verify. It
+can be added later as a separate knob without breaking this one
+(config is additive per AGENTS.md §13).

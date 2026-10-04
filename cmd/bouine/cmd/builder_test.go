@@ -25,6 +25,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func newTestLogger() observability.Logger {
@@ -1424,6 +1425,72 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 	router := e.buildRouter(rs)
 	require.NotNil(t, router)
 	assert.Len(t, rs.handlers, 1)
+}
+
+// TestBuildRouter_BypassOnCookieWired verifies the config flag
+// cache.bypass_on_cookie reaches the route's cache handler (issue
+// #762): a cookied request is proxied as BYPASS. The full
+// miss/hit/bypass semantics are pinned by internal/cache's
+// cookie_bypass_test.go; this test proves only the config plumbing
+// (config.RouteCache.BypassOnCookie → cache.HandlerConfig), which is
+// why it avoids HIT assertions against the real-origin streaming
+// path (the tee store is asynchronous; MISS→HIT is deterministic only
+// under the buffered test client).
+func TestBuildRouter_BypassOnCookieWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	bypass := true
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{BypassOnCookie: &bypass}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Anonymous request: normal cache path (MISS, fetches from origin).
+	anon := &fasthttp.RequestCtx{}
+	anon.Request.Header.SetMethod("GET")
+	anon.Request.SetRequestURI("/page")
+	router.ServeRequest(anon)
+	require.Equal(t, fasthttp.StatusOK, anon.Response.StatusCode())
+	require.Equal(t, "MISS", string(anon.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(anon.Response.Body()))
+
+	// Cookied request bypasses the cache entirely: its own origin
+	// fetch, X-Cache: BYPASS — the flag reached the handler.
+	cookied := &fasthttp.RequestCtx{}
+	cookied.Request.Header.SetMethod("GET")
+	cookied.Request.SetRequestURI("/page")
+	cookied.Request.Header.Set(header.Cookie, "sid=u")
+	router.ServeRequest(cookied)
+	require.Equal(t, fasthttp.StatusOK, cookied.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(cookied.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(cookied.Response.Body()))
 }
 
 // TestBuildRouter_StripPrefixWired is the regression test for issue

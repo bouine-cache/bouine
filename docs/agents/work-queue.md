@@ -18,6 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
+- [WIP] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_cookie` per-route cookie bypass (#762: slow path + fast path + builder wiring, tests, ADR-0054, runbook 56, changelog) — started: 2026-10-04 — ETA: same day
 - [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
 - [WIP] crush — release 0.5.25 (changelog curation + promotion, chart bump) — started: 2026-09-30 — ETA: same day
 

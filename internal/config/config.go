@@ -519,6 +519,23 @@ type RouteCache struct {
 	// intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie,omitempty" json:"allow_set_cookie,omitempty"`
 	Enabled        *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// BypassOnCookie, when true, routes any request carrying a
+	// non-empty Cookie header entirely around the cache: no lookup,
+	// no storage, no in-flight sharing (the Varnish `return (pass)`
+	// equivalent for `req.http.Cookie`). Designed for personalized SSR
+	// HTML behind a login session: the origin reads the request cookie
+	// and renders per-user content, so such a response must never be
+	// stored, never served to the requesting user, and never shared
+	// in-flight with another concurrent request (ADR-0052 rationale
+	// applied to cookies; ADR-0054 for the full contract).
+	// Default (nil / false): cookied requests participate in the cache
+	// normally per RFC 9111 — the cache-tests `other-cookie` optimal
+	// case (serve a stored fresh response to a cookied request) keeps
+	// passing.
+	// The trigger is Cookie-header presence, not a name list: an
+	// A/B or analytics cookie also bypasses; scope the flag per route
+	// accordingly.
+	BypassOnCookie *bool `yaml:"bypass_on_cookie,omitempty" json:"bypass_on_cookie,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 	// RefreshMinHits is the minimum number of cache hits an object must

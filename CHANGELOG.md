@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-10-05
+
 ### Added
 
 - **`cache.bypass_on_cookie` per-route flag (ADR-0054, issue #762)**.
@@ -150,6 +152,21 @@ the curated, human-readable summary.
   re-derive transient flags at decode time; `internal/cache` keeps
   API-compatible aliases (`cache.ParseCacheControl`,
   `cache.Directives`), so no call-site changes were required.
+- **Ban snapshot reads on the hit path are lock-free** (issue #757).
+  Every cache hit — the fast path included — evaluated lazy bans
+  through a snapshot read that took a single global mutex even when
+  the ban list was empty and the snapshot clean; under a concurrent
+  ban registration, the next reader rebuilt the O(list) snapshot
+  (up to 1,024 bans) while holding the lock, parking all cores
+  behind it. The compiled snapshot is now published through an
+  atomic pointer with an atomic dirty flag: one uncontended load in
+  the clean steady state, one winner rebuilds when registrations
+  mark the state dirty, and concurrent hits keep serving the
+  previous snapshot. Measured on the gating benchmarks: hot-tier hit
+  31.0 → 22.6 ns/op (−27%), parallel hit −17%, contended hit +
+  registrations 594–776 → 178 ns/op with 0 allocs/op (the old
+  design charged 2–3 allocs/op to hits under contention). No
+  behavior change; enforcement freshness is pinned by tests.
 
 ## [0.5.25] - 2026-09-30
 
@@ -2148,7 +2165,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.25...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.26...HEAD
+[0.5.26]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.26
 [0.5.25]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.25
 [0.5.24]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.24
 [0.5.23]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.23

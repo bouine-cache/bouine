@@ -192,7 +192,6 @@ func TestBatcher_AsyncEnqueueNeverDeliversSynchronously(t *testing.T) {
 		func([]api.RefreshEvent) {},
 		func() {},
 	)
-	defer b.close()
 
 	// Idle queue: the sync variant would deliver synchronously; the
 	// async variant must queue for the flush loop.
@@ -207,6 +206,12 @@ func TestBatcher_AsyncEnqueueNeverDeliversSynchronously(t *testing.T) {
 		"flush loop must deliver the async-enqueued event")
 
 	// Overflow: delivery is preserved via the unbatched fallback.
+	// Join the flush loop before stuffing: a 10 ms tick under -race
+	// on a slow CI runner can drain the queue between appends (4097
+	// lock cycles exceed one interval), which would drop the queue
+	// below cap and break the capacity check. With the loop joined
+	// the queue is stable and the overflow path is deterministic.
+	b.close()
 	for i := range broadcastQueueCap + 1 {
 		b.purgeMu.Lock()
 		b.purgeQueue = append(b.purgeQueue, api.PurgeEvent{Issuer: "n0", Seq: uint64(100 + i)})

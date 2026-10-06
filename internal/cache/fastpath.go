@@ -64,10 +64,17 @@ type FastPathHandler struct {
 	// (default) keeps the fast path's behavior unchanged: the gate is
 	// a single nil read paid on every request, with the header scan
 	// only on pattern-configured routes' requests.
-	uaBypass       *uaBypass
+	uaBypass *uaBypass
 	cachedDate     atomic.Pointer[string]
 	poolName       string
-	cachedDateUnix atomic.Int64
+	// bypassCookieNames mirrors the owning Handler's
+	// cache.bypass_on_cookie_names scanner (issue #768). When the
+	// owner lists names, TryHit declines requests carrying one of
+	// them; the scan walks the RawRequest's Cookie header lines
+	// (kept individually by the h1parser, unlike fasthttp's joined
+	// Peek). Empty scanner (no names) costs one bool read.
+	bypassCookieNames cookieNameScanner
+	cachedDateUnix    atomic.Int64
 	// bypassOnCookie mirrors the owning Handler's cache.bypass_on_cookie
 	// flag (ADR-0054). When true, TryHit declines cookied requests so
 	// they fall through to the slow path's ServeRequest, which routes
@@ -77,13 +84,6 @@ type FastPathHandler struct {
 	// request, with the header scan (req.Header) only on flag-on
 	// routes' cookied requests.
 	bypassOnCookie bool
-	// bypassCookieNames mirrors the owning Handler's
-	// cache.bypass_on_cookie_names scanner (issue #768). When the
-	// owner lists names, TryHit declines requests carrying one of
-	// them; the scan walks the RawRequest's Cookie header lines
-	// (kept individually by the h1parser, unlike fasthttp's joined
-	// Peek). Empty scanner (no names) costs one bool read.
-	bypassCookieNames cookieNameScanner
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's

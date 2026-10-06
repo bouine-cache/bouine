@@ -24,8 +24,15 @@ type KeyPolicy struct {
 	// hash-input builders in vary.go never need to know about them.
 	includeHeaders []string
 	stripPrefixes  []string // prefix patterns to strip, capped at 16
-	stripEmpty     bool     // strip params with empty values
-	dedup          bool     // keep first value (in request order) for duplicate params
+	// cookiePresence is the route's cache.key.cookie_presence list
+	// (issue #768): cookie names whose presence (never their values)
+	// participates in the variant key. Normalized (trimmed,
+	// lowercased, sorted, deduped) here like includeHeaders.
+	// Cluster note: identical across nodes, same hazard class as
+	// include_headers.
+	cookiePresence []string
+	stripEmpty     bool // strip params with empty values
+	dedup          bool // keep first value (in request order) for duplicate params
 	// excludeHost, when true, omits the host segment from the primary
 	// key (cache.key.include_host: false). Read on every key build; the
 	// default (false) is today's behaviour. See includeHostKey.
@@ -43,13 +50,6 @@ type KeyPolicy struct {
 	// under different keys (peer gates fail safe — miss, never a wrong
 	// body).
 	verbatimAE bool
-	// cookiePresence is the route's cache.key.cookie_presence list
-	// (issue #768): cookie names whose presence (never their values)
-	// participates in the variant key. Normalized (trimmed,
-	// lowercased, sorted, deduped) here like includeHeaders.
-	// Cluster note: identical across nodes, same hazard class as
-	// include_headers.
-	cookiePresence []string
 }
 
 // cookiePresenceField is the synthetic Vary field name carrying the
@@ -124,7 +124,7 @@ func (p *KeyPolicy) cookiePresenceValue(cookieValue string) string {
 		// are small (≤16), and the common all-absent / all-present
 		// cases short-circuit on the first matching length group.
 		for i, listed := range p.cookiePresence {
-			if len(listed) == len(token) && asciiEqualFold(token, listed) {
+			if len(listed) == len(token) && asciiEqualFoldStrings(token, listed) {
 				bits[i] = '1'
 				break
 			}

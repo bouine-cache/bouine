@@ -241,3 +241,66 @@ func TestCookiePresence_RefreshRegistryReplaysCookie(t *testing.T) {
 	replayed := BuildVaryKey(h.policy.CookiePresenceVary(), entry.header, h.policy)
 	require.Equal(t, stored, replayed)
 }
+
+// BenchmarkGate_VaryKey_CookiePresence gates the presence-bit
+// computation on the variant-key hot path for presence-keyed routes
+// (issue #768). Each iteration hashes the synthetic field: one
+// presence-bit string (≤16 bytes) over a 2-cookie value, plus the
+// header.Map GetAll that reads the Cookie line. Budget 2 — the bit
+// string and the joined Cookie value are the floor of the current
+// design; presence bits are presence-keyed-route costs only, every
+// other route pays nothing (the field is absent from the Vary).
+func BenchmarkGate_VaryKey_CookiePresence(b *testing.B) {
+	primary := testkey.Key(21)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookiePresence([]string{"consent", "analytics"})
+	hm := headerMap(header.Cookie, "consent=yes; analytics=2; theme=dark")
+	vary := policy.CookiePresenceVary()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = VariantKey(primary, vary, hm, policy)
+	}
+}
+
+// BenchmarkGate_VaryKey_CookiePresenceRaw is the RawRequest form: the
+// h1parser keeps Cookie lines separately, so the presence scan joins
+// them (api.RawRequest.CookieValue) before hashing the bits. Budget 3
+// — one more alloc than the Map form for the join.
+func BenchmarkGate_VaryKey_CookiePresenceRaw(b *testing.B) {
+	primary := testkey.Key(22)
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookiePresence([]string{"consent", "analytics"})
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	req.Headers[0] = api.RawHeader{Key: header.Cookie, Value: "consent=yes"}
+	req.Headers[1] = api.RawHeader{Key: header.Cookie, Value: "analytics=2"}
+	req.NHeaders = 2
+	vary := policy.CookiePresenceVary()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = VariantKeyFromRaw(primary, vary, req, policy)
+	}
+}
+
+// BenchmarkGate_VaryKey_NoPresenceZeroCost pins the invariant that
+// routes WITHOUT cookie_presence pay zero extra allocations for the
+// synthetic-field dispatch: the field is absent from their Vary, so
+// the presence branch never runs. The cookie-bearing request hashes
+// exactly as it did before this feature.
+func BenchmarkGate_VaryKey_NoPresenceZeroCost(b *testing.B) {
+	primary := testkey.Key(23)
+	hm := headerMap(header.Cookie, "consent=yes; analytics=2")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = VariantKey(primary, "Cookie", hm, nil)
+	}
+}

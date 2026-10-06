@@ -336,7 +336,14 @@ type Handler struct {
 	// goroutines through its internal locks; sharded maps do a direct
 	// map insert under a per-shard mutex (0 allocs) with far less
 	// contention.
+	// bypassCookieNames is the compiled matcher for
+	// cache.bypass_on_cookie_names (issue #768): routes a request
+	// carrying any listed cookie name around the cache, same contract
+	// as bypassOnCookie, while requests with only unlisted cookies
+	// participate normally. Empty scanner (no names configured) pays
+	// a single bool read per request.
 	inflightStreams         inflightTable
+	bypassCookieNames       cookieNameScanner
 	refreshWg               sync.WaitGroup
 	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
 	defaultTTL              time.Duration  // operator fallback when origin sends no freshness
@@ -375,13 +382,6 @@ type Handler struct {
 	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
 	// cache-tests other-cookie optimal case.
 	bypassOnCookie bool
-	// bypassCookieNames is the compiled matcher for
-	// cache.bypass_on_cookie_names (issue #768): routes a request
-	// carrying any listed cookie name around the cache, same contract
-	// as bypassOnCookie, while requests with only unlisted cookies
-	// participate normally. Empty scanner (no names configured) pays
-	// a single bool read per request.
-	bypassCookieNames cookieNameScanner
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
@@ -506,6 +506,21 @@ type HandlerConfig struct {
 	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
 	// Names are lower-cased at construction for O(1) skip checks.
 	RequestHeaderRemove []string
+	// BypassOnCookieNames routes requests carrying any cookie whose
+	// name is in the list entirely around the cache — the same
+	// contract as BypassOnCookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Cookie names are matched case-insensitively on the name token
+	// only, never on values or substrings. Requests carrying only
+	// unlisted cookies participate in the cache per RFC 9111 — the
+	// knob exists so ubiquitous analytics/consent cookies do not
+	// force the blunt presence trigger.
+	//
+	// In-flight sharing is refused unconditionally for every cookied
+	// request by collapseDenied (ADR-0054) regardless of this list:
+	// a listed-cookie request can never receive another user's
+	// in-flight body, and an unlisted-cookie request cannot either.
+	BypassOnCookieNames []string
 	// ResponseHeaderSet sets the listed response headers (name → value)
 	// on every response this handler emits — hit, stale, revalidated,
 	// miss, and bypass — after the stored headers are written
@@ -645,12 +660,10 @@ type HandlerConfig struct {
 	// unlisted cookies participate in the cache per RFC 9111 — the
 	// knob exists so ubiquitous analytics/consent cookies do not
 	// force the blunt presence trigger.
-	//
 	// In-flight sharing is refused unconditionally for every cookied
 	// request by collapseDenied (ADR-0054) regardless of this list:
 	// a listed-cookie request can never receive another user's
 	// in-flight body, and an unlisted-cookie request cannot either.
-	BypassOnCookieNames []string
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a

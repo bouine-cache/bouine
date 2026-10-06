@@ -1105,20 +1105,7 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateRouteKey(ec, path+".key", rc.Key)
 	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
 	validateCookieNames(ec, path, *rc)
-	// Cookie-presence keying is mutually exclusive with both bypass
-	// knobs (issue #768): a bypassed request never reaches the cache,
-	// so keying the variant dimension it selects is dead config whose
-	// cost — presence bits multiplying the variant space against
-	// max_variants — buys nothing. Rejected at load so the conflict
-	// surfaces before a warm cache, not after.
-	if len(rc.Key.CookiePresence) > 0 {
-		if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
-			ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie: bypassed requests never reach the cache, so presence keying is dead config")
-		}
-		if len(rc.BypassOnCookieNames) > 0 {
-			ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie_names: bypassed requests never reach the cache, so presence keying is dead config")
-		}
-	}
+	validateCookiePresenceConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
 }
 
@@ -1211,6 +1198,25 @@ func uaPatternCharError(p string) string {
 		}
 	}
 	return ""
+}
+
+
+// validateCookiePresenceConflicts rejects cache.key.cookie_presence
+// combined with either bypass knob (issue #768): a bypassed request
+// never reaches the cache, so keying the variant dimension it selects
+// is dead config whose cost — presence bits multiplying the variant
+// space against max_variants — buys nothing. Rejected at load so the
+// conflict surfaces before a warm cache, not after.
+func validateCookiePresenceConflicts(ec *errCollector, path string, rc RouteCache) {
+	if len(rc.Key.CookiePresence) == 0 {
+		return
+	}
+	if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+		ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie: bypassed requests never reach the cache, so presence keying is dead config")
+	}
+	if len(rc.BypassOnCookieNames) > 0 {
+		ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie_names: bypassed requests never reach the cache, so presence keying is dead config")
+	}
 }
 
 // validateCookieNames validates cache.bypass_on_cookie_names (issue

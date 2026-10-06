@@ -2593,3 +2593,77 @@ func TestHasKeyPolicy_IncludeHeaders(t *testing.T) {
 	t.Parallel()
 	assert.True(t, hasKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}}))
 }
+
+// TestBuildRouter_BypassOnCookieNamesWired verifies the config knob
+// cache.bypass_on_cookie_names reaches the route's cache handler
+// (issue #768): a request carrying a listed cookie name proxies as
+// BYPASS while an unlisted cookie keeps the cache path. The matching
+// semantics are pinned by internal/cache's cookie_name_bypass_test.go;
+// this test proves only the config plumbing (config.RouteCache.
+// BypassOnCookieNames → cache.HandlerConfig).
+func TestBuildRouter_BypassOnCookieNamesWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{
+					BypassOnCookieNames: []string{"session_id"},
+				}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Anonymous request: normal cache path.
+	anon := &fasthttp.RequestCtx{}
+	anon.Request.Header.SetMethod("GET")
+	anon.Request.SetRequestURI("/page")
+	router.ServeRequest(anon)
+	require.Equal(t, fasthttp.StatusOK, anon.Response.StatusCode())
+	require.Equal(t, "MISS", string(anon.Response.Header.Peek(header.XCache)))
+
+	// Listed cookie name: the knob reached the handler — BYPASS.
+	listed := &fasthttp.RequestCtx{}
+	listed.Request.Header.SetMethod("GET")
+	listed.Request.SetRequestURI("/page")
+	listed.Request.Header.Set(header.Cookie, "session_id=u; theme=dark")
+	router.ServeRequest(listed)
+	require.Equal(t, fasthttp.StatusOK, listed.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(listed.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(listed.Response.Body()))
+
+	// Unlisted cookie only: the cache path is kept — the whole point
+	// of the named knob. The store may serve the anonymous fill
+	// asynchronously, so assert only that it is not BYPASS.
+	unlisted := &fasthttp.RequestCtx{}
+	unlisted.Request.Header.SetMethod("GET")
+	unlisted.Request.SetRequestURI("/page")
+	unlisted.Request.Header.Set(header.Cookie, "analytics=abc")
+	router.ServeRequest(unlisted)
+	require.Equal(t, fasthttp.StatusOK, unlisted.Response.StatusCode())
+	assert.NotEqual(t, "BYPASS", string(unlisted.Response.Header.Peek(header.XCache)))
+}

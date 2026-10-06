@@ -597,6 +597,20 @@ type RouteCache struct {
 	// pattern-less routes pay a single nil check. Default (empty): no
 	// UA-conditioned behavior, RFC 9111 semantics unchanged.
 	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
+	// BypassOnCookieNames routes a request carrying any cookie whose
+	// name is in this list entirely around the cache — the same
+	// contract as bypass_on_cookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Names are matched case-insensitively on the cookie-name token
+	// only, never on values or substrings (RFC 6265 §4.1.1). Requests
+	// carrying only unlisted cookies participate in the cache per
+	// RFC 9111: the knob exists so ubiquitous analytics/consent
+	// cookies do not force the blunt presence trigger.
+	// Mutually exclusive with bypass_on_cookie (the presence trigger
+	// is a strict superset — listing names under it is dead config).
+	// Capped at 16 entries; empty entries and case-insensitive
+	// duplicates are rejected.
+	BypassOnCookieNames []string `yaml:"bypass_on_cookie_names,omitempty" json:"bypass_on_cookie_names,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 	// RefreshMinHits is the minimum number of cache hits an object must

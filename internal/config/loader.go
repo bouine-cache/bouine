@@ -1104,6 +1104,7 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	}
 	validateRouteKey(ec, path+".key", rc.Key)
 	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
+	validateCookieNames(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
 }
 
@@ -1196,6 +1197,47 @@ func uaPatternCharError(p string) string {
 		}
 	}
 	return ""
+}
+
+// validateCookieNames validates cache.bypass_on_cookie_names (issue
+// #768): capped at 16 entries (mirrors include_headers), every entry
+// must be a valid RFC 6265 §4.1.1 cookie-name — an RFC 9110 §5.6.2
+// token (the cookie grammar is stricter than header tokens: the
+// name-value pair also excludes ";" and "=" as separators, which
+// isHTTPToken already forbids) — no case-insensitive duplicates, and
+// mutually exclusive with bypass_on_cookie: the presence trigger fires
+// on any cookie, so a name list under it is dead config whose
+// apparent scope would mislead operators reviewing a warm cache.
+func validateCookieNames(ec *errCollector, path string, rc RouteCache) {
+	if len(rc.BypassOnCookieNames) == 0 {
+		return
+	}
+	if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+		ec.addf(path+".bypass_on_cookie_names", "is mutually exclusive with bypass_on_cookie: the presence trigger already bypasses every cookied request")
+		return
+	}
+	if len(rc.BypassOnCookieNames) > 16 {
+		ec.addf(path+".bypass_on_cookie_names", "capped at 16 entries, got %d", len(rc.BypassOnCookieNames))
+	}
+	seen := make(map[string]bool, len(rc.BypassOnCookieNames))
+	for j, raw := range rc.BypassOnCookieNames {
+		entryPath := fmt.Sprintf("%s.bypass_on_cookie_names[%d]", path, j)
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			ec.addf(entryPath, "must be a non-empty cookie name")
+			continue
+		}
+		lower := strings.ToLower(name)
+		if !isHTTPToken(lower) {
+			ec.addf(entryPath, "(%q) must be a valid RFC 6265 §4.1.1 cookie name: one token, no separators, whitespace, ';', '=', or commas", name)
+			continue
+		}
+		if seen[lower] {
+			ec.addf(entryPath, "(%s) is a duplicate (cookie names are case-insensitive)", name)
+			continue
+		}
+		seen[lower] = true
+	}
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields

@@ -1874,3 +1874,100 @@ func mustParse(t *testing.T, b []byte) *Config {
 	require.NoError(t, err)
 	return cfg
 }
+
+func TestParse_BypassOnCookieNames_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [session_id, Debug_Bypass]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, []string{"session_id", "Debug_Bypass"}, cfg.Routes[0].Cache.BypassOnCookieNames)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidate_BypassOnCookieNames_Rejections(t *testing.T) {
+	t.Parallel()
+	base := func(names string, presence string) string {
+		return `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: ` + presence + `
+      bypass_on_cookie_names: ` + names + `
+`
+	}
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name:    "empty entry rejected",
+			yaml:    base(`[""]`, "false"),
+			wantErr: "must be a non-empty cookie name",
+		},
+		{
+			name:    "cookie separator in name rejected",
+			yaml:    base(`["a;b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "whitespace in name rejected",
+			yaml:    base(`["a b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "equals in name rejected",
+			yaml:    base(`["a=b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "case-insensitive duplicate rejected",
+			yaml:    base(`["session_id", "SESSION_ID"]`, "false"),
+			wantErr: "duplicate",
+		},
+		{
+			name:    "mutually exclusive with bypass_on_cookie",
+			yaml:    base(`["session_id"]`, "true"),
+			wantErr: "mutually exclusive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.yaml))
+			require.Error(t, err, "Parse runs Validate under the strict decoder; validation failures surface here")
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidate_BypassOnCookieNames_CapRejected(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q]
+`
+	_, err := Parse([]byte(yamlSrc))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "capped at 16 entries")
+}

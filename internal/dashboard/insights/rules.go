@@ -703,6 +703,14 @@ func ruleConfigCookieBypassMissing(data InsightData) *Insight {
 		if r.Cache.BypassOnCookie != nil && *r.Cache.BypassOnCookie {
 			continue
 		}
+		// A named-cookie bypass (issue #768) counts as coverage for the
+		// leak shape this rule exists for only when the operator actually
+		// listed the session cookie; since the rule cannot know which
+		// cookie name personalizes the origin, a non-empty list is taken
+		// as the operator's explicit choice and suppresses the finding.
+		if len(r.Cache.BypassOnCookieNames) > 0 {
+			continue
+		}
 		storing := r.Cache.TTLDefault > 0 || r.Cache.TTLOverride > 0
 		if !storing {
 			continue

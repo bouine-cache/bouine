@@ -375,6 +375,13 @@ type Handler struct {
 	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
 	// cache-tests other-cookie optimal case.
 	bypassOnCookie bool
+	// bypassCookieNames is the compiled matcher for
+	// cache.bypass_on_cookie_names (issue #768): routes a request
+	// carrying any listed cookie name around the cache, same contract
+	// as bypassOnCookie, while requests with only unlisted cookies
+	// participate normally. Empty scanner (no names configured) pays
+	// a single bool read per request.
+	bypassCookieNames cookieNameScanner
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
@@ -629,6 +636,21 @@ type HandlerConfig struct {
 	// request cookie. Default (false): cookied requests participate in
 	// the cache per RFC 9111.
 	BypassOnCookie bool
+	// BypassOnCookieNames routes requests carrying any cookie whose
+	// name is in the list entirely around the cache — the same
+	// contract as BypassOnCookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Cookie names are matched case-insensitively on the name token
+	// only, never on values or substrings. Requests carrying only
+	// unlisted cookies participate in the cache per RFC 9111 — the
+	// knob exists so ubiquitous analytics/consent cookies do not
+	// force the blunt presence trigger.
+	//
+	// In-flight sharing is refused unconditionally for every cookied
+	// request by collapseDenied (ADR-0054) regardless of this list:
+	// a listed-cookie request can never receive another user's
+	// in-flight body, and an unlisted-cookie request cannot either.
+	BypassOnCookieNames []string
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
@@ -819,6 +841,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		allowSetCookie:          cfg.AllowSetCookie,
 		bypassOnCookie:          cfg.BypassOnCookie,
 		uaBypass:                compileUABypass(cfg.BypassOnUserAgent),
+		bypassCookieNames:       newCookieNameScanner(cfg.BypassOnCookieNames),
 		maxObjectSize:           cfg.MaxObjectSize,
 		maxVariants:             cfg.MaxVariants,
 		maxResponseBytes:        cfg.MaxResponseBytes,
@@ -1342,15 +1365,17 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 
 // requestBypass reports whether a request-gate knob routes this
 // request around the cache: bypass_on_cookie (ADR-0054 — any non-empty
-// Cookie header on an opted-in route) or bypass_on_user_agent
-// (issue #771, ADR-0055 — a User-Agent glob match on a route with
-// patterns). The UA matcher's purpose is mirroring edge-CDN
-// verified-bot bypass rules on inner cache layers (client → edge →
-// bouine), so a crawler the edge deliberately sends around its cache
-// is not served bouine's stored copy. Zero allocations: one Peek per
-// configured gate, byte-wise matching, no string conversion.
+// Cookie header on an opted-in route), bypass_on_cookie_names
+// (issue #768 — any listed cookie name, presence trigger plus the
+// compiled name scanner), or bypass_on_user_agent (issue #771,
+// ADR-0055 — a User-Agent glob match on a route with patterns). The
+// UA matcher's purpose is mirroring edge-CDN verified-bot bypass
+// rules on inner cache layers (client → edge → bouine), so a crawler
+// the edge deliberately sends around its cache is not served
+// bouine's stored copy. Zero allocations: one Peek per configured
+// gate, byte-wise matching, no string conversion.
 func (h *Handler) requestBypass(ctx *fasthttp.RequestCtx) bool {
-	if h.bypassOnCookie && len(ctx.Request.Header.Peek(header.Cookie)) > 0 {
+	if h.cookieBypassTriggered(ctx.Request.Header.Peek(header.Cookie)) {
 		return true
 	}
 	return h.uaBypass != nil && h.uaBypass.matchBytes(ctx.Request.Header.Peek(header.UserAgent))
@@ -1391,18 +1416,19 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// lookup. No-op for routes without directives.
 	h.rewriteRequestCtx(ctx)
 
-	// Cookie bypass (ADR-0054, cache.bypass_on_cookie) and User-Agent
-	// bypass (issue #771, cache.bypass_on_user_agent, ADR-0055): a
-	// request gated by either knob never touches the cache — no lookup,
-	// no storage, no in-flight sharing. requestBypass reads only
-	// already-parsed headers (Peek / the compiled matcher), and both
-	// flags are resolved at handler build time, so gate-less routes pay
-	// one Peek of a header fasthttp already parsed (cookie flag off is
-	// one bool read; UA patterns absent is one nil read — no Peek at
-	// all, keeping the zero-alloc hit path unchanged). Placed after
-	// rewriteRequestCtx so request.header_set/header_remove can strip
-	// or adjust the Cookie / User-Agent headers before the check, and
-	// before lookup so no store read is ever performed.
+	// Cookie bypass (ADR-0054, cache.bypass_on_cookie; issue #768,
+	// cache.bypass_on_cookie_names) and User-Agent bypass (issue #771,
+	// cache.bypass_on_user_agent, ADR-0055): a request gated by any
+	// knob never touches the cache — no lookup, no storage, no
+	// in-flight sharing. requestBypass reads only already-parsed
+	// headers (Peek / the compiled matcher), and all flags are resolved
+	// at handler build time, so gate-less routes pay one Peek of a
+	// header fasthttp already parsed (cookie flag off with no listed
+	// names is one bool read; UA patterns absent is one nil read — no
+	// Peek at all, keeping the zero-alloc hit path unchanged). Placed
+	// after rewriteRequestCtx so request.header_set/header_remove can
+	// strip or adjust the Cookie / User-Agent headers before the check,
+	// and before lookup so no store read is ever performed.
 	if h.requestBypass(ctx) {
 		h.serveCacheBypass(ctx)
 		return

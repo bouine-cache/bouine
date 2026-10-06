@@ -77,6 +77,13 @@ type FastPathHandler struct {
 	// request, with the header scan (req.Header) only on flag-on
 	// routes' cookied requests.
 	bypassOnCookie bool
+	// bypassCookieNames mirrors the owning Handler's
+	// cache.bypass_on_cookie_names scanner (issue #768). When the
+	// owner lists names, TryHit declines requests carrying one of
+	// them; the scan walks the RawRequest's Cookie header lines
+	// (kept individually by the h1parser, unlike fasthttp's joined
+	// Peek). Empty scanner (no names) costs one bool read.
+	bypassCookieNames cookieNameScanner
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's
@@ -90,12 +97,13 @@ type FastPathHandler struct {
 // flag opt-in (issue #696).
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:          h.store,
-		owner:          h,
-		poolName:       h.poolName,
-		policy:         h.policy,
-		bypassOnCookie: h.bypassOnCookie,
-		uaBypass:       h.uaBypass,
+		store:             h.store,
+		owner:             h,
+		poolName:          h.poolName,
+		policy:            h.policy,
+		bypassOnCookie:    h.bypassOnCookie,
+		bypassCookieNames: h.bypassCookieNames,
+		uaBypass:          h.uaBypass,
 	}
 }
 
@@ -145,12 +153,16 @@ func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.Pee
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
-	// Cookie bypass (ADR-0054): decline before the store Get so a
-	// cookied request never reads — or is later served from — the
-	// cache on routes that opted in. The h1parser falls through to
-	// the slow path, whose ServeRequest runs handleBypass. req.Header
-	// scans the already-parsed array, no re-parse.
-	if f.bypassOnCookie && req.Header(header.Cookie) != "" {
+	// Cookie bypass (ADR-0054 presence trigger, issue #768 named
+	// trigger): decline before the store Get so a cookied request never
+	// reads — or is later served from — the cache on routes that opted
+	// in. The h1parser falls through to the slow path, whose
+	// ServeRequest runs handleBypass. The named trigger scans the
+	// RawRequest's Cookie lines because the h1parser keeps them
+	// individually (fasthttp's joined Peek shape lives on the slow
+	// path) — a listed cookie on any line must bypass.
+	if (f.bypassOnCookie || !f.bypassCookieNames.empty()) &&
+		cookieBypassTriggeredRaw(f.bypassOnCookie, f.bypassCookieNames, req) {
 		return nil, false
 	}
 	// User-Agent bypass (issue #771, ADR-0055): decline before the

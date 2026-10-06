@@ -273,9 +273,22 @@ and refill path; the hit path never touches it. See ADR-0051.
 ### 3.4 Cookie & authorization policy
 
 - **Request `Cookie`** — does NOT participate in the cache key by default.
-  Per-route opt-in: `cache.cookies.key: [name1, name2]`. Per-route
-  `cache.bypass_on_cookie: true` (ADR-0054) routes cookied requests
-  entirely around the cache.
+  Per-route `cache.bypass_on_cookie: true` (ADR-0054) routes cookied
+  requests entirely around the cache. Two finer-grained per-route
+  opt-ins (issue #768):
+  - `cache.key.cookie_presence: [name1, name2]` — each listed cookie
+    name contributes one presence bit (present/absent, never its value)
+    to the Vary variant key. Presence rides a synthetic Vary field
+    unioned into the stored VaryValue, so store/lookup pairing, peer
+    gates, and 304 revalidation hash the same bits everywhere. N names
+    multiply the variant space by up to 2^N (bounded by `max_variants`).
+  - `cache.bypass_on_cookie_names: [name1, name2]` — a request
+    carrying any listed cookie bypasses the cache entirely (same
+    contract as `bypass_on_cookie`, scoped to the names; ubiquitous
+    analytics/consent cookies alone do not trigger it).
+  In-flight sharing is refused for every cookied request
+  unconditionally (ADR-0054): no request ever receives another user's
+  in-flight body, on any route.
 - **Response `Set-Cookie`** — a response carrying `Set-Cookie` is NOT stored
   by default. Per-route opt-in requires explicit operator acknowledgement.
 - **`Authorization` request header** — per RFC 9111 §3.5, responses to

@@ -122,6 +122,32 @@ the curated, human-readable summary.
   hit-path gates are unchanged. Default off: RFC 9111 semantics and
   the cache-tests score are untouched; invalidating methods
   (POST/PUT/DELETE) keep invalidating the shared key.
+- **`cache.bypass_on_cookie_names` per-route list (issue #768)**. A
+  request carrying any listed cookie name bypasses the cache
+  entirely — same contract as `bypass_on_cookie` (no lookup, no
+  storage, no in-flight sharing, `X-Cache: BYPASS`) — while requests
+  carrying only unlisted cookies participate in the cache per RFC
+  9111. On cookie-personalized SSR routes the presence trigger is
+  too blunt (ubiquitous analytics/consent cookies turn it into
+  "cache off"); this knob scopes the bypass to the session/debug
+  cookies. Matching is on the cookie-name token (case-insensitive,
+  never a substring or a value), zero-alloc on both the slow path
+  and the H1 fast path (which scans each Cookie line the h1parser
+  keeps individually). Capped at 16 names, mutually exclusive with
+  `bypass_on_cookie`.
+- **`cache.key.cookie_presence` per-route list (issue #768)**. Each
+  listed cookie name contributes one presence bit (present/absent,
+  never the value) to the Vary variant key — the CDN `check_presence`
+  equivalent for origins that render different content depending on
+  whether a consent/analytics cookie exists. Presence rides a
+  synthetic Vary field unioned into the stored VaryValue, so
+  store/lookup pairing, peer-gate assertions, 304 revalidation, and
+  the refresh registry replay hash the same bits everywhere. The
+  refresh registry now saves the Cookie header on presence-keyed
+  routes so the background-refresh replay cannot skew the
+  VaryValue/VaryKey pair. Capped at 16 names, mutually exclusive with
+  both bypass knobs. `docs/architecture.md` §3.4's stale
+  `cache.cookies.key` reference corrected to the implemented surface.
 
 ### Changed
 

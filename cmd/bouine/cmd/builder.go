@@ -409,6 +409,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
 			BypassOnCookie:          rc.Cache.BypassOnCookie != nil && *rc.Cache.BypassOnCookie,
 			BypassOnUserAgent:       rc.Cache.BypassOnUserAgent,
+			BypassOnCookieNames:     rc.Cache.BypassOnCookieNames,
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,

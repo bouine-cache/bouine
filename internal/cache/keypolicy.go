@@ -43,6 +43,94 @@ type KeyPolicy struct {
 	// under different keys (peer gates fail safe — miss, never a wrong
 	// body).
 	verbatimAE bool
+	// cookiePresence is the route's cache.key.cookie_presence list
+	// (issue #768): cookie names whose presence (never their values)
+	// participates in the variant key. Normalized (trimmed,
+	// lowercased, sorted, deduped) here like includeHeaders.
+	// Cluster note: identical across nodes, same hazard class as
+	// include_headers.
+	cookiePresence []string
+}
+
+// cookiePresenceField is the synthetic Vary field name carrying the
+// cookie-presence bits through the variant-key machinery. It is never
+// a legal Vary field an origin can send for: Vary field names are
+// header names (RFC 9110 §12.5.5), and this name is not one — it is
+// reserved by this package. An origin literally sending it would be
+// claiming a "header" that does not exist; its requests never carry
+// such a header, so every lookup hashes the same value and no
+// functional collision is possible (an attacker sending it in Vary
+// merely adds one constant field to the key, the same as any
+// never-present header).
+const cookiePresenceField = "x-bouine-cookie-presence"
+
+// CookiePresenceVary returns the synthetic Vary field value that
+// carries the route's cookie-presence bits through effectiveVary: the
+// presence-keyed dimension is unioned into the stored Vary exactly
+// like include_headers fields (same mechanism, same store/lookup
+// pairing guarantees). Empty string when the route does not key on
+// cookie presence.
+func (p *KeyPolicy) CookiePresenceVary() string {
+	if p == nil || len(p.cookiePresence) == 0 {
+		return ""
+	}
+	return cookiePresenceField
+}
+
+// hasCookiePresence reports whether the route keys variants on cookie
+// presence. Nil-safe.
+func (p *KeyPolicy) hasCookiePresence() bool {
+	return p != nil && len(p.cookiePresence) > 0
+}
+
+// cookiePresenceValue reduces the Cookie header value(s) for this
+// request to the presence-bit string that joins the variant key: one
+// character per listed name (sorted order), "1" for present, "0" for
+// absent. Cookie values never appear — presence only (issue #768:
+// cardinality + PII). The bits are positional over the sorted
+// normalized name list, so the value is deterministic across nodes
+// and config-order independent.
+//
+// One pass over the cookie pairs; each pair's name is looked up
+// against the scanner. Allocations: the returned string (≤16 bytes)
+// is the only heap use — it is produced on the lookup path (hit and
+// miss alike) for Vary-carrying objects on presence-keyed routes.
+// The zero-alloc hit-path budget applies to flag-off routes, which
+// never take this branch (effectiveVary only adds the synthetic field
+// when the route lists names).
+func (p *KeyPolicy) cookiePresenceValue(cookieValue string) string {
+	if !p.hasCookiePresence() || cookieValue == "" {
+		return ""
+	}
+	bits := make([]byte, len(p.cookiePresence))
+	for i := range bits {
+		bits[i] = '0'
+	}
+	for pair := range strings.SplitSeq(cookieValue, ";") {
+		name, _, _ := strings.Cut(pair, "=")
+		n := len(name)
+		for n > 0 && (name[n-1] == ' ' || name[n-1] == '\t') {
+			n--
+		}
+		off := 0
+		for off < n && (name[off] == ' ' || name[off] == '\t') {
+			off++
+		}
+		token := name[off:n]
+		if token == "" {
+			continue
+		}
+		// Linear scan over the sorted-by-length list: presence lists
+		// are small (≤16), and the common all-absent / all-present
+		// cases short-circuit on the first matching length group.
+		for i, listed := range p.cookiePresence {
+			if len(listed) == len(token) && asciiEqualFold(token, listed) {
+				bits[i] = '1'
+				break
+			}
+		}
+	}
+	return string(bits)
 }
 
 // shouldStripParam returns true if the query param should be excluded
@@ -146,6 +234,11 @@ func includeHostKey(p *KeyPolicy) bool {
 // origin also lists in Vary (its own trims must match).
 // excludeHost carries cache.key.include_host: false — the one field
 // that is true by default, hence an inverted "exclude" parameter.
+// Cookie presence (cache.key.cookie_presence, issue #768) is NOT a
+// parameter: it is set via WithCookiePresence, mirroring SetVerbatimAE,
+// so the 74 existing call sites (tests and the builder) stay stable.
+// Normalization is identical to includeHeaders (trim, lowercase, sort,
+// dedupe) — the presence bits are positional over the sorted list.
 func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, stripPrefixes []string, stripEmpty, dedup bool, includeHeaders []string, excludeHost bool) *KeyPolicy {
 	if len(includeHeaders) > 0 {
 		lowered := make([]string, 0, len(includeHeaders))
@@ -173,6 +266,45 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 		includeHeaders: includeHeaders,
 		excludeHost:    excludeHost,
 	}
+}
+
+// WithCookiePresence sets the cookie-presence list after
+// construction (mirrors SetVerbatimAE's setter pattern for optional
+// keying dimensions). Mutating a policy after the handler is serving
+// is forbidden — stored VaryKeys would no longer match freshly
+// computed ones.
+func (p *KeyPolicy) WithCookiePresence(names []string) *KeyPolicy {
+	if p == nil {
+		return nil
+	}
+	p.cookiePresence = normalizeCookiePresence(names)
+	return p
+}
+
+// normalizeCookiePresence trims, lowercases, sorts, and dedupes the
+// cookie-presence list. The presence bits are positional over this
+// canonical form (cookiePresenceValue), so every node must reduce the
+// config to the same order — which validation's duplicate rejection
+// and this normalization together guarantee.
+func normalizeCookiePresence(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	lowered := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(strings.ToLower(n))
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		lowered = append(lowered, n)
+	}
+	if len(lowered) == 0 {
+		return nil
+	}
+	sort.Strings(lowered)
+	return lowered
 }
 
 // ShouldExcludeHeader returns true if the given header name should be

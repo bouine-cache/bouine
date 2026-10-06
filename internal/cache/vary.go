@@ -149,7 +149,19 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
-		val := varyHeaderValue(f, src.getValue(f), policy)
+		var val string
+		if f == cookiePresenceField && policy.hasCookiePresence() {
+			// Synthetic cookie-presence field (issue #768): the hash
+			// input is the presence-bit string over the route's
+			// listed cookie names, never the raw Cookie value (values
+			// are PII + cardinality). All Cookie lines participate:
+			// the adapter's getValue returns the joined value for the
+			// slow/fasthttp shapes, and the RawRequest shape walks
+			// each line (see rawVarySrc presence note below).
+			val = policy.cookiePresenceValue(presenceCookieValue(src))
+		} else {
+			val = varyHeaderValue(f, src.getValue(f), policy)
+		}
 		needed := len(f) + 1 + len(val) + 1 // f=val;
 		if off+needed > len(buf) {
 			// Buffer overflow — fall back to alloc path.
@@ -167,6 +179,22 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 		return primary
 	}
 	return primary.WithVary(xxhash.Sum64(buf[:off]))
+}
+
+// presenceCookieValue returns the Cookie header content the
+// cookie-presence computation must scan, for any varySource: the
+// joined value for the one-line shapes (header.Map built from
+// fasthttp's All(), fasthttp's Peek), and every RawRequest Cookie
+// line joined by "; " — the h1parser keeps Cookie lines individually,
+// so a single getValue(Cookie) would miss cookies on the second line
+// (a presence bit must never depend on which line a cookie landed on).
+func presenceCookieValue[S varySource](src S) string {
+	switch s := any(src).(type) {
+	case rawVarySrc:
+		return s.r.CookieValue()
+	default:
+		return src.getValue(header.Cookie)
+	}
 }
 
 // headerFromFastHTTPReqHeader builds a header.Map from a fasthttp
@@ -197,7 +225,15 @@ func variantKeySlow(primary api.Key, vary string, reqHeader header.Map, policy *
 		}
 		_, _ = h.WriteString(f)
 		_, _ = h.WriteString("=")
-		val := varyHeaderValue(f, reqHeader.Get(f), policy)
+		var val string
+		if f == cookiePresenceField && policy.hasCookiePresence() {
+			// GetAll joins every Cookie line (multi-line shape from
+			// reqHeaderMapFromRaw); presence bits over the joined
+			// value are identical to the per-line scan.
+			val = policy.cookiePresenceValue(reqHeader.GetAll(header.Cookie))
+		} else {
+			val = varyHeaderValue(f, reqHeader.Get(f), policy)
+		}
 		_, _ = h.WriteString(val)
 		_, _ = h.WriteString(";")
 		written = true

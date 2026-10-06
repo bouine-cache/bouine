@@ -1105,6 +1105,20 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateRouteKey(ec, path+".key", rc.Key)
 	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
 	validateCookieNames(ec, path, *rc)
+	// Cookie-presence keying is mutually exclusive with both bypass
+	// knobs (issue #768): a bypassed request never reaches the cache,
+	// so keying the variant dimension it selects is dead config whose
+	// cost — presence bits multiplying the variant space against
+	// max_variants — buys nothing. Rejected at load so the conflict
+	// surfaces before a warm cache, not after.
+	if len(rc.Key.CookiePresence) > 0 {
+		if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+			ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie: bypassed requests never reach the cache, so presence keying is dead config")
+		}
+		if len(rc.BypassOnCookieNames) > 0 {
+			ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie_names: bypassed requests never reach the cache, so presence keying is dead config")
+		}
+	}
 	validateRefreshConfig(ec, path, *rc)
 }
 
@@ -1216,12 +1230,23 @@ func validateCookieNames(ec *errCollector, path string, rc RouteCache) {
 		ec.addf(path+".bypass_on_cookie_names", "is mutually exclusive with bypass_on_cookie: the presence trigger already bypasses every cookied request")
 		return
 	}
-	if len(rc.BypassOnCookieNames) > 16 {
-		ec.addf(path+".bypass_on_cookie_names", "capped at 16 entries, got %d", len(rc.BypassOnCookieNames))
+	validateCookieNameList(ec, path+".bypass_on_cookie_names", rc.BypassOnCookieNames)
+}
+
+// validateCookieNameList is the shared entry-format check for
+// cookie-name lists: RFC 6265 §4.1.1 cookie-name tokens (via
+// isHTTPToken — the cookie grammar excludes header-token separators
+// already), a 16-entry cap (mirrors include_headers), and
+// case-insensitive uniqueness. Trimmed entries are compared: the cache
+// layer trims before storing, so " a " and "a" must be rejected here
+// or validation and the stored policy disagree.
+func validateCookieNameList(ec *errCollector, path string, names []string) {
+	if len(names) > 16 {
+		ec.addf(path, "capped at 16 entries, got %d", len(names))
 	}
-	seen := make(map[string]bool, len(rc.BypassOnCookieNames))
-	for j, raw := range rc.BypassOnCookieNames {
-		entryPath := fmt.Sprintf("%s.bypass_on_cookie_names[%d]", path, j)
+	seen := make(map[string]bool, len(names))
+	for j, raw := range names {
+		entryPath := fmt.Sprintf("%s[%d]", path, j)
 		name := strings.TrimSpace(raw)
 		if name == "" {
 			ec.addf(entryPath, "must be a non-empty cookie name")
@@ -1303,6 +1328,19 @@ func validateRouteKey(ec *errCollector, path string, rk RouteKey) {
 		}
 	}
 	validateIncludeHeaders(ec, path, rk)
+	validateCookiePresence(ec, path, rk)
+}
+
+// validateCookiePresence validates cache.key.cookie_presence (issue
+// #768): RFC 6265 §4.1.1 cookie-name tokens, 16-entry cap,
+// case-insensitive uniqueness (validateCookieNameList). The bypass
+// conflicts are checked in validateRouteCache, where both the key and
+// the cache block are visible.
+func validateCookiePresence(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.CookiePresence) == 0 {
+		return
+	}
+	validateCookieNameList(ec, path+".cookie_presence", rk.CookiePresence)
 }
 
 // validateIncludeHeaders validates cache.key.include_headers: capped at

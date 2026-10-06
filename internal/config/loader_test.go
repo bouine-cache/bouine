@@ -1971,3 +1971,118 @@ routes:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "capped at 16 entries")
 }
+
+func TestParse_CookiePresence_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [consent, Analytics_Opt]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, []string{"consent", "Analytics_Opt"}, cfg.Routes[0].Cache.Key.CookiePresence)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidate_CookiePresence_Rejections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "invalid token rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: ["a b"]
+`,
+			wantErr: "RFC 6265",
+		},
+		{
+			name: "duplicate rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [consent, CONSENT]
+`,
+			wantErr: "duplicate",
+		},
+		{
+			name: "empty entry rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [""]
+`,
+			wantErr: "non-empty",
+		},
+		{
+			name: "conflict with bypass_on_cookie",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: true
+      key:
+        cookie_presence: [consent]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie",
+		},
+		{
+			name: "conflict with bypass_on_cookie_names",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [session_id]
+      key:
+        cookie_presence: [consent]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie_names",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.yaml))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

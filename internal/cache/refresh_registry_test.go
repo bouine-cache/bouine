@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestRefreshRegistryRegisterLookup(t *testing.T) {
@@ -19,7 +20,7 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 	req.Request.Header.Set("X-Test", "val1")
 
 	key := testkey.Key(42)
-	r.Register(key, requestInfoFromCtx(req), "", 0)
+	r.Register(key, requestInfoFromCtx(req), "", 0, nil)
 
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
@@ -43,7 +44,7 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 	req.Request.Header.Set("X-Trace-Id", "abc123")
 
 	key := testkey.Key(99)
-	r.Register(key, requestInfoFromCtx(req), "Accept, Accept-Language", 0)
+	r.Register(key, requestInfoFromCtx(req), "Accept, Accept-Language", 0, nil)
 
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
@@ -64,7 +65,7 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 	req := testCtx("GET", "https://example.com/baz")
 
 	key := testkey.Key(1)
-	r.Register(key, requestInfoFromCtx(req), "", 0)
+	r.Register(key, requestInfoFromCtx(req), "", 0, nil)
 	require.Equal(t, 1, r.Len())
 
 	r.Unregister(key)
@@ -82,7 +83,7 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 	req.Request.Header.Set("Accept-Encoding", "gzip")
 
 	key := testkey.Key(77)
-	r.Register(key, requestInfoFromCtx(req), "", 0)
+	r.Register(key, requestInfoFromCtx(req), "", 0, nil)
 
 	// Mutate the original request header after registration.
 	req.Request.Header.Set("Accept-Encoding", "br")
@@ -101,7 +102,7 @@ func TestRefreshRegistryLen(t *testing.T) {
 	req := testCtx("GET", "https://example.com/len")
 
 	for i := range 5 {
-		r.Register(testkey.Key(uint64(i)), requestInfoFromCtx(req), "", 0)
+		r.Register(testkey.Key(uint64(i)), requestInfoFromCtx(req), "", 0, nil)
 	}
 	require.Equal(t, 5, r.Len())
 }
@@ -122,14 +123,14 @@ func TestDecrementPersist(t *testing.T) {
 	t.Run("persist_zero", func(t *testing.T) {
 		t.Parallel()
 		r2 := newRefreshRegistry()
-		r2.Register(key, info, "", 0)
+		r2.Register(key, info, "", 0, nil)
 		require.False(t, r2.DecrementPersist(key))
 	})
 
 	t.Run("persist_positive", func(t *testing.T) {
 		t.Parallel()
 		r3 := newRefreshRegistry()
-		r3.Register(key, info, "", 3)
+		r3.Register(key, info, "", 3, nil)
 		require.True(t, r3.DecrementPersist(key))
 		entry := r3.Lookup(key)
 		require.NotNil(t, entry)
@@ -147,7 +148,7 @@ func TestRefreshRegistry_VaryStar(t *testing.T) {
 	req.Request.Header.Set("Accept-Encoding", "gzip")
 	req.Request.Header.Set("X-Custom", "val")
 	key := testkey.Key(55)
-	r.Register(key, requestInfoFromCtx(req), "*", 0)
+	r.Register(key, requestInfoFromCtx(req), "*", 0, nil)
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
 	// Vary:* clones all headers.
@@ -167,7 +168,7 @@ func TestRefreshRegistry_Concurrent(t *testing.T) {
 		go func(n uint64) {
 			defer wg.Done()
 			k := testkey.Key(n)
-			r.Register(k, info, "", 0)
+			r.Register(k, info, "", 0, nil)
 			_ = r.Lookup(k)
 			if n%2 == 0 {
 				r.Unregister(k)
@@ -178,4 +179,60 @@ func TestRefreshRegistry_Concurrent(t *testing.T) {
 	// After all goroutines: even keys unregistered, odd keys remain.
 	// Len should be 50 (odd keys 1,3,5,...,99).
 	assert.Equal(t, 50, r.Len())
+}
+
+// A presence-keyed route (issue #768) must save the Cookie header in
+// the registry entry: doBackgroundRefresh replays the saved headers
+// into the conditional fetch's RequestInfo, and refreshFrom304
+// recomputes VaryKey from them — a missing Cookie would rehash the
+// presence bits as all-absent and skew the stored VaryValue/VaryKey
+// pair (the peer gates then reject every refreshed object until TTL).
+func TestRefreshRegistry_CookiePresenceSavesCookie(t *testing.T) {
+	t.Parallel()
+	req := testCtx("GET", "http://example.com/p")
+	req.Request.Header.Set(header.Cookie, "consent=yes; analytics=1")
+	ri := requestInfoFromCtx(req)
+
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookiePresence([]string{"consent"})
+	r := newRefreshRegistry()
+	r.Register(testkey.Key(1), ri, policy.CookiePresenceVary(), 0, policy)
+
+	entry := r.Lookup(testkey.Key(1))
+	require.NotNil(t, entry)
+	assert.Equal(t, "consent=yes; analytics=1", entry.header.Get(header.Cookie),
+		"the registry must replay the Cookie header on presence-keyed routes or the 304 rehash skews VaryKey")
+
+	// The replayed presence bits must match the original request's:
+	// the VaryKey recomputation in refreshFrom304 uses the same
+	// BuildVaryKey call as the store path.
+	vk := BuildVaryKey(entry.varyHeader(t, policy), ri.Header, policy)
+	vkReplay := BuildVaryKey(entry.varyHeader(t, policy), entry.header, policy)
+	require.Equal(t, vk, vkReplay)
+}
+
+// Non-presence routes must NOT save the Cookie header (the registry's
+// minimal-entry memory contract), and the replay keeps working.
+func TestRefreshRegistry_NonPresenceDoesNotSaveCookie(t *testing.T) {
+	t.Parallel()
+	req := testCtx("GET", "http://example.com/p")
+	req.Request.Header.Set(header.Cookie, "session=abc")
+	ri := requestInfoFromCtx(req)
+
+	r := newRefreshRegistry()
+	r.Register(testkey.Key(2), ri, "", 0, nil)
+
+	entry := r.Lookup(testkey.Key(2))
+	require.NotNil(t, entry)
+	assert.Empty(t, entry.header.Get(header.Cookie))
+}
+
+// varyHeader adapts the stored VaryValue into the string form
+// refreshFrom304 recomputes VaryKey from — for the presence test the
+// stored object's VaryValue (effectiveVary output) is exactly
+// policy.CookiePresenceVary() when the origin sends no Vary.
+func (e *refreshEntry) varyHeader(t *testing.T, policy *KeyPolicy) string {
+	t.Helper()
+	v := policy.CookiePresenceVary()
+	require.NotEmpty(t, v)
+	return v
 }

@@ -2667,3 +2667,17 @@ func TestBuildRouter_BypassOnCookieNamesWired(t *testing.T) {
 	require.Equal(t, fasthttp.StatusOK, unlisted.Response.StatusCode())
 	assert.NotEqual(t, "BYPASS", string(unlisted.Response.Header.Peek(header.XCache)))
 }
+
+// TestBuildKeyPolicy_CookiePresenceWired verifies cache.key.cookie_presence
+// reaches the route's KeyPolicy (issue #768): the built policy carries
+// the normalized presence list and emits the synthetic Vary field the
+// variant-key machinery keys on. The full variant semantics (store/
+// lookup pairing, peer-gate parity, refresh replay) are pinned by
+// internal/cache's cookie_presence_test.go; this test proves only the
+// config plumbing (config.RouteKey.CookiePresence → KeyPolicy).
+func TestBuildKeyPolicy_CookiePresenceWired(t *testing.T) {
+	t.Parallel()
+	p := buildKeyPolicy(config.RouteKey{CookiePresence: []string{"consent", "Session_ID"}})
+	require.NotNil(t, p, "cookie_presence must construct a policy")
+	require.NotEmpty(t, p.CookiePresenceVary(), "the policy must emit the synthetic Vary field")
+}

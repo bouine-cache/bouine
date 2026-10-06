@@ -701,6 +701,7 @@ func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 		excludeHost(rk),
 	)
 	p.SetVerbatimAE(rk.VerbatimEncoding)
+	p.WithCookiePresence(rk.CookiePresence)
 	return p
 }
 
@@ -729,7 +730,8 @@ func hasKeyPolicy(rk config.RouteKey) bool {
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
 		rk.StripEmptyParams || rk.DedupQueryParams ||
 		excludeHost(rk) ||
-		rk.VerbatimEncoding
+		rk.VerbatimEncoding ||
+		len(rk.CookiePresence) > 0
 }
 
 // buildStripSet converts a config []string into a map for O(1) lookup.

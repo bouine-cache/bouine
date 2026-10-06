@@ -2926,7 +2926,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.VaryValue
 		}
-		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles)
+		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles, h.policy)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
 }

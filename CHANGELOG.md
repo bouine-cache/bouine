@@ -131,9 +131,12 @@ the curated, human-readable summary.
   too blunt (ubiquitous analytics/consent cookies turn it into
   "cache off"); this knob scopes the bypass to the session/debug
   cookies. Matching is on the cookie-name token (case-insensitive,
-  never a substring or a value), zero-alloc on both the slow path
-  and the H1 fast path (which scans each Cookie line the h1parser
-  keeps individually). Capped at 16 names, mutually exclusive with
+  never a substring or a value), after OWS trimming — a listed
+  cookie matches in every "; "-separated position, and on every
+  repeated Cookie field line (the slow path scans fasthttp's
+  PeekAll because Peek returns only the first line until cookie
+  collection; the H1 fast path scans each line the h1parser keeps
+  individually). Capped at 16 names, mutually exclusive with
   `bypass_on_cookie`.
 - **`cache.key.cookie_presence` per-route list (issue #768)**. Each
   listed cookie name contributes one presence bit (present/absent,
@@ -142,12 +145,36 @@ the curated, human-readable summary.
   whether a consent/analytics cookie exists. Presence rides a
   synthetic Vary field unioned into the stored VaryValue, so
   store/lookup pairing, peer-gate assertions, 304 revalidation, and
-  the refresh registry replay hash the same bits everywhere. The
-  refresh registry now saves the Cookie header on presence-keyed
-  routes so the background-refresh replay cannot skew the
-  VaryValue/VaryKey pair. Capped at 16 names, mutually exclusive with
-  both bypass knobs. `docs/architecture.md` §3.4's stale
-  `cache.cookies.key` reference corrected to the implemented surface.
+  the refresh registry replay hash the same bits everywhere. Every
+  request representation canonicalizes repeated Cookie field lines
+  to the RFC 6265 §4.2 form before the bits are computed (the new
+  `header.Map.CookieAll`), so a presence bit never depends on which
+  line a cookie landed on. The refresh registry now saves the
+  Cookie header on presence-keyed routes so the background-refresh
+  replay cannot skew the VaryValue/VaryKey pair. Capped at 16 names,
+  mutually exclusive with both bypass knobs.
+  `docs/architecture.md` §3.4's stale `cache.cookies.key` reference
+  corrected to the implemented surface.
+
+### Fixed
+
+- Cookie-bypass and presence-keying correctness on multi-line and
+  non-first-position cookies (review of #773): the
+  `bypass_on_cookie_names` scanner rejected a listed cookie whose
+  name arrived with a leading separator space (the length gate ran
+  before OWS trimming, so `" session_id"` never matched — real
+  browsers put the session cookie last in one `"; "`-joined line,
+  meaning the knob almost never fired and the personalized response
+  was stored and served to other users); the slow-path gate saw
+  only the first Cookie field line (fasthttp's Peek pre-collection)
+  so a listed cookie on a later line was served from cache; and
+  presence bits hashed over a `", "`-joined Cookie value
+  (header.Map.GetAll), folding the second line's pairs into the
+  first line's last value — the peer gate then rejected every
+  presence-keyed exchange of a multi-line cookied request. All
+  three are pinned by new regression tests covering every position,
+  real 2-line wire shapes, the peer-gate assertion, the refresh
+  replay, and cross-representation key parity.
 
 ### Changed
 

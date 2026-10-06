@@ -1385,10 +1385,13 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 // UA matcher's purpose is mirroring edge-CDN verified-bot bypass
 // rules on inner cache layers (client → edge → bouine), so a crawler
 // the edge deliberately sends around its cache is not served
-// bouine's stored copy. Zero allocations: one Peek per configured
-// gate, byte-wise matching, no string conversion.
+// bouine's stored copy. Zero allocations: one header read per
+// configured gate (PeekAll for the cookie gates — fasthttp's Peek
+// does NOT join repeated Cookie lines, so a single Peek would miss a
+// listed cookie on the second line; one Peek for the UA gate),
+// byte-wise matching, no string conversion.
 func (h *Handler) requestBypass(ctx *fasthttp.RequestCtx) bool {
-	if h.cookieBypassTriggered(ctx.Request.Header.Peek(header.Cookie)) {
+	if h.cookieBypassTriggered(&ctx.Request.Header) {
 		return true
 	}
 	return h.uaBypass != nil && h.uaBypass.matchBytes(ctx.Request.Header.Peek(header.UserAgent))
@@ -1434,14 +1437,21 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// cache.bypass_on_user_agent, ADR-0055): a request gated by any
 	// knob never touches the cache — no lookup, no storage, no
 	// in-flight sharing. requestBypass reads only already-parsed
-	// headers (Peek / the compiled matcher), and all flags are resolved
-	// at handler build time, so gate-less routes pay one Peek of a
-	// header fasthttp already parsed (cookie flag off with no listed
-	// names is one bool read; UA patterns absent is one nil read — no
-	// Peek at all, keeping the zero-alloc hit path unchanged). Placed
+	// headers (PeekAll / the compiled matcher), and all flags are
+	// resolved at handler build time, so gate-less routes return
+	// before any header read (cookie flag off with no listed names is
+	// one bool read; UA patterns absent is one nil read — no Peek at
+	// all, keeping the zero-alloc hit path unchanged). Flag-on cookie
+	// routes pay one PeekAll — fasthttp's Peek does NOT join repeated
+	// Cookie lines (peekArgBytes returns the first line until
+	// collectCookies runs), so the gate must see every line or a
+	// listed cookie on the second line slips into the cache. Placed
 	// after rewriteRequestCtx so request.header_set/header_remove can
 	// strip or adjust the Cookie / User-Agent headers before the check,
-	// and before lookup so no store read is ever performed.
+	// and before lookup so no store read is ever performed. SSE intent
+	// wins the dispatch inside serveCacheBypass: handleSSE already
+	// streams live with never-cache semantics, which satisfies the
+	// same "never stored, never shared" contract.
 	if h.requestBypass(ctx) {
 		h.serveCacheBypass(ctx)
 		return
@@ -1740,6 +1750,14 @@ func remapHeadToGet(method string) string {
 // strings are copied into owned memory — the fast-path equivalent of
 // the materialize-before-escape rule the SWR goroutine follows in
 // triggerBgRevalidate.
+//
+// Cookie lines: the h1parser keeps every Cookie header line
+// separately, and header.Map.Set overwrites — a per-line Set would keep
+// only the LAST line's pairs, dropping a listed cookie and skewing any
+// cookie-keying (presence bits, bypass replay) computed downstream.
+// The lines are joined into one §4.2 value instead, the same shape
+// headerFromCtx produces from fasthttp's collected cookies, so both
+// paths' RequestInfos key identically.
 func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
 	uri := req.Path
 	if req.Query != "" {
@@ -1755,7 +1773,13 @@ func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
 	}
 	ri.Header = header.NewMap(req.NHeaders)
 	for i := 0; i < req.NHeaders; i++ {
+		if api.EqualFold(req.Headers[i].Key, header.Cookie) {
+			continue
+		}
 		ri.Header.Set(req.Headers[i].Key, req.Headers[i].Value)
+	}
+	if cv := req.CookieValue(); cv != "" {
+		ri.Header.Set(header.Cookie, cv)
 	}
 	return ri
 }

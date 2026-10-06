@@ -1200,7 +1200,6 @@ func uaPatternCharError(p string) string {
 	return ""
 }
 
-
 // validateCookiePresenceConflicts rejects cache.key.cookie_presence
 // combined with either bypass knob (issue #768): a bypassed request
 // never reaches the cache, so keying the variant dimension it selects

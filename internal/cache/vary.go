@@ -155,9 +155,8 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 			// input is the presence-bit string over the route's
 			// listed cookie names, never the raw Cookie value (values
 			// are PII + cardinality). All Cookie lines participate:
-			// the adapter's getValue returns the joined value for the
-			// slow/fasthttp shapes, and the RawRequest shape walks
-			// each line (see rawVarySrc presence note below).
+			// presenceCookieValue canonicalizes every adapter's Cookie
+			// content into one "; "-joined §4.2 value (see its note).
 			val = policy.cookiePresenceValue(presenceCookieValue(src))
 		} else {
 			val = varyHeaderValue(f, src.getValue(f), policy)
@@ -181,17 +180,49 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 	return primary.WithVary(xxhash.Sum64(buf[:off]))
 }
 
-// presenceCookieValue returns the Cookie header content the
-// cookie-presence computation must scan, for any varySource: the
-// joined value for the one-line shapes (header.Map built from
-// fasthttp's All(), fasthttp's Peek), and every RawRequest Cookie
-// line joined by "; " — the h1parser keeps Cookie lines individually,
-// so a single getValue(Cookie) would miss cookies on the second line
-// (a presence bit must never depend on which line a cookie landed on).
+// presenceCookieValue returns the canonical Cookie field value the
+// cookie-presence computation must scan, for any varySource — every
+// line's pairs joined by "; " per RFC 6265 §4.2, the value
+// api.RawRequest.CookieValue and header.Map.CookieAll produce. The
+// one-line shapes (header.Map built from fasthttp's All(), fasthttp's
+// Peek) already carry the joined value; the multi-entry shapes (a map
+// with repeated Cookie entries, the RawRequest the h1parser produces)
+// keep lines separate, and a single getValue would see only the
+// first — a presence bit must never depend on which line a cookie
+// landed on. The "; " separator composes with cookiePresenceValue's
+// ";"-split without folding any pair into another line's value
+// (GetAll's ", " join would — the bug class CookieAll exists to
+// prevent).
 func presenceCookieValue[S varySource](src S) string {
 	switch s := any(src).(type) {
 	case rawVarySrc:
 		return s.r.CookieValue()
+	case mapVarySrc:
+		return s.m.CookieAll()
+	case fastVarySrc:
+		// fasthttp's Peek joins collected cookies with "; "
+		// (appendRequestCookieBytes) but a PRE-collection Peek sees
+		// only the first line — wrong for presence keying. PeekAll
+		// never collects: pre-collection it returns one element per
+		// Cookie line, post-collection the single joined value — the
+		// join below canonicalizes the first shape and is a no-op
+		// view of the second.
+		if lines := s.h.PeekAll(header.Cookie); len(lines) > 1 {
+			first := true
+			var b []byte
+			for _, line := range lines {
+				if len(line) == 0 {
+					continue
+				}
+				if !first {
+					b = append(b, ';', ' ')
+				}
+				b = append(b, line...)
+				first = false
+			}
+			return string(b)
+		}
+		return src.getValue(header.Cookie)
 	default:
 		return src.getValue(header.Cookie)
 	}
@@ -227,10 +258,12 @@ func variantKeySlow(primary api.Key, vary string, reqHeader header.Map, policy *
 		_, _ = h.WriteString("=")
 		var val string
 		if f == cookiePresenceField && policy.hasCookiePresence() {
-			// GetAll joins every Cookie line (multi-line shape from
-			// reqHeaderMapFromRaw); presence bits over the joined
-			// value are identical to the per-line scan.
-			val = policy.cookiePresenceValue(reqHeader.GetAll(header.Cookie))
+			// CookieAll joins every Cookie line with the §4.2
+			// separator; presence bits over the joined value are
+			// identical to the per-line scan (GetAll's ", " join
+			// folds pairs into the previous line's last value —
+			// the bug class CookieAll exists to prevent).
+			val = policy.cookiePresenceValue(reqHeader.CookieAll())
 		} else {
 			val = varyHeaderValue(f, reqHeader.Get(f), policy)
 		}

@@ -436,10 +436,13 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 		if f == cookiePresenceField && policy.hasCookiePresence() {
 			// Cookie-presence assertion (issue #768): the same
 			// presence-bit string variantKeyCore hashes, or peers
-			// reject every presence-keyed exchange. GetAll joins
-			// multi-line Cookie entries (the RawRequest-derived map
-			// keeps lines separate).
-			val = policy.cookiePresenceValue(reqHeader.GetAll(header.Cookie))
+			// reject every presence-keyed exchange. CookieAll joins
+			// multi-line Cookie entries with the RFC 6265 §4.2
+			// separator — GetAll's ", " join would fold the second
+			// line's first pair into the first line's last value, where
+			// the ";"-split never sees it and the bits hash wrong
+			// (the RawRequest-derived map keeps lines separate).
+			val = policy.cookiePresenceValue(reqHeader.CookieAll())
 		} else {
 			val = varyAssertionValue(f, reqHeader.Get(f), policy)
 		}

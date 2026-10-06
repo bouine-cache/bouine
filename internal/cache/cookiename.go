@@ -4,6 +4,9 @@ import (
 	"strings"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // cookieNameScanner matches cookie names in a Cookie header value
@@ -111,12 +114,15 @@ func (s cookieNameScanner) hasCookieName(cookieValue string) bool {
 // on the original bytes is avoided by comparing against the precomputed
 // lowercase list with an inline fold.
 func (s cookieNameScanner) nameListed(rawName string) bool {
+	// Trim OWS around the name token FIRST (RFC 6265 §5.2 strips it
+	// around the pair before the "=" split, and RFC 9110 §5.6.3 permits
+	// spaces around the ";" separators — clients send "a=1; b=2", so
+	// every pair after the first arrives with a leading space). The
+	// length gate must run on the trimmed token: gating on the raw
+	// length rejected " session_id" (11 bytes) against a 10-byte listed
+	// name before the trim could see it — the listed cookie was missed
+	// in every position except the first.
 	n := len(rawName)
-	if n < s.minLen || n > s.maxLen {
-		return false
-	}
-	// Trim OWS around the name token (RFC 9110 §5.6.3 permits spaces
-	// around the ";" separators, and clients send "a=1; b=2").
 	for n > 0 && (rawName[n-1] == ' ' || rawName[n-1] == '\t') {
 		n--
 	}
@@ -125,7 +131,7 @@ func (s cookieNameScanner) nameListed(rawName string) bool {
 		off++
 	}
 	name := rawName[off:n]
-	if name == "" || len(name) < s.minLen {
+	if name == "" || len(name) < s.minLen || len(name) > s.maxLen {
 		return false
 	}
 	for _, listed := range s.names {
@@ -146,15 +152,34 @@ func (s cookieNameScanner) nameListed(rawName string) bool {
 // (cache.bypass_on_cookie) and the request carries any non-empty
 // Cookie header, or the route lists names
 // (cache.bypass_on_cookie_names) and the request carries one of them.
-// The Cookie value is the joined RFC 6265 §4.2 field value fasthttp's
-// Peek returns (collectCookies merges every Cookie line), so the
-// scanner sees all cookie pairs. Zero-alloc for flag-off routes (the
-// Peek itself is fasthttp's existing parse).
-func (h *Handler) cookieBypassTriggered(cookieValue []byte) bool {
-	if len(cookieValue) == 0 {
+//
+// Multi-line Cookie headers (RFC 9110 §5.2 permits repeated field
+// lines): fasthttp's Peek(Cookie) does NOT join them — before
+// collectCookies runs it returns only the FIRST line (peekArgBytes,
+// first argsKV match), so a listed cookie on the second line would
+// be invisible to a single Peek. PeekAll returns every line, so the
+// scan walks each one's pairs; the flag-on presence trigger fires on
+// the first non-empty line. PeekAll populates h.mulHeader — safe
+// here because the bytes are consumed before any other Peek call
+// (fasthttp's own documented contract).
+//
+// Cost: flag-off routes (no names, no presence trigger) return before
+// any header read; presence-trigger routes pay one PeekAll of a
+// header fasthttp already parsed; named routes pay one PeekAll plus
+// the per-line scan of the bypass list.
+func (h *Handler) cookieBypassTriggered(hdr *fasthttp.RequestHeader) bool {
+	if !h.bypassOnCookie && h.bypassCookieNames.empty() {
 		return false
 	}
-	return h.bypassOnCookie || h.bypassCookieNames.hasCookieName(string(cookieValue))
+	for _, line := range hdr.PeekAll(header.Cookie) {
+		if len(line) == 0 {
+			continue
+		}
+		if h.bypassOnCookie || h.bypassCookieNames.hasCookieName(header.BytesToString(line)) {
+			return true
+		}
+	}
+	return false
 }
 
 // cookieBypassTriggeredRaw reports the same trigger for a RawRequest

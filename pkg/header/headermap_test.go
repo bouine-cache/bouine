@@ -2,6 +2,7 @@ package header
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -458,4 +459,57 @@ func BenchmarkBytesToString(b *testing.B) {
 	for b.Loop() {
 		_ = BytesToString(data)
 	}
+}
+
+// TestMap_CookieAll pins the Cookie join semantics (issue #768):
+// cookie pairs are "; "-separated (RFC 6265 §4.2), so multi-line
+// Cookie entries must join with "; " — GetAll's ", " join (correct for
+// list-valued fields per RFC 9111 §5.2) folds the second line's first
+// pair into the first line's last value, where a ";" split never sees
+// it. Cache-keying consumers (presence bits, bypass matching, the
+// VaryKey assertion) all reduce over the CookieAll form.
+func TestMap_CookieAll(t *testing.T) {
+	t.Run("no cookie", func(t *testing.T) {
+		h := Map{}
+		h.Set("Accept", "*/*")
+		assert.Equal(t, "", h.CookieAll())
+	})
+	t.Run("single line", func(t *testing.T) {
+		h := Map{}
+		h.Set("Cookie", "a=1; b=2")
+		assert.Equal(t, "a=1; b=2", h.CookieAll())
+	})
+	t.Run("multi line joins with §4.2 separator", func(t *testing.T) {
+		h := Map{}
+		h.AppendEntryCanonical("Cookie", "analytics=1")
+		h.AppendEntryCanonical("Cookie", "consent=yes")
+		assert.Equal(t, "analytics=1; consent=yes", h.CookieAll())
+		// The §4.2 join keeps every pair visible to a ";" split
+		// (trimmed) — splitPairs mirrors the cache layer's
+		// presence/bypass scans.
+		assert.Contains(t, splitPairs(h.CookieAll()), " consent=yes")
+		assert.Equal(t, []string{"analytics=1, consent=yes"}, splitPairs(h.GetAll("Cookie")),
+			"GetAll's comma join must hide the second line's pair from a \";\" split — the bug this pins")
+	})
+	t.Run("empty lines are skipped", func(t *testing.T) {
+		h := Map{}
+		h.AppendEntryCanonical("Cookie", "")
+		h.AppendEntryCanonical("Cookie", "a=1")
+		assert.Equal(t, "a=1", h.CookieAll())
+	})
+	t.Run("case-insensitive cookie key", func(t *testing.T) {
+		h := Map{}
+		h.AppendEntryCanonical(InternKey("cookie"), "a=1")
+		assert.Equal(t, "a=1", h.CookieAll())
+	})
+}
+
+func splitPairs(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ";") {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

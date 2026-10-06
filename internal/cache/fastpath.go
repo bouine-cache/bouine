@@ -64,9 +64,9 @@ type FastPathHandler struct {
 	// (default) keeps the fast path's behavior unchanged: the gate is
 	// a single nil read paid on every request, with the header scan
 	// only on pattern-configured routes' requests.
-	uaBypass *uaBypass
-	cachedDate     atomic.Pointer[string]
-	poolName       string
+	uaBypass   *uaBypass
+	cachedDate atomic.Pointer[string]
+	poolName   string
 	// bypassCookieNames mirrors the owning Handler's
 	// cache.bypass_on_cookie_names scanner (issue #768). When the
 	// owner lists names, TryHit declines requests carrying one of

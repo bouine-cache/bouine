@@ -60,10 +60,12 @@ func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader strin
 	}
 
 	// Cookie-presence keying: the presence bits derive from the Cookie
-	// header, so the replay must carry it (GetAll joins multi-line
-	// Cookie entries — the map stores them separately).
+	// header, so the replay must carry it. CookieAll joins multi-line
+	// Cookie entries with the RFC 6265 §4.2 separator (the map stores
+	// them separately; GetAll's ", " join would fold one line's pair
+	// into another's value and skew the replayed presence bits).
 	if policy.hasCookiePresence() {
-		if cv := ri.Header.GetAll(header.Cookie); cv != "" {
+		if cv := ri.Header.CookieAll(); cv != "" {
 			saved.Set(header.Cookie, cv)
 		}
 	}

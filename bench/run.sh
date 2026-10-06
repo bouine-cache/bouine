@@ -100,6 +100,7 @@ declare -A BUDGETS=(
     [VaryKey_AcceptEncodingBucketVerbatim]=4
     [VaryKey_AcceptLanguageBucket]=3
     [VaryKey_CookiePresence]=1
+    [VaryKey_CookiePresenceFast]=2
     [VaryKey_CookiePresenceRaw]=4
     [VaryKey_NoPresenceZeroCost]=2
     [H1Parse_Get]=0

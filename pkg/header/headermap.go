@@ -194,6 +194,11 @@ func (h Map) Get(key string) string {
 // GetAll returns all values for the given key, joined with ", " per
 // RFC 9111 §5.2 (multiple header field lines are equivalent to a
 // comma-separated list). Returns "" if the header is not present.
+//
+// GetAll is NOT the right join for Cookie (RFC 6265 §4.2): cookie
+// pairs are "; "-separated, so a ", "-join folds the second line's
+// pair into the first line's last value — invisible to any ";" split.
+// Use CookieAll for Cookie-shaped lookups.
 func (h Map) GetAll(key string) string {
 	var parts []string
 	// Fast path: direct comparison (see Get for rationale).
@@ -221,6 +226,61 @@ func (h Map) GetAll(key string) string {
 		return parts[0]
 	}
 	return strings.Join(parts, ", ")
+}
+
+// CookieAll returns every Cookie line's value joined with "; " — the
+// RFC 6265 §4.2 field form, the same value fasthttp's Peek returns
+// after cookie collection (appendRequestCookieBytes joins pairs with
+// "; ") and RawRequest.CookieValue produces. This is the canonical
+// Cookie representation for every cache-keying consumer (bypass
+// matching, cookie-presence bits, the VaryKey assertion): joining
+// with ", " instead folds the second line's first pair into the
+// first line's last value, where a ";"-split never sees it — the
+// listed cookie silently stops matching and presence bits hash
+// wrong. Returns "" when no Cookie entry is present. Allocations:
+// strings.Join on the multi-line shape only; one line returns as-is.
+func (h Map) CookieAll() string {
+	// Pass 1: count. Zero-alloc when the map carries one Cookie entry
+	// (the common shapes: headerFromCtx folds at parse-collect time,
+	// requestInfoFromRaw folds at materialization) — the value is
+	// returned without copying.
+	single := ""
+	count := 0
+	for i := range h.entries {
+		if h.entries[i].key != Cookie {
+			continue
+		}
+		if v := h.values[h.entries[i].off]; v != "" {
+			if count == 0 {
+				single = v
+			}
+			count++
+		}
+	}
+	switch count {
+	case 0:
+		return ""
+	case 1:
+		return single
+	}
+	// Pass 2: the multi-entry shape (reqHeaderMapFromRaw keeps the
+	// h1parser's per-line entries). Joins — the rare repeated-field-line
+	// request, off every zero-alloc budget by construction.
+	var b []byte
+	for i := range h.entries {
+		if h.entries[i].key != Cookie {
+			continue
+		}
+		v := h.values[h.entries[i].off]
+		if v == "" {
+			continue
+		}
+		if len(b) > 0 {
+			b = append(b, ';', ' ')
+		}
+		b = append(b, v...)
+	}
+	return string(b)
 }
 
 // Set sets the header with the given key to the single value.

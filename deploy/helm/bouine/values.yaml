@@ -92,6 +92,13 @@ config:
   upstream_pools: []
   # Header rewrite directives (request.header_set, request.header_remove,
   # response.header_set, response.header_remove) apply per route.
+  # Client-identity forwarding (issue #769): request.forwarded injects
+  # X-Forwarded-For (append-only, bouine's immediate peer), X-Forwarded-Proto
+  # (scheme bouine received), X-Forwarded-Host (received Host), and Via
+  # "1.1 bouine" onto origin-bound requests only — never the hit path, never
+  # the cache key. Requires a pool; mutually exclusive with header_set
+  # entries targeting the same headers; XFF/Via chains capped at max_append
+  # entries (default 5, range 1..64).
   # Request path rewrites: request.strip_prefix (pure prefix removal) and
   # request.path_rewrite {match, replace} (Go RE2 regex, nginx
   # `rewrite ... break` equivalent; mutually exclusive) rewrite the
@@ -101,6 +108,12 @@ config:
   #       pool: app
   #       request:
   #         header_remove: [X-Client-Trace]
+  #         forwarded:
+  #           client_ip: true    # append peer IP to X-Forwarded-For
+  #           proto: true        # set X-Forwarded-Proto from the listener
+  #           host: true         # set X-Forwarded-Host to the received Host
+  #           via: true          # append Via: 1.1 bouine
+  #           max_append: 5      # XFF/Via chain cap (default 5)
   #         path_rewrite:
   #           match: ^/public/webhook/(.*)$
   #           replace: /internal/webhook/$1

@@ -227,6 +227,22 @@ func buildPathRewrite(rc config.Route) *cache.PathRewrite {
 	return cache.NewPathRewrite(pw.Match, pw.Replace)
 }
 
+// buildForwardedPolicy compiles the route's request.forwarded block into
+// a cache.ForwardedPolicy (issue #769). Validation rejects forwarded on
+// static routes and any header_set overlap, and defaults max_append, so
+// this only maps the validated fields. Returns the zero (disabled)
+// policy when the block is unset.
+func buildForwardedPolicy(rc config.Route) cache.ForwardedPolicy {
+	f := rc.Request.Forwarded
+	return cache.ForwardedPolicy{
+		ClientIP:  f.ClientIP,
+		Proto:     f.Proto,
+		Host:      f.Host,
+		Via:       f.Via,
+		MaxAppend: f.MaxAppend,
+	}
+}
+
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
 	// Retain the router: startListeners wraps it into the routed H1
@@ -349,6 +365,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			PathRewrite:             buildPathRewrite(rc),
 			RequestHeaderSet:        rc.Request.HeaderSet,
 			RequestHeaderRemove:     rc.Request.HeaderRemove,
+			Forwarded:               buildForwardedPolicy(rc),
 			ResponseHeaderSet:       rc.Response.HeaderSet,
 			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,

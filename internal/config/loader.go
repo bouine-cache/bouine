@@ -438,7 +438,53 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 		ec.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
 	validatePathRewrite(ec, prefix+".request", r.Request)
+	validateForwarded(ec, prefix, r)
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
+}
+
+// validateForwarded validates the request.forwarded block (issue #769):
+// forwarded headers only apply to origin-proxy routes, header_set wins
+// over forwarded injection for the same header (the conflict is rejected
+// so the effective value is never an accident of application order), and
+// max_append is bounded. Zero (unset) max_append is normalised to
+// DefaultForwardedMaxAppend when any flag is on, mirroring how route
+// methods are normalised above.
+func validateForwarded(ec *errCollector, prefix string, r *Route) {
+	f := &r.Request.Forwarded
+	if !f.ClientIP && !f.Proto && !f.Host && !f.Via {
+		return
+	}
+	if r.Pool == "" {
+		ec.addf(prefix+".request.forwarded",
+			"requires a pool — a static route forwards to no origin")
+		return
+	}
+	if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
+		ec.addf(prefix+".request.forwarded.max_append",
+			"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
+		return
+	}
+	if f.MaxAppend == 0 {
+		f.MaxAppend = DefaultForwardedMaxAppend
+	}
+	// header_set and forwarded both write the same headers; whichever
+	// applied second would silently mask the other. Reject instead of
+	// picking a winner the operator did not choose. Names are listed
+	// literally (not via pkg/header) to keep this leaf package's import
+	// set minimal; they match the pkg/header constants for the same
+	// headers.
+	targets := map[string]string{
+		"x-forwarded-for":   "X-Forwarded-For",
+		"x-forwarded-proto": "X-Forwarded-Proto",
+		"x-forwarded-host":  "X-Forwarded-Host",
+		"via":               "Via",
+	}
+	for name := range r.Request.HeaderSet {
+		if canonical, ok := targets[strings.ToLower(name)]; ok {
+			ec.addf(prefix+".request.forwarded",
+				"is mutually exclusive with header_set entry %q — specify exactly one", canonical)
+		}
+	}
 }
 
 // validateRouteKeyHostSelector rejects include_host: false on a route

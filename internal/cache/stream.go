@@ -122,6 +122,11 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	// key's bucket claim (see rewriteOutboundAE). The SSE-only branch
 	// never stores; the rewrite is harmless there.
 	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — never the ctx, so the cache key, the Vary
+	// variant key, and the stored RequestInfo stay untouched. Covers
+	// miss, bypass, and SSE fetches on this path.
+	h.applyForwardedCtx(&req.Header, ctx)
 	// Forward the request body (POST-style SSE carries the prompt/payload
 	// in the body). The pooled request outlives the handler on streaming
 	// paths (released inside the body-stream writer), so the body is

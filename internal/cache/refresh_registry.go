@@ -41,12 +41,31 @@ func newRefreshRegistry() *refreshRegistry {
 // (from the response's Vary header, plus Accept-Encoding) are kept.
 // The header map is cloned — storing a reference to r.Header would
 // race with the HTTP server's request pooling.
-func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader string, persistCycles int) {
+//
+// On cookie-presence routes (issue #768) the Cookie header is saved
+// too: doBackgroundRefresh replays the saved headers into the
+// conditional fetch's RequestInfo, and refreshFrom304 recomputes
+// VaryKey from that RequestInfo — a missing Cookie would rehash the
+// presence bits as all-absent and skew the VaryKey pair (the peer
+// gates then reject every refreshed object until TTL). Cookie VALUES
+// do not leak into requests beyond what the triggering request itself
+// carried to the origin; they are replayed exactly like any other
+// Vary-nominated header.
+func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader string, persistCycles int, policy *KeyPolicy) {
 	saved := header.Map{}
 
 	// Always store Accept-Encoding for content negotiation.
 	if ae := ri.Header.Get(header.AcceptEncoding); ae != "" {
 		saved.Set(header.AcceptEncoding, ae)
+	}
+
+	// Cookie-presence keying: the presence bits derive from the Cookie
+	// header, so the replay must carry it (GetAll joins multi-line
+	// Cookie entries — the map stores them separately).
+	if policy.hasCookiePresence() {
+		if cv := ri.Header.GetAll(header.Cookie); cv != "" {
+			saved.Set(header.Cookie, cv)
+		}
 	}
 
 	if varyHeader != "" {

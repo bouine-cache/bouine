@@ -432,7 +432,17 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 		}
 		n += copyOverflow(dst, n, f)
 		n = appendByte(dst, n, '=')
-		val := varyAssertionValue(f, reqHeader.Get(f), policy)
+		var val string
+		if f == cookiePresenceField && policy.hasCookiePresence() {
+			// Cookie-presence assertion (issue #768): the same
+			// presence-bit string variantKeyCore hashes, or peers
+			// reject every presence-keyed exchange. GetAll joins
+			// multi-line Cookie entries (the RawRequest-derived map
+			// keeps lines separate).
+			val = policy.cookiePresenceValue(reqHeader.GetAll(header.Cookie))
+		} else {
+			val = varyAssertionValue(f, reqHeader.Get(f), policy)
+		}
 		n += copyOverflow(dst, n, val)
 		n = appendByte(dst, n, ';')
 	}

@@ -2113,7 +2113,7 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	require.False(t, r.DecrementPersist(key))
 
 	req := testCtx("GET", "http://example.com/test")
-	r.Register(key, requestInfoFromCtx(req), "", 2)
+	r.Register(key, requestInfoFromCtx(req), "", 2, nil)
 
 	// persist=2 → decrement to 1.
 	require.True(t, r.DecrementPersist(key))
@@ -2892,7 +2892,7 @@ func TestDoBackgroundRefresh_BadURL(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register with a URL containing a control character that url.Parse rejects.
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/\x00bad"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/\x00bad"), "", 0, nil)
 	// This should unregister and skip without panicking.
 	h.doBackgroundRefresh(context.Background(), key, &api.Object{
 		StoredAt: time.Now(),
@@ -2906,7 +2906,7 @@ func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register the key with a valid URL.
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	// Use an upstream that returns 502 (error response).
 	errUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(502)
@@ -2933,7 +2933,7 @@ func TestDoBackgroundRefresh_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(2)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 	stale := &api.Object{
@@ -2955,7 +2955,7 @@ func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(3)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	// Upstream returns no-store (uncacheable).
 	nsUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "no-store")
@@ -2982,7 +2982,7 @@ func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.allowSetCookie = false
 	key := testkey.Key(4)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	scUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.Response.Header.Set(header.SetCookie, "sid=abc")
@@ -3009,7 +3009,7 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.maxObjectSize = 5
 	key := testkey.Key(5)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	bigUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.SetStatusCode(200)
@@ -3949,7 +3949,7 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		updated, _, _ := h.store.Get(context.Background(), key)
@@ -3998,7 +3998,7 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -4047,7 +4047,7 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -4165,7 +4165,7 @@ func TestTriggerBgRefresh_NotFound(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 		key := testkey.Key(999)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -4210,7 +4210,7 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 			TTL:        time.Second,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -4256,7 +4256,7 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 	})
@@ -4424,7 +4424,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 
 		// Schedule refresh at now + 50ms and advance synthetic time.
 		// synctest.Sleep advances the fake clock AND waits for all

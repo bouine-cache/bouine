@@ -158,6 +158,34 @@ func (r *RawRequest) HasHeader(key string) bool {
 	return false
 }
 
+// CookieValue returns the joined RFC 6265 §4.2 cookie field value:
+// every Cookie header line's value, joined with "; ". RFC 9110 §5.2
+// folds duplicate field lines into one list value, and cookie pairs
+// are ";"-separated within it, so the joined string is the canonical
+// single-field-line form. Callers that must see every cookie (cache
+// keying, bypass matching) use this instead of Header("Cookie"),
+// which returns only the first line.
+//
+// Unstable.
+func (r *RawRequest) CookieValue() string {
+	first := true
+	var b []byte
+	for i := 0; i < r.NHeaders; i++ {
+		if !EqualFold(r.Headers[i].Key, "Cookie") {
+			continue
+		}
+		if r.Headers[i].Value == "" {
+			continue
+		}
+		if !first {
+			b = append(b, ';', ' ')
+		}
+		b = append(b, r.Headers[i].Value...)
+		first = false
+	}
+	return string(b)
+}
+
 // FastPathHandler is implemented by the cache layer (L3). L1 calls it
 // through this interface — no upward import from L1 to L3.
 //

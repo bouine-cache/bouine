@@ -886,6 +886,32 @@ type RouteKey struct {
 	// different policy stores and resolves variants under different
 	// keys. Peer gates fail safe (miss, never a wrong body).
 	VerbatimEncoding bool `yaml:"verbatim_encoding,omitempty" json:"verbatim_encoding,omitempty"`
+	// CookiePresence lists cookie names whose PRESENCE participates in
+	// the variant key (cache.key.cookie_presence, issue #768): each
+	// listed name contributes one bit — present or absent, never the
+	// cookie's value (values are PII and would explode the variant
+	// space; the CDN equivalent is check_presence). Use when the origin
+	// renders different content depending on whether a consent,
+	// analytics, or A/B cookie exists, while all value-spellings share
+	// one variant.
+	//
+	// The bits multiply the stored variant count (N names = up to 2^N
+	// presence combinations per primary key); cap the list (16, same as
+	// include_headers) and prefer listing only cookies the origin
+	// actually reads. max_variants bounds the total; a Put over the
+	// cap is refused, never a wrong variant served.
+	//
+	// Cookie names must be valid RFC 6265 §4.1.1 tokens, unique
+	// case-insensitively. Mutually exclusive with
+	// bypass_on_cookie_names and bypass_on_cookie on the same route:
+	// a bypassed request never reaches the cache, so keying it is
+	// dead config; validation rejects the combination so operators do
+	// not discover the conflict after a warm cache.
+	//
+	// Like include_headers: identical across all cluster nodes serving
+	// the route or nodes store/resolve variants under different keys
+	// (peer gates fail safe — miss, never a wrong body).
+	CookiePresence []string `yaml:"cookie_presence,omitempty" json:"cookie_presence,omitempty"`
 }
 
 // RouteRequest is the per-route request-side rewrite block.

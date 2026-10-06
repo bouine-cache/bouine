@@ -700,7 +700,7 @@ func joinedVary(h header.Map) string {
 // is failed hits until the object is re-fetched, never a wrong body.
 func effectiveVary(h header.Map, policy *KeyPolicy) string {
 	joined := joinedVary(h)
-	if policy == nil || len(policy.includeHeaders) == 0 {
+	if (policy == nil || len(policy.includeHeaders) == 0) && !policy.hasCookiePresence() {
 		return joined
 	}
 	// Union into a lowercase, trimmed, deduplicated, sorted field list
@@ -709,13 +709,19 @@ func effectiveVary(h header.Map, policy *KeyPolicy) string {
 	// VaryValue/VaryKey stay byte-identical across the store sites and
 	// across cluster nodes; dedup collapses a field the origin also
 	// lists in Vary (NewKeyPolicy already dedupes the include side).
-	fields := make([]string, 0, strings.Count(joined, ",")+1+len(policy.includeHeaders))
+	// The synthetic cookie-presence field (issue #768) unions in the
+	// same way: its hash contribution is computed by the variant-key
+	// builders (presence bits, never raw cookie values).
+	fields := make([]string, 0, strings.Count(joined, ",")+1+len(policy.includeHeaders)+1)
 	if joined != "" {
 		for f := range strings.SplitSeq(joined, ",") {
 			fields = append(fields, strings.TrimSpace(strings.ToLower(f)))
 		}
 	}
 	fields = append(fields, policy.includeHeaders...)
+	if policy.hasCookiePresence() {
+		fields = append(fields, cookiePresenceField)
+	}
 	sort.Strings(fields)
 	uniq := fields[:0]
 	for i, f := range fields {

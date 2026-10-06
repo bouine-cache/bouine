@@ -375,6 +375,11 @@ type Handler struct {
 	// TTL - margin, keeping objects perpetually fresh.
 	refreshBeforeExpiry  bool
 	refreshReactiveFirst bool
+	// forwarded is the compiled request.forwarded policy (issue #769):
+	// client-identity header injection on origin-bound fetches only.
+	// Zero value = disabled (single bool read per fetch). Lives in the
+	// value region with the other non-pointer fields (fieldalignment).
+	forwarded ForwardedPolicy
 }
 
 // HandlerConfig configures a cache Handler.
@@ -573,6 +578,13 @@ type HandlerConfig struct {
 	// RefreshMaxRPS caps background refresh fetches per second per route.
 	// Zero means no limit.
 	RefreshMaxRPS int
+	// Forwarded injects client-identity headers (X-Forwarded-For/Proto/
+	// Host, Via) on every origin-bound fetch (config.ForwardedConfig
+	// contract, issue #769). Injection is append/set at outbound request
+	// construction only — never the hit path, never the cache key, never
+	// the stored RequestInfo headers. Zero value = no-op. Lives in the
+	// value region with the other non-pointer fields (fieldalignment).
+	Forwarded ForwardedPolicy
 	// RefreshReactiveFirst skips proactive refresh for new objects, relying
 	// on SWR to promote popular objects. Requires StaleWhileRevalidate > 0
 	// and RefreshMinHits > 0.
@@ -883,6 +895,15 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		}
 		h.reqHeaderRemove = m
 	}
+	// Client-identity forwarding (request.forwarded, issue #769). The
+	// chain cap is defaulted here as well as in config.Validate so a
+	// hand-constructed HandlerConfig (tests) cannot bypass the bound.
+	if cfg.Forwarded.Enabled() {
+		h.forwarded = cfg.Forwarded
+		if h.forwarded.MaxAppend <= 0 {
+			h.forwarded.MaxAppend = defaultForwardedMaxAppend
+		}
+	}
 	if len(cfg.ResponseHeaderSet) > 0 {
 		h.respHeaderSet = cfg.ResponseHeaderSet
 	}
@@ -1149,6 +1170,10 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	// Normalize AE to the bucket token so the refreshed variant
 	// matches the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&req.Header, ri)
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
 	// Detached root span: the triggering request is long gone, and its
@@ -2142,6 +2167,9 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// Normalize AE to the bucket token so the revalidated variant
 	// matches the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&revalReq.Header)
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — see applyForwardedCtx.
+	h.applyForwardedCtx(&revalReq.Header, ctx)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
@@ -2370,6 +2398,10 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	// Normalize AE to the bucket token so the revalidated variant
 	// matches the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&revalReq.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&revalReq.Header, ri)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// The origin span starts here, detached from any client trace: the
@@ -2628,6 +2660,9 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — see applyForwardedCtx.
+	h.applyForwardedCtx(&req.Header, ctx)
 	if ctx.Request.Body() != nil {
 		body := ctx.Request.Body()
 		req.SetBodyRaw(body)
@@ -2921,6 +2956,10 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	// Normalize AE to the bucket token so the refilled variant matches
 	// the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&req.Header, ri)
 
 	// Deadline-based timeout, mirroring doFetchBg's transport deadline.
 	// Detached root span: no client trace to join, but attribute-bearing
@@ -3087,6 +3126,10 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Normalize AE to the bucket token so the stored variant matches
 	// the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769): applied
+	// to the outbound copy only — never the ctx, so the cache key, the
+	// Vary variant key, and the stored RequestInfo stay untouched.
+	h.applyForwardedCtx(&req.Header, ctx)
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 

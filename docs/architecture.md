@@ -427,6 +427,22 @@ L1 owns sockets, TLS, and ALPN. L1 pipeline stages (configurable, ordered):
 4. Request collapsing latch acquisition.
 5. Hand-off to L3.
 
+Per-route client-identity forwarding (`request.forwarded`, issue #769)
+happens at L3, at origin-bound request construction only — miss,
+invalidating proxy, bypass, revalidate, streaming/SSE, and the
+background fetchers (background revalidate / refresh-before-expiry /
+shed refill). `X-Forwarded-For` appends the immediate peer's address
+(never rewritten, chain capped at `max_append` entries and the 8 KiB
+per-header budget), `X-Forwarded-Proto` / `X-Forwarded-Host` are set
+from what bouine received, and `Via: 1.1 bouine` is appended
+(RFC 9110 §7.6.3). The hit path never injects, and the injected
+headers never join the cache key or the stored request headers (T06).
+Background fetches do not append `X-Forwarded-For` — there is no live
+peer to attribute. Cluster peer-fetch is unaffected: peers answer from
+their local store and never fetch origin on a requester's behalf, so
+the requesting node's own origin fetch always carries the client
+context.
+
 ---
 
 ## 8. Control Plane (L6)

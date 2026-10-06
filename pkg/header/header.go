@@ -231,3 +231,30 @@ const (
 	// tell the client to fire a client-side event (e.g. "refreshOpsLog").
 	HXTrigger = "HX-Trigger"
 )
+
+// Client-identity forwarding headers (issue #769). These are the
+// industry-standard (non-RFC) X-Forwarded dialect plus the RFC 9110 §7.6.3
+// Via header. bouine appends or sets them per route on origin-bound
+// requests only; client-supplied values are untrusted input (threat-model
+// T04) — appended to, never parsed or acted upon.
+const (
+	// XForwardedFor — comma-separated chain of the addresses each
+	// forwarding hop received the request from. bouine appends the
+	// address of its immediate peer (the edge), never the client IP it
+	// cannot verify (RFC-unofficial, Varnish/nginx semantics).
+	XForwardedFor = "X-Forwarded-For"
+
+	// XForwardedProto — the scheme bouine received the request on
+	// (https on a TLS listener, http otherwise). Not the scheme used
+	// towards the origin.
+	XForwardedProto = "X-Forwarded-Proto"
+
+	// XForwardedHost — the Host header of the request as bouine
+	// received it, so origins behind host-rewriting pools can generate
+	// correct absolute URLs (relevant to cache.key.include_host: false).
+	XForwardedHost = "X-Forwarded-Host"
+
+	// Via — RFC 9110 §7.6.3. Appended by bouine as "1.1 bouine" for
+	// loop detection, complementing the internal Bouine-Hop count.
+	Via = "Via"
+)

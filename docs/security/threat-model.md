@@ -142,7 +142,7 @@ risk after controls.
 | T01 | Peer impersonation: rogue pod joins cluster | S | C5,C7 | A2,A11 | ✓ mTLS on cluster listener (TB4), separate CA from data plane, SPIFFE-style SAN check on incoming peer conns. | Low |
 | T02 | Origin impersonation: MITM presents wrong cert | S | C4 | A1,A3,A12 | ✓ TLS verify enabled by default (no `InsecureSkipVerify` outside an explicit per-pool `tls.insecure: true` test flag, refused in production builds). Optional SPKI pinning per pool. | Low |
 | T03 | Client impersonation against admin API | S | C1,C2 | A6 | ✓ Bearer token (constant-time compare) or mTLS. Rejects insecure HTTP for write methods. Admin port never exposed externally in default Helm chart. | Low |
-| T04 | Forged `X-Forwarded-For` / `Forwarded` | S | C1,C2 | A8 | ✓ Trust list of upstream LBs configured per route; otherwise the header is stripped before logging. | Low |
+| T04 | Forged `X-Forwarded-For` / `Forwarded` | S | C1,C2 | A8 | ✓ Client-supplied `X-Forwarded-*` is untrusted input everywhere: bouine never parses or acts on it. The per-route opt-in `request.forwarded` (issue #769) only *appends* the address of bouine's immediate peer (the edge connection) to the chain on origin-bound requests — existing entries are carried verbatim, never rewritten, never trusted — and sets `X-Forwarded-Proto` / `X-Forwarded-Host` from what bouine itself received. Chains are capped at `max_append` entries (default 5) and the 8 KiB per-header budget (T37); injected headers never join the cache key or the stored request headers (T06); background fetches append no client address (no live peer to attribute). A route without the block forwards client-supplied identity headers verbatim and adds nothing. | Low |
 
 ### Tampering
 

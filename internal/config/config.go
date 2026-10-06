@@ -829,7 +829,65 @@ type RouteRequest struct {
 	// HeaderRemove removes the listed request headers from the
 	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
 	HeaderRemove []string `yaml:"header_remove,omitempty" json:"header_remove,omitempty"`
+	// Forwarded injects client-identity headers on the origin-bound
+	// fetch (config.ForwardedConfig contract, issue #769). Off by
+	// default; requires a pool.
+	Forwarded ForwardedConfig `yaml:"forwarded,omitempty" json:"forwarded,omitempty"`
 }
+
+// ForwardedConfig is the per-route client-identity forwarding block
+// (request.forwarded, issue #769). Injection happens at origin-bound
+// request construction only — miss, invalidating proxy (POST/PUT/DELETE),
+// bypass, revalidate, background revalidate/refresh, shed refill, and
+// streaming/SSE fetches. Never on the cache-hit path, never into the
+// cache key, and never into the stored RequestInfo headers (threat-model
+// T06: headers participate in keying ONLY via Vary or the explicit
+// cache.key.include_headers).
+//
+// Spoofing model (threat-model T04): a client-supplied X-Forwarded-For is
+// untrusted input. bouine appends the address of its immediate peer
+// (the edge's connection address) and never parses or acts on existing
+// entries. X-Forwarded-Proto and X-Forwarded-Host are SET (replacing any
+// client-supplied value) because bouine is authoritative about what it
+// itself received. Unstable.
+type ForwardedConfig struct {
+	// ClientIP appends the address of bouine's immediate peer to any
+	// existing X-Forwarded-For chain (append-only, never rewritten).
+	ClientIP bool `yaml:"client_ip,omitempty" json:"client_ip,omitempty"`
+	// Proto sets X-Forwarded-Proto to the scheme bouine received the
+	// request on ("https" on a TLS listener, "http" otherwise) — not
+	// the scheme used towards the origin.
+	Proto bool `yaml:"proto,omitempty" json:"proto,omitempty"`
+	// Host sets X-Forwarded-Host to the Host header bouine received,
+	// replacing any client-supplied value. On the cache-handler paths
+	// the forwarded Host is identical (bouine preserves it); the header
+	// still tells multi-host origins which hostname was requested, and
+	// matters wherever the outbound Host is rewritten to a pool target.
+	Host bool `yaml:"host,omitempty" json:"host,omitempty"`
+	// Via appends "1.1 bouine" to any existing Via chain (RFC 9110
+	// §7.6.3) for loop detection, complementing the internal Bouine-Hop
+	// hop limit.
+	Via bool `yaml:"via,omitempty" json:"via,omitempty"`
+	// MaxAppend caps the number of entries kept in the X-Forwarded-For
+	// and Via chains after bouine's append: the rightmost (nearest,
+	// most recent) entries are kept, older entries are dropped. The
+	// chain also stays under the 8 KiB per-header cap (threat-model
+	// T37) by dropping the oldest entries. 0 means
+	// DefaultForwardedMaxAppend (5); allowed range 1..64.
+	MaxAppend int `yaml:"max_append,omitempty" json:"max_append,omitempty"`
+}
+
+// DefaultForwardedMaxAppend is the X-Forwarded-For / Via chain cap applied
+// when request.forwarded.max_append is unset. Five entries cover the
+// realistic hop count (client → edge → bouine → origin) while keeping the
+// forwarded chain well inside the per-header 8 KiB budget even with
+// IPv6-with-port entries.
+const DefaultForwardedMaxAppend = 5
+
+// MaxForwardedAppend is the upper bound for request.forwarded.max_append.
+// A larger cap only serves to bloat every origin-bound request header;
+// the per-header 8 KiB budget would clamp it anyway.
+const MaxForwardedAppend = 64
 
 // PathRewriteConfig is the per-route regex path rewrite. The pattern is
 // compiled once at startup (Go RE2 — linear time, no backtracking) and

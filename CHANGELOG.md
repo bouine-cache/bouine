@@ -22,6 +22,31 @@ the curated, human-readable summary.
   `lat.Seconds()`. `PeerFetchStats`' `AvgLatMs` readout and the
   `dur_ms` log field keep integer-ms resolution.
 
+### Added
+
+- **`request.forwarded` per-route client-identity injection (issue
+  #769)**. Opt-in per-route block that injects `X-Forwarded-For`
+  (appends the address of bouine's immediate peer — the edge — to the
+  carried chain, never rewriting existing entries),
+  `X-Forwarded-Proto` (the scheme bouine received the request on, not
+  the scheme to origin), `X-Forwarded-Host` (the received Host, for
+  multi-host origins and `include_host: false` deployments), and `Via:
+  1.1 bouine` (RFC 9110 §7.6.3) onto origin-bound requests: miss,
+  invalidating proxy (POST/PUT/DELETE), bypass, revalidate,
+  streaming/SSE, and the background fetchers. The hit path is
+  untouched, the headers never join the cache key or the stored
+  request headers (threat-model T06), client-supplied chains are
+  append-only untrusted input (T04), and the XFF/Via chains are capped
+  at `max_append` entries (default 5, range 1..64) and the 8 KiB
+  per-header budget (T37). Background fetches (SWR revalidate,
+  refresh-before-expiry, shed refill) inject proto/host/Via from the
+  captured request but deliberately do not append
+  `X-Forwarded-For`: there is no live peer, and replaying the
+  original requester's address would attribute one user's identity to
+  an anonymous refresh. Mutually exclusive with `header_set` entries
+  targeting the same header; requires a pool (rejected on static
+  routes).
+
 ## [0.5.26] - 2026-10-05
 
 ### Added

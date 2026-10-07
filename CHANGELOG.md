@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.27] - 2026-10-07
+
 ### Fixed
 
 - **Collapsing flights are keyed on the response's declared variation
@@ -2354,7 +2356,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.26...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.27...HEAD
+[0.5.27]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.27
 [0.5.26]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.26
 [0.5.25]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.25
 [0.5.24]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.24

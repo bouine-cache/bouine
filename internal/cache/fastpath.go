@@ -52,10 +52,19 @@ type FastPathHandler struct {
 	// and whether it is local; peerFetch asks that owner for the object.
 	// Nil in single-node and eventual modes — the peer branch then never
 	// runs and TryHit behaves exactly as before.
-	ownerFn        func(key api.Key) (owner api.PeerInfo, isLocal bool)
-	peerFetch      func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	policy         *KeyPolicy // nil = no query/header policy
-	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
+	ownerFn   func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	policy    *KeyPolicy // nil = no query/header policy
+	onStale   func(req *api.RawRequest, key api.Key, stale *api.Object)
+	// uaBypass mirrors the owning Handler's compiled
+	// cache.bypass_on_user_agent patterns (issue #771, ADR-0055). When
+	// non-nil, TryHit declines matching requests so they fall through
+	// to the slow path's ServeRequest, which routes them to
+	// handleBypass — no lookup, no storage, no in-flight sharing. Nil
+	// (default) keeps the fast path's behavior unchanged: the gate is
+	// a single nil read paid on every request, with the header scan
+	// only on pattern-configured routes' requests.
+	uaBypass       *uaBypass
 	cachedDate     atomic.Pointer[string]
 	poolName       string
 	cachedDateUnix atomic.Int64
@@ -86,6 +95,7 @@ func NewFastPathHandler(h *Handler) *FastPathHandler {
 		poolName:       h.poolName,
 		policy:         h.policy,
 		bypassOnCookie: h.bypassOnCookie,
+		uaBypass:       h.uaBypass,
 	}
 }
 
@@ -141,6 +151,15 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	// the slow path, whose ServeRequest runs handleBypass. req.Header
 	// scans the already-parsed array, no re-parse.
 	if f.bypassOnCookie && req.Header(header.Cookie) != "" {
+		return nil, false
+	}
+	// User-Agent bypass (issue #771, ADR-0055): decline before the
+	// store Get so a matching request never reads — or is later served
+	// from — the cache on routes that configured patterns. The
+	// h1parser falls through to the slow path, whose ServeRequest runs
+	// handleBypass. req.Header scans the already-parsed array, no
+	// re-parse, and the match itself is allocation-free.
+	if f.uaBypass != nil && f.uaBypass.matchString(req.Header(header.UserAgent)) {
 		return nil, false
 	}
 	return f.tryHit(req, now)

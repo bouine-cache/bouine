@@ -273,12 +273,23 @@ and refill path; the hit path never touches it. See ADR-0051.
 ### 3.4 Cookie & authorization policy
 
 - **Request `Cookie`** — does NOT participate in the cache key by default.
-  Per-route opt-in: `cache.cookies.key: [name1, name2]`.
+  Per-route opt-in: `cache.cookies.key: [name1, name2]`. Per-route
+  `cache.bypass_on_cookie: true` (ADR-0054) routes cookied requests
+  entirely around the cache.
 - **Response `Set-Cookie`** — a response carrying `Set-Cookie` is NOT stored
   by default. Per-route opt-in requires explicit operator acknowledgement.
 - **`Authorization` request header** — per RFC 9111 §3.5, responses to
   authorized requests are NOT stored unless the response carries
   `must-revalidate`, `public`, or `s-maxage`. No operator override.
+- **Request `User-Agent`** — does NOT participate in the cache key, ever.
+  Per-route opt-in `cache.bypass_on_user_agent: [patterns]` (ADR-0055,
+  issue #771) routes matching requests entirely around the cache — no
+  lookup, no storage, no in-flight sharing, `X-Cache: BYPASS` — so a
+  layered deployment (client → edge → bouine) can mirror the edge's
+  verified-crawler bypass rules on its inner cache layer. Patterns are
+  `*`-globs matched case-insensitively against the full UA string;
+  default off, so RFC 9111 semantics and the cache-tests score are
+  unchanged.
 
 ---
 

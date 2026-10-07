@@ -91,6 +91,12 @@ const (
 	// request.
 	RetryAfter = "Retry-After"
 
+	// UserAgent — RFC 9110 §12.5.4. User agent initiating the request.
+	// Client-controlled, spoofable input: bouine reads it only for the
+	// per-route cache.bypass_on_user_agent opt-in (issue #771,
+	// ADR-0055) and observability — never as a trust signal.
+	UserAgent = "User-Agent"
+
 	// Cookie — RFC 6265 §4.2. Request cookie. May appear multiple
 	// times; the cache-bypass guard (ADR-0054) treats presence of any
 	// value as the bypass trigger. The canonical MIME form is "Cookie"

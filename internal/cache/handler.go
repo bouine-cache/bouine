@@ -307,6 +307,11 @@ type Handler struct {
 	// origin-bound request URI after strip_prefix. Nil on routes without
 	// path_rewrite (zero cost). See PathRewrite for the hardening rules.
 	pathRewrite *PathRewrite
+	// uaBypass holds the compiled cache.bypass_on_user_agent patterns
+	// (issue #771, ADR-0055); nil on pattern-less routes, making both
+	// request-path gates (ServeRequest, FastPathHandler.TryHit) a
+	// single nil check.
+	uaBypass *uaBypass
 	// reqHeaderSet sets (overrides) request headers on every origin-bound
 	// fetch (request.header_set). nil = no-op.
 	reqHeaderSet map[string]string
@@ -415,6 +420,15 @@ type HandlerConfig struct {
 	// means no rewrite. Mutually exclusive with StripPrefix at the
 	// config layer; validated and compiled by config.validatePathRewrite.
 	PathRewrite *PathRewrite
+	// BypassOnUserAgent routes requests whose User-Agent matches one
+	// of the glob patterns entirely around the cache (issue #771,
+	// ADR-0055): the same contract as BypassOnCookie, triggered by a
+	// User-Agent match instead of Cookie presence. Patterns are
+	// validated by config.validateBypassOnUserAgent (capped count and
+	// length, `*` as the only wildcard, no lone `*`, no duplicates) and
+	// compiled once at handler build. Default (nil): no UA-conditioned
+	// behavior, RFC 9111 semantics unchanged.
+	BypassOnUserAgent []string
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because the variant cap is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -804,6 +818,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		purgeBroadcast:          cfg.PurgeBroadcast,
 		allowSetCookie:          cfg.AllowSetCookie,
 		bypassOnCookie:          cfg.BypassOnCookie,
+		uaBypass:                compileUABypass(cfg.BypassOnUserAgent),
 		maxObjectSize:           cfg.MaxObjectSize,
 		maxVariants:             cfg.MaxVariants,
 		maxResponseBytes:        cfg.MaxResponseBytes,
@@ -1325,6 +1340,39 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 	return BuildKeyFast(ctx.Method(), ctx.RequestURI(), ctx.Host(), ctx.Path(), ctx.IsTLS(), h.policy)
 }
 
+// requestBypass reports whether a request-gate knob routes this
+// request around the cache: bypass_on_cookie (ADR-0054 — any non-empty
+// Cookie header on an opted-in route) or bypass_on_user_agent
+// (issue #771, ADR-0055 — a User-Agent glob match on a route with
+// patterns). The UA matcher's purpose is mirroring edge-CDN
+// verified-bot bypass rules on inner cache layers (client → edge →
+// bouine), so a crawler the edge deliberately sends around its cache
+// is not served bouine's stored copy. Zero allocations: one Peek per
+// configured gate, byte-wise matching, no string conversion.
+func (h *Handler) requestBypass(ctx *fasthttp.RequestCtx) bool {
+	if h.bypassOnCookie && len(ctx.Request.Header.Peek(header.Cookie)) > 0 {
+		return true
+	}
+	return h.uaBypass != nil && h.uaBypass.matchBytes(ctx.Request.Header.Peek(header.UserAgent))
+}
+
+// serveCacheBypass dispatches a gated request around the cache. SSE
+// intent wins the dispatch: handleSSE already streams live with
+// never-cache semantics, which satisfies the same "never stored,
+// never shared" contract (the SSE fetch never collapses and never
+// buffers into the store). Everything else proxies via handleBypass
+// (streamBypass), which does not write the store; the zero cacheKey
+// keeps the access-log sampler consistent with the miss/revalidate
+// bypass paths.
+func (h *Handler) serveCacheBypass(ctx *fasthttp.RequestCtx) {
+	if h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
+	ctx.SetUserValue("cacheKey", api.Key{})
+	h.handleBypass(ctx)
+}
+
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
 // cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
 // and all others to the cache lookup pipeline.
@@ -1343,25 +1391,20 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// lookup. No-op for routes without directives.
 	h.rewriteRequestCtx(ctx)
 
-	// Cookie bypass (ADR-0054, cache.bypass_on_cookie): a cookied
-	// request on a route that opted in never touches the cache — no
-	// lookup, no storage, no in-flight sharing. The check is a single
-	// non-empty Peek, and the flag is read from a bool field resolved
-	// at handler build time, so flag-off routes pay one Peek of a
-	// header fasthttp already parsed. Placed after rewriteRequestCtx
-	// so request.header_remove can strip the Cookie header before the
-	// check, and before lookup so no store read is ever performed.
-	// SSE intent wins the dispatch: handleSSE already streams live
-	// with never-cache semantics, which satisfies the same "never
-	// stored, never shared" contract (the SSE fetch never collapses
-	// and never buffers into the store).
-	if h.bypassOnCookie && len(ctx.Request.Header.Peek(header.Cookie)) > 0 {
-		if h.sseIntent(ctx) {
-			h.handleSSE(ctx)
-			return
-		}
-		ctx.SetUserValue("cacheKey", api.Key{})
-		h.handleBypass(ctx)
+	// Cookie bypass (ADR-0054, cache.bypass_on_cookie) and User-Agent
+	// bypass (issue #771, cache.bypass_on_user_agent, ADR-0055): a
+	// request gated by either knob never touches the cache — no lookup,
+	// no storage, no in-flight sharing. requestBypass reads only
+	// already-parsed headers (Peek / the compiled matcher), and both
+	// flags are resolved at handler build time, so gate-less routes pay
+	// one Peek of a header fasthttp already parsed (cookie flag off is
+	// one bool read; UA patterns absent is one nil read — no Peek at
+	// all, keeping the zero-alloc hit path unchanged). Placed after
+	// rewriteRequestCtx so request.header_set/header_remove can strip
+	// or adjust the Cookie / User-Agent headers before the check, and
+	// before lookup so no store read is ever performed.
+	if h.requestBypass(ctx) {
+		h.serveCacheBypass(ctx)
 		return
 	}
 

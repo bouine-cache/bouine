@@ -22,8 +22,9 @@ type uaGlob struct {
 
 // compileUABypass compiles the validated pattern list into a matcher.
 // The config layer (validateBypassOnUserAgent) rejects malformed
-// entries at load time; defensively, compile skips empty and lone-`*`
-// patterns so a hand-built HandlerConfig can never turn into
+// entries at load time; defensively, compile skips empty patterns and
+// any pattern made only of `*` wildcards (lone `*`, `**`, `***` — all
+// segments empty) so a hand-built HandlerConfig can never turn into
 // "bypass everything".
 func compileUABypass(patterns []string) *uaBypass {
 	if len(patterns) == 0 {
@@ -32,10 +33,20 @@ func compileUABypass(patterns []string) *uaBypass {
 	globs := make([]uaGlob, 0, len(patterns))
 	for _, p := range patterns {
 		p = strings.TrimSpace(p)
-		if p == "" || p == "*" {
+		if p == "" {
 			continue
 		}
 		rawSegs := strings.Split(p, "*")
+		onlyWildcards := true
+		for _, seg := range rawSegs {
+			if seg != "" {
+				onlyWildcards = false
+				break
+			}
+		}
+		if onlyWildcards {
+			continue
+		}
 		segs := make([][]byte, len(rawSegs))
 		for i, seg := range rawSegs {
 			// ASCII-fold, not strings.ToLower: the matcher folds the

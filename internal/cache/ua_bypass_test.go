@@ -78,17 +78,22 @@ func TestUABypass_Matcher(t *testing.T) {
 }
 
 // compileUABypass must return a nil matcher (route unchanged) for an
-// empty list, and must defensively skip a lone `*` / empty pattern
-// that bypassed config validation (hand-built HandlerConfig).
+// empty list, and must defensively skip empty patterns and any
+// pattern made only of `*` wildcards (lone `*`, `**`, `***`) that
+// bypassed config validation (hand-built HandlerConfig) — none of
+// them may compile into a match-everything glob.
 func TestUABypass_CompileNilAndDefensive(t *testing.T) {
 	t.Parallel()
 	assert.Nil(t, compileUABypass(nil))
 	assert.Nil(t, compileUABypass([]string{}))
-	assert.Nil(t, compileUABypass([]string{"", "*"}))
-	m := compileUABypass([]string{"Bot"})
+	assert.Nil(t, compileUABypass([]string{"", "*", "**", "***"}))
+	// A wildcard-only entry is dropped, not fatal: the real pattern
+	// beside it still compiles and nothing matches everything.
+	m := compileUABypass([]string{"**", "Bot"})
 	require.NotNil(t, m)
 	assert.True(t, m.matchString("Bot"))
 	assert.False(t, m.matchString("Other"))
+	assert.False(t, m.matchString("anything at all"), "no compiled glob may match every request")
 }
 
 // A matching-UA request on a bypass_on_user_agent route must never be

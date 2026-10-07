@@ -635,7 +635,7 @@ func ruleConfigKeyQueryParams(data InsightData) *Insight {
 	for i := range data.Config.Routes {
 		r := &data.Config.Routes[i]
 		if len(r.Cache.Key.StripQueryParams) == 0 {
-			path := r.Match.PathPrefix
+			path := r.Match.PathLabel()
 			if strings.Contains(strings.ToLower(path), "search") || strings.Contains(strings.ToLower(path), "query") {
 				triggered = append(triggered, r.Name)
 			}

@@ -448,7 +448,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 	for _, rc := range cfg.Routes {
 		label := rc.Name
 		if label == "" {
-			label = rc.Match.PathPrefix
+			label = rc.Match.PathLabel()
 		}
 		rows := buildRouteCacheRows(rc)
 		routeEntries = append(routeEntries, ConfigRouteEntry{
@@ -662,7 +662,7 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 		stat := byName[label]
 		row := RouteRow{
 			Name:        label,
-			PathPrefix:  rc.Match.PathPrefix,
+			PathPrefix:  rc.Match.PathLabel(),
 			Host:        rc.Match.Host,
 			Pool:        rc.Pool,
 			TTL:         FmtDuration(rc.Cache.TTLOverride),

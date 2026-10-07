@@ -356,27 +356,8 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // All cache handlers are collected into rs.handlers; the engine
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
-	// The classifier is compiled once and shared by the router (slow
-	// path) and the routed fast path — both run the same classify over
-	// the same Host.
-	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
-	// Shadow detection is boot-only: a fully-shadowed later pattern can
-	// never select its class, so the dead config is surfaced at Error
-	// level while boot proceeds with declaration-order precedence.
-	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
-		e.logger.Error(msg)
-	}
-	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: rs.trafficClassify})
-	// The H1 fast path is per route: each cache-enabled route registers
-	// the FastPathHandler built from its own Handler, so hits carry the
-	// route's pool attribution and run under the route's KeyPolicy
-	// (issue #696). A single store-level handler cannot — the store is
-	// shared across routes and knows nothing about them.
-	buildRouteFP := func(cached *cache.Handler) *cache.FastPathHandler {
-		fp := cache.NewFastPathHandler(cached)
-		rs.fastPathHandlers = append(rs.fastPathHandlers, fp)
-		return fp
-	}
+	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: e.buildTrafficClassifier(rs)})
+	buildRouteFP := e.routeFPBuilder(rs)
 	for _, rc := range e.cfg.Routes {
 		if rc.Static.Root != "" {
 			e.buildStaticRoute(router, rs, rc, buildRouteFP)
@@ -455,9 +436,67 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest, buildRouteFP(cached))
+		e.addRoute(router, rc, cached.ServeRequest, buildRouteFP(cached))
+	}
+	// Route shadow detection is boot-only, mirroring the traffic-class
+	// report above: a fully-shadowed later route can never be selected,
+	// so the dead config is surfaced at Error level while boot proceeds
+	// with declaration-order precedence (issue #772).
+	for _, msg := range router.ShadowedRoutes() {
+		e.logger.Error(msg)
 	}
 	return router
+}
+
+// addRoute lowers one configured route onto the router with the full
+// match predicate (issue #772): wildcard host and anchored RE2 path
+// included. A regex that fails to compile here cannot happen for a
+// config that passed config.Validate; it is still log-and-skip (the
+// static-route failure mode) rather than panic so a hand-built route
+// table degrades the same way a bad static root does.
+func (e *engine) addRoute(router *server.Router, rc config.Route, handler fasthttp.RequestHandler, fastPath api.FastPathHandler) {
+	err := router.AddRouteSpec(server.RouteSpec{
+		Host:       rc.Match.Host,
+		PathPrefix: rc.Match.PathPrefix,
+		Path:       rc.Match.Path,
+		Label:      rc.Name,
+		Pool:       rc.Pool,
+		Methods:    rc.Match.Methods,
+		Handler:    handler,
+		FastPath:   fastPath,
+	})
+	if err != nil {
+		e.logger.Error("route init failed, skipping", "route", rc.Name, "error", err)
+	}
+}
+
+// routeFPBuilder produces the per-route H1 fast-path constructor: each
+// cache-enabled route registers the FastPathHandler built from its own
+// Handler, so hits carry the route's pool attribution and run under the
+// route's KeyPolicy (issue #696). A single store-level handler cannot —
+// the store is shared across routes and knows nothing about them. Every
+// built handler joins rs.fastPathHandlers for shutdown drain.
+func (e *engine) routeFPBuilder(rs *runState) func(*cache.Handler) *cache.FastPathHandler {
+	return func(cached *cache.Handler) *cache.FastPathHandler {
+		fp := cache.NewFastPathHandler(cached)
+		rs.fastPathHandlers = append(rs.fastPathHandlers, fp)
+		return fp
+	}
+}
+
+// buildTrafficClassifier compiles the configured traffic classes once
+// and reports boot-only shadow findings: a fully-shadowed later
+// pattern can never select its class, so the dead config is surfaced
+// at Error level while boot proceeds with declaration-order
+// precedence. The classifier is shared by the router (slow path) and
+// the routed fast path — both run the same classify over the same
+// Host.
+func (e *engine) buildTrafficClassifier(rs *runState) *server.TrafficClassifier {
+	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
+	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
+		e.logger.Error(msg)
+	}
+	return rs.trafficClassify
 }
 
 // buildStaticRoute wires a route that serves files from a local directory
@@ -582,12 +621,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// rewrites still apply: they wrap the handler the same way. Path
 	// rewrites already landed in the handler chain above.
 	if !cacheEnabled {
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods,
-			wrapStaticRewrites(rc, handler), nil)
+		e.addRoute(router, rc, wrapStaticRewrites(rc, handler), nil)
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler, cacheFP)
+	e.addRoute(router, rc, handler, cacheFP)
 }
 
 // clusterFastPathClosures builds the ownerFn/peerFetch closures shared

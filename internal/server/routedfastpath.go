@@ -8,9 +8,10 @@ import (
 
 // RoutedFastPath adapts a Router into an api.FastPathHandler for the
 // H1 listeners. It exists because the router owns route semantics
-// (first-match-wins over host, path prefix, and methods): a fast path
-// keyed on anything less serves hits for requests the slow path would
-// never route the same way — wrong content, not just wrong metrics
+// (first-match-wins over host — exact or "*.suffix" wildcard —, path
+// prefix or pre-compiled regex, and methods): a fast path keyed on
+// anything less serves hits for requests the slow path would never
+// route the same way — wrong content, not just wrong metrics
 // (issue #696).
 //
 // TryHit resolves the request's route with the router's own table and
@@ -49,9 +50,10 @@ func NewRoutedFastPath(rt *Router, release api.FastPathHandler) *RoutedFastPath 
 }
 
 // TryHit implements api.FastPathHandler. It resolves the route with
-// the router's shared matchRoute (first-match-wins over host, path
-// prefix, and methods) and delegates to the matched route's handler —
-// the same authority the router's ServeRequest has. Returns (nil,
+// the router's shared matchRoute (first-match-wins over host — exact
+// or "*.suffix" wildcard —, path prefix or pre-compiled regex, and
+// methods) and delegates to the matched route's handler — the same
+// authority the router's ServeRequest has. Returns (nil,
 // false) when no route matches or the matched route has no fast path.
 // The traffic class is stamped on the response in the same pass: a
 // config-owned string, empty when no classifier is configured (read

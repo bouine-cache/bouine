@@ -19,8 +19,8 @@ func validTrafficClassesCfg(classes ...TrafficClass) *Config {
 func TestTrafficClasses_Valid(t *testing.T) {
 	t.Parallel()
 	cfg := validTrafficClassesCfg(
-		TrafficClass{Name: "csr", Hosts: []string{"www.backmarket.fr", "www.backmarket.de"}},
-		TrafficClass{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "www.backmarket.*"}},
+		TrafficClass{Name: "csr", Hosts: []string{"www.example.com", "shop.example.org"}},
+		TrafficClass{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "www.example.*"}},
 	)
 	require.NoError(t, cfg.Validate())
 }
@@ -135,8 +135,8 @@ func TestTrafficClasses_HostPatternValidation(t *testing.T) {
 	}{
 		{"www.example.com", true},
 		{"*.svc.cluster.local", true},
-		{"www.backmarket.*", true},
-		{"www.backmarket*", true},
+		{"www.example.*", true},
+		{"www.example*", true},
 		{"", false},
 		{"*", false},
 		{"*evil.com", false},
@@ -163,8 +163,8 @@ metrics:
   traffic_classes:
     - name: csr
       hosts:
-        - "www.backmarket.fr"
-        - "www.backmarket.de"
+        - "www.example.com"
+        - "shop.example.org"
     - name: ssr
       hosts:
         - "*.svc.cluster.local"

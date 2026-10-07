@@ -576,6 +576,26 @@ type RouteCache struct {
 	// A/B or analytics cookie also bypasses; scope the flag per route
 	// accordingly.
 	BypassOnCookie *bool `yaml:"bypass_on_cookie,omitempty" json:"bypass_on_cookie,omitempty"`
+	// BypassOnUserAgent lists User-Agent glob patterns that route the
+	// request entirely around the cache (issue #771, ADR-0055): no
+	// lookup, no storage, no in-flight sharing — the same contract as
+	// bypass_on_cookie, triggered by the request's User-Agent instead.
+	// Built for layered deployments (client → edge → bouine) where the
+	// edge already bypasses its own cache for a verified crawler (e.g.
+	// a shopping-feed bot that must see current product data); without
+	// mirroring the rule here, bouine would serve its own stored copy
+	// and silently defeat the edge rule's freshness intent.
+	// Patterns are matched against the full User-Agent string,
+	// case-insensitively; `*` is the only wildcard (matches any run of
+	// bytes, including `/`); an exact pattern matches the whole string,
+	// not a substring — use `*ShoppingFeedBot*` for substring
+	// semantics. The User-Agent is client-controlled and spoofable: a
+	// spoofed UA merely costs an origin fetch (same as a no-cache
+	// request), never an invalidation (bypass ≠ purge; threat-model
+	// T52). The check runs only on routes with patterns configured;
+	// pattern-less routes pay a single nil check. Default (empty): no
+	// UA-conditioned behavior, RFC 9111 semantics unchanged.
+	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 	// RefreshMinHits is the minimum number of cache hits an object must

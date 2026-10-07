@@ -1493,6 +1493,72 @@ func TestBuildRouter_BypassOnCookieWired(t *testing.T) {
 	require.Equal(t, "origin-body", string(cookied.Response.Body()))
 }
 
+// TestBuildRouter_BypassOnUserAgentWired verifies the config knob
+// cache.bypass_on_user_agent reaches the route's cache handler (issue
+// #771): a matching-UA request is proxied as BYPASS while a
+// non-matching UA uses the cache. The full bypass semantics are pinned
+// by internal/cache's ua_bypass_test.go; this test proves only the
+// config plumbing (config.RouteCache.BypassOnUserAgent →
+// cache.HandlerConfig).
+func TestBuildRouter_BypassOnUserAgentWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{
+					BypassOnUserAgent: []string{"*ShoppingFeedBot*"},
+				}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Non-matching UA: normal cache path (MISS, fetches from origin).
+	normal := &fasthttp.RequestCtx{}
+	normal.Request.Header.SetMethod("GET")
+	normal.Request.SetRequestURI("/feed")
+	normal.Request.Header.Set(header.UserAgent, "Mozilla/5.0")
+	router.ServeRequest(normal)
+	require.Equal(t, fasthttp.StatusOK, normal.Response.StatusCode())
+	require.Equal(t, "MISS", string(normal.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(normal.Response.Body()))
+
+	// Matching UA bypasses the cache entirely: its own origin fetch,
+	// X-Cache: BYPASS — the knob reached the handler.
+	crawler := &fasthttp.RequestCtx{}
+	crawler.Request.Header.SetMethod("GET")
+	crawler.Request.SetRequestURI("/feed")
+	crawler.Request.Header.Set(header.UserAgent, "ShoppingFeedBot/1.0")
+	router.ServeRequest(crawler)
+	require.Equal(t, fasthttp.StatusOK, crawler.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(crawler.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(crawler.Response.Body()))
+}
+
 // TestBuildRouter_StripPrefixWired is the regression test for issue
 // #595: request.strip_prefix on a proxied route must reach the cache
 // handler, so the origin sees the stripped path while cache keys keep

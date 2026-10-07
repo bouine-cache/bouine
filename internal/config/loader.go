@@ -1047,7 +1047,84 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 		ec.addf(path+".fetch_wait_timeout", "must be <= %v, got %v", maxFetchWaitTimeout, rc.FetchWaitTimeout)
 	}
 	validateRouteKey(ec, path+".key", rc.Key)
+	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
 	validateRefreshConfig(ec, path, *rc)
+}
+
+// maxBypassUAEntries caps the bypass_on_user_agent pattern list: the
+// per-request match walks every pattern, so an unbounded list would
+// turn a cold-route opt-in into a CPU budget knob. Mirrors the
+// include_headers cap (16).
+const maxBypassUAEntries = 16
+
+// maxBypassUAPatternBytes caps a single pattern. User-Agent values are
+// bounded by the 8 KiB per-header budget (threat-model T37); a pattern
+// anywhere near that size is a paste error, not an operator intent.
+const maxBypassUAPatternBytes = 256
+
+// validateBypassOnUserAgent validates the route's
+// cache.bypass_on_user_agent pattern list (issue #771, ADR-0055):
+// capped count, capped length, printable ASCII with `*` as the only
+// wildcard, no lone `*`, no adjacent `*`, no duplicates
+// (case-insensitive). Matching semantics are pinned by
+// internal/cache's ua_bypass_test.go; this gate exists so a malformed
+// pattern fails at load time instead of silently never-matching (or
+// matching everything) in production.
+func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string) {
+	if len(patterns) > maxBypassUAEntries {
+		ec.addf(path, "capped at %d entries, got %d", maxBypassUAEntries, len(patterns))
+	}
+	seen := make(map[string]bool, len(patterns))
+	for j, raw := range patterns {
+		entryPath := fmt.Sprintf("%s[%d]", path, j)
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			ec.addf(entryPath, "must be a non-empty pattern")
+			continue
+		}
+		if len(p) > maxBypassUAPatternBytes {
+			ec.addf(entryPath, "capped at %d bytes, got %d", maxBypassUAPatternBytes, len(p))
+			continue
+		}
+		if p == "*" {
+			ec.addf(entryPath, `a lone "*" matches every request and disables the route's cache; set cache.enabled: false instead`)
+			continue
+		}
+		if strings.Contains(p, "**") {
+			ec.addf(entryPath, "(%q) contains an empty wildcard (**); use a single *", p)
+			continue
+		}
+		if msg := uaPatternCharError(p); msg != "" {
+			ec.addf(entryPath, "(%q) %s", p, msg)
+			continue
+		}
+		lower := strings.ToLower(p)
+		if seen[lower] {
+			ec.addf(entryPath, "(%s) is a duplicate (comparison is case-insensitive)", p)
+			continue
+		}
+		seen[lower] = true
+	}
+}
+
+// uaPatternCharError reports why p is not a valid
+// bypass_on_user_agent pattern on the character level, or "" when
+// valid. Only printable ASCII (0x21–0x7E) is accepted, and the glob
+// metacharacters `?`, `[`, `]`, `\` are rejected — `*` is the only
+// wildcard the matcher supports (ADR-0055), so a pattern using another
+// one would read as a literal and silently never match.
+func uaPatternCharError(p string) string {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c < 0x21 || c > 0x7E {
+			return "must contain only printable ASCII"
+		}
+		switch c {
+		case '?', '[', ']', '\\':
+			return fmt.Sprintf("must not contain %q: '*' is the only supported wildcard", c)
+		}
+	}
+	return ""
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields

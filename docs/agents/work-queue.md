@@ -45,6 +45,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_user_agent` per-route UA-conditioned cache bypass (issue #771: config field + validation, zero-alloc glob matcher, slow-path + fast-path gates, builder wiring, tests, ADR-0055, runbook 57, threat-model T52, changelog) — 2026-10-07
+
 - [DONE] crush — release 0.5.25 (changelog curation + promotion, chart bump) — 2026-09-30
 - [DONE] crush — release 0.5.24 (changelog curation + promotion, chart bump) — 2026-09-29
 - [DONE] crush — release 0.5.23 (changelog curation + promotion, chart bump) — 2026-09-29

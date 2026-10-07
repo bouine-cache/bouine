@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bouine_peer_fetch_duration_seconds` no longer truncates sub-millisecond
+  peer fetches to 0**. `PeerFetcher.Fetch` observed
+  `time.Since(start).Milliseconds()/1000`, flooring sub-ms RPCs to 0;
+  since ~95% of production peer fetches complete under 1 ms, the
+  `bouine_peer_fetch_duration_seconds` histogram collapsed p50/p95 into
+  the zero bucket and the "Peer fetch latency p99 by pod" panel rendered
+  them flat at 0. The histogram now observes the untruncated
+  `lat.Seconds()`. `PeerFetchStats`' `AvgLatMs` readout and the
+  `dur_ms` log field keep integer-ms resolution.
+
 ## [0.5.26] - 2026-10-05
 
 ### Added

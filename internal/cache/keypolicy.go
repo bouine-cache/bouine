@@ -23,7 +23,12 @@ type KeyPolicy struct {
 	// object-build time (see effectiveVary), so the variant-key
 	// hash-input builders in vary.go never need to know about them.
 	includeHeaders []string
-	stripPrefixes  []string // prefix patterns to strip, capped at 16
+	// includeJoined is includeHeaders pre-joined as an RFC 9110 §5.2
+	// field-list string ("a, b, c"), so the collapse flight key can be
+	// built without re-joining on every cold miss. Empty when the route
+	// declares no include_headers.
+	includeJoined string
+	stripPrefixes []string // prefix patterns to strip, capped at 16
 	// cookiePresence is the route's cache.key.cookie_presence list
 	// (issue #768): cookie names whose presence (never their values)
 	// participates in the variant key. Normalized (trimmed,
@@ -264,6 +269,7 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 		dedup:          dedup,
 		excludeHeaders: excludeHeaders,
 		includeHeaders: includeHeaders,
+		includeJoined:  strings.Join(includeHeaders, ", "),
 		excludeHost:    excludeHost,
 	}
 }
@@ -314,6 +320,51 @@ func (p *KeyPolicy) ShouldExcludeHeader(h string) bool {
 		return false
 	}
 	return p.excludeHeaders[h]
+}
+
+// hasIncludeHeaders reports whether the route declares an
+// include_headers allow-list. Read-only; the list is fixed at
+// construction. A nil policy (routes without a key block) declares
+// nothing. Used by the flight-collapse gate to decide whether the
+// primary key alone is a faithful request identity.
+func (p *KeyPolicy) hasIncludeHeaders() bool {
+	return p != nil && len(p.includeHeaders) > 0
+}
+
+// flightVary returns the declared-dimensions field list the collapse
+// flight key must hash when the flight key is the primary key: the
+// route's include_headers plus the synthetic cookie-presence field when
+// the route declares one, pre-joined as an RFC 9110 §5.2 field-list
+// string. Empty for a nil policy and for a route that declares nothing.
+// Both dimensions union into the STORED Vary the same way
+// (effectiveVary), so keying the flight over the same list keeps the
+// two pairings identical.
+//
+// The flight key hashes the same "field=value;" pairs the storage
+// variant key builds over this list (see varyHeaderValue and the
+// flightHeaders helper), so a flight collapses two requests only when
+// their stored variants would be the same variant. It deliberately
+// reuses the storage normalization rather than inventing a second one:
+// any divergence between the two keyings is exactly how a wrong-body
+// handoff creeps back in.
+func (p *KeyPolicy) flightVary() string {
+	if p == nil {
+		return ""
+	}
+	if !p.hasCookiePresence() {
+		return p.includeJoined
+	}
+	if p.includeJoined == "" {
+		return cookiePresenceField
+	}
+	return p.includeJoined + ", " + cookiePresenceField
+}
+
+// hasFlightDimensions reports whether the route declares any dimension
+// the collapse flight key can key on: include_headers or cookie
+// presence. Nil-safe.
+func (p *KeyPolicy) hasFlightDimensions() bool {
+	return p.hasIncludeHeaders() || p.hasCookiePresence()
 }
 
 // SetVerbatimAE sets the Accept-Encoding key policy. Called once at

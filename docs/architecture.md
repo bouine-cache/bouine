@@ -204,6 +204,25 @@ normally dispatch to the invalidating proxy before the miss pipeline,
 but the flight gate keeps that invariant local — a mutation is never
 parked on another caller's flight whatever the dispatcher does.
 
+A **cold flight** is keyed on the response's declared variation
+dimensions (ADR-0057): a warm flight keeps the lookup key (a stored
+object — with or without Vary — is the origin's own declaration for the
+URL); a cold flight on an `include_headers` route extends the primary
+key with the declared headers, hashed by the same `variantKeyCore`/
+`varyHeaderValue` path as the storage variant key, so a flight collapses
+two requests exactly when their stored variants would be identical; a
+cold flight on an include-free route is refused — the origin's Vary is
+unknowable before the first response arrives, so no shared key can be
+proven safe.
+
+The warm half's trust in the stored declaration is *checked*, not
+blind: every revalidation compares the stored object's VaryValue
+against the fresh response's effectiveVary union and, on a field-set
+change, purges the stale resolver and its variants (ADR-0058,
+`bouine_vary_drift_total`) — an origin that changes its `Vary` under a
+live cache loses the abandoned surface at the next revalidation
+instead of propagating it until TTL.
+
 ### 3.2 Cache key construction
 
 The canonical cache key is deterministic and stable across nodes. The primary
@@ -428,7 +447,10 @@ rolling-deploy compatibility.
   methods only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`).
 - **Request collapsing** — single-flight per cache key for anonymous
   safe-method requests only; requests carrying `Authorization` or an
-  unsafe method (POST/PUT/DELETE, …) never collapse (ADR-0052).
+  unsafe method (POST/PUT/DELETE, …) never collapse (ADR-0052), and cold
+  flights are keyed on the declared variation dimensions — extended with
+  `include_headers` on declared routes, refused on undeclared ones
+  (ADR-0057).
 - **Circuit breaker** — half-open probes, exponential backoff.
 
 ### 6.1 Upstream TLS

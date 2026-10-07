@@ -249,11 +249,17 @@ type Handler struct {
 	// lost refills, so a rising shed rate during a purge storm no longer
 	// implies the hit ratio is pinned at the shed equilibrium.
 	RewarmFillInc interface{ Inc() }
-	store         storage.Store
-	flight        singleflight.Group
-	logger        observability.Logger
-	fastClient    FastClient
-	neg           *StatusTTL
+	// VaryDriftInc is incremented when a revalidation observes the
+	// origin declaring a different variation surface than the stored
+	// resolver carries (ADR-0058); nil-safe. The handler purges the
+	// stale resolver and its variants on detection — the counter is the
+	// operator signal that the purge fired.
+	VaryDriftInc varyDriftInc
+	store        storage.Store
+	flight       singleflight.Group
+	logger       observability.Logger
+	fastClient   FastClient
+	neg          *StatusTTL
 	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
 	// is deliberately NOT the foreground fetchSem: the refill exists to
 	// clear the post-ban miss backlog, and sharing the foreground budget
@@ -439,6 +445,13 @@ type HandlerConfig struct {
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because the variant cap is exceeded.
 	VaryCapHits interface{ Inc() }
+	// VaryDrift, if non-nil, is incremented when a revalidation observes
+	// the origin declaring a different variation surface than the
+	// stored resolver carries — the stored VaryValue drifted from the
+	// fresh response's effectiveVary (ADR-0058). The handler purges the
+	// stale resolver and its variants on detection; this counter is the
+	// operator signal that the purge fired.
+	VaryDrift varyDriftInc
 	// StreamingBufferBytes, if non-nil, is set to the current total
 	// bytes held in live streaming tee buffers. Polled by the engine's
 	// background metrics loop.
@@ -842,6 +855,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		defaultSIE:              cfg.DefaultSIE,
 		variantSets:             make(map[api.Key]map[api.Key]struct{}),
 		VaryCapHits:             cfg.VaryCapHits,
+		VaryDriftInc:            cfg.VaryDrift,
 		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
 		StreamingFallbackInc:    cfg.StreamingFallback,
 		FetchShedInc:            cfg.FetchShed,
@@ -1251,6 +1265,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
@@ -1266,6 +1281,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
+		h.detectVaryDrift(ctx, stale, ri, effectiveVary(resMap, h.policy))
 		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
@@ -1676,7 +1692,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src, ri)
 	} else {
-		h.fetchAndStore(ctx, lookupKey, primaryKey, ri)
+		h.fetchAndStore(ctx, lookupKey, primaryKey, obj, ri)
 	}
 }
 
@@ -1999,14 +2015,23 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 // resMap (attribution headers), so concurrent callers must not share one
 // mutable header.Map. Authorized requests skip the dedup entirely
 // (collapseDenied, ADR-0052): an authorized response is never shareable
-// in-flight, so each authorized caller fetches its own copy.
-func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key, ri RequestInfo) fetchResult {
+// in-flight, so each authorized caller fetches its own copy. Every other
+// request parks under collapseFlightKey: the variant key on a warm
+// flight, the dimension-extended key on a cold include_headers route,
+// and no shared flight at all on a cold include-free miss (ADR-0057).
+func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) fetchResult {
 	if collapseDenied(ri) {
 		res := h.doFetch(ctx)
 		res.Header = res.Header.ownedClone()
 		return res
 	}
-	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+	sfKey := collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
+	if sfKey == (api.Key{}) {
+		res := h.doFetch(ctx)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
 	})
@@ -2020,6 +2045,11 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key, ri Reque
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
+// collapsedFetchBg deduplicates concurrent background origin fetches for
+// the same key. Every caller holds a stored object (a refresh or rewrite
+// of a known key), so the flight key already encodes the route's declared
+// variant dimensions and the collapse is safe without the cold-miss gate.
+// Authorized requests still skip the dedup (collapseDenied, ADR-0052).
 func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key, ri RequestInfo) fetchResult {
 	if collapseDenied(ri) {
 		res := h.doFetchBg(ctx, req)
@@ -2039,15 +2069,23 @@ func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, k
 // same key. Authorized requests skip the dedup entirely (collapseDenied,
 // ADR-0052): the conditional request carries the caller's credentials,
 // so its response is never shareable in-flight — each authorized caller
-// revalidates on its own.
-func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key, ri RequestInfo) fetchResult {
-	if collapseDenied(ri) {
+// revalidates on its own. Every revalidation holds a stored object, so
+// collapseFlightKey resolves to the lookup key (a variant key when the
+// object varies, the primary key when the resolver is revalidated) and
+// the flight always shares — the refusal branch is defense-in-depth for
+// a future caller that revalidates without a stored object, not a path
+// today's callers can reach.
+func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, lookupKey, primaryKey api.Key, stale *api.Object, ri RequestInfo) fetchResult {
+	sfKey := api.Key{}
+	if !collapseDenied(ri) {
+		sfKey = collapseFlightKey(h, primaryKey, lookupKey, stale, ri)
+	}
+	if sfKey == (api.Key{}) {
 		res := h.doFetchBg(ctx, req)
 		res.Header = res.Header.ownedClone()
 		return res
 	}
-	sfKey := key.SingleFlightKey(revalKeySuffix)
-	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(revalKeySuffix), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
@@ -2133,20 +2171,31 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	}
 }
 
-func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
+func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) {
 	// Authorized requests never share an in-flight response
 	// (collapseDenied, ADR-0052): collapsing is not storage, so the
 	// RFC 9111 §3.5 gate that protects stored authorized responses never
-	// applied to followers. Fetch our own copy outside the inflight
-	// table — no follower can park on it.
-	if collapseDenied(ri) {
+	// applied to followers. Every other request parks under
+	// collapseFlightKey (ADR-0057): the lookup key on a warm flight (a
+	// stored object — with or without Vary — is the origin's own
+	// declaration), the dimension-extended key on a cold include_headers
+	// route — so a follower only ever parks on a leader fetching the
+	// same declared dimensions — and no shared flight at all on a cold
+	// include-free miss, where nothing has ever declared the origin's
+	// variation surface. A request refused here fetches its own copy
+	// outside the inflight table — no follower can park on it.
+	sfKey := api.Key{}
+	if !collapseDenied(ri) {
+		sfKey = collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
+	}
+	if sfKey == (api.Key{}) {
 		h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
 		return
 	}
 	// Try to become the streaming leader for this key.
 	// If another request is already streaming, wait for its buffered result.
 	inflight := &inflightStream{done: make(chan struct{})}
-	if actual, loaded := h.inflightStreams.loadOrStore(lookupKey, inflight); loaded {
+	if actual, loaded := h.inflightStreams.loadOrStore(sfKey, inflight); loaded {
 		// Follower: wait for the leader's buffered result.
 		existing := actual
 		existing.followers.Add(1)
@@ -2180,7 +2229,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 		return
 	}
 	// Leader: remove from inflight map when done.
-	defer h.inflightStreams.delete(lookupKey)
+	defer h.inflightStreams.delete(sfKey)
 	h.streamMiss(ctx, primaryKey, ri, inflight)
 }
 
@@ -2229,7 +2278,7 @@ func (h *Handler) writeBufferedResult(
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	res := h.collapsedFetch(ctx, lookupKey, ri)
+	res := h.collapsedFetch(ctx, lookupKey, primaryKey, stale, ri)
 	if res.Err != nil {
 		if errors.Is(res.Err, ErrFetchShed) {
 			// Shed — the fetch queue was full for fetchWaitTimeout. The
@@ -2293,7 +2342,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// Join the client trace like the other foreground fetches; the
 	// singleflight leader's span context is what gets injected.
 	tracing.InjectFastHTTP(revalCtx, revalReq)
-	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey, ri)
+	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey, primaryKey, stale, ri)
 	if res.Err != nil {
 		tracing.RecordError(revalSpan, res.Err)
 	}
@@ -2342,11 +2391,22 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, now)
+		// A 304 carries the origin's current Vary declaration via
+		// MergeHeaders304 (refreshed.VaryValue is recomputed from the
+		// merged headers): compare it against what the stored resolver
+		// carried, purging on drift (ADR-0058). Run BEFORE the store so
+		// the purge takes out the old resolver even if the refreshed
+		// variant re-lands under a different key.
+		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
+	// A 200 revalidation is a full fresh response: its effectiveVary is
+	// the origin's current declaration. The comparison sees the response
+	// that will be stored, not the merged header.
+	h.detectVaryDrift(ctx, stale, ri, effectiveVary(res.Header.ToMap(), h.policy))
 	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
 }
 
@@ -2533,6 +2593,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		return
 	}
@@ -2550,6 +2611,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
+		h.detectVaryDrift(ctx, stale, ri, effectiveVary(bgResMap, h.policy))
 		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}

@@ -1,10 +1,11 @@
-# 55 — Request collapsing: authorized, cookied, and unsafe-method requests never collapse
+# 55 — Request collapsing: identity-split flights and dimension-keyed cold flights
 
 **Audience**: operators seeing origin load or hit-ratio changes after
 ADR-0052 (requests carrying `Authorization` were removed from the
 request-collapsing space; unsafe methods were added to the gate as
-defense-in-depth) and ADR-0054 (Cookie-carrying requests were added
-to the gate).
+defense-in-depth), ADR-0054 (Cookie-carrying requests were added
+to the gate), and ADR-0057 (cold flights are now keyed on the declared
+variation dimensions, and undeclared cold misses are refused).
 
 ## What changed
 
@@ -21,6 +22,30 @@ unsafe methods never reached the collapsing paths anyway (the
 dispatcher proxies them directly), but the gate now enforces that
 locally, so a future dispatcher refactor cannot silently coalesce
 concurrent mutations onto one origin fetch.
+
+**Cold flights are keyed on the declared variation dimensions**
+(ADR-0057). A shared flight hands the leader's response *body* to
+followers, so the flight key must encode every dimension the body varies
+on. On a cold miss the primary key (scheme, host, path, query, method)
+alone cannot: it carries neither the route's `include_headers` dimensions
+nor an origin `Vary` the cache has not yet seen. One helper now derives
+the flight key at every collapsing site:
+
+- **Warm flights** (a stored object exists, with or without Vary): the
+  flight key is the lookup key, unchanged. A stored object is the
+  origin's own declaration for this URL — Vary-carrying objects yield
+  the variant key, and a stored object without Vary positively declares
+  one body per URL (RFC 9110 §12.5.5).
+- **Cold flights on an `include_headers` route**: the flight key is the
+  primary key extended with the declared headers, hashed by the same
+  path as the storage variant key. Same-dimension cold misses still
+  collapse (the deploy/restart thundering herd keeps its dedup);
+  different-dimension callers never meet on one flight.
+- **Cold flights on an include-free route**: refused — one origin fetch
+  per concurrent caller for the first fill of each key. The origin's
+  Vary is unknowable before the first response arrives, so no shared
+  key can be proven safe. The next concurrent miss is warm and collapses
+  again; only the first burst per key pays.
 
 Why the `Authorization` half exists: storage of an authorized response
 is gated by RFC 9111 §3.5 (not stored unless the response is
@@ -49,9 +74,35 @@ callers on one URL pay one origin fetch each.
 - **Cookied traffic on one URL** (SSR with login sessions, A/B
   buckets): same — each concurrent cookied caller costs one origin
   fetch. Expected under the ADR-0054 extension of the gate.
+- **Cold start of an include-free route** (a deploy, fleet restart, or
+  ban reclaim): the first concurrent fill of each key no longer
+  collapses, so a burst of concurrent cold-miss callers costs one origin
+  fetch each. Expected under ADR-0057 — nothing has declared the
+  variation surface yet. The next burst is warm and collapses; keep the
+  window short with a proactive warmup or a purge-then-warm before
+  flipping a route onto the cache.
+- **Cold start of an `include_headers` route**: same-dimension callers
+  still collapse onto the dimension-extended key; only the declared
+  dimensions split the herd, which is exactly what the route asked for.
 - The fetch semaphore bounds concurrent fetches and sheds excess
   (503 + Retry-After, or stale); a rise in `fetch_shed_total` during
-  authorized or cookied bursts is the bound working.
+  authorized, cookied, or cold-start bursts is the bound working.
+
+## Rolling out the ADR-0057 change itself
+
+The composite flight key is a per-process rule, not a cluster
+protocol: during a rolling deploy, nodes running the old build still
+key cold flights on the bare primary key. The failure mode is
+fail-safe — the two builds never hand a wrong body to a follower
+(their gates just use different keys, so mixed-fleet traffic splits
+flights and loses dedup until the fleet converges) — but a
+mixed fleet during a cold-start burst pays the ADR-0052/0054/0057
+origin-load cost twice: old nodes collapse cold misses onto one
+flight, new nodes collapse the same traffic per dimension (or refuse
+it on include-free routes). Roll the fleet uniformly — do not run a
+long-lived mixed fleet across a deploy/restart window on high-traffic
+routes — and expect the one-shot cold-burst origin spike from the
+section above to overlap the rollout window.
 
 ## Mitigations for authorized routes that genuinely share responses
 
@@ -68,13 +119,22 @@ callers on one URL pay one origin fetch each.
    authorized route → expected under the gate; check convergence to
    HITs via storage once the origin's directives allow caching.
 2. Hit ratio drop after adding `include_headers` → separate mechanism
-   (storage variants), unchanged by this gate: anonymous callers on
-   include_headers routes still collapse (pinned by test).
+   (storage variants), unchanged by the flight key: warm paths still
+   collapse, and cold misses collapse per dimension value. A drop that
+   persists past the first fill cycle is not the flight key.
+3. One-shot MISS burst on an include-free route right after a deploy or
+   restart → the refused cold fill, expected once per key; it converges
+   on the next burst. If it persists, something is evicting the resolver
+   objects — check eviction metrics, not the flight gate.
 
 ## Known-good states
 
-- Anonymous traffic: unchanged, zero overhead (one header lookup on
-  the already-materialized miss-path header map).
+- Anonymous warm traffic: unchanged, zero new cost (the lookup key is
+  the flight key).
+- Anonymous cold traffic on include-free routes: one origin fetch per
+  concurrent caller for the first fill per key, then warm collapsing.
+- Cold traffic on `include_headers` routes: collapses per declared
+  dimension value — same-dimension callers share one flight.
 - Repeated authorized access to an origin-shareable resource: converges
   to stored HITs; only concurrent cold bursts pay the extra fetches.
 
@@ -86,4 +146,6 @@ callers on one URL pay one origin fetch each.
 | Origin fetches ≈ concurrent cookied callers on one URL | The ADR-0054 extension of the gate working | Accept; anonymous traffic still collapses; cookied users each get their own render |
 | `fetch_shed_total` rising during authorized bursts | Fetch semaphore saturated by un-collapsed authorized fetches | Raise `max_fetch_concurrency` on the route; shedded callers retry |
 | `fetch_shed_total` rising during cookied bursts (SSR login storms, synchronized cookie drops) | Same bound, cookie side | Raise `max_fetch_concurrency`; consider `bypass_on_cookie` for clarity of attribution |
-| Cross-caller response leakage still suspected in-flight | Impossible on authorized or cookied traffic after this gate; suspect storage keying instead | Check the route's `include_headers`/Vary for an undeclared selector — storage variants share by declared dimensions |
+| One-shot cold-burst origin spike on an include-free route after deploy/restart/purge | The refused cold fill (ADR-0057) | Accept — it converges on the next burst; warm the route first if the origin cannot take the burst |
+| `bouine_vary_drift_total` non-zero | An origin changed its Vary declaration under a live cache (ADR-0058); the stale resolver and its variants were purged | Confirm the origin's new declaration is intended; expect a one-cycle hit-ratio dip while the route re-fills under the new surface |
+| Cross-caller response leakage still suspected in-flight | Impossible on authorized, cookied, or undeclared-cold traffic after these gates; suspect storage keying instead | Check the route's `include_headers`/Vary for an undeclared selector — storage variants share by declared dimensions |

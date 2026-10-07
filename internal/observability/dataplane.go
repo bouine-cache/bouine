@@ -38,6 +38,14 @@ type DataPlaneMetrics struct {
 	// because the streaming memory cap was exceeded.
 	StreamingBufferBytes prometheus.Gauge
 	VaryCapHits          prometheus.Counter // incremented when MaxVariants cap is hit
+	// VaryDriftTotal counts Vary-declaration drifts detected on the
+	// revalidate paths (ADR-0058): the fresh origin response declared a
+	// different variation surface than the stored resolver carried, and
+	// the stale resolver plus its variants were purged. Non-zero means
+	// an origin changed its Vary under a live cache — pair it with the
+	// operator action: confirm the new declaration, expect a one-cycle
+	// hit-ratio dip while the route re-fills under the new surface.
+	VaryDriftTotal prometheus.Counter
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
@@ -191,6 +199,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Help:      "Metrics re-initialization events. Non-zero indicates the process restarted or metrics were re-registered, explaining histogram count discontinuities.",
 	})
 	m.initShedMetrics()
+	m.initVaryDriftMetrics()
 	m.initRefreshMetrics()
 	m.initWALMetrics()
 	m.initStreamingMetrics()
@@ -214,7 +223,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
 		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
-		m.RewarmFillTotal)
+		m.RewarmFillTotal, m.VaryDriftTotal)
 	return m
 }
 
@@ -285,6 +294,18 @@ func (m *DataPlaneMetrics) initStreamingMetrics() {
 		Namespace: "bouine",
 		Name:      "streaming_fallback_total",
 		Help:      "Cacheable misses that fell back to synchronous buffering because the streaming memory cap was exceeded.",
+	})
+}
+
+// initVaryDriftMetrics creates the Vary-declaration drift counter
+// (ADR-0058). Called by NewDataPlaneMetrics; extracted alongside the
+// other init helpers to keep NewDataPlaneMetrics under the funlen
+// limit.
+func (m *DataPlaneMetrics) initVaryDriftMetrics() {
+	m.VaryDriftTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "vary_drift_total",
+		Help:      "Revalidations that observed the origin declaring a different variation surface (Vary) than the stored resolver carried; the stale resolver and its variants were purged. Non-zero means an origin changed its Vary under a live cache — expect a one-cycle hit-ratio dip while the route re-fills under the new surface.",
 	})
 }
 

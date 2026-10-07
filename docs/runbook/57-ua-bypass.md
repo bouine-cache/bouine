@@ -49,7 +49,11 @@ Pattern rules (enforced at config load): `*` is the only wildcard and
 matches any run of bytes including `/`; an exact pattern matches the
 whole UA string — use `*Pattern*` for substring semantics; matching is
 case-insensitive; max 16 patterns, 256 bytes each; no lone `*`, no
-`**`, no `?`/`[`/`]`/`\`, no duplicates.
+`**`, no `?`/`[`/`]`/`\`, no duplicates, and only graphic ASCII bytes
+0x21-0x7E — **spaces are rejected on purpose**: real User-Agent
+strings contain spaces (`Mozilla/5.0 (…) et al.`), so an exact
+pattern could never match one; match a spaced UA with a `*Pattern*`
+substring glob instead.
 
 ## Why: edge bypass rules must be mirrored on inner caches
 
@@ -80,4 +84,4 @@ spoofable as the UA itself.
 | `cache_result="BYPASS"` share spikes on a route after enabling the knob | Crawler-pattern traffic is higher than expected, or a bot is spoofing a matching UA | Check the route's BYPASS share in the dashboard; verify with the edge's bot-management logs whether the traffic is the verified crawler. Spoofed traffic costs origin fetches only — nothing is poisoned or evicted. |
 | Origin load rises after enabling | Every matching request is an origin fetch by design | Confirm the crawler's fetch rate is acceptable; tune `max_fetch_concurrency` / `fetch_wait_timeout` on the route; the fetch semaphore bounds the blast radius. |
 | Crawler still receives stale content | The UA does not match any pattern (exact pattern vs substring: `ShoppingFeedBot` does not match `ShoppingFeedBot/1.0` — use `ShoppingFeedBot*` or `*ShoppingFeedBot*`), or the request is served by an upper cache layer that still stores | Re-check the pattern against the crawler's actual UA string; mirror the rule on every layer between the client and bouine. |
-| Config rejected at load | Pattern validation: > 16 entries, > 256 bytes, empty, lone `*`, `**`, `?`/`[`/`]`/`\`, non-printable-ASCII, or duplicate entries | Fix the pattern per the error message; a lone `*` is rejected on purpose — to disable caching for a route use `cache.enabled: false`. |
+| Config rejected at load | Pattern validation: > 16 entries, > 256 bytes, empty, lone `*`, `**`, `?`/`[`/`]`/`\`, a byte outside graphic ASCII 0x21-0x7E (space included — match a spaced UA with `*Pattern*` instead), or duplicate entries | Fix the pattern per the error message; a lone `*` is rejected on purpose — to disable caching for a route use `cache.enabled: false`. |

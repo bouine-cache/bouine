@@ -105,8 +105,10 @@ the curated, human-readable summary.
   against the full UA string — an exact pattern matches the whole
   string (`*Bot*` for substring semantics); `*` matches any run of
   bytes including `/`; validation caps the list at 16 entries / 256
-  bytes each and rejects lone `*`, `**`, `?`/`[`/`]`/`\`, non-ASCII,
-  and duplicates. The pattern list can be declared once under
+  bytes each and rejects lone `*`, `**`, `?`/`[`/`]`/`\`, bytes outside
+  graphic ASCII 0x21-0x7E (spaces included — real UA strings contain
+  spaces, so an exact pattern could never match one; use the `*Bot*`
+  substring form), and duplicates. The pattern list can be declared once under
   `route_defaults.cache.bypass_on_user_agent` instead of repeated per
   route: a route without its own list inherits the default wholesale,
   a route's own list replaces it (never a union), an explicit empty

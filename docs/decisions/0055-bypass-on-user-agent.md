@@ -75,10 +75,14 @@ entries, a lone `*` (matches every request — an accidental
 route-wide cache kill; operators wanting that should set
 `cache.enabled: false`), adjacent `**`, unsupported glob metacharacters
 (`?`, `[`, `]`, `\` — they would read as literals and silently never
-match), non-printable/non-ASCII characters, and duplicates
+match), bytes outside graphic ASCII 0x21-0x7E (space included, on
+purpose: real User-Agent strings contain spaces, so an exact pattern
+with one could never match — the `*Pattern*` substring form is the
+supported way to match a spaced UA), and duplicates
 (case-insensitive). Patterns are compiled once at handler build
 (`internal/cache/uabypass.go`); the compiled matcher is nil for
-pattern-less routes.
+pattern-less routes, and compile defensively drops any
+wildcard-only pattern (lone `*`, `**`) that bypassed validation.
 
 ### Placement
 

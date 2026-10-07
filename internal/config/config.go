@@ -38,6 +38,15 @@ type Config struct {
 	// Grouped with the slice fields so the GC-scan region stays
 	// contiguous (fieldalignment).
 	Metrics MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
+	// RouteDefaults is merged into every route before validation
+	// (see mergeRouteDefaults), so per-route blocks that repeat across
+	// routes can be declared once. Only request.forwarded and
+	// cache.bypass_on_user_agent are mergeable today; other fields are
+	// rejected at decode so their merge semantics get designed when
+	// they are needed, not inherited by accident. Unstable. Sits with
+	// the slice-typed fields (fieldalignment: the block carries a
+	// slice once cache defaults exist).
+	RouteDefaults RouteDefaults `yaml:"route_defaults,omitempty" json:"route_defaults,omitempty"`
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
 	// Cluster controls peer discovery and fan-out.
@@ -53,14 +62,6 @@ type Config struct {
 	// 100 records 1 in 100, reducing sync.Map overhead under high miss
 	// rates. Set to 1 to record every call (debug mode).
 	URLRingSampleRate int `yaml:"url_ring_sample_rate,omitempty" json:"url_ring_sample_rate,omitempty"`
-	// RouteDefaults is merged into every route before validation
-	// (see mergeRouteDefaults), so per-route blocks that repeat across
-	// routes can be declared once. Only request.forwarded is mergeable
-	// today; other fields are rejected at decode so their merge
-	// semantics get designed when they are needed, not inherited by
-	// accident. Unstable. Sits with the other value-typed fields
-	// (fieldalignment).
-	RouteDefaults RouteDefaults `yaml:"route_defaults,omitempty" json:"route_defaults,omitempty"`
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
@@ -1022,6 +1023,12 @@ func ForwardedStandard() ForwardedConfig {
 // declared once. The merge is field-scoped and form-aware (see
 // mergeRouteDefaults in loader.go). Unstable.
 type RouteDefaults struct {
+	// Cache holds cache-side defaults. Only bypass_on_user_agent is
+	// mergeable today; other RouteCache fields are rejected here at
+	// decode time (strict mode), same rationale as Request. Declared
+	// before Request (fieldalignment: it carries the block's only
+	// slice).
+	Cache RouteDefaultsCache `yaml:"cache,omitempty" json:"cache,omitempty"`
 	// Request holds request-side defaults. Only forwarded is
 	// mergeable; other RouteRequest fields are rejected here at decode
 	// time (strict mode) so their merge semantics are designed when
@@ -1038,6 +1045,23 @@ type RouteDefaultsRequest struct {
 	// route that does not opt out. See ForwardedConfig for the shapes
 	// and mergeRouteDefaults for the precedence rules.
 	Forwarded ForwardedConfig `yaml:"forwarded,omitempty" json:"forwarded,omitempty"`
+}
+
+// RouteDefaultsCache is the cache half of route_defaults — a distinct
+// type from RouteCache for the same reason as RouteDefaultsRequest:
+// sharing the type would silently accept every cache field under
+// route_defaults before its merge semantics are designed.
+type RouteDefaultsCache struct {
+	// BypassOnUserAgent is the cache.bypass_on_user_agent default
+	// (issue #771, ADR-0055), so a layered deployment declares its
+	// verified-bot bypass patterns once instead of repeating them on
+	// every route. Every pool route without its own list inherits it
+	// wholesale; a route's own list replaces it (never a union); an
+	// explicit empty list (`bypass_on_user_agent: []`) opts out.
+	// Static routes inherit nothing — the knob is wired on pool routes
+	// only. Patterns are validated at route_defaults' own path before
+	// the merge (validateRouteDefaults).
+	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
 }
 
 // DefaultForwardedMaxAppend is the X-Forwarded-For / Via chain cap applied

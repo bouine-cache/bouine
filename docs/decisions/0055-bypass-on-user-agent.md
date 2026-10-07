@@ -94,6 +94,30 @@ zero-alloc hit-path gates are unchanged (pinned by
 
 Cluster: no new flows — bypass happens before lookup and peer-fetch.
 
+### route_defaults inheritance
+
+`route_defaults.cache.bypass_on_user_agent` declares the pattern list
+once for every pool route, instead of repeating it per route (the same
+declare-once purpose `route_defaults.request.forwarded` serves, issue
+#769). Precedence:
+
+- a route with no list of its own inherits the default wholesale;
+- a route's own list **replaces** the default (never a union) — a
+  route's list is the complete pattern set, mirroring the forwarded
+  token-list form;
+- an explicit empty list (`bypass_on_user_agent: []`, which yaml
+  decodes to a non-nil empty slice) opts the route out;
+- static routes inherit nothing (the knob is pool-route-wired).
+
+The default's patterns are validated at `route_defaults`' own path
+before the merge, so an invalid default is reported once instead of
+surfacing as an error on every route; the merge is skipped when the
+default is invalid, and is idempotent across repeated `Validate`
+calls. `route_defaults.cache` accepts only `bypass_on_user_agent`
+(distinct `RouteDefaultsCache` type) — other cache fields fail strict
+decoding until their merge semantics are designed, same rule as the
+request half.
+
 ### Trust model (threat-model T52)
 
 A spoofed UA merely costs an origin fetch — the same as the

@@ -18,25 +18,25 @@ import (
 func TestTrafficClassifier_Classify(t *testing.T) {
 	t.Parallel()
 	c := NewTrafficClassifier([]TrafficClassSpec{
-		{Name: "csr", Hosts: []string{"www.backmarket.fr", "www.backmarket.de"}},
-		{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "www.backmarket.*"}},
+		{Name: "csr", Hosts: []string{"www.example.com", "shop.example.org"}},
+		{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "www.example.*"}},
 	})
 
 	tests := []struct {
 		host string
 		want string
 	}{
-		{"www.backmarket.fr", "csr"},
-		{"www.backmarket.de:443", "csr"},
-		{"WWW.BACKMARKET.FR", "csr"},           // case-insensitive
-		{"Www.BackMarket.Fr:8443", "csr"},      // mixed case + port
+		{"www.example.com", "csr"},
+		{"shop.example.org:443", "csr"},
+		{"WWW.EXAMPLE.COM", "csr"},             // case-insensitive
+		{"Www.Example.Com:8443", "csr"},        // mixed case + port
 		{"api.svc.cluster.local", "ssr"},       // suffix match
 		{"a.b.svc.cluster.local", "ssr"},       // deep suffix match
 		{"svc.cluster.local", "unclassified"},  // suffix requires a subdomain
 		{".svc.cluster.local", "unclassified"}, // bare suffix is not a host
-		{"www.backmarket.it", "ssr"},           // prefix match via ".*"
-		{"www.backmarket", "unclassified"},     // prefix needs the trailing dot
-		{"www.backmarket.", "unclassified"},    // prefix requires a label after the dot ("www.backmarket.*" = any host starting with "www.backmarket.")
+		{"www.example.net", "ssr"},             // prefix match via ".*"
+		{"www.example", "unclassified"},        // prefix needs the trailing dot
+		{"www.example.", "unclassified"},       // prefix requires a label after the dot ("www.example.*" = any host starting with "www.example.")
 		{"other.example.com", "unclassified"},
 		{"", "unclassified"},
 		{"evil-host", "unclassified"},
@@ -75,7 +75,7 @@ func TestTrafficClassifier_ShadowedPatterns(t *testing.T) {
 		{
 			name: "no overlap is silent",
 			classes: []TrafficClassSpec{
-				{Name: "csr", Hosts: []string{"www.backmarket.fr"}},
+				{Name: "csr", Hosts: []string{"www.example.com"}},
 				{Name: "ssr", Hosts: []string{"*.svc.cluster.local"}},
 			},
 		},
@@ -233,15 +233,15 @@ func TestTrafficClassifier_ClassNames(t *testing.T) {
 // TestTrafficClassifier_BareStarCrossesLabels pins the raw-prefix
 // semantics of a bare trailing `*` (ADR-0047 Decision 1): unlike the
 // `.*` form it is not anchored to a label boundary, so it matches
-// across labels (`www.backmarket-evil.example.com`) and the empty
-// continuation (`www.backmarket` itself).
+// across labels (`www.example-evil.com`) and the empty
+// continuation (`www.example` itself).
 func TestTrafficClassifier_BareStarCrossesLabels(t *testing.T) {
 	t.Parallel()
 	c := NewTrafficClassifier([]TrafficClassSpec{
-		{Name: "wide", Hosts: []string{"www.backmarket*"}},
+		{Name: "wide", Hosts: []string{"www.example*"}},
 	})
-	assert.Equal(t, "wide", c.Classify("www.backmarket-evil.example.com"))
-	assert.Equal(t, "wide", c.Classify("www.backmarket"))
+	assert.Equal(t, "wide", c.Classify("www.example-evil.com"))
+	assert.Equal(t, "wide", c.Classify("www.example"))
 	assert.Equal(t, "unclassified", c.Classify("shop.example.com"))
 }
 

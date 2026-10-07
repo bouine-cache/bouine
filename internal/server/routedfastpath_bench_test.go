@@ -92,7 +92,7 @@ func BenchmarkGate_RoutedFastPath_Hit(b *testing.B) {
 // strings.ToLower on the request Host.
 func BenchmarkGate_RoutedFastPath_Hit_TrafficClass(b *testing.B) {
 	tc := NewTrafficClassifier([]TrafficClassSpec{
-		{Name: "csr", Hosts: []string{"www.backmarket.fr", "www.backmarket.de", "www.example.com"}},
+		{Name: "csr", Hosts: []string{"www.example.com", "shop.example.org", "www.example.net"}},
 		{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "api.example.*"}},
 	})
 	rt := NewRouter(RouterConfig{TrafficClassify: tc})
@@ -133,7 +133,7 @@ func BenchmarkGate_RoutedFastPath_Hit_TrafficClass(b *testing.B) {
 // classify without allocating.
 func BenchmarkGate_RoutedFastPath_Hit_TrafficClass_MixedCase(b *testing.B) {
 	tc := NewTrafficClassifier([]TrafficClassSpec{
-		{Name: "csr", Hosts: []string{"www.backmarket.fr", "www.backmarket.de", "www.example.com"}},
+		{Name: "csr", Hosts: []string{"www.example.com", "shop.example.org", "www.example.net"}},
 		{Name: "ssr", Hosts: []string{"*.svc.cluster.local", "api.example.*"}},
 	})
 	rt := NewRouter(RouterConfig{TrafficClassify: tc})

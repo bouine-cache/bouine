@@ -36,8 +36,8 @@ label on the three data-plane request metric families.
    (matches every host, so under first-match precedence every later
    class would be dead config). Names must match
    `^[a-z][a-z0-9_]{0,31}$`, be unique, and not be the reserved
-   `unclassified`. Declaration order is precedence. A bare trailing `*`
-   (e.g. `www.backmarket*`) is a raw string prefix: it crosses label
+    `unclassified`. Declaration order is precedence. A bare trailing `*`
+    (e.g. `www.example*`) is a raw string prefix: it crosses label
    boundaries and matches the empty continuation — prefer the `.*`
    form, anchored to the label boundary.
 

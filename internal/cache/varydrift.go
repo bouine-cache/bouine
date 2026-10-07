@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -44,6 +46,19 @@ func varyFieldSet(v string) []string {
 	return fields
 }
 
+// isDriftDeclarationSource reports whether a fresh response's status
+// may be treated as a Vary-declaration source (ADR-0058): 304 and the
+// cacheable 2xx statuses. Everything else — 5xx/4xx origin duress, and
+// the 3xx/4xx statuses a proxy can revalidate into (301, 302, 404 with
+// negative caching, …) — is refused so the drift purge can never be
+// triggered by a response that is not, or must not be, stored under the
+// new declaration. Cacheability itself (no-store, private, …) is the
+// caller's store gate: this function only rules on the status, the one
+// dimension it owns.
+func isDriftDeclarationSource(status int) bool {
+	return status == fasthttp.StatusNotModified || (status >= 200 && status < 300)
+}
+
 // detectVaryDrift compares the stored object's declared variation
 // surface against the fresh origin response about to replace or
 // revalidate it (ADR-0058). The stored VaryValue feeds every
@@ -69,12 +84,20 @@ func varyFieldSet(v string) []string {
 // on the old variant keys. The primary key is recomputed from the
 // triggering request (the revalidate paths hold the variant key).
 //
-// Called on the revalidate paths only, after the fresh response is
-// known good (304 or cacheable 2xx) — an origin under duress is not
-// a declaration source; the stale object stays served per the
-// stale-fallback gates.
-func (h *Handler) detectVaryDrift(ctx context.Context, stale *api.Object, ri RequestInfo, freshVary string) {
-	if stale == nil || stale.VaryValue == "" || varyFieldsEqual(stale.VaryValue, freshVary) {
+// The good-response trigger table (ADR-0058) is ENFORCED HERE, not left
+// to the call sites: only 304 and cacheable 2xx responses may signal.
+// An origin under duress (5xx, 4xx) is not a declaration source — a
+// bare error page carries no Vary and would purge live variants on
+// every revalidation of a no-cache route during a single outage; an
+// uncacheable response (no-store, private, …) will not be stored, so
+// purging the old surface would leave the route resolver-less with
+// nothing fresh landing under the new declaration. The stale object
+// stays served per the stale-fallback gates in both cases.
+//
+// Callers must still invoke this only on the revalidate paths and only
+// with the declaration the store path would actually store.
+func (h *Handler) detectVaryDrift(ctx context.Context, stale *api.Object, ri RequestInfo, statusCode int, freshVary string) {
+	if stale == nil || stale.VaryValue == "" || !isDriftDeclarationSource(statusCode) || varyFieldsEqual(stale.VaryValue, freshVary) {
 		return
 	}
 	primaryKey := BuildKey(ri, h.policy)

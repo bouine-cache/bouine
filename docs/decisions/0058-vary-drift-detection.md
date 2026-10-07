@@ -44,8 +44,12 @@ drift.
 
 Only a good fresh response (304 or cacheable 2xx) can trigger the
 signal — an origin under duress is not a declaration source, and the
-stale-fallback gates keep serving the old object. Cold misses never
-run the comparison.
+stale-fallback gates keep serving the old object. This table is
+ENFORCED INSIDE `detectVaryDrift` (the status gate, so no call site
+can reintroduce the hole), and on the foreground path the comparison
+runs inside `writeAndMaybeStore`'s cacheability gate — an uncacheable
+response must not purge a live surface it will not replace. Cold
+misses never run the comparison.
 
 ## Consequences
 

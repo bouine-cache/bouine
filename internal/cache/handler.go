@@ -1258,7 +1258,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
-		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
@@ -1274,7 +1274,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		h.detectVaryDrift(ctx, stale, ri, effectiveVary(resMap, h.policy))
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
 		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
@@ -2286,7 +2286,7 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
+	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -2378,16 +2378,17 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		// Drift check before the store (ADR-0058): refreshed.VaryValue
 		// carries the merged 304 declaration; purging first removes the
 		// old resolver even if the refreshed variant re-lands elsewhere.
-		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
-	// A 200 is a full fresh response: compare its effectiveVary (the
-	// declaration that will be stored) against the stored one.
-	h.detectVaryDrift(ctx, stale, ri, effectiveVary(res.Header.ToMap(), h.policy))
-	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
+	// A 200 is a full fresh response: writeAndMaybeStore compares its
+	// effectiveVary (the declaration that will be stored) against the
+	// stored one, INSIDE the cacheability gate — an uncacheable response
+	// must not purge the live surface it will not replace.
+	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -2573,7 +2574,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
-		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		return
 	}
@@ -2591,7 +2592,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		h.detectVaryDrift(ctx, stale, ri, effectiveVary(bgResMap, h.policy))
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
 		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
@@ -2601,6 +2602,7 @@ func (h *Handler) writeAndMaybeStore(
 	ctx *fasthttp.RequestCtx,
 	res fetchResult,
 	primaryKey api.Key,
+	stale *api.Object,
 	ri RequestInfo,
 ) {
 	dst := &ctx.Response.Header
@@ -2648,6 +2650,12 @@ func (h *Handler) writeAndMaybeStore(
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
+		// Drift check inside the store gate (ADR-0058): only the
+		// declaration of a response that WILL be stored may purge the
+		// stored one. fetchAndStoreStayinAlive passes stale=nil on the
+		// cold-miss path, where detectVaryDrift is a no-op — a cold fill
+		// never revalidates a declaration it does not have.
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey

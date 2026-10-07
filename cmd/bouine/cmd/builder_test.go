@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1559,7 +1560,77 @@ func TestBuildRouter_BypassOnUserAgentWired(t *testing.T) {
 	require.Equal(t, "origin-body", string(crawler.Response.Body()))
 }
 
-// TestBuildRouter_StripPrefixWired is the regression test for issue
+// TestBuildRouter_BypassOnUserAgentRouteDefaultsWired proves the
+// route_defaults.cache.bypass_on_user_agent inheritance end to end:
+// a route that declares no list of its own bypasses matching requests
+// because the merged default reached its cache handler. The merge
+// precedence rules are pinned by internal/config's
+// ua_bypass_test.go; this test covers only merge → handler wiring.
+func TestBuildRouter_BypassOnUserAgentRouteDefaultsWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+listen:
+  admin: :9000
+upstream_pools:
+  - name: ssr
+    targets: ["%s"]
+route_defaults:
+  cache:
+    bypass_on_user_agent: ["*ShoppingFeedBot*"]
+routes:
+  - name: ssr
+    pool: ssr
+    cache: {ttl_default: 60s}
+`, originSrv.Addr)))
+	require.NoError(t, err)
+	require.Equal(t, []string{"*ShoppingFeedBot*"}, cfg.Routes[0].Cache.BypassOnUserAgent,
+		"the route must inherit the route_defaults pattern list")
+
+	e := &engine{
+		cfg:     cfg,
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+
+	// Non-matching UA: normal cache path (MISS).
+	normal := &fasthttp.RequestCtx{}
+	normal.Request.Header.SetMethod("GET")
+	normal.Request.SetRequestURI("/feed")
+	normal.Request.Header.Set(header.UserAgent, "Mozilla/5.0")
+	router.ServeRequest(normal)
+	require.Equal(t, fasthttp.StatusOK, normal.Response.StatusCode())
+	require.Equal(t, "MISS", string(normal.Response.Header.Peek(header.XCache)))
+
+	// Matching UA: BYPASS — the inherited default reached the handler.
+	crawler := &fasthttp.RequestCtx{}
+	crawler.Request.Header.SetMethod("GET")
+	crawler.Request.SetRequestURI("/feed")
+	crawler.Request.Header.Set(header.UserAgent, "ShoppingFeedBot/1.0")
+	router.ServeRequest(crawler)
+	require.Equal(t, fasthttp.StatusOK, crawler.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(crawler.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(crawler.Response.Body()))
+}
+
 // #595: request.strip_prefix on a proxied route must reach the cache
 // handler, so the origin sees the stripped path while cache keys keep
 // the original path.

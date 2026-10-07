@@ -10,33 +10,6 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
-### Added
-
-- **`cache.bypass_on_user_agent` per-route pattern list (ADR-0055,
-  issue #771)**. When configured, a request whose `User-Agent` matches
-  one of the `*`-glob patterns never touches the cache on that route:
-  no lookup, no storage, no in-flight sharing — the request proxies to
-  origin with headers preserved, attributed `X-Cache: BYPASS` /
-  `cache_result="BYPASS"` (the `cache.bypass_on_cookie` contract,
-  ADR-0054, triggered by the UA instead of a cookie). Built for
-  layered deployments (client → edge → bouine) where the edge already
-  bypasses its own cache for a verified crawler (e.g. a shopping-feed
-  bot that must see current product data): without mirroring the rule,
-  bouine would serve its own stored copy and silently defeat the edge
-  rule's freshness intent. Patterns are matched case-insensitively
-  against the full UA string — an exact pattern matches the whole
-  string (`*Bot*` for substring semantics); `*` matches any run of
-  bytes including `/`; validation caps the list at 16 entries / 256
-  bytes each and rejects lone `*`, `**`, `?`/`[`/`]`/`\`, non-ASCII,
-  and duplicates. The UA is spoofable client input (threat-model T52):
-  a spoofed UA merely costs an origin fetch (same as a `no-cache`
-  request) — bypass never invalidates, evicts, or stores anything.
-  The H1 fast path declines matching requests (falls through to the
-  slow path's bypass branch); pattern-less routes pay one nil check,
-  so the zero-alloc hit-path gates are unchanged. Default off: RFC
-  9111 semantics and the cache-tests score are untouched; invalidating
-  methods (POST/PUT/DELETE) keep invalidating the shared key.
-
 ### Fixed
 
 - **`bouine_peer_fetch_duration_seconds` no longer truncates sub-millisecond
@@ -116,6 +89,37 @@ the curated, human-readable summary.
   `pools × (1 + #classes) > 57`; the overage is opt-in (no configured
   classes ⇒ no multiplication) and documented with the
   `metric_relabel_configs` mitigation in the native-histogram runbook.
+- **`cache.bypass_on_user_agent` per-route pattern list and
+  `route_defaults.cache.bypass_on_user_agent` inheritance (ADR-0055,
+  issue #771)**. When configured, a request whose `User-Agent` matches
+  one of the `*`-glob patterns never touches the cache on that route:
+  no lookup, no storage, no in-flight sharing — the request proxies to
+  origin with headers preserved, attributed `X-Cache: BYPASS` /
+  `cache_result="BYPASS"` (the `cache.bypass_on_cookie` contract,
+  ADR-0054, triggered by the UA instead of a cookie). Built for
+  layered deployments (client → edge → bouine) where the edge already
+  bypasses its own cache for a verified crawler (e.g. a shopping-feed
+  bot that must see current product data): without mirroring the rule,
+  bouine would serve its own stored copy and silently defeat the edge
+  rule's freshness intent. Patterns are matched case-insensitively
+  against the full UA string — an exact pattern matches the whole
+  string (`*Bot*` for substring semantics); `*` matches any run of
+  bytes including `/`; validation caps the list at 16 entries / 256
+  bytes each and rejects lone `*`, `**`, `?`/`[`/`]`/`\`, non-ASCII,
+  and duplicates. The pattern list can be declared once under
+  `route_defaults.cache.bypass_on_user_agent` instead of repeated per
+  route: a route without its own list inherits the default wholesale,
+  a route's own list replaces it (never a union), an explicit empty
+  list (`[]`) opts the route out, and static routes inherit nothing;
+  an invalid default is reported once at `route_defaults`' own path.
+  The UA is spoofable client input (threat-model T52): a spoofed UA
+  merely costs an origin fetch (same as a `no-cache` request) — bypass
+  never invalidates, evicts, or stores anything. The H1 fast path
+  declines matching requests (falls through to the slow path's bypass
+  branch); pattern-less routes pay one nil check, so the zero-alloc
+  hit-path gates are unchanged. Default off: RFC 9111 semantics and
+  the cache-tests score are untouched; invalidating methods
+  (POST/PUT/DELETE) keep invalidating the shared key.
 
 ### Changed
 

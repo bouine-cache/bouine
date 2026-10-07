@@ -287,9 +287,11 @@ and refill path; the hit path never touches it. See ADR-0051.
   lookup, no storage, no in-flight sharing, `X-Cache: BYPASS` — so a
   layered deployment (client → edge → bouine) can mirror the edge's
   verified-crawler bypass rules on its inner cache layer. Patterns are
-  `*`-globs matched case-insensitively against the full UA string;
-  default off, so RFC 9111 semantics and the cache-tests score are
-  unchanged.
+  `*`-globs matched case-insensitively against the full UA string; the
+  list can be declared once under
+  `route_defaults.cache.bypass_on_user_agent` (inherit wholesale,
+  replace per route, opt out with `[]`); default off, so RFC 9111
+  semantics and the cache-tests score are unchanged.
 
 ---
 

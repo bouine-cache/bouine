@@ -21,6 +21,30 @@ routes:
       bypass_on_user_agent: ["*ShoppingFeedBot*"]
 ```
 
+When every route should share the same patterns, declare them once
+under `route_defaults` instead of repeating them per route:
+
+```yaml
+route_defaults:
+  cache:
+    bypass_on_user_agent: ["*ShoppingFeedBot*"]
+routes:
+  - name: feed          # inherits the default list wholesale
+    pool: origin
+  - name: api           # replaces the default with its own list
+    pool: origin
+    cache:
+      bypass_on_user_agent: ["*Bingbot"]
+  - name: private-app   # opts out: normal cache semantics
+    pool: origin
+    cache:
+      bypass_on_user_agent: []
+```
+
+A route's own list always **replaces** the default (never a union);
+`bypass_on_user_agent: []` is the explicit opt-out; static routes
+inherit nothing.
+
 Pattern rules (enforced at config load): `*` is the only wildcard and
 matches any run of bytes including `/`; an exact pattern matches the
 whole UA string — use `*Pattern*` for substring semantics; matching is

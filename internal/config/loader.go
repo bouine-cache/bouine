@@ -712,18 +712,31 @@ func (f *ForwardedConfig) applyTokens(tokens []string) error {
 // path instead of surfacing as a confusing error on every route.
 func (c *Config) validateRouteDefaults(ec *errCollector) {
 	f := c.RouteDefaults.Request.Forwarded
-	if !f.ClientIP && !f.Proto && !f.Host && !f.Via {
-		return
+	if f.ClientIP || f.Proto || f.Host || f.Via {
+		if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
+			ec.addf("route_defaults.request.forwarded.max_append",
+				"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
+		}
 	}
-	if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
-		ec.addf("route_defaults.request.forwarded.max_append",
-			"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
-	}
+	validateBypassOnUserAgent(ec, "route_defaults.cache.bypass_on_user_agent",
+		c.RouteDefaults.Cache.BypassOnUserAgent)
 }
 
-// mergeRouteDefaults folds route_defaults.request.forwarded into every
-// route before per-route validation. Precedence, by the form the route's
-// block was written in:
+// mergeRouteDefaults folds route_defaults into every route before
+// per-route validation. Each half (request.forwarded,
+// cache.bypass_on_user_agent) merges independently — an empty or
+// opted-out default in one half never blocks the other. Both halves
+// are idempotent (Validate may be called more than once) and skipped
+// when their own default is invalid, so the route_defaults error
+// stands alone.
+func (c *Config) mergeRouteDefaults() {
+	c.mergeForwardedDefaults()
+	c.mergeBypassOnUserAgentDefaults()
+}
+
+// mergeForwardedDefaults folds route_defaults.request.forwarded into
+// every route before per-route validation. Precedence, by the form the
+// route's block was written in:
 //
 //   - unset route: inherits the default wholesale (marked inherited).
 //   - `forwarded: false` / `none`: the explicit opt-out — nothing is
@@ -739,10 +752,9 @@ func (c *Config) validateRouteDefaults(ec *errCollector) {
 // clobbers explicit values. Static routes (no pool) inherit nothing:
 // the block is vacuous without an origin-bound request, and an
 // explicit block on a static route stays a validation error
-// (validateForwarded). The merge is idempotent — Validate may be
-// called more than once — and is skipped entirely when the defaults
-// themselves are invalid, so the route_defaults error stands alone.
-func (c *Config) mergeRouteDefaults() {
+// (validateForwarded). Skipped entirely when the forwarded default
+// itself is invalid, so the route_defaults error stands alone.
+func (c *Config) mergeForwardedDefaults() {
 	d := c.RouteDefaults.Request.Forwarded
 	if d.form == forwardedFormOff {
 		return
@@ -761,8 +773,9 @@ func (c *Config) mergeRouteDefaults() {
 }
 
 // applyForwardedDefault folds the route_defaults forwarded block into
-// one route's block, by the route block's form (see mergeRouteDefaults
-// for the precedence contract). Mutates f in place; idempotent.
+// one route's block, by the route block's form (see
+// mergeForwardedDefaults for the precedence contract). Mutates f in
+// place; idempotent.
 func applyForwardedDefault(f *ForwardedConfig, d ForwardedConfig) {
 	switch f.form {
 	case forwardedFormUnset:
@@ -788,6 +801,49 @@ func applyForwardedDefault(f *ForwardedConfig, d ForwardedConfig) {
 		f.Via = f.Via || d.Via
 		inheritDefaultMaxAppend(f, d)
 	}
+}
+
+// mergeBypassOnUserAgentDefaults folds
+// route_defaults.cache.bypass_on_user_agent (issue #771, ADR-0055)
+// into every pool route before per-route validation, so a layered
+// deployment declares its verified-bot bypass patterns once instead of
+// repeating them on every route. Precedence:
+//
+//   - unset route list (nil): inherits the default wholesale. The
+//     route's slice aliases the default's — config is read-only after
+//     load, and aliasing keeps the merge allocation-free.
+//   - route's own list: replaces the default wholesale (never a
+//     union) — a route's list is the complete pattern set, mirroring
+//     the forwarded token-list form.
+//   - explicit empty list (`bypass_on_user_agent: []`, non-nil):
+//     opts out — the route keeps normal cache semantics.
+//
+// Static routes (no pool) inherit nothing: the knob is wired on pool
+// routes only. Skipped when the default list is invalid
+// (validateBypassOnUserAgent already reported it at route_defaults'
+// own path), so the route_defaults error stands alone.
+func (c *Config) mergeBypassOnUserAgentDefaults() {
+	d := c.RouteDefaults.Cache.BypassOnUserAgent
+	if len(d) == 0 {
+		return
+	}
+	if !bypassOnUserAgentValid(d) {
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Pool != "" && r.Cache.BypassOnUserAgent == nil {
+			r.Cache.BypassOnUserAgent = d
+		}
+	}
+}
+
+// bypassOnUserAgentValid reports whether a pattern list passes
+// validateBypassOnUserAgent's checks. Merge-side gate only — the
+// authoritative errors are reported by validateBypassOnUserAgent at
+// the list's own path.
+func bypassOnUserAgentValid(patterns []string) bool {
+	var ec errCollector
+	return validateBypassOnUserAgent(&ec, "", patterns)
 }
 
 // inheritDefaultMaxAppend fills an unset route max_append from the
@@ -1062,17 +1118,20 @@ const maxBypassUAEntries = 16
 // anywhere near that size is a paste error, not an operator intent.
 const maxBypassUAPatternBytes = 256
 
-// validateBypassOnUserAgent validates the route's
-// cache.bypass_on_user_agent pattern list (issue #771, ADR-0055):
-// capped count, capped length, printable ASCII with `*` as the only
-// wildcard, no lone `*`, no adjacent `*`, no duplicates
-// (case-insensitive). Matching semantics are pinned by
+// validateBypassOnUserAgent validates a bypass_on_user_agent pattern
+// list (issue #771, ADR-0055): capped count, capped length, printable
+// ASCII with `*` as the only wildcard, no lone `*`, no adjacent `*`,
+// no duplicates (case-insensitive). Matching semantics are pinned by
 // internal/cache's ua_bypass_test.go; this gate exists so a malformed
 // pattern fails at load time instead of silently never-matching (or
-// matching everything) in production.
-func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string) {
+// matching everything) in production. Returns whether the whole list
+// passed — the merge side (mergeBypassOnUserAgentDefaults) uses the
+// boolean to skip inheriting an invalid default.
+func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string) bool {
+	valid := true
 	if len(patterns) > maxBypassUAEntries {
 		ec.addf(path, "capped at %d entries, got %d", maxBypassUAEntries, len(patterns))
+		valid = false
 	}
 	seen := make(map[string]bool, len(patterns))
 	for j, raw := range patterns {
@@ -1080,31 +1139,38 @@ func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string)
 		p := strings.TrimSpace(raw)
 		if p == "" {
 			ec.addf(entryPath, "must be a non-empty pattern")
+			valid = false
 			continue
 		}
 		if len(p) > maxBypassUAPatternBytes {
 			ec.addf(entryPath, "capped at %d bytes, got %d", maxBypassUAPatternBytes, len(p))
+			valid = false
 			continue
 		}
 		if p == "*" {
 			ec.addf(entryPath, `a lone "*" matches every request and disables the route's cache; set cache.enabled: false instead`)
+			valid = false
 			continue
 		}
 		if strings.Contains(p, "**") {
 			ec.addf(entryPath, "(%q) contains an empty wildcard (**); use a single *", p)
+			valid = false
 			continue
 		}
 		if msg := uaPatternCharError(p); msg != "" {
 			ec.addf(entryPath, "(%q) %s", p, msg)
+			valid = false
 			continue
 		}
 		lower := strings.ToLower(p)
 		if seen[lower] {
 			ec.addf(entryPath, "(%s) is a duplicate (comparison is case-insensitive)", p)
+			valid = false
 			continue
 		}
 		seen[lower] = true
 	}
+	return valid
 }
 
 // uaPatternCharError reports why p is not a valid

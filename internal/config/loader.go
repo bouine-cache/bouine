@@ -533,13 +533,14 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 	if r.Name == "" {
 		switch {
 		case r.Match.Host != "":
-			r.Name = r.Match.Host + ":" + r.Match.PathPrefix
-		case r.Match.PathPrefix != "":
-			r.Name = r.Match.PathPrefix
+			r.Name = r.Match.Host + ":" + r.Match.PathLabel()
+		case r.Match.PathLabel() != "":
+			r.Name = r.Match.PathLabel()
 		default:
 			r.Name = "_catch-all"
 		}
 	}
+	validateRouteMatch(ec, prefix, &r.Match)
 	for j, m := range r.Match.Methods {
 		up := strings.ToUpper(strings.TrimSpace(m))
 		if !isKnownHTTPMethod(up) {
@@ -555,6 +556,64 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 	validatePathRewrite(ec, prefix+".request", r.Request)
 	validateForwarded(ec, prefix, r)
 	validateRouteCache(ec, prefix+".cache", &r.Cache)
+}
+
+// validateRouteMatch checks the extended route predicate surface
+// (issue #772): match.path (RE2, anchored, compiled here so a bad
+// pattern fails startup instead of the first request) is mutually
+// exclusive with match.path_prefix, and match.host accepts an exact
+// host or a single leading "*." wildcard — suffix matching anchored on
+// the label boundary. Anything else containing "*" (mid-string or
+// trailing) is a typo today and a dead route tomorrow.
+func validateRouteMatch(ec *errCollector, prefix string, m *RouteMatch) {
+	if m.PathPrefix != "" && m.Path != "" {
+		ec.addf(prefix+".match", "path_prefix and path are mutually exclusive — specify exactly one")
+	}
+	if m.Path != "" {
+		validateRoutePathPattern(ec, prefix+".match.path", m.Path)
+	}
+	if !validRouteHostPattern(m.Host) {
+		ec.addf(prefix+".match.host",
+			"invalid host pattern %q (exact host or leading \"*.\" wildcard only)", m.Host)
+	}
+}
+
+// validateRoutePathPattern gates one match.path RE2 pattern: anchored
+// at both ends (an unanchored pattern silently matches suffixes the
+// operator did not intend, and a `^`-only one matches far too much),
+// size-capped like path_rewrite patterns, free of raw control bytes
+// (they can never appear in a parsed request path, so the pattern is
+// dead config), and compiled now — RE2 is linear-time, so an
+// operator-supplied pattern cannot ReDoS the data plane (the same
+// choice request.path_rewrite already made).
+func validateRoutePathPattern(ec *errCollector, path, pattern string) {
+	if !strings.HasPrefix(pattern, "^") || !strings.HasSuffix(pattern, "$") {
+		ec.addf(path, "must be anchored: start with '^' and end with '$', got %q", pattern)
+	}
+	if len(pattern) > MaxRoutePathPatternBytes {
+		ec.addf(path, "exceeds %d bytes", MaxRoutePathPatternBytes)
+	}
+	rejectControlBytes(ec, path, pattern)
+	if _, err := regexp.Compile(pattern); err != nil {
+		ec.addf(path, "is not a valid regular expression: %v", err)
+	}
+}
+
+// validRouteHostPattern accepts an exact host or a single leading "*."
+// wildcard whose remainder is star-free and keeps at least one
+// alphanumeric byte (reuses the traffic-class notion of a host anchor:
+// "*." alone compiles to a suffix no real host matches). A bare "*"
+// matches every host and would silently dead-config every later route
+// under first-match precedence, so it is rejected too.
+func validRouteHostPattern(host string) bool {
+	switch {
+	case host == "":
+		return true
+	case strings.HasPrefix(host, "*."):
+		return hasHostAnchor(host[2:]) && !strings.Contains(host[2:], "*")
+	default:
+		return !strings.Contains(host, "*")
+	}
 }
 
 // validateForwarded validates the request.forwarded block (issue #769):

@@ -530,14 +530,35 @@ type StaticConfig struct {
 	MaxFileSize ByteSize `yaml:"max_file_size,omitempty" json:"max_file_size,omitempty"`
 }
 
-// RouteMatch is the predicate for selecting a route.
+// RouteMatch is the predicate for selecting a route. Fields follow the
+// operator-facing config-file order; the route table is cold, the
+// padding is irrelevant.
 type RouteMatch struct {
 	Host       string `yaml:"host,omitempty" json:"host,omitempty"`
 	PathPrefix string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	// Path is an RE2 regular expression matched against the request
+	// path (query excluded), e.g. `^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`
+	// (issue #772). Mutually exclusive with PathPrefix; must be
+	// anchored (start `^`, end `$`); compiled once at startup so the
+	// data plane never pays compile cost. Empty means no path
+	// constraint. Validated by config.Validate.
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 	// Methods restricts this route to the listed HTTP methods (e.g.
 	// [GET, HEAD]). Empty means match all methods (default).
 	// Methods are normalised to upper-case at parse time.
 	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
+}
+
+// PathLabel returns the route's path predicate as a single display
+// string: the RE2 pattern when Path is set, the path prefix otherwise.
+// It feeds the auto-derived route name, the dashboard route tables, and
+// the config insights, so every surface shows the predicate that
+// actually selects the route.
+func (m RouteMatch) PathLabel() string {
+	if m.Path != "" {
+		return m.Path
+	}
+	return m.PathPrefix
 }
 
 // RouteCache is the per-route cache policy.
@@ -1166,6 +1187,12 @@ type PathRewriteConfig struct {
 // leaves room for a dozen labeled groups while keeping the compiled
 // program and per-route config small enough to audit by eye.
 const MaxPathRewritePatternBytes = 512
+
+// MaxRoutePathPatternBytes bounds the match.path RE2 pattern. Same
+// rationale as MaxPathRewritePatternBytes: route configuration, not
+// user input — the cap keeps the compiled program and the per-request
+// match work auditable (issue #772).
+const MaxRoutePathPatternBytes = 512
 
 // RouteResponse is the per-route response-side header rewrite block.
 type RouteResponse struct {

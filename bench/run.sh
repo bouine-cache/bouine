@@ -49,6 +49,8 @@
 #   RoutedFastPath_Hit:               0  (issue #696 routed wrapper: route
 #                                      resolution before every fast-path hit;
 #                                      index-loop walk, no maps, no state)
+#   RoutedFastPath_Hit_WildcardHost:  0  (issue #772 "*.suffix" host routes:
+#                                      length-bounded EqualFold, no ToLower)
 #   FastPath_PeerHit:                 0  (owner-first peer branch, plain key;
 #                                      peer decode excluded — production decodes
 #                                      before the branch; object rotation defeats
@@ -94,6 +96,7 @@ declare -A BUDGETS=(
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
     [RoutedFastPath_Hit]=0
+    [RoutedFastPath_Hit_WildcardHost]=0
     [FastPath_PeerHit]=0
     [FastPath_PeerHitVary]=7
     [VaryKey_AcceptEncodingBucket]=2

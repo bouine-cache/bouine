@@ -84,6 +84,86 @@ func BenchmarkGate_RoutedFastPath_Hit(b *testing.B) {
 	}
 }
 
+// BenchmarkGate_RoutedFastPath_Hit_WildcardHost gates the wildcard-host
+// route form (issue #772): route resolution walks a mixed exact +
+// "*.suffix" + catch-all table before the hit delegates. The suffix
+// comparison is a length-bounded api.EqualFold on the request Host's
+// tail — no ToLower, no slicing allocation — so the extended predicate
+// must not cost the hit path its zero-alloc budget.
+func BenchmarkGate_RoutedFastPath_Hit_WildcardHost(b *testing.B) {
+	rt := NewRouter(RouterConfig{})
+	a := &pooledBenchFP{pool: "staging-pool"}
+	miss := &pooledBenchFP{pool: "miss"}
+	rt.AddRoute("www.example.com", "/", "www", "www-pool", nil, ok200("www"), nil)
+	if err := rt.AddRouteSpec(RouteSpec{
+		Host: "*.staging.example.com", Label: "staging", Pool: "staging-pool",
+		Handler: ok200("staging"), FastPath: a,
+	}); err != nil {
+		b.Fatal(err)
+	}
+	rt.AddRoute("", "/", "root", "root-pool", nil, ok200("root"), miss)
+
+	rfp := NewRoutedFastPath(rt, a)
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/x",
+		Host:        "PR-42.Staging.Example.COM:443",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := rfp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		rfp.Release(resp)
+	}
+}
+
+// Benchmark_RoutedFastPath_Hit_RegexPath measures (not gates) the
+// regex-path route form: the pre-compiled RE2 program runs per hit
+// inside route resolution. Go's regexp executor draws its machines
+// from a sync.Pool, so steady-state evaluation is allocation-free for
+// representative patterns, but the zero-alloc guarantee the
+// prefix-only gates pin is not claimed for arbitrary operator
+// patterns — which is why this is a regular benchmark, not a gate.
+func Benchmark_RoutedFastPath_Hit_RegexPath(b *testing.B) {
+	rt := NewRouter(RouterConfig{})
+	a := &pooledBenchFP{pool: "campaign-pool"}
+	miss := &pooledBenchFP{pool: "miss"}
+	if err := rt.AddRouteSpec(RouteSpec{
+		Path: `^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`, Label: "campaign", Pool: "campaign-pool",
+		Handler: ok200("campaign"), FastPath: a,
+	}); err != nil {
+		b.Fatal(err)
+	}
+	rt.AddRoute("", "/", "root", "root-pool", nil, ok200("root"), miss)
+
+	rfp := NewRoutedFastPath(rt, a)
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/fr-fr/l/campaign-summer",
+		Host:        "www.example.com:443",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := rfp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		rfp.Release(resp)
+	}
+}
+
 // BenchmarkGate_RoutedFastPath_Hit_TrafficClass gates the routed
 // fast-path wrapper with the traffic-class classifier active
 // (ADR-0047): Classify runs per hit inside TryHit, after route

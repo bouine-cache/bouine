@@ -174,3 +174,44 @@ func TestStripHostPort(t *testing.T) {
 		assert.Equal(t, tt.want, stripHostPort(tt.in), tt.in)
 	}
 }
+
+// TestRoutedFastPath_ExtendedPredicates pins issue #772's fast-path
+// parity: a route expressed with a wildcard host or a regex path must
+// resolve identically in TryHit and the slow path — same route table,
+// same matchRoute authority, so a hit can never be served for a
+// request the slow path would route elsewhere.
+func TestRoutedFastPath_ExtendedPredicates(t *testing.T) {
+	t.Parallel()
+	rt := NewRouter(RouterConfig{})
+	stagingFP := &recordingFP{name: "staging-pool"}
+	campaignFP := &recordingFP{name: "campaign-pool"}
+	rootFP := &recordingFP{name: "root-pool"}
+	require.NoError(t, rt.AddRouteSpec(RouteSpec{
+		Host: "*.staging.example.com", Label: "staging", Pool: "staging-pool", Handler: ok200("s"), FastPath: stagingFP,
+	}))
+	require.NoError(t, rt.AddRouteSpec(RouteSpec{
+		Path: `^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`, Label: "campaign", Pool: "campaign-pool", Handler: ok200("c"), FastPath: campaignFP,
+	}))
+	rt.AddRoute("", "/", "root", "root-pool", nil, ok200("root"), rootFP)
+	rfp := NewRoutedFastPath(rt, rootFP)
+
+	// Wildcard host: the fast path reaches the staging handler for a
+	// subdomain host (port stripped), and the slow path agrees.
+	resp, ok := rfp.TryHit(rawReq("GET", "/x", "pr-42.staging.example.com:443"), time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "staging-pool", resp.Pool)
+	assert.Equal(t, "staging", rt.MatchByHostPath("pr-42.staging.example.com", "/x"))
+
+	// Bare suffix host declines the wildcard route and falls to root.
+	resp, ok = rfp.TryHit(rawReq("GET", "/x", "staging.example.com"), time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "root-pool", resp.Pool)
+
+	// Regex path: matched and unmatched forms resolve like the slow path.
+	resp, ok = rfp.TryHit(rawReq("GET", "/fr-fr/l/campaign-summer", "www.example.com"), time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "campaign-pool", resp.Pool)
+	resp, ok = rfp.TryHit(rawReq("GET", "/fr-fr/l/other", "www.example.com"), time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "root-pool", resp.Pool)
+}

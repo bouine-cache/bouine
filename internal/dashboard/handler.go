@@ -1049,7 +1049,7 @@ func (h *Handler) buildRouteToPool() map[string]string {
 	for _, rc := range h.cfg.Config.Routes {
 		name := rc.Name
 		if name == "" {
-			name = rc.Match.PathPrefix
+			name = rc.Match.PathLabel()
 		}
 		m[name] = rc.Pool
 	}

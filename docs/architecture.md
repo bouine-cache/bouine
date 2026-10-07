@@ -572,7 +572,32 @@ routes:
       stale_if_error:        5m
       key:
         include_headers: [Accept-Language]
+  - match: { host: "*.staging.example.com" }   # leading-* wildcard: whole subdomain tree
+    name:  staging
+    pool:  app
+    cache:
+      enabled: false                          # bypass for the entire tree
+  - match:
+      host: "www.example.com"
+      path: "^/[a-z]{2}-[a-z]{2}/l/campaign-.*$"   # RE2, anchored; mutually exclusive with path_prefix
+    name:  campaign-pages
+    pool:  app
+    cache:
+      ttl_override: 60s
 ```
+
+Route matching (`RouteMatch`) is first-match-wins in **declaration
+order** — the same precedence rule the traffic-class classifier uses.
+`match.host` is an exact host or a single leading `*.` wildcard
+(suffix match anchored on the label boundary; `*.example.com` matches
+`foo.example.com` and `a.b.example.com`, never `example.com` itself).
+`match.path` is an anchored RE2 pattern; `match.path_prefix` stays the
+raw prefix form and the two are mutually exclusive. Order exact-host
+routes before wildcard-host routes and specific paths before
+catch-alls: a later route fully covered by an earlier one is dead
+config, reported (not rejected) at boot like shadowed traffic classes.
+Regexes are compiled once at startup, so route resolution never pays
+compile cost per request.
 
 ---
 

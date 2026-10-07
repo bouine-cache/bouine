@@ -48,6 +48,32 @@ the curated, human-readable summary.
   on a change, purges the primary key (resolver and variants).
   `bouine_vary_drift_total` is the operator signal (expect a
   one-cycle hit-ratio dip per drifted key).
+- **Wildcard-host and regex-path route matching (issue #772,
+  ADR-0056)**. `routes[].match.host` now accepts a leading `*.`
+  wildcard (suffix match anchored on the label boundary —
+  `*.staging.example.com` covers the whole per-PR subdomain tree,
+  never the bare suffix host), and a new `routes[].match.path` accepts
+  an anchored RE2 pattern (`^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`) for
+  path classes a prefix cannot express. `path` and `path_prefix` are
+  mutually exclusive; `config.Validate` rejects invalid regexes,
+  unanchored patterns, oversized patterns (> 512 B), control bytes,
+  and any host wildcard that is not the single leading `*.` form.
+  Regexes compile once at startup, so route resolution never pays
+  compile cost; prefix-only route tables keep their zero-alloc
+  hit-path gates unchanged (the new
+  `BenchmarkGate_RoutedFastPath_Hit_WildcardHost` gate pins the
+  wildcard form at 0 allocs/op; the regex form is measured by an
+  ungated benchmark — 0 allocs/op steady state, not budget-guaranteed
+  for arbitrary operator patterns). A later route fully covered by an
+  earlier one (host, path, and methods all covered) is dead config and
+  is reported at Error level at boot while boot proceeds, mirroring the
+  traffic-class shadow report (ADR-0047); detection is conservative and
+  stays silent on undecidable regex-vs-prefix pairs. Admin purge/refresh
+  key building (`MatchByHostPath`), the H1 fast path, the dashboard
+  route tables, and the config insights all resolve through the same
+  matcher, and route names auto-derive with the regex shown verbatim.
+  Regex and wildcard routes reduce `route`-label and config cardinality
+  versus the per-host/per-page route explosion they replace.
 - **`request.forwarded` per-route client-identity injection (issue
   #769)**. Opt-in per-route block that injects `X-Forwarded-For`
   (appends the address of bouine's immediate peer — the edge — to the

@@ -46,6 +46,22 @@ the curated, human-readable summary.
   an anonymous refresh. Mutually exclusive with `header_set` entries
   targeting the same header; requires a pool (rejected on static
   routes).
+- **Compact `request.forwarded` forms and `route_defaults`**. The
+  forwarded block accepts four YAML shapes: the `standard` preset
+  (all four headers, one line), a token list
+  (`forwarded: [client_ip, proto]` — exactly these headers), the
+  explicit opt-out (`forwarded: false` / `none`), and the original
+  mapping. A new top-level `route_defaults` block
+  (`route_defaults.request.forwarded`) declares the default once for
+  every route instead of repeating it per route; routes inherit it
+  wholesale, override it with a preset/token list, combine with it
+  field-by-field via the mapping form (OR; only `max_append` falls
+  back), or opt out with `none`. `route_defaults` accepts only
+  `request.forwarded` today — other route fields are rejected at
+  decode so their merge semantics get designed when needed. Static
+  routes ignore an inherited default (no origin-bound request exists);
+  validation (pool requirement, `header_set` conflict, `max_append`
+  bounds) runs on the resolved value.
 
 ## [0.5.26] - 2026-10-05
 

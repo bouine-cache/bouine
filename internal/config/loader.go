@@ -184,6 +184,8 @@ func (c *Config) Validate() error {
 		validatePoolDurations(ec, i, p)
 	}
 
+	c.validateRouteDefaults(ec)
+	c.mergeRouteDefaults()
 	for i := range c.Routes {
 		c.validateRoute(ec, i, seen)
 	}
@@ -448,7 +450,9 @@ func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{
 // so the effective value is never an accident of application order), and
 // max_append is bounded. Zero (unset) max_append is normalised to
 // DefaultForwardedMaxAppend when any flag is on, mirroring how route
-// methods are normalised above.
+// methods are normalised above. Runs after mergeRouteDefaults, so an
+// inherited block that landed on a route is validated exactly like a
+// route-authored one.
 func validateForwarded(ec *errCollector, prefix string, r *Route) {
 	f := &r.Request.Forwarded
 	if !f.ClientIP && !f.Proto && !f.Host && !f.Via {
@@ -484,6 +488,200 @@ func validateForwarded(ec *errCollector, prefix string, r *Route) {
 			ec.addf(prefix+".request.forwarded",
 				"is mutually exclusive with header_set entry %q — specify exactly one", canonical)
 		}
+	}
+}
+
+// ---- forwarded YAML unmarshalling ----
+
+// UnmarshalYAML implements yaml.Unmarshaler for ForwardedConfig, which
+// accepts four shapes under one name (see ForwardedConfig): a scalar
+// preset (`standard` / `none`, plus the bool spellings true/false), a
+// token list (`[client_ip, proto]`), or the full mapping. Every shape
+// normalizes to the one struct at decode time, so the merge,
+// validation, and builder only ever see a single representation — the
+// negative_ttl dual-form precedent.
+func (f *ForwardedConfig) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag == "!!null" {
+			return nil
+		}
+		var v any
+		if err := value.Decode(&v); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		switch t := v.(type) {
+		case bool:
+			if t {
+				*f = ForwardedStandard()
+			} else {
+				f.form = forwardedFormOff
+			}
+			return nil
+		case string:
+			return f.applyPreset(t)
+		default:
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping, got %T", v)
+		}
+	case yaml.SequenceNode:
+		var tokens []string
+		if err := value.Decode(&tokens); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		return f.applyTokens(tokens)
+	case yaml.MappingNode:
+		// A distinct field-only type: decoding into ForwardedConfig
+		// directly would recurse into this method forever.
+		type forwardedFields struct {
+			ClientIP  bool `yaml:"client_ip"`
+			Proto     bool `yaml:"proto"`
+			Host      bool `yaml:"host"`
+			Via       bool `yaml:"via"`
+			MaxAppend int  `yaml:"max_append"`
+		}
+		var raw forwardedFields
+		if err := value.Decode(&raw); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		f.ClientIP, f.Proto, f.Host, f.Via, f.MaxAppend =
+			raw.ClientIP, raw.Proto, raw.Host, raw.Via, raw.MaxAppend
+		f.form = forwardedFormMerge
+		return nil
+	default:
+		return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping, got YAML kind %d", value.Kind)
+	}
+}
+
+// applyPreset resolves the scalar spellings. The string forms of the
+// booleans are accepted so quoting in generated YAML (Helm templating)
+// cannot flip the meaning.
+func (f *ForwardedConfig) applyPreset(s string) error {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case ForwardedPresetStandard, "true":
+		*f = ForwardedStandard()
+		return nil
+	case ForwardedPresetNone, "false":
+		f.form = forwardedFormOff
+		return nil
+	default:
+		return fmt.Errorf("config: forwarded preset must be %q or %q (or a token list like [client_ip, proto]), got %q",
+			ForwardedPresetStandard, ForwardedPresetNone, s)
+	}
+}
+
+// applyTokens resolves the list form: exactly the named headers, no
+// implicit extras, so dropping a single route_defaults flag is expressible.
+func (f *ForwardedConfig) applyTokens(tokens []string) error {
+	if len(tokens) == 0 {
+		return fmt.Errorf("config: forwarded token list must not be empty — use %q to disable the block", ForwardedPresetNone)
+	}
+	for _, tok := range tokens {
+		switch strings.ToLower(strings.TrimSpace(tok)) {
+		case ForwardedTokenClientIP:
+			f.ClientIP = true
+		case ForwardedTokenProto:
+			f.Proto = true
+		case ForwardedTokenHost:
+			f.Host = true
+		case ForwardedTokenVia:
+			f.Via = true
+		default:
+			return fmt.Errorf("config: unknown forwarded token %q (valid: %s, %s, %s, %s)",
+				tok, ForwardedTokenClientIP, ForwardedTokenProto, ForwardedTokenHost, ForwardedTokenVia)
+		}
+	}
+	f.form = forwardedFormExact
+	return nil
+}
+
+// validateRouteDefaults bounds-checks the route_defaults block itself,
+// before any merge, so an invalid default is reported once at its own
+// path instead of surfacing as a confusing error on every route.
+func (c *Config) validateRouteDefaults(ec *errCollector) {
+	f := c.RouteDefaults.Request.Forwarded
+	if !f.ClientIP && !f.Proto && !f.Host && !f.Via {
+		return
+	}
+	if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
+		ec.addf("route_defaults.request.forwarded.max_append",
+			"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
+	}
+}
+
+// mergeRouteDefaults folds route_defaults.request.forwarded into every
+// route before per-route validation. Precedence, by the form the route's
+// block was written in:
+//
+//   - unset route: inherits the default wholesale (marked inherited).
+//   - `forwarded: false` / `none`: the explicit opt-out — nothing is
+//     inherited, nothing is injected.
+//   - preset / token list: the flags are the complete set (they replace
+//     the default's); max_append falls back to the default's when unset.
+//   - mapping: flags OR with the default's per field — a false field
+//     means "not set here" — so dropping a single default flag requires
+//     the token-list form; max_append falls back to the default's.
+//
+// A programmatically built non-zero ForwardedConfig (form unset but
+// fields populated) is treated as the exact form so the merge never
+// clobbers explicit values. Static routes (no pool) inherit nothing:
+// the block is vacuous without an origin-bound request, and an
+// explicit block on a static route stays a validation error
+// (validateForwarded). The merge is idempotent — Validate may be
+// called more than once — and is skipped entirely when the defaults
+// themselves are invalid, so the route_defaults error stands alone.
+func (c *Config) mergeRouteDefaults() {
+	d := c.RouteDefaults.Request.Forwarded
+	if d.form == forwardedFormOff {
+		return
+	}
+	if !d.ClientIP && !d.Proto && !d.Host && !d.Via && d.MaxAppend == 0 {
+		return
+	}
+	if d.MaxAppend < 0 || d.MaxAppend > MaxForwardedAppend {
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Pool != "" {
+			applyForwardedDefault(&r.Request.Forwarded, d)
+		}
+	}
+}
+
+// applyForwardedDefault folds the route_defaults forwarded block into
+// one route's block, by the route block's form (see mergeRouteDefaults
+// for the precedence contract). Mutates f in place; idempotent.
+func applyForwardedDefault(f *ForwardedConfig, d ForwardedConfig) {
+	switch f.form {
+	case forwardedFormUnset:
+		// Unset: a fully zero block inherits wholesale; a
+		// programmatically populated one is treated as exact so the
+		// merge never clobbers explicit values.
+		if f.ClientIP || f.Proto || f.Host || f.Via || f.MaxAppend != 0 {
+			f.form = forwardedFormExact
+			inheritDefaultMaxAppend(f, d)
+			return
+		}
+		inherited := d
+		inherited.inherited = true
+		*f = inherited
+	case forwardedFormOff:
+		// Explicit opt-out: the zero value stands.
+	case forwardedFormExact:
+		inheritDefaultMaxAppend(f, d)
+	case forwardedFormMerge:
+		f.ClientIP = f.ClientIP || d.ClientIP
+		f.Proto = f.Proto || d.Proto
+		f.Host = f.Host || d.Host
+		f.Via = f.Via || d.Via
+		inheritDefaultMaxAppend(f, d)
+	}
+}
+
+// inheritDefaultMaxAppend fills an unset route max_append from the
+// default — the one field both override forms still inherit.
+func inheritDefaultMaxAppend(f *ForwardedConfig, d ForwardedConfig) {
+	if f.MaxAppend == 0 {
+		f.MaxAppend = d.MaxAppend
 	}
 }
 

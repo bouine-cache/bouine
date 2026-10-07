@@ -98,7 +98,27 @@ config:
   # "1.1 bouine" onto origin-bound requests only — never the hit path, never
   # the cache key. Requires a pool; mutually exclusive with header_set
   # entries targeting the same headers; XFF/Via chains capped at max_append
-  # entries (default 5, range 1..64).
+  # entries (default 5, range 1..64). Compact forms (both mean all four
+  # headers on): `forwarded: standard` or `forwarded: [client_ip, proto, host, via]`;
+  # `forwarded: false` / `none` opts a route out of a route_default.
+  # Declare once for every route via route_defaults (merged before
+  # validation; only request.forwarded is mergeable today):
+  #   route_defaults:
+  #     request:
+  #       forwarded: standard
+  #   routes:
+  #     - name: inherit   # inherits the default
+  #       pool: app
+  #     - name: optout    # explicit opt-out
+  #       pool: app
+  #       request: {forwarded: none}
+  #     - name: subset    # exactly these headers (replaces default flags)
+  #       pool: app
+  #       request: {forwarded: [proto, host]}
+  #     - name: tuned    # mapping form ORs with the default flags, tunes the cap
+  #       pool: app
+  #       request:
+  #         forwarded: {max_append: 12}
   # Request path rewrites: request.strip_prefix (pure prefix removal) and
   # request.path_rewrite {match, replace} (Go RE2 regex, nginx
   # `rewrite ... break` equivalent; mutually exclusive) rewrite the
@@ -108,12 +128,13 @@ config:
   #       pool: app
   #       request:
   #         header_remove: [X-Client-Trace]
-  #         forwarded:
-  #           client_ip: true    # append peer IP to X-Forwarded-For
-  #           proto: true        # set X-Forwarded-Proto from the listener
-  #           host: true         # set X-Forwarded-Host to the received Host
-  #           via: true          # append Via: 1.1 bouine
-  #           max_append: 5      # XFF/Via chain cap (default 5)
+  #         forwarded: standard   # one line — or expand to the mapping form:
+  #         # forwarded:
+  #         #   client_ip: true    # append peer IP to X-Forwarded-For
+  #         #   proto: true        # set X-Forwarded-Proto from the listener
+  #         #   host: true         # set X-Forwarded-Host to the received Host
+  #         #   via: true          # append Via: 1.1 bouine
+  #         #   max_append: 5      # XFF/Via chain cap (default 5)
   #         path_rewrite:
   #           match: ^/public/webhook/(.*)$
   #           replace: /internal/webhook/$1

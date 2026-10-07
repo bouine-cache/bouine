@@ -47,6 +47,14 @@ type Config struct {
 	// 100 records 1 in 100, reducing sync.Map overhead under high miss
 	// rates. Set to 1 to record every call (debug mode).
 	URLRingSampleRate int `yaml:"url_ring_sample_rate,omitempty" json:"url_ring_sample_rate,omitempty"`
+	// RouteDefaults is merged into every route before validation
+	// (see mergeRouteDefaults), so per-route blocks that repeat across
+	// routes can be declared once. Only request.forwarded is mergeable
+	// today; other fields are rejected at decode so their merge
+	// semantics get designed when they are needed, not inherited by
+	// accident. Unstable. Sits with the other value-typed fields
+	// (fieldalignment).
+	RouteDefaults RouteDefaults `yaml:"route_defaults,omitempty" json:"route_defaults,omitempty"`
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
@@ -850,6 +858,17 @@ type RouteRequest struct {
 // entries. X-Forwarded-Proto and X-Forwarded-Host are SET (replacing any
 // client-supplied value) because bouine is authoritative about what it
 // itself received. Unstable.
+//
+// The YAML value accepts four shapes, mirroring the negative_ttl
+// dual-form precedent (loader.go "negative_ttl YAML unmarshalling"):
+//
+//	forwarded: standard            # preset: all four headers
+//	forwarded: [client_ip, proto]  # token list: exactly these headers
+//	forwarded: false               # opt-out (kills a route_default)
+//	forwarded: {client_ip: true, max_append: 10}  # full mapping
+//
+// All shapes decode to this one struct, so downstream (merge,
+// validation, builder) never sees a second representation. Unstable.
 type ForwardedConfig struct {
 	// ClientIP appends the address of bouine's immediate peer to any
 	// existing X-Forwarded-For chain (append-only, never rewritten).
@@ -868,6 +887,20 @@ type ForwardedConfig struct {
 	// §7.6.3) for loop detection, complementing the internal Bouine-Hop
 	// hop limit.
 	Via bool `yaml:"via,omitempty" json:"via,omitempty"`
+
+	// form records which YAML shape the block was written in, so the
+	// route_defaults merge knows whether this value replaces, combines
+	// with, or opts out of the inherited default (see mergeRouteDefaults).
+	// Unexported: it never leaves the config layer. Zero (unset) on
+	// programmatically built configs. Grouped with the flags so the
+	// struct stays one machine word of bools + one int (fieldalignment).
+	form forwardedForm
+	// inherited marks a value wholly supplied by route_defaults, so
+	// validation can distinguish "the operator asked for forwarded
+	// headers on a static route" (error) from "a default landed on a
+	// static route" (silently ignored, see mergeRouteDefaults).
+	inherited bool
+
 	// MaxAppend caps the number of entries kept in the X-Forwarded-For
 	// and Via chains after bouine's append: the rightmost (nearest,
 	// most recent) entries are kept, older entries are dropped. The
@@ -875,6 +908,84 @@ type ForwardedConfig struct {
 	// T37) by dropping the oldest entries. 0 means
 	// DefaultForwardedMaxAppend (5); allowed range 1..64.
 	MaxAppend int `yaml:"max_append,omitempty" json:"max_append,omitempty"`
+}
+
+// forwardedForm is the YAML shape a ForwardedConfig was decoded from.
+// It drives the route_defaults merge semantics.
+type forwardedForm uint8
+
+const (
+	// forwardedFormUnset: the block was absent (or programmatically
+	// built). Inherits route_defaults wholesale when all fields are
+	// zero; a non-zero value is treated as forwardedFormExact so the
+	// merge never clobbers programmatic values.
+	forwardedFormUnset forwardedForm = iota
+	// forwardedFormOff: written as `forwarded: false` or `none`. The
+	// explicit opt-out: nothing is inherited, nothing is injected.
+	forwardedFormOff
+	// forwardedFormExact: a preset or token list. The flags are the
+	// complete set; only max_append can still be inherited.
+	forwardedFormExact
+	// forwardedFormMerge: the mapping form. Flags combine (OR) with the
+	// route_defaults flags, so a false field means "not set here";
+	// dropping a single default flag requires the token-list form.
+	forwardedFormMerge
+)
+
+// Forwarded token names for the list form, and preset names for the
+// scalar form. Tokens map 1:1 to the struct's header flags.
+const (
+	// ForwardedTokenClientIP enables X-Forwarded-For appending.
+	ForwardedTokenClientIP = "client_ip"
+	// ForwardedTokenProto enables X-Forwarded-Proto.
+	ForwardedTokenProto = "proto"
+	// ForwardedTokenHost enables X-Forwarded-Host.
+	ForwardedTokenHost = "host"
+	// ForwardedTokenVia enables Via.
+	ForwardedTokenVia = "via"
+
+	// ForwardedPresetStandard enables all four headers — the shape an
+	// edge-fronted origin wants.
+	ForwardedPresetStandard = "standard"
+	// ForwardedPresetNone disables the block — the explicit opt-out.
+	ForwardedPresetNone = "none"
+)
+
+// ForwardedStandard returns the "standard" preset programmatically
+// (tests, SDK): every header on, max_append left to validation's
+// defaulting. The single construction path for the preset — the YAML
+// scalar form decodes through it too, so the two can never disagree.
+func ForwardedStandard() ForwardedConfig {
+	return ForwardedConfig{
+		ClientIP: true,
+		Proto:    true,
+		Host:     true,
+		Via:      true,
+		form:     forwardedFormExact,
+	}
+}
+
+// RouteDefaults holds defaults merged into every route before
+// validation, so blocks that would otherwise repeat on every route are
+// declared once. The merge is field-scoped and form-aware (see
+// mergeRouteDefaults in loader.go). Unstable.
+type RouteDefaults struct {
+	// Request holds request-side defaults. Only forwarded is
+	// mergeable; other RouteRequest fields are rejected here at decode
+	// time (strict mode) so their merge semantics are designed when
+	// they are needed, not inherited by accident.
+	Request RouteDefaultsRequest `yaml:"request,omitempty" json:"request,omitempty"`
+}
+
+// RouteDefaultsRequest is the request half of route_defaults. It is a
+// distinct type from RouteRequest on purpose: sharing the type would
+// silently accept every route field under route_defaults, including
+// ones with no defined merge semantics (lists, regexes, static roots).
+type RouteDefaultsRequest struct {
+	// Forwarded is the request.forwarded default inherited by every
+	// route that does not opt out. See ForwardedConfig for the shapes
+	// and mergeRouteDefaults for the precedence rules.
+	Forwarded ForwardedConfig `yaml:"forwarded,omitempty" json:"forwarded,omitempty"`
 }
 
 // DefaultForwardedMaxAppend is the X-Forwarded-For / Via chain cap applied

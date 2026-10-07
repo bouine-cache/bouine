@@ -443,6 +443,17 @@ their local store and never fetch origin on a requester's behalf, so
 the requesting node's own origin fetch always carries the client
 context.
 
+The block's configuration is written compactly (`forwarded: standard`
+or a token list like `forwarded: [client_ip, proto]`; the full mapping
+form remains for tuning `max_append` and subsets), and a top-level
+`route_defaults.request.forwarded` declares it once for every route:
+routes inherit wholesale, override with a preset/token list, OR flags
+in via the mapping form, or opt out with `none`. `route_defaults`
+accepts only `request.forwarded` today; static routes ignore an
+inherited default (no origin-bound request exists), and all validation
+runs on the resolved value (config contract:
+`config.RouteDefaults`, `mergeRouteDefaults`).
+
 ---
 
 ## 8. Control Plane (L6)

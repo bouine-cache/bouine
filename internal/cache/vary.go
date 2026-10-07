@@ -316,19 +316,14 @@ func normalizeHeaderValue(v string) string {
 // are pinned identical across both by
 // TestVaryKeyEncodingBucket_ParityAcrossPaths.
 //
-// COLLAPSE-KEY INVARIANT (ADR-0057): the collapsing flight key routes
-// its declared dimensions through this exact function
-// (collapseFlightKey -> variantKeyCore). A flight shares two callers
-// only when their stored variants would be identical, and that proof
-// holds iff this function stays the SINGLE value-normalization
-// authority for both keys. Any future normalization change (e.g. a
-// language-folding rule from the language-normalization plan) must
-// land HERE — never as a flight-key-only or storage-key-only
-// normalization — or the equivalence classes of the two keys diverge
-// and a follower parked on a leader whose variant it does not hold
-// receives the leader's body. Pinned by
-// TestCollapseFlightKey/flight_key_matches_the_storage_variant_key_
-// for_the_same_dimensions.
+// COLLAPSE-KEY INVARIANT (ADR-0057): the flight key routes its declared
+// dimensions through this same function (collapseFlightKey ->
+// variantKeyCore). It must stay the SINGLE value-normalization authority
+// for both the flight key and the storage variant key: any future
+// normalization (e.g. a language-fold rule) must land HERE, never on one
+// path only, or the keys' equivalence classes diverge and a follower
+// parks on a leader whose variant it does not hold. Pinned by
+// TestCollapseFlightKey (flight/variant parity).
 func varyHeaderValue(field, value string, policy *KeyPolicy) string {
 	switch field {
 	case "accept-encoding":

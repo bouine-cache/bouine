@@ -12,26 +12,14 @@ the curated, human-readable summary.
 
 ### Fixed
 
-- **Collapsing flights are now keyed on the response's declared variation
-  dimensions instead of the primary cache key (ADR-0057)**. On a cold
-  miss the flight key was the primary key — scheme, host, path, query and
-  method — which carries neither a route's `cache.key.include_headers`
-  dimensions (those govern stored variants only, ADR-0046) nor any origin
-  `Vary` the cache has not yet seen, so two requests differing only in a
-  selector header (byte-identical URI and Host) collapsed onto one leader
-  and every follower received the leader's variant body — the anonymous
-  twin of the cross-caller in-flight swap ADR-0052 closed for authorized
-  traffic. One helper now derives the flight key at every collapsing site
-  (`collapsedFetch`, the `inflightStreams` table in `fetchAndStore`,
-  `collapsedRevalidateBg`): warm flights (a stored object exists, with or
-  without Vary) keep the lookup key unchanged; cold flights on an
-  `include_headers` route extend the primary key with the declared
-  headers, hashed by the same `variantKeyCore`/`varyHeaderValue` path as
-  the storage variant key — so same-dimension cold misses keep deduping
-  and different-dimension callers never meet; cold flights on an
-  include-free route are refused (the origin's Vary is unknowable before
-  the first response arrives), costing one origin fetch per concurrent
-  caller for the first fill of each key only.
+- **Collapsing flights are keyed on the response's declared variation
+  dimensions instead of the primary cache key (ADR-0057)**: on a cold
+  miss, two requests differing only in a selector header could
+  collapse onto one leader and every follower received the leader's
+  variant body. Warm flights keep the lookup key; cold flights on a
+  declared route extend the key with the declared headers; cold
+  flights on an include-free route are refused (one extra origin
+  fetch per concurrent caller, first fill only).
 - **`bouine_peer_fetch_duration_seconds` no longer truncates sub-millisecond
   peer fetches to 0**. `PeerFetcher.Fetch` observed
   `time.Since(start).Milliseconds()/1000`, flooring sub-ms RPCs to 0;
@@ -50,26 +38,14 @@ the curated, human-readable summary.
 
 ### Added
 
-- **Vary-declaration drift detection at revalidation
-  (ADR-0058)**. A stored object's `VaryValue` is the origin's
-  declaration as of cache-fill time; an origin that changes its `Vary`
-  under a live cache left every lookup, warm collapsing flight, and
-  304-merge computing variant keys under the abandoned surface until
-  TTL — serving wrong-variant HITs from the surviving variants (the
-  storage-side twin of the in-flight bug ADR-0057 closed). Every
-  revalidation path (foreground, background SWR, refresh-before-expiry)
-  now compares the stored declaration against the fresh response's
-  effectiveVary union as field SETS (reordered or re-cased fields are
-  the same surface; a field appearing or disappearing is drift), and on
-  a change purges the primary key — resolver and tracked variants,
-  RFC 9111 §4.4 — so the route re-fills under the fresh declaration on
-  the very request that detected the drift. `bouine_vary_drift_total`
-  is the operator signal (expect a one-cycle hit-ratio dip per drifted
-  key); a Warn log carries both surfaces for diffing. Only a good
-  fresh response (304 or cacheable 2xx) can trigger it — 5xx and
-  uncacheable responses keep the stale-fallback gates, and an empty
-  stored declaration never signals (genuinely Vary-less routes and
-  pre-v4 warm-tier blobs are not drift).
+- **Vary-declaration drift detection at revalidation (ADR-0058)**.
+  An origin that changes its `Vary` under a live cache previously left
+  variant keys computed under the abandoned surface until TTL —
+  serving wrong-variant HITs. Every revalidation now compares the
+  stored declaration against the fresh response's as field sets and,
+  on a change, purges the primary key (resolver and variants).
+  `bouine_vary_drift_total` is the operator signal (expect a
+  one-cycle hit-ratio dip per drifted key).
 - **`request.forwarded` per-route client-identity injection (issue
   #769)**. Opt-in per-route block that injects `X-Forwarded-For`
   (appends the address of bouine's immediate peer — the edge — to the

@@ -72,9 +72,11 @@ const (
 	// peerFetchWaitTimeout bounds how long a fetch or put waits for a
 	// semaphore slot before shedding with ErrPeerFetchShed — the peer
 	// analogue of the origin fetch shed bound (cache handler,
-	// fetchWaitTimeout, issue #562). Healthy peer RPC p50 is ~3ms, so
-	// the timer only fires under saturation, when falling back to the
-	// slow path's shed/origin machinery is exactly the right behavior.
+	// fetchWaitTimeout, issue #562). Healthy peer RPCs are sub-millisecond
+	// (the earlier "~3ms p50" claim was an artifact of the ms-truncated
+	// duration metric, since fixed), so the timer only fires under
+	// saturation, when falling back to the slow path's shed/origin
+	// machinery is exactly the right behavior.
 	peerFetchWaitTimeout = 100 * time.Millisecond
 	// MaxPeerFetchConcurrency is the exported upper bound for the
 	// configurable fetch/put concurrency (cluster.peer_fetch_concurrency).
@@ -803,11 +805,18 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if f.pHits != nil {
 		f.pHits.Inc()
 	}
-	latMs := time.Since(start).Milliseconds()
+	// The histogram must observe the untruncated duration: Milliseconds()
+	// floors sub-millisecond RPCs to 0, and the vast majority of production
+	// fetches complete under 1 ms — the truncated Observe collapsed p50/p95
+	// into the native histogram's zero bucket (invisible on Grafana).
+	// latSumMs/latN keep integer ms: PeerFetchStats' avg is a ms-resolution
+	// readout.
+	lat := time.Since(start)
+	latMs := lat.Milliseconds()
 	f.latSumMs.Add(latMs)
 	f.latN.Add(1)
 	if f.pDuration != nil {
-		f.pDuration.Observe(float64(latMs) / 1000)
+		f.pDuration.Observe(lat.Seconds())
 	}
 	f.logger.Info("peer fetch hit",
 		"key", req.Key, "peer", peer.Addr, "hops", req.Hops,

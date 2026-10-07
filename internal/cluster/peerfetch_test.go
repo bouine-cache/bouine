@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -482,6 +484,57 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	if latSumMs <= 0 {
 		t.Fatalf("latSumMs=%d, want >0", latSumMs)
 	}
+}
+
+// TestPeerFetcher_SubMillisecondFetchNotTruncatedToZero pins the duration
+// histogram against the ms-truncation regression: Fetch previously observed
+// float64(time.Since(start).Milliseconds())/1000, which floors sub-ms RPCs
+// to 0. Almost every production fetch completes under 1 ms, so p50/p95
+// collapsed into the native histogram's zero bucket and the Grafana panel
+// rendered them as 0. A sub-ms RPC must land in a real (positive) sparse
+// bucket. On a pathologically slow runner the RPC may take >= 1 ms and this
+// test degrades to a pass — it can only fail against the truncation.
+func TestPeerFetcher_SubMillisecondFetchNotTruncatedToZero(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("fast")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, reg, nil)
+	defer f.Close(context.Background())
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.NoError(t, err, "fetch")
+	require.NotNil(t, obj)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	var h *dto.Histogram
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_peer_fetch_duration_seconds" {
+			continue
+		}
+		require.Len(t, mf.GetMetric(), 1, "one fetcher series")
+		h = mf.GetMetric()[0].GetHistogram()
+	}
+	require.NotNil(t, h, "bouine_peer_fetch_duration_seconds must be gathered")
+	assert.Equal(t, uint64(1), h.GetSampleCount(), "one observation")
+	assert.Zero(t, h.GetZeroCount(),
+		"a sub-millisecond RPC must not land in the native histogram zero bucket (duration truncated to 0)")
+	assert.Equal(t, int32(3), h.GetSchema(),
+		"native histogram schema must be present (3 = factor 1.1)")
+	assert.NotEmpty(t, h.GetPositiveSpan(),
+		"the observation must land in a real positive sparse bucket")
+	var positiveCount int64
+	for _, d := range h.GetPositiveDelta() {
+		positiveCount += d
+	}
+	assert.Equal(t, int64(1), positiveCount,
+		"the single sub-millisecond observation must be in the positive buckets")
 }
 
 func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {

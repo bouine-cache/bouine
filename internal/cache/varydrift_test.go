@@ -21,8 +21,10 @@ func (c *driftCounter) Inc() { c.n.Add(1) }
 
 // TestDetectVaryDrift pins the drift detector's trigger table in
 // isolation (ADR-0058): only a stored non-empty declaration that
-// differs from the fresh response's effectiveVary union counts as
-// drift, and drift purges the primary key (resolver and variants).
+// differs from a good fresh response's (304 or 2xx) effectiveVary
+// union counts as drift, and drift purges the primary key (resolver
+// and variants). A 5xx/4xx fresh response is never a declaration
+// source — the status gate lives inside detectVaryDrift itself.
 func TestDetectVaryDrift(t *testing.T) {
 	t.Parallel()
 
@@ -44,7 +46,7 @@ func TestDetectVaryDrift(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		h := newHandler(counter, store)
 		stored := &api.Object{Key: primary, VaryValue: "accept-language"}
-		h.detectVaryDrift(context.Background(), stored, ri, "accept-language")
+		h.detectVaryDrift(context.Background(), stored, ri, 200, "accept-language")
 		require.Equal(t, int64(0), counter.n.Load(), "a matching declaration must not signal")
 	})
 
@@ -54,7 +56,7 @@ func TestDetectVaryDrift(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		h := newHandler(counter, store)
 		stored := &api.Object{Key: primary, VaryValue: "accept-encoding, accept-language"}
-		h.detectVaryDrift(context.Background(), stored, ri, "Accept-Language, Accept-Encoding")
+		h.detectVaryDrift(context.Background(), stored, ri, 200, "Accept-Language, Accept-Encoding")
 		require.Equal(t, int64(0), counter.n.Load(),
 			"effectiveVary sorts and lowercases: reordered or re-cased fields are the same surface")
 	})
@@ -65,7 +67,7 @@ func TestDetectVaryDrift(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		h := newHandler(counter, store)
 		stored := &api.Object{Key: primary}
-		h.detectVaryDrift(context.Background(), stored, ri, "accept-language")
+		h.detectVaryDrift(context.Background(), stored, ri, 200, "accept-language")
 		require.Equal(t, int64(0), counter.n.Load(),
 			"an empty stored VaryValue is either genuinely Vary-less or a legacy warm blob re-deriving on next store")
 	})
@@ -75,8 +77,31 @@ func TestDetectVaryDrift(t *testing.T) {
 		counter := &driftCounter{}
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		h := newHandler(counter, store)
-		h.detectVaryDrift(context.Background(), nil, ri, "accept-language")
+		h.detectVaryDrift(context.Background(), nil, ri, 200, "accept-language")
 		require.Equal(t, int64(0), counter.n.Load())
+	})
+
+	t.Run("drift: 304 revalidation signals (the good 304 branch)", func(t *testing.T) {
+		t.Parallel()
+		counter := &driftCounter{}
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+		h := newHandler(counter, store)
+		stored := &api.Object{Key: primary, VaryValue: "accept-language"}
+		h.detectVaryDrift(context.Background(), stored, ri, 304, "accept-language, x-region")
+		require.Equal(t, int64(1), counter.n.Load(), "a 304 is a declaration source")
+	})
+
+	t.Run("no drift: 5xx and 4xx never signal (status gate)", func(t *testing.T) {
+		t.Parallel()
+		counter := &driftCounter{}
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+		h := newHandler(counter, store)
+		stored := &api.Object{Key: primary, VaryValue: "accept-language"}
+		h.detectVaryDrift(context.Background(), stored, ri, 502, "accept-language, x-region")
+		h.detectVaryDrift(context.Background(), stored, ri, 404, "accept-language, x-region")
+		h.detectVaryDrift(context.Background(), stored, ri, 503, "")
+		require.Equal(t, int64(0), counter.n.Load(),
+			"an origin under duress is not a declaration source, whatever headers it carries")
 	})
 
 	t.Run("drift: changed declaration purges the resolver and signals", func(t *testing.T) {
@@ -93,7 +118,7 @@ func TestDetectVaryDrift(t *testing.T) {
 		require.NoError(t, store.Put(context.Background(), variantKey, variant))
 
 		stored := &api.Object{Key: variantKey, VaryValue: "accept-language"}
-		h.detectVaryDrift(context.Background(), stored, ri, "accept-language, x-tenant-id")
+		h.detectVaryDrift(context.Background(), stored, ri, 200, "accept-language, x-tenant-id")
 		require.Equal(t, int64(1), counter.n.Load(), "a changed declaration must signal exactly once")
 
 		got, _, err := store.Get(context.Background(), primary)
@@ -109,7 +134,7 @@ func TestDetectVaryDrift(t *testing.T) {
 		resolver := &api.Object{Key: primary, VaryValue: "accept-language", TTL: time.Minute}
 		require.NoError(t, store.Put(context.Background(), primary, resolver))
 		stored := &api.Object{Key: primary, VaryValue: "accept-language, x-tenant-id"}
-		h.detectVaryDrift(context.Background(), stored, ri, "accept-language")
+		h.detectVaryDrift(context.Background(), stored, ri, 200, "accept-language")
 		require.Equal(t, int64(1), counter.n.Load(),
 			"the origin narrowing its declaration also invalidates the stored variant set")
 	})

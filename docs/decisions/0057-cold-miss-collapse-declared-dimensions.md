@@ -36,8 +36,12 @@ key) when safety cannot be proven:
 2. **Cold flight, `include_headers` route**: primary key extended
    with the declared headers, hashed by the same `variantKeyCore`/
    `varyHeaderValue` path as the storage variant key — a flight
-   collapses two requests exactly when their stored variants would be
-   identical. Same-dimension callers keep deduping.
+   collapses two requests exactly when their *declared* dimensions
+   match, so a shared flight always lands on one stored variant when
+   the origin's Vary is a subset of the declared dimensions. An origin
+   that also varies on something undeclared can still cross a cold
+   flight once (the first burst); the consequences section states the
+   bound. Same-dimension callers keep deduping.
 3. **Cold flight, include-free route**: refused. The origin's Vary is
    unknowable before the first response arrives. Each concurrent caller
    fetches its own copy; the next burst is warm and collapses — only
@@ -55,7 +59,12 @@ key) when safety cannot be proven:
   wrong body). Roll the fleet uniformly.
 - A route whose origin varies on *undeclared* headers is still unsafe
   in storage as in flight — the operator's declaration to get right
-  (ADR-0046).
+  (ADR-0046). On a declared route the undeclared surface narrows this
+  to the first cold burst per key: storage re-keys correctly on the
+  first fill (its variant key hashes the response's own Vary), while
+  the cold flight keys only the declared dimensions and can hand the
+  leader's body to a caller the undeclared surface distinguishes.
+  Warm traffic is unaffected — the stored VaryValue keys it.
 
 **Invariants:**
 

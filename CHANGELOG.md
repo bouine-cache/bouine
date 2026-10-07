@@ -21,6 +21,12 @@ the curated, human-readable summary.
   them flat at 0. The histogram now observes the untruncated
   `lat.Seconds()`. `PeerFetchStats`' `AvgLatMs` readout and the
   `dur_ms` log field keep integer-ms resolution.
+- **`metrics.traffic_classes` validation reports every invalid field
+  at once** — aligned with the errCollector behaviour the other config
+  sections already use: findings append (no early return), each
+  anchored to its own FieldError path
+  (`metrics.traffic_classes[i].name` / `.hosts[j]`), instead of the
+  first invalid class aborting startup with an unprefixed error.
 
 ### Added
 

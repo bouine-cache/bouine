@@ -233,9 +233,7 @@ func (c *Config) Validate() error {
 		ec.addf("gogc", "must be -1 (off) or a positive percentage")
 	}
 
-	if err := c.validateTrafficClasses(); err != nil {
-		return err
-	}
+	c.validateTrafficClasses(ec)
 
 	return ec.err()
 }
@@ -254,45 +252,43 @@ const (
 // reserved "unclassified" is rejected (it is the fallback, not a
 // configurable class), and host patterns must be the exact / leading
 // "*." / trailing ".*"|"*" glob forms — anything else is a typo today
-// and a dead class tomorrow.
-func (c *Config) validateTrafficClasses() error {
-	if len(c.Metrics.TrafficClasses) == 0 {
-		return nil
-	}
+// and a dead class tomorrow. Findings append to ec like every other
+// section: one bad class reports alongside (not instead of) the rest.
+func (c *Config) validateTrafficClasses(ec *errCollector) {
 	if len(c.Metrics.TrafficClasses) > MaxTrafficClasses {
-		return fmt.Errorf("config: metrics.traffic_classes: at most %d classes, got %d",
+		ec.addf("metrics.traffic_classes", "at most %d classes, got %d",
 			MaxTrafficClasses, len(c.Metrics.TrafficClasses))
 	}
 	seen := make(map[string]struct{}, len(c.Metrics.TrafficClasses))
 	for i := range c.Metrics.TrafficClasses {
 		tc := &c.Metrics.TrafficClasses[i]
+		base := fmt.Sprintf("metrics.traffic_classes[%d]", i)
+		// One name finding per class (the upstream_pools pattern):
+		// the shape check gates the reserved/duplicate checks so an
+		// invalid name does not also pile a duplicate finding onto
+		// every later class declared with it.
 		if !validTrafficClassName(tc.Name) {
-			return fmt.Errorf("config: metrics.traffic_classes[%d]: name %q must match ^[a-z][a-z0-9_]{0,31}$",
-				i, tc.Name)
+			ec.addf(base+".name", "name %q must match ^[a-z][a-z0-9_]{0,31}$", tc.Name)
+		} else if tc.Name == "unclassified" {
+			ec.addf(base+".name", "name %q is reserved (the no-match fallback)", tc.Name)
+		} else if _, dup := seen[tc.Name]; dup {
+			ec.addf(base+".name", "duplicate class name %q", tc.Name)
+		} else {
+			seen[tc.Name] = struct{}{}
 		}
-		if tc.Name == "unclassified" {
-			return fmt.Errorf("config: metrics.traffic_classes[%d]: name %q is reserved (the no-match fallback)",
-				i, tc.Name)
-		}
-		if _, dup := seen[tc.Name]; dup {
-			return fmt.Errorf("config: metrics.traffic_classes[%d]: duplicate class name %q", i, tc.Name)
-		}
-		seen[tc.Name] = struct{}{}
 		if len(tc.Hosts) == 0 {
-			return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q has no hosts", i, tc.Name)
+			ec.addf(base+".hosts", "class %q has no hosts", tc.Name)
 		}
 		if len(tc.Hosts) > MaxTrafficClassHosts {
-			return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q has more than %d hosts",
-				i, tc.Name, MaxTrafficClassHosts)
+			ec.addf(base+".hosts", "class %q has more than %d hosts", tc.Name, MaxTrafficClassHosts)
 		}
-		for _, h := range tc.Hosts {
+		for j, h := range tc.Hosts {
 			if !validTrafficClassHostPattern(h) {
-				return fmt.Errorf("config: metrics.traffic_classes[%d]: class %q: invalid host pattern %q (exact host, leading \"*.\", or trailing \".*\"/\"*\" only)",
-					i, tc.Name, h)
+				ec.addf(fmt.Sprintf("%s.hosts[%d]", base, j),
+					"invalid host pattern %q (exact host, leading \"*.\", or trailing \".*\"/\"*\" only)", h)
 			}
 		}
 	}
-	return nil
 }
 
 // validTrafficClassName enforces ^[a-z][a-z0-9_]{0,31}$: a valid

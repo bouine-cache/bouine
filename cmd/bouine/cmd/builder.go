@@ -423,6 +423,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
 			PoolName:                rc.Pool,
@@ -539,6 +540,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {

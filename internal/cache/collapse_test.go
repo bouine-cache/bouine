@@ -10,8 +10,164 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
+
+// TestCollapseFlightKey pins the composite flight-key rule (ADR-0057) in
+// isolation: a flight is shared only under a key that encodes every
+// dimension the response is known to vary on. A stored object (with or
+// without Vary) is the origin's own declaration — warm flights keep the
+// lookup key; cold flights on a declared route extend the primary key
+// with the declared headers (hashed as the storage variant key hashes
+// them); cold flights with no declaration are refused (the zero key).
+func TestCollapseFlightKey(t *testing.T) {
+	t.Parallel()
+
+	tenantPolicy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
+
+	primary := api.NewKeyFromBytes([16]byte{1})
+	variant := api.NewKeyFromBytes([16]byte{2})
+	stored := &api.Object{}
+
+	ri14 := RequestInfo{}
+	ri14.Header.Set("X-Tenant-Id", "14")
+	ri66 := RequestInfo{}
+	ri66.Header.Set("X-Tenant-Id", "66")
+
+	t.Run("warm flight keys on the lookup key, Vary or not", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{Policy: tenantPolicy})
+		require.Equal(t, variant, collapseFlightKey(h, primary, variant, stored, ri14),
+			"a stored variant's key already encodes the declared dimensions")
+		require.Equal(t, primary, collapseFlightKey(h, primary, primary, stored, ri14),
+			"a stored Vary-less object declares no selector header: the primary key is a proven identity")
+		h = NewHandler(HandlerConfig{})
+		require.Equal(t, primary, collapseFlightKey(h, primary, primary, stored, ri14),
+			"undeclared route, stored Vary-less object: warm flights keep collapsing")
+	})
+
+	t.Run("cold flight on a declared route extends the key with the declared dimensions", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{Policy: tenantPolicy})
+		k14 := collapseFlightKey(h, primary, primary, nil, ri14)
+		k66 := collapseFlightKey(h, primary, primary, nil, ri66)
+		require.NotEqual(t, api.Key{}, k14, "a declared route keeps a shared flight")
+		require.NotEqual(t, k14, k66,
+			"different declared-dimension callers must never share one flight")
+		require.NotEqual(t, primary, k14,
+			"the flight key must not be the bare primary key on a declared route")
+		require.Equal(t, k14, collapseFlightKey(h, primary, primary, nil, ri14),
+			"the flight key is a pure function of the declared dimensions")
+	})
+
+	t.Run("cold flight on an undeclared route is refused", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{})
+		require.Equal(t, api.Key{}, collapseFlightKey(h, primary, primary, nil, ri14),
+			"no shared key can be proven safe before anything declared the variation surface")
+	})
+
+	t.Run("declared but absent headers share one dimension-keyed flight", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{Policy: tenantPolicy})
+		// Every declared header absent: each field still hashes a stable
+		// "field=;" pair, so all absent-header callers share one flight
+		// key — distinct from the primary key and from any value-carrying
+		// flight.
+		k := collapseFlightKey(h, primary, primary, nil, RequestInfo{Header: header.Map{}})
+		require.NotEqual(t, api.Key{}, k)
+		require.NotEqual(t, primary, k)
+		require.Equal(t, k, collapseFlightKey(h, primary, primary, nil, RequestInfo{Header: header.Map{}}),
+			"absent declared headers must be one deterministic flight key")
+		require.NotEqual(t, k, collapseFlightKey(h, primary, primary, nil, ri14),
+			"absent and present dimension values must never share a flight")
+	})
+
+	t.Run("flight key matches the storage variant key for the same dimensions", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{Policy: tenantPolicy})
+		// The flight key must be the variant key the storage path would
+		// compute for the same declared dimensions — the parity that
+		// makes a shared flight provably serve one stored variant.
+		//
+		// NORMALIZATION INVARIANT (ADR-0057 §Risks, the language-
+		// normalization trap): this parity is the ONLY thing that makes
+		// dimension equality safe, and it holds because the flight key
+		// routes every declared field through the SAME varyHeaderValue
+		// normalization the storage variant key uses (bucketed
+		// Accept-Encoding/Accept-Language, legacy lowercase+sort
+		// otherwise). Any future change that normalizes values
+		// DIFFERENTLY on one path — e.g. folding "fr-FR" and
+		// "fr-fr" together for flight keying but not for storage, or
+		// teaching one path a language tag equivalence the other does
+		// not know — breaks the proof here: two requests whose
+		// declared-dimension values differ only in the folded class
+		// would share a flight whose stored variants are DISTINCT, and
+		// the follower receives the leader's variant. The invariant is
+		// semantic, not just byte parity: varyHeaderValue must remain
+		// the single value-normalization authority for BOTH keys. A
+		// change to varyHeaderValue's equivalence classes is safe; a
+		// normalization that exists on only one path never is.
+		require.Equal(t,
+			VariantKey(primary, "x-tenant-id", ri14.Header, tenantPolicy),
+			collapseFlightKey(h, primary, primary, nil, ri14))
+	})
+
+	t.Run("variant-miss flight keys on the stored variant key, not the include-only dimensions", func(t *testing.T) {
+		t.Parallel()
+		h := NewHandler(HandlerConfig{Policy: tenantPolicy})
+		// A stored Vary resolver exists but this variant was evicted:
+		// lookup returns obj=nil with the variant lookup key. The
+		// variant key was derived from the STORED VaryValue (origin Vary
+		// + includes), so it encodes strictly more than the include-only
+		// dimensions — the flight must key on it, or callers the stored
+		// Vary distinguishes (different origin-Vary field values) would
+		// collapse onto one leader despite the includes matching.
+		require.Equal(t, variant, collapseFlightKey(h, primary, variant, nil, ri14),
+			"a variant-miss flight must key on the stored variant key")
+	})
+}
+
+// TestCollapseFlightKey_CookiePresence pins the cookie-presence half of
+// the declared-dimension keying: a route that keys stored variants on
+// cookie presence (issue #768) must key the cold flight on the same
+// dimension — presence bits only, never Cookie values — and callers
+// with different presence sets must never share one flight.
+func TestCollapseFlightKey_CookiePresence(t *testing.T) {
+	t.Parallel()
+
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookiePresence([]string{"session", "consent"})
+
+	primary := api.NewKeyFromBytes([16]byte{1})
+
+	none := RequestInfo{Header: header.Map{}}
+	session := RequestInfo{Header: header.Map{}}
+	session.Header.Set(header.Cookie, "session=abc; other=x")
+	consent := RequestInfo{Header: header.Map{}}
+	consent.Header.Set(header.Cookie, "consent=1")
+
+	h := NewHandler(HandlerConfig{Policy: policy})
+
+	kNone := collapseFlightKey(h, primary, primary, nil, none)
+	kSession := collapseFlightKey(h, primary, primary, nil, session)
+	kConsent := collapseFlightKey(h, primary, primary, nil, consent)
+
+	require.NotEqual(t, api.Key{}, kNone, "a presence-keyed route keeps a shared cold flight")
+	require.NotEqual(t, primary, kNone, "the flight key must carry the presence dimension")
+	require.NotEqual(t, kNone, kSession, "absent and present cookies must key different flights")
+	require.NotEqual(t, kSession, kConsent, "different presence sets must key different flights")
+	// Presence bits only: two callers with different Cookie VALUES but
+	// the same presence set share one flight.
+	samePresence := RequestInfo{Header: header.Map{}}
+	samePresence.Header.Set(header.Cookie, "session=zzz; other=y")
+	require.Equal(t, kSession, collapseFlightKey(h, primary, primary, nil, samePresence),
+		"presence-bit keying must ignore cookie values")
+	// Parity with the storage variant key for the same dimensions.
+	require.Equal(t,
+		VariantKey(primary, "x-bouine-cookie-presence", session.Header, policy),
+		kSession)
+}
 
 // collapse_test.go pins the request-collapsing gate (ADR-0052 for
 // Authorization, ADR-0054 for Cookie): a request carrying Authorization
@@ -262,27 +418,40 @@ func TestFetchAndStore_SameCredentialAlsoNeverCollapses(t *testing.T) {
 	require.Equal(t, "merchant:66", bodies[1])
 }
 
-// TestFetchAndStore_AnonymousUnchanged pins the default behavior: no
-// Authorization — concurrent misses collapse to one fetch (regression
-// guard for the fix; anonymous traffic is bit-for-bit unchanged).
-func TestFetchAndStore_AnonymousUnchanged(t *testing.T) {
+// TestFetchAndStore_UndeclaredRouteWarmFlightsStillCollapse pins the
+// preserved behavior: the composite flight gate refuses only COLD misses
+// on undeclared routes (no shared key can be proven safe before the
+// origin's Vary is known). Once a fill stores the object — with or
+// without Vary — warm flights collapse as before, so steady-state
+// anonymous traffic keeps its dedup. First fill (1 fetch, sequential),
+// then two concurrent revalidations of the same key collapse to one
+// conditional request.
+func TestFetchAndStore_UndeclaredRouteWarmFlightsStillCollapse(t *testing.T) {
 	t.Parallel()
 
 	var fetches atomic.Int64
-	release := make(chan struct{})
+	first := make(chan struct{})
 	origin := func(ctx *fasthttp.RequestCtx) {
 		if fetches.Add(1) == 1 {
-			select {
-			case <-release:
-			case <-time.After(2 * time.Second):
-			}
+			close(first)
 		}
-		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
 		ctx.SetStatusCode(200)
 		_, _ = ctx.WriteString("public")
 	}
 	h := testHandler(t, origin)
 
+	// Cold fill — sequential, allowed to fetch alone.
+	seed := testCtx("GET", "http://example.com/public")
+	serveRequest(h, seed)
+	require.Equal(t, int64(1), fetches.Load())
+
+	// Let the freshness expire so the two concurrent requests below are
+	// warm revalidations (flight key = the stored key).
+	time.Sleep(1100 * time.Millisecond)
+
+	release := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Add(1)
@@ -292,15 +461,17 @@ func TestFetchAndStore_AnonymousUnchanged(t *testing.T) {
 			serveRequest(h, ctx)
 		}()
 	}
-	for fetches.Load() < 1 {
+	// Wait for the revalidation fetch(es) to start, then release.
+	deadline := time.Now().Add(3 * time.Second)
+	for fetches.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
 
-	require.Equal(t, int64(1), fetches.Load(),
-		"anonymous callers must keep collapsing")
+	require.Equal(t, int64(2), fetches.Load(),
+		"concurrent warm revalidations of one key must collapse to a single origin fetch")
 }
 
 // TestInvalidatingMethods_EachRequestFetchesItsOwnCopy pins the
@@ -392,7 +563,7 @@ func TestFetchAndStore_UnsafeMethodNeverParksOnSharedFlight(t *testing.T) {
 			defer wg.Done()
 			ctx := testCtxWithBody("POST", "http://example.com/owned", []byte(body))
 			primaryKey, lookupKey, _, _ := h.lookup(ctx)
-			h.fetchAndStore(ctx, primaryKey, lookupKey, requestInfoFromCtx(ctx))
+			h.fetchAndStore(ctx, lookupKey, primaryKey, nil, requestInfoFromCtx(ctx))
 			bodies[i] = respBody(ctx)
 		}()
 	}
@@ -408,10 +579,73 @@ func TestFetchAndStore_UnsafeMethodNeverParksOnSharedFlight(t *testing.T) {
 	require.Equal(t, "body:payload-2", bodies[1])
 }
 
-// TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses pins
-// that include_headers alone does not disable collapsing for anonymous
-// callers: the gate is Authorization-only (ADR-0052 scope note).
-func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
+// TestFetchAndStore_IncludeHeaderRouteColdMissNeverCrossesDimensions pins
+// the declared-dimension half of the flight gate: on a route whose
+// cache.key.include_headers names request headers, a cold miss (no stored
+// object, so the shared key would be the primary key, which does not
+// encode those headers) must not share a flight ACROSS dimension values.
+// The origin echoes the tenant header, so a collapsed (broken) run would
+// deliver the leader's tenant body to the follower. The two requests
+// differ only in the include-listed header — byte-identical URI and Host
+// — the exact shape the gate covers.
+func TestFetchAndStore_IncludeHeaderRouteColdMissNeverCrossesDimensions(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
+
+	var fetches atomic.Int64
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		n := fetches.Add(1)
+		if n <= 2 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("tenant:" + string(ctx.Request.Header.Peek("X-Tenant-Id")))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin,
+		FastClient: &testFastClient{handler: origin},
+		Store:      store,
+		Policy:     policy,
+	})
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 2)
+	for i, tenant := range []string{"14", "66"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("GET", "http://example.com/public?x=1")
+			ctx.Request.Header.Set("X-Tenant-Id", tenant)
+			serveRequest(h, ctx)
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	for fetches.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(2), fetches.Load(),
+		"a cold miss on an include_headers route must never share a flight across declared-dimension values")
+	require.Equal(t, "tenant:14", bodies[0])
+	require.Equal(t, "tenant:66", bodies[1])
+}
+
+// TestFetchAndStore_IncludeHeaderRouteSameDimensionsStillCollapse pins
+// the dedup-preserving half of the composite rule: on the same declared
+// route, two concurrent cold misses with the SAME declared-dimension
+// values still collapse to one origin fetch. The flight key extends the
+// primary key with the declared dimensions, so same-dimension callers
+// meet on one flight; this is the cold-burst dedup option A restores.
+func TestFetchAndStore_IncludeHeaderRouteSameDimensionsStillCollapse(t *testing.T) {
 	t.Parallel()
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
@@ -428,7 +662,7 @@ func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
 		}
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.SetStatusCode(200)
-		_, _ = ctx.WriteString("same-for-all")
+		_, _ = ctx.WriteString("same-variant")
 	}
 	h := NewHandler(HandlerConfig{
 		Upstream:   origin,
@@ -438,12 +672,12 @@ func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
-	for _, merchant := range []string{"14", "66"} {
+	for range 2 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			ctx := testCtx("GET", "http://example.com/public?x=1")
-			ctx.Request.Header.Set("X-Tenant-Id", merchant)
+			ctx.Request.Header.Set("X-Tenant-Id", "14")
 			serveRequest(h, ctx)
 		}()
 	}
@@ -455,7 +689,59 @@ func TestFetchAndStore_IncludeHeaderRouteAnonymousStillCollapses(t *testing.T) {
 	wg.Wait()
 
 	require.Equal(t, int64(1), fetches.Load(),
-		"anonymous callers on include_headers routes must keep collapsing")
+		"same-dimension cold misses must keep sharing one flight")
+}
+
+// TestFetchAndStore_UndeclaredRouteColdMissNeverCollapses pins the
+// refusal half of the composite rule: on a route with NO include_headers,
+// a cold miss never shares a flight — the origin's Vary is unknowable at
+// flight time, so no shared key can be proven to encode the origin's
+// variation surface. The two requests differ only in a header the route
+// never declared (the undeclared-selector shape). Once the first fill
+// stores the Vary resolver, warm traffic collapses on the variant key as
+// before (covered by the revalidate/stayin-alive suites).
+func TestFetchAndStore_UndeclaredRouteColdMissNeverCollapses(t *testing.T) {
+	t.Parallel()
+
+	var fetches atomic.Int64
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		n := fetches.Add(1)
+		if n <= 2 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "X-Tenant-Id")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("tenant:" + string(ctx.Request.Header.Peek("X-Tenant-Id")))
+	}
+	h := testHandler(t, origin)
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 2)
+	for i, tenant := range []string{"14", "66"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("GET", "http://example.com/public?x=1")
+			ctx.Request.Header.Set("X-Tenant-Id", tenant)
+			serveRequest(h, ctx)
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	for fetches.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(2), fetches.Load(),
+		"a cold miss on an undeclared route must never share a flight: the origin's Vary is unknowable at flight time")
+	require.Equal(t, "tenant:14", bodies[0])
+	require.Equal(t, "tenant:66", bodies[1])
 }
 
 // TestRevalidate_NoCrossCredentialCollapse pins the foreground

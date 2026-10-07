@@ -2177,7 +2177,7 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 		panic(errAbortHandler)
 	})
 	req := testCtx("GET", "http://example.com/")
-	res := h.collapsedFetch(req, api.Key{}, requestInfoFromCtx(req))
+	res := h.collapsedFetch(req, api.Key{}, api.Key{}, nil, requestInfoFromCtx(req))
 	require.NotNil(t, res.Err)
 	require.True(t, errors.Is(res.Err, errAbortHandler))
 }

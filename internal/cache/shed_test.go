@@ -191,7 +191,23 @@ func TestShedBypassReturns503(t *testing.T) {
 // instead of stalling behind the leader.
 func TestShedInflightFollowersUnpark(t *testing.T) {
 	t.Parallel()
-	h, counter := shedTestHandler(t, origin200("body"))
+	// Same-dimension cold misses on a declared route share one flight
+	// under the dimension-extended key (ADR-0057), so the inflight-table
+	// follower mechanics still apply: the leader sheds at the semaphore
+	// and the followers unpark with the leader's error, never reaching
+	// the semaphore themselves.
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
+	c := &shedCounter{}
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin200("body"),
+		FastClient: &testFastClient{handler: origin200("body")},
+		Store:      store,
+		Policy:     policy,
+	})
+	h.FetchShedInc = c
+	h.fetchWaitTimeout = 50 * time.Millisecond
+	h.fetchSem = make(chan struct{}, 1)
 
 	h.fetchSem <- struct{}{}
 	defer func() { <-h.fetchSem }()
@@ -206,6 +222,7 @@ func TestShedInflightFollowersUnpark(t *testing.T) {
 			defer wg.Done()
 			<-start
 			rr := testCtx("GET", "http://example.com/concurrent")
+			rr.Request.Header.Set("X-Tenant-Id", "14")
 			h.ServeRequest(rr)
 			results <- respCode(rr)
 		}()
@@ -228,7 +245,7 @@ func TestShedInflightFollowersUnpark(t *testing.T) {
 	// deleted would become a new leader and shed again; that is correct
 	// behavior, so this asserts the steady state after all followers
 	// completed.)
-	require.Equal(t, int64(1), counter.n.Load())
+	require.Equal(t, int64(1), c.n.Load())
 }
 
 // TestShedSingleflightFollowerServesStale covers the collapsedFetch
@@ -372,7 +389,7 @@ func TestCollapsedFetchResultNeverAliasesPooledResponse(t *testing.T) {
 	h := testHandler(t, origin200("owned-body"))
 	key := BuildKeyFromURL("http://example.com/owned", nil)
 
-	res := h.collapsedFetch(testCtx("GET", "http://example.com/owned"), key, requestInfoFromCtx(testCtx("GET", "http://example.com/owned")))
+	res := h.collapsedFetch(testCtx("GET", "http://example.com/owned"), key, key, nil, requestInfoFromCtx(testCtx("GET", "http://example.com/owned")))
 	require.NoError(t, res.Err)
 	require.Nil(t, res.Header.fastHdr, "flight results must not alias the pooled response")
 	require.Equal(t, "owned-body", string(res.Body))

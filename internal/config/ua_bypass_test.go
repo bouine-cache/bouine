@@ -94,7 +94,16 @@ func TestValidate_BypassOnUserAgent_Rejected(t *testing.T) {
 			name:        "non-ascii",
 			patterns:    []string{"Böt"},
 			pathSuffix:  "bypass_on_user_agent[0]",
-			msgContains: "printable ASCII",
+			msgContains: "graphic ASCII",
+		},
+		{
+			// Space is printable but rejected on purpose (0x21-0x7E):
+			// real UAs contain spaces, so an exact pattern with one
+			// could never match; the error points at the *Pattern* form.
+			name:        "space rejected",
+			patterns:    []string{"Googlebot/2.1 (+http://example.com)"},
+			pathSuffix:  "bypass_on_user_agent[0]",
+			msgContains: "space is not allowed",
 		},
 		{
 			name:        "oversized pattern",

@@ -1175,15 +1175,20 @@ func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string)
 
 // uaPatternCharError reports why p is not a valid
 // bypass_on_user_agent pattern on the character level, or "" when
-// valid. Only printable ASCII (0x21–0x7E) is accepted, and the glob
-// metacharacters `?`, `[`, `]`, `\` are rejected — `*` is the only
-// wildcard the matcher supports (ADR-0055), so a pattern using another
-// one would read as a literal and silently never match.
+// valid. Only graphic ASCII (0x21-0x7E, space excluded) is accepted,
+// and the glob metacharacters `?`, `[`, `]`, `\` are rejected — `*` is
+// the only wildcard the matcher supports (ADR-0055), so a pattern
+// using another one would read as a literal and silently never match.
+// Space is rejected on purpose: real User-Agent strings contain
+// spaces ("Mozilla/5.0 (…)" et al.), so an exact pattern containing
+// one could never match a real UA; rejecting it fails loudly at load
+// instead of silently never-matching in production. Operators match
+// spaced UAs with the `*Bot*` substring form.
 func uaPatternCharError(p string) string {
 	for i := 0; i < len(p); i++ {
 		c := p[i]
 		if c < 0x21 || c > 0x7E {
-			return "must contain only printable ASCII"
+			return "must contain only graphic ASCII bytes 0x21-0x7E (space is not allowed; match a spaced User-Agent with a *Pattern* substring glob)"
 		}
 		switch c {
 		case '?', '[', ']', '\\':

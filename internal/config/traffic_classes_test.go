@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -32,13 +33,14 @@ func TestTrafficClasses_AbsentIsValid(t *testing.T) {
 
 func TestTrafficClasses_TooManyRejected(t *testing.T) {
 	t.Parallel()
+	// Unique names so the cap is the only finding; the duplicate-name
+	// and collect-all behaviours have their own tests.
 	classes := make([]TrafficClass, MaxTrafficClasses+1)
 	for i := range classes {
-		classes[i] = TrafficClass{Name: "c", Hosts: []string{"h"}}
+		classes[i] = TrafficClass{Name: fmt.Sprintf("c%d", i), Hosts: []string{"h"}}
 	}
 	err := validTrafficClassesCfg(classes...).Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at most 8")
+	requireFieldError(t, err, "metrics.traffic_classes", "at most 8")
 }
 
 func TestTrafficClasses_NameValidation(t *testing.T) {
@@ -64,8 +66,7 @@ func TestTrafficClasses_NameValidation(t *testing.T) {
 		if tt.valid {
 			assert.NoError(t, err, tt.name)
 		} else {
-			require.Error(t, err, tt.name)
-			assert.Contains(t, err.Error(), "must match", tt.name)
+			requireFieldError(t, err, "metrics.traffic_classes[0].name", "must match")
 		}
 	}
 }
@@ -73,8 +74,7 @@ func TestTrafficClasses_NameValidation(t *testing.T) {
 func TestTrafficClasses_ReservedNameRejected(t *testing.T) {
 	t.Parallel()
 	err := validTrafficClassesCfg(TrafficClass{Name: "unclassified", Hosts: []string{"h"}}).Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved")
+	requireFieldError(t, err, "metrics.traffic_classes[0].name", "reserved")
 }
 
 func TestTrafficClasses_DuplicateNameRejected(t *testing.T) {
@@ -83,15 +83,13 @@ func TestTrafficClasses_DuplicateNameRejected(t *testing.T) {
 		TrafficClass{Name: "csr", Hosts: []string{"a"}},
 		TrafficClass{Name: "csr", Hosts: []string{"b"}},
 	).Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "duplicate class name")
+	requireFieldError(t, err, "metrics.traffic_classes[1].name", "duplicate class name")
 }
 
 func TestTrafficClasses_NoHostsRejected(t *testing.T) {
 	t.Parallel()
 	err := validTrafficClassesCfg(TrafficClass{Name: "csr"}).Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no hosts")
+	requireFieldError(t, err, "metrics.traffic_classes[0].hosts", "no hosts")
 }
 
 func TestTrafficClasses_TooManyHostsRejected(t *testing.T) {
@@ -101,8 +99,32 @@ func TestTrafficClasses_TooManyHostsRejected(t *testing.T) {
 		hosts[i] = "h"
 	}
 	err := validTrafficClassesCfg(TrafficClass{Name: "csr", Hosts: hosts}).Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "more than 64 hosts")
+	requireFieldError(t, err, "metrics.traffic_classes[0].hosts", "more than 64 hosts")
+}
+
+// TestTrafficClasses_AllFindingsReportedAtOnce pins the errCollector
+// behaviour (ADR follow-up to the early-return form): every invalid
+// field across every class is reported in a single Validate call, each
+// anchored to its own path, instead of only the first.
+func TestTrafficClasses_AllFindingsReportedAtOnce(t *testing.T) {
+	t.Parallel()
+	cfg := validTrafficClassesCfg(
+		TrafficClass{Name: "UPPER", Hosts: []string{"a", "*evil.com"}},
+		TrafficClass{Name: "csr"},
+		TrafficClass{Name: "csr", Hosts: []string{"b"}},
+		TrafficClass{Name: "unclassified", Hosts: []string{"c"}},
+	)
+	var paths []string
+	for _, fe := range fieldErrs(t, cfg.Validate()) {
+		paths = append(paths, fe.Path)
+	}
+	assert.ElementsMatch(t, []string{
+		"metrics.traffic_classes[0].name",
+		"metrics.traffic_classes[0].hosts[1]",
+		"metrics.traffic_classes[1].hosts",
+		"metrics.traffic_classes[2].name",
+		"metrics.traffic_classes[3].name",
+	}, paths)
 }
 
 func TestTrafficClasses_HostPatternValidation(t *testing.T) {

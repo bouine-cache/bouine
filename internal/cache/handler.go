@@ -249,11 +249,8 @@ type Handler struct {
 	// lost refills, so a rising shed rate during a purge storm no longer
 	// implies the hit ratio is pinned at the shed equilibrium.
 	RewarmFillInc interface{ Inc() }
-	// VaryDriftInc is incremented when a revalidation observes the
-	// origin declaring a different variation surface than the stored
-	// resolver carries (ADR-0058); nil-safe. The handler purges the
-	// stale resolver and its variants on detection — the counter is the
-	// operator signal that the purge fired.
+	// VaryDriftInc counts detected Vary-declaration drifts (ADR-0058),
+	// where the stale resolver and its variants were purged; nil-safe.
 	VaryDriftInc varyDriftInc
 	store        storage.Store
 	flight       singleflight.Group
@@ -445,12 +442,8 @@ type HandlerConfig struct {
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because the variant cap is exceeded.
 	VaryCapHits interface{ Inc() }
-	// VaryDrift, if non-nil, is incremented when a revalidation observes
-	// the origin declaring a different variation surface than the
-	// stored resolver carries — the stored VaryValue drifted from the
-	// fresh response's effectiveVary (ADR-0058). The handler purges the
-	// stale resolver and its variants on detection; this counter is the
-	// operator signal that the purge fired.
+	// VaryDrift, if non-nil, counts detected Vary-declaration drifts
+	// (ADR-0058); wired to bouine_vary_drift_total.
 	VaryDrift varyDriftInc
 	// StreamingBufferBytes, if non-nil, is set to the current total
 	// bytes held in live streaming tee buffers. Polled by the engine's
@@ -2070,11 +2063,8 @@ func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, k
 // ADR-0052): the conditional request carries the caller's credentials,
 // so its response is never shareable in-flight — each authorized caller
 // revalidates on its own. Every revalidation holds a stored object, so
-// collapseFlightKey resolves to the lookup key (a variant key when the
-// object varies, the primary key when the resolver is revalidated) and
-// the flight always shares — the refusal branch is defense-in-depth for
-// a future caller that revalidates without a stored object, not a path
-// today's callers can reach.
+// collapseFlightKey resolves to the lookup key and the flight always
+// shares; the refusal branch is defense-in-depth only.
 func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, lookupKey, primaryKey api.Key, stale *api.Object, ri RequestInfo) fetchResult {
 	sfKey := api.Key{}
 	if !collapseDenied(ri) {
@@ -2173,17 +2163,11 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) {
 	// Authorized requests never share an in-flight response
-	// (collapseDenied, ADR-0052): collapsing is not storage, so the
-	// RFC 9111 §3.5 gate that protects stored authorized responses never
-	// applied to followers. Every other request parks under
-	// collapseFlightKey (ADR-0057): the lookup key on a warm flight (a
-	// stored object — with or without Vary — is the origin's own
-	// declaration), the dimension-extended key on a cold include_headers
-	// route — so a follower only ever parks on a leader fetching the
-	// same declared dimensions — and no shared flight at all on a cold
-	// include-free miss, where nothing has ever declared the origin's
-	// variation surface. A request refused here fetches its own copy
-	// outside the inflight table — no follower can park on it.
+	// (collapseDenied, ADR-0052). Every other request parks under
+	// collapseFlightKey (ADR-0057): lookup key on a warm flight,
+	// dimension-extended key on a cold include_headers route, no
+	// shared flight on a cold include-free miss. A refused request
+	// fetches its own copy outside the inflight table.
 	sfKey := api.Key{}
 	if !collapseDenied(ri) {
 		sfKey = collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
@@ -2391,21 +2375,17 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, now)
-		// A 304 carries the origin's current Vary declaration via
-		// MergeHeaders304 (refreshed.VaryValue is recomputed from the
-		// merged headers): compare it against what the stored resolver
-		// carried, purging on drift (ADR-0058). Run BEFORE the store so
-		// the purge takes out the old resolver even if the refreshed
-		// variant re-lands under a different key.
+		// Drift check before the store (ADR-0058): refreshed.VaryValue
+		// carries the merged 304 declaration; purging first removes the
+		// old resolver even if the refreshed variant re-lands elsewhere.
 		h.detectVaryDrift(ctx, stale, ri, refreshed.VaryValue)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
-	// A 200 revalidation is a full fresh response: its effectiveVary is
-	// the origin's current declaration. The comparison sees the response
-	// that will be stored, not the merged header.
+	// A 200 is a full fresh response: compare its effectiveVary (the
+	// declaration that will be stored) against the stored one.
 	h.detectVaryDrift(ctx, stale, ri, effectiveVary(res.Header.ToMap(), h.policy))
 	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
 }

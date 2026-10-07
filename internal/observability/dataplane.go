@@ -38,13 +38,10 @@ type DataPlaneMetrics struct {
 	// because the streaming memory cap was exceeded.
 	StreamingBufferBytes prometheus.Gauge
 	VaryCapHits          prometheus.Counter // incremented when MaxVariants cap is hit
-	// VaryDriftTotal counts Vary-declaration drifts detected on the
-	// revalidate paths (ADR-0058): the fresh origin response declared a
-	// different variation surface than the stored resolver carried, and
-	// the stale resolver plus its variants were purged. Non-zero means
-	// an origin changed its Vary under a live cache — pair it with the
-	// operator action: confirm the new declaration, expect a one-cycle
-	// hit-ratio dip while the route re-fills under the new surface.
+	// VaryDriftTotal counts detected Vary-declaration drifts (ADR-0058),
+	// where the stale resolver and its variants were purged. Non-zero
+	// means an origin changed its Vary under a live cache; expect a
+	// one-cycle hit-ratio dip per drifted key.
 	VaryDriftTotal prometheus.Counter
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
@@ -297,15 +294,11 @@ func (m *DataPlaneMetrics) initStreamingMetrics() {
 	})
 }
 
-// initVaryDriftMetrics creates the Vary-declaration drift counter
-// (ADR-0058). Called by NewDataPlaneMetrics; extracted alongside the
-// other init helpers to keep NewDataPlaneMetrics under the funlen
-// limit.
 func (m *DataPlaneMetrics) initVaryDriftMetrics() {
 	m.VaryDriftTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "bouine",
 		Name:      "vary_drift_total",
-		Help:      "Revalidations that observed the origin declaring a different variation surface (Vary) than the stored resolver carried; the stale resolver and its variants were purged. Non-zero means an origin changed its Vary under a live cache — expect a one-cycle hit-ratio dip while the route re-fills under the new surface.",
+		Help:      "Revalidations that observed the origin declaring a different variation surface (Vary) than the stored resolver carried; the stale resolver and its variants were purged.",
 	})
 }
 

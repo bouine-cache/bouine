@@ -1868,7 +1868,11 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 // the origin response via FastClient and writes it directly to the
 // *fasthttp.RequestCtx, then overwrites bouine's attribution headers
 // (X-Cache, X-Cache-Source) so an origin-supplied value cannot spoof
-// the source metric label or X-Cache result.
+// the source metric label or X-Cache result. BYPASS responses are
+// attributed to the origin (api.SourceOrigin) — the response was
+// proxied uncached from the upstream, never served from a tier; only
+// the shed 503 (writeShed503) and the only-if-cached 504 keep the empty
+// source, which the metrics layer labels "bouine".
 func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 	reqCC := ParseCacheControlBytes(ctx.Request.Header.Peek(header.CacheControl))
 	if reqCC.OnlyIfCached {
@@ -1895,6 +1899,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
@@ -1903,6 +1908,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 		// error body resets the response, so X-Cache is written after.
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}

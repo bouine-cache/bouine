@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -35,6 +36,10 @@ import (
 //     a few dozen concurrent streams starve every other request on the
 //     route.
 //
+// BYPASS responses are attributed to the origin (X-Cache-Source: origin),
+// matching the miss and streamBypass paths; only the shed 503 keeps the
+// empty source (metrics label "bouine").
+//
 // Cache-invalidation semantics for POST/PUT/DELETE are preserved: on a
 // 2xx/3xx response the affected keys are purged as soon as the status is
 // known (at header time — waiting for an endless body would delay
@@ -43,6 +48,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
@@ -56,6 +62,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -70,6 +77,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(sf.StatusCode)
 	h.applyResponseRewrites(dst)
 

@@ -250,7 +250,10 @@ func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
 
 // streamBypass fetches the origin response and streams it directly to
 // the client without buffering. Used for BYPASS path where the response
-// is not cached.
+// is not cached. The response is attributed to the origin
+// (X-Cache-Source: origin) on every branch except the shed 503
+// (writeShed503), where the origin was never reached — the empty source
+// there is labelled "bouine" by the metrics layer.
 func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	if h.fastClient == nil {
 		// Upstream fallback (issue #598): a cached-static-route handler
@@ -265,11 +268,13 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -281,6 +286,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -294,6 +300,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(sf.StatusCode)
 	h.applyResponseRewrites(dst)
 

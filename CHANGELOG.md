@@ -10,6 +10,29 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **BYPASS traffic is attributed to `origin` on the data-plane metrics** —
+  BYPASS responses are proxied uncached from the upstream, but no bypass
+  path ever set `X-Cache-Source`, so the whole BYPASS population landed on
+  the `source` axis's default slot (rendered as the unnamed/"Value" series
+  in dashboards). Every bypass branch — streamed origin fetch, SSE, the
+  upstream-in-process fallback, and their 502 dispatch-error variants —
+  now carries `X-Cache-Source: origin`, matching the miss paths' origin
+  attribution; the shed 503 keeps the empty source (the origin was never
+  reached).
+- **The `source` label's default slot is named `bouine` instead of the
+  empty string** — responses bouine synthesized itself (the only-if-cached
+  504, the shed 503) previously carried `source=""` on
+  `bouine_requests_total`/`bouine_response_bytes_total`, which dashboards
+  rendered as an unnamed "Value" series. The label now reads
+  `source="bouine"` — the same named-fallback pattern as `upstream_pool
+  "_default"` and `traffic_class "unclassified"` — while the wire
+  `X-Cache-Source` value stays empty for those responses. This is a
+  series-identity reset: the former `source=""` series and the BYPASS
+  series move to their new labels, so `rate()` queries show one gap window
+  at the deploy boundary.
+
 ## [0.5.27] - 2026-10-07
 
 ### Fixed

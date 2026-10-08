@@ -321,7 +321,7 @@ const (
 	// code costs one series instead of a histogram's bucket series.
 	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
 	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
-	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
+	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,BOUINE=4
 	// metricClassSlots bounds the traffic_class axis: "unclassified"
 	// (index 0) + the config cap of 8 classes. Static array bound so
 	// the per-pool tables stay one allocation; unused slots cost
@@ -432,6 +432,9 @@ func cacheResultIndexBytes(s []byte) int {
 }
 
 // sourceIndex maps source strings to array indices. Returns -1 for unknown.
+// Both the empty string (bouine-synthesized responses on the wire) and
+// "bouine" (the metrics label for that default slot) resolve to slot 4,
+// so a normalised label string always finds its pre-resolved slot.
 func sourceIndex(s string) int {
 	switch s {
 	case string(api.SourceHot):
@@ -442,6 +445,8 @@ func sourceIndex(s string) int {
 		return 2
 	case string(api.SourceOrigin):
 		return 3
+	case string(api.SourceBouine):
+		return 4
 	case "":
 		return 4
 	default:
@@ -884,7 +889,10 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		case 3:
 			source = string(api.SourceOrigin)
 		default:
-			source = ""
+			// Empty (bouine-synthesized: only-if-cached 504, shed 503) and
+			// unknown or spoofed header values both collapse into the
+			// closed set's default "bouine" slot.
+			source = string(api.SourceBouine)
 		}
 
 		elapsed := time.Since(start)
@@ -1038,6 +1046,9 @@ func (m *DataPlaneMetrics) RecordHit(pool, trafficClass, cacheResult, source str
 	if trafficClass == "" {
 		trafficClass = api.TrafficClassUnclassified
 	}
+	// Close the source label set: empty and unknown values collapse into
+	// the "bouine" default slot, never a minted label.
+	source = normaliseSource(source)
 	dur := duration.Seconds()
 	if pm, ok := m.lookupPoolMetrics(pool); ok {
 		si := statusIndex(status)
@@ -1153,13 +1164,17 @@ func normaliseCacheResult(xCache string) string {
 }
 
 // normaliseSource maps X-Cache-Source header values to a stable Prometheus
-// label. Empty string is preserved (BYPASS, only-if-cached 504). Unknown
-// values default to empty for forward-compatibility.
+// label. Empty (bouine-synthesized responses: only-if-cached 504, shed
+// 503) and unknown values both default to the "bouine" label — the closed
+// source set is hot/warm/peer/origin/bouine, so a spoofed or
+// misconfigured X-Cache-Source response header can never mint a label
+// outside it (the same named-fallback pattern as upstream_pool
+// "_default" and traffic_class "unclassified").
 func normaliseSource(xCacheSource string) string {
 	switch xCacheSource {
-	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin):
+	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin), string(api.SourceBouine):
 		return xCacheSource
 	default:
-		return ""
+		return string(api.SourceBouine)
 	}
 }

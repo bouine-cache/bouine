@@ -110,7 +110,15 @@ func TestStrong_PurgePropagation(t *testing.T) {
 func TestStrong_BanPropagation(t *testing.T) {
 	s := sharedCluster(t, "strong")
 
-	path := "/hit?x=strong-ban"
+	// Dedicated path, served by the origin's default handler: the ban
+	// below is path-scoped, so it must not touch the shared stack's
+	// other entries. A fleet-wide ".*" host ban here previously banned
+	// every object stored for the next 24h (ban TTL) on the shared
+	// cluster — fills by later tests were permanently refused, which
+	// is what made TestStrong_PurgeBatchEndToEnd and
+	// TestStrong_MultiLineVaryVariantIsolation flake in suite runs
+	// while passing alone.
+	path := "/ban-fleet"
 
 	// Prime all alive nodes.
 	for _, i := range s.AliveNodes() {
@@ -119,10 +127,10 @@ func TestStrong_BanPropagation(t *testing.T) {
 		s.Get(t, i, path) // make sure it's a HIT before banning
 	}
 
-	// Issue ban from node 0 with a host_regex that matches the empty string
-	// stored in cached object headers (workaround: ".*" matches "").
-	// This effectively bans all currently cached objects.
-	s.Ban(t, 0, ".*", "")
+	// Issue a path-scoped ban from node 0. The ban predicate matches
+	// the stored X-Bouine-Path header (path only, no query), so this
+	// bans only objects filled from this test's path on every node.
+	s.Ban(t, 0, "", "^/ban-fleet$")
 
 	// In strong mode, HTTP fan-out is synchronous: all peers receive the ban
 	// immediately (no gossip wait needed).
@@ -221,21 +229,31 @@ func TestStrong_FastPathPeerFetch(t *testing.T) {
 	require.Equal(t, originBefore+1, originAfterFill,
 		"the fill must be a single origin request (single-flight collapsed)")
 
-	// Give peer-put and gossip a moment to settle.
-	time.Sleep(300 * time.Millisecond)
+	// The write-to-owner RPC after the fill is fire-and-forget
+	// (builder.go PeerPut goroutine), so the owner may not hold the
+	// object yet — a fixed sleep here raced that RPC on loaded CI
+	// runners and failed phase 2 (the flake). serveWithoutOrigin
+	// instead retries a node's GET until it is served without origin
+	// traffic: a GET that misses the owner re-fills and re-puts (both
+	// idempotent), so every node converges to local/peer serving
+	// within the poll window instead of assuming a sleep was enough.
+	serveWithoutOrigin := func(n int) *driver.Response {
+		var last *driver.Response
+		driver.RetryUntil(t, 5*time.Second, 100*time.Millisecond, func() bool {
+			before := s.OriginRequests()
+			last = s.GetWithHost(t, n, path, host)
+			return s.OriginRequests() == before
+		})
+		return last
+	}
 
-	// 2. Every alive node serves the SAME (path, host): a non-owner
-	//    must HIT without origin traffic. The owner may serve a local
-	//    HIT (also no origin traffic) — either way the origin counter
-	//    must stay flat for every one of these requests.
+	// 2. Every alive node serves the SAME (path, host) without origin
+	//    traffic: the owner from its local store, each non-owner via
+	//    the fast-path peer branch.
 	peerHits := 0
 	for _, n := range s.AliveNodes() {
-		before := s.OriginRequests()
-		resp := s.GetWithHost(t, n, path, host)
+		resp := serveWithoutOrigin(n)
 		require.Equal(t, 200, resp.StatusCode)
-		after := s.OriginRequests()
-		require.Equal(t, before, after,
-			"node %d must serve without origin traffic (local hit or fast-path peer fetch)", n)
 		if src := resp.Header.Get("X-Cache-Source"); src == "peer" {
 			peerHits++
 			require.Equal(t, "HIT", resp.Header.Get("X-Cache"),

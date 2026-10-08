@@ -143,13 +143,19 @@ type Cluster struct {
 	// onPeerRetired, when set, receives peer addresses that stopped
 	// being current (peer left, or restarted at a new address). Set
 	// via SetOnPeerRetired before Join.
-	onPeerRetired func(addr string)
+	onPeerRetired atomic.Pointer[func(addr string)]
 	// onPeerUnretired, when set, receives an address the moment the
 	// ring learns it is current again (a peer added or re-added at
 	// that address). The PeerFetcher uses it to lift a previous
 	// retirement so fetches dial the address again. Set via
 	// SetOnPeerRetired before Join.
-	onPeerUnretired func(addr string)
+	// Both callbacks are stored atomically: memberlist's event
+	// goroutines (started inside memberlist.Create, before the engine
+	// can call SetOnPeerRetired) invoke them from addPeer/removePeer —
+	// the same reason inv and metrics hold atomics. Plain fields raced
+	// with SetOnPeerRetired under -race in the integration suite
+	// (addPeer read the zero value while the engine wrote it).
+	onPeerUnretired atomic.Pointer[func(addr string)]
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue   []gossipBroadcast
@@ -839,16 +845,20 @@ func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	// a retirement may be lifted: a fetch can hold a stale owner
 	// PeerInfo from before a ring change, and clearing the mark from
 	// the fetch path would resurrect a client for a dead address.
-	if addr := peerAddr(info); addr != "" && c.onPeerUnretired != nil {
-		c.onPeerUnretired(addr)
+	if addr := peerAddr(info); addr != "" {
+		if cb := c.onPeerUnretired.Load(); cb != nil {
+			(*cb)(addr)
+		}
 	}
 	// A peer restarting at a new address leaves its old address dead:
 	// retire the old PipelineClient so its worker stops dialing it
 	// (fasthttp cannot stop a worker whose dial fails — see
 	// PeerFetcher.RetireAddress).
-	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+	if existed && name != c.cfg.NodeName {
 		if oldAddr, newAddr := peerAddr(old.Info), peerAddr(info); oldAddr != "" && oldAddr != newAddr {
-			c.onPeerRetired(oldAddr)
+			if cb := c.onPeerRetired.Load(); cb != nil {
+				(*cb)(oldAddr)
+			}
 		}
 	}
 }
@@ -859,9 +869,11 @@ func (c *Cluster) removePeer(name string) {
 	delete(c.peers, name)
 	c.ring.remove(name)
 	c.mu.Unlock()
-	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+	if existed && name != c.cfg.NodeName {
 		if addr := peerAddr(old.Info); addr != "" {
-			c.onPeerRetired(addr)
+			if cb := c.onPeerRetired.Load(); cb != nil {
+				(*cb)(addr)
+			}
 		}
 	}
 }
@@ -1012,6 +1024,6 @@ func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv.Store(&inv) }
 // called before Join. The callbacks must not call back into the
 // Cluster.
 func (c *Cluster) SetOnPeerRetired(retire, unretire func(addr string)) {
-	c.onPeerRetired = retire
-	c.onPeerUnretired = unretire
+	c.onPeerRetired.Store(&retire)
+	c.onPeerUnretired.Store(&unretire)
 }

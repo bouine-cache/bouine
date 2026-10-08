@@ -23,12 +23,11 @@ import (
 // (which cannot be composed from the BuildVaryKey assertion hex the
 // field carries).
 //
-// The test boots a dedicated cluster instead of the shared strong stack:
-// TestStrong_BanPropagation in the shared suite issues a fleet-wide
-// ".*" ban with no created_at exemption (pre-existing behavior), which
-// makes every later fill MISS permanently and would mask this test's
-// observations. All requests carry the CrossNodeHost Host header so
-// every node derives the same cache key (see TestStrong_PurgeBatchEndToEnd).
+// The test boots a dedicated cluster rather than the shared strong
+// stack, so a purge failure cannot be masked by cross-test state and
+// its purged entries cannot leak into later shared-stack tests. All
+// requests carry the CrossNodeHost Host header so every node derives
+// the same cache key (see TestStrong_PurgeBatchEndToEnd).
 //
 // Observed contract: after the purge, the first request for EACH
 // variant is a fresh origin MISS (X-Cache: MISS) on every node. Later

@@ -4,10 +4,13 @@ package integration_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // TestStrong_MultiLineVaryVariantIsolation replays the production
@@ -20,7 +23,6 @@ func TestStrong_MultiLineVaryVariantIsolation(t *testing.T) {
 	s := sharedCluster(t, "strong")
 
 	path := "/vary-multiline?x=isolation"
-	url := s.OriginURL + path
 
 	// Fill the fr/FR variant via node 0.
 	resp := s.GetWithHeaders(t, 0, path, map[string]string{
@@ -46,12 +48,21 @@ func TestStrong_MultiLineVaryVariantIsolation(t *testing.T) {
 	require.Contains(t, body, "lang=it-IT", "node1 must fetch its own italian variant")
 
 	// Back to the french variant via node 0 → HIT with french body.
-	resp = s.GetWithHeaders(t, 0, path, map[string]string{
-		"Accept-Language": "fr-FR,fr;q=0.9",
-		"X-Region":        "FR",
+	// The HIT may arrive via the fast-path/peer branch once the owner
+	// holds the fr variant, but the write-to-owner RPC after node 0's
+	// fill is fire-and-forget (builder.go PeerPut goroutine) — a fixed
+	// sleep or a single GET raced it (the residual flake once the
+	// suite-wide ".*" ban poisoning was removed). Poll instead: a GET
+	// that misses re-fills the fr variant and re-puts it to the owner,
+	// so the HIT converges; the body assertion holds on every
+	// iteration because every fr response — fresh or stored — carries
+	// the fr identity.
+	driver.RetryUntil(t, 5*time.Second, 100*time.Millisecond, func() bool {
+		resp = s.GetWithHeaders(t, 0, path, map[string]string{
+			"Accept-Language": "fr-FR,fr;q=0.9",
+			"X-Region":        "FR",
+		})
+		return resp.Header.Get("X-Cache") == "HIT" &&
+			strings.Contains(string(resp.Body), "lang=fr-FR")
 	})
-	require.Equal(t, "HIT", resp.Header.Get("X-Cache"))
-	require.Contains(t, string(resp.Body), "lang=fr-FR")
-
-	_ = url
 }

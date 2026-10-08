@@ -1,9 +1,11 @@
 package cache
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -427,51 +429,72 @@ func TestFetchAndStore_SameCredentialAlsoNeverCollapses(t *testing.T) {
 // then two concurrent revalidations of the same key collapse to one
 // conditional request.
 func TestFetchAndStore_UndeclaredRouteWarmFlightsStillCollapse(t *testing.T) {
-	t.Parallel()
-
-	var fetches atomic.Int64
-	first := make(chan struct{})
-	origin := func(ctx *fasthttp.RequestCtx) {
-		if fetches.Add(1) == 1 {
-			close(first)
+	// synctest, not wall-clock sleeps: the assertion only holds if both
+	// revalidations overlap the leader's in-flight singleflight entry,
+	// whose window is the fetch's own duration. With a real clock the
+	// follower's parking raced that microscopic window on loaded CI
+	// runners (observed: 3 fetches). Here the origin blocks the second
+	// fetch on a channel, so the bubble's fake clock cannot advance past
+	// the park point and the sequence is deterministic: fill → expire →
+	// both requests park → release → one shared fetch.
+	synctest.Test(t, func(t *testing.T) {
+		var fetches atomic.Int64
+		release := make(chan struct{})
+		origin := func(ctx *fasthttp.RequestCtx) {
+			if fetches.Add(1) == 2 {
+				// Hold the collapsed revalidation open until both
+				// callers are parked (singleflight leader + follower).
+				// The 5s timeout is a broken-run escape: a non-collapsed
+				// run fails on the fetch-count assertion instead of
+				// deadlocking the bubble.
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.WriteString("public")
 		}
-		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
-		ctx.Response.Header.Set(header.ETag, `"v1"`)
-		ctx.SetStatusCode(200)
-		_, _ = ctx.WriteString("public")
-	}
-	h := testHandler(t, origin)
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+		defer store.Close(context.Background())
+		h := NewHandler(HandlerConfig{
+			Upstream:   origin,
+			FastClient: &testFastClient{handler: origin},
+			Store:      store,
+		})
+		defer h.Close(context.Background())
 
-	// Cold fill — sequential, allowed to fetch alone.
-	seed := testCtx("GET", "http://example.com/public")
-	serveRequest(h, seed)
-	require.Equal(t, int64(1), fetches.Load())
+		// Cold fill — sequential, allowed to fetch alone.
+		seed := testCtx("GET", "http://example.com/public")
+		serveRequest(h, seed)
+		synctest.Wait()
+		require.Equal(t, int64(1), fetches.Load())
 
-	// Let the freshness expire so the two concurrent requests below are
-	// warm revalidations (flight key = the stored key).
-	time.Sleep(1100 * time.Millisecond)
+		// Advance past the TTL so the two requests below are warm
+		// revalidations (flight key = the stored key).
+		time.Sleep(2 * time.Second)
 
-	release := make(chan struct{})
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx := testCtx("GET", "http://example.com/public")
-			serveRequest(h, ctx)
-		}()
-	}
-	// Wait for the revalidation fetch(es) to start, then release.
-	deadline := time.Now().Add(3 * time.Second)
-	for fetches.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	wg.Wait()
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx := testCtx("GET", "http://example.com/public")
+				serveRequest(h, ctx)
+			}()
+		}
+		// Both callers are now durably blocked — the leader inside the
+		// origin handler, the follower on the singleflight entry — so
+		// Wait returns and releasing cannot race the park point.
+		synctest.Wait()
+		close(release)
+		wg.Wait()
 
-	require.Equal(t, int64(2), fetches.Load(),
-		"concurrent warm revalidations of one key must collapse to a single origin fetch")
+		require.Equal(t, int64(2), fetches.Load(),
+			"concurrent warm revalidations of one key must collapse to a single origin fetch")
+	})
 }
 
 // TestInvalidatingMethods_EachRequestFetchesItsOwnCopy pins the

@@ -196,10 +196,12 @@ const (
 	XCache = "X-Cache"
 
 	// XCacheSource — bouine's cache source header set on every served
-	// response: "hot", "warm", "peer", "origin", or empty for non-origin
-	// paths (BYPASS, only-if-cached 504). Split from X-Cache so operators
-	// can distinguish where a HIT was served from without scraping the
-	// storage layer.
+	// response: "hot", "warm", "peer", or "origin" (misses, BYPASS, and
+	// error responses all reach the origin). Empty for responses
+	// bouine synthesized itself (only-if-cached 504, shed 503) — the
+	// metrics layer labels that slot "bouine" (see api.SourceBouine).
+	// Split from X-Cache so operators can distinguish where a HIT was
+	// served from without scraping the storage layer.
 	XCacheSource = "X-Cache-Source"
 
 	// XBouineHost — stored on cached objects to record the request Host

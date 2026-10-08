@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -64,6 +65,9 @@ func TestSSE_HintedGet_StreamsUncached(t *testing.T) {
 
 	require.Equal(t, 200, respCode(ctx))
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
+	// BYPASS is proxied uncached from the origin: attributed to it,
+	// matching the miss and streamBypass paths.
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 	require.Equal(t, sseEvents, respBody(ctx))
 
 	// The fetch slot must be released as soon as the headers are in hand:

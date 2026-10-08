@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
 
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -64,6 +65,9 @@ func TestHandler_UpstreamFallbackWhenFastClientNil(t *testing.T) {
 	h.ServeRequest(rr4)
 	require.Equal(t, 200, respCode(rr4))
 	require.Equal(t, "BYPASS", respHeader(rr4, header.XCache))
+	// The bypass response came from the upstream (the origin here), so
+	// the source is attributed to it.
+	require.Equal(t, string(api.SourceOrigin), respHeader(rr4, header.XCacheSource))
 	require.Equal(t, "static-body", respBody(rr4))
 	require.Equal(t, 3, calls)
 }
@@ -120,4 +124,7 @@ func TestHandler_UpstreamFallbackNoUpstream502(t *testing.T) {
 	h.ServeRequest(rr2)
 	require.Equal(t, fasthttp.StatusBadGateway, respCode(rr2))
 	require.Equal(t, "BYPASS", respHeader(rr2, header.XCache))
+	// The 502 is dispatched toward the origin (no client/upstream wired):
+	// it carries the origin attribution like the miss-path 502s do.
+	require.Equal(t, string(api.SourceOrigin), respHeader(rr2, header.XCacheSource))
 }

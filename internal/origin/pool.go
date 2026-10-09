@@ -43,6 +43,10 @@ type Pool struct {
 	// pool after this delay for idempotent methods; the first response
 	// wins (config connect.hedge_timeout). Zero disables hedging.
 	hedgeTimeout time.Duration
+	// preserveHost keeps the request's own Host header on origin-bound
+	// fetches instead of the pool target (config connect.preserve_host).
+	// Read by doSingleFetch and FastHandler via the UseHostHeader flag.
+	preserveHost bool
 	// consecutive5xx is the pool's passive-ejection threshold, kept on
 	// the Pool so the cache-path fetch client (FastClient) can record
 	// passive health exactly like the proxy FastHandler path does
@@ -219,6 +223,17 @@ type PoolConfig struct {
 	// this delay for idempotent methods (GET/HEAD/OPTIONS); the first
 	// response wins. Zero disables hedging.
 	HedgeTimeout time.Duration
+	// PreserveHost keeps the request's own Host header on the
+	// origin-bound request instead of replacing it with the pool
+	// target. The dial target is always the configured pool target —
+	// only the wire-level Host header changes. Origins that derive
+	// behaviour (market, locale, virtual-host routing) from the
+	// request Host need this; host-blind origins keep it off. Zero
+	// (default) preserves the historical behaviour: the origin sees
+	// the pool target as its Host, and request.forwarded:
+	// forwarded.host is the way to tell it which public hostname was
+	// requested.
+	PreserveHost bool
 	// DialTimeout bounds the TCP dial. Zero applies a 10s default.
 	DialTimeout time.Duration
 	// KeepAlive is the TCP keep-alive probe interval. Zero applies a
@@ -316,6 +331,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		logger:         cfg.Logger,
 		ejectFor:       cfg.EjectFor,
 		hedgeTimeout:   cfg.HedgeTimeout,
+		preserveHost:   cfg.PreserveHost,
 		consecutive5xx: cfg.Consecutive5xx,
 		clientConfig: clientConfig{
 			dialTimeout:           resolveDefault(cfg.DialTimeout, defaultDialTimeout),
@@ -409,6 +425,13 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		req.Header.SetMethod(string(ctx.Method()))
 		req.SetRequestURI(uri)
 		req.Header.SetHost(t.url.Host)
+		// Preserve the client's Host on the wire for preserve_host
+		// pools (same UseHostHeader mechanism as doSingleFetch): the
+		// ctx Request carries the client's Host, and VisitAll below
+		// copies it over the pool target set above.
+		if p.preserveHost {
+			req.UseHostHeader = true
+		}
 		//nolint:staticcheck // deprecated but functional
 		ctx.Request.Header.VisitAll(func(k, v []byte) {
 			req.Header.AddBytesKV(k, v)
@@ -579,6 +602,14 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// duplicated sink from adding a third alert.
 	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+	// With an absolute-form request URI, fasthttp's Request.Write
+	// replaces the Host header with the URI's host (the pool target)
+	// unless UseHostHeader is set. Preserving the request's own Host
+	// (already set by the cache handler to the client's Host) is what
+	// preserve_host pools opt into; the dial target is unchanged.
+	if c.pool.preserveHost {
+		req.UseHostHeader = true
+	}
 
 	t.metrics.incActiveConnection(c.pool.Name, t.addr)
 	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)

@@ -89,6 +89,9 @@ config:
   #                                     # keep below any LB idle timeout in the path (AWS NLB: 350s)
   #       response_header_timeout: 30s  # origin wait default inherited by routes without cache.fetch_timeout; keep < 5m (data plane safety net)
   #       hedge_timeout: 50ms           # fire a duplicate request after this delay
+  #       preserve_host: true           # keep the request's Host header on origin fetches
+  #                                     # instead of the pool target; for origins that derive
+  #                                     # behaviour from the Host (market selection, vhost routing)
   upstream_pools: []
   # Header rewrite directives (request.header_set, request.header_remove,
   # response.header_set, response.header_remove) apply per route.

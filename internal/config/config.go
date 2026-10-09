@@ -489,6 +489,15 @@ type ConnectPolicy struct {
 	// primary does not respond within this duration. Zero disables hedging.
 	// Only applies to idempotent methods (GET, HEAD, OPTIONS).
 	HedgeTimeout time.Duration `yaml:"hedge_timeout,omitempty" json:"hedge_timeout,omitempty"`
+	// PreserveHost keeps the request's own Host header on the
+	// origin-bound request instead of replacing it with the pool target.
+	// The dial target is always the configured pool target — only the
+	// wire-level Host header changes. Origins that derive behaviour
+	// from the request Host (market/country selection, virtual-host
+	// routing) need this; host-blind origins keep it off (default).
+	// Host-agnostic cache keys (cache.key.include_host: false) remain
+	// orthogonal: this changes the origin-bound header, not the key.
+	PreserveHost bool `yaml:"preserve_host,omitempty" json:"preserve_host,omitempty"`
 }
 
 // Route declares a host/path match and its per-request behaviour.

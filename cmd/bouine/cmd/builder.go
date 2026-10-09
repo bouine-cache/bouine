@@ -312,6 +312,7 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 		Consecutive5xx:        pc.Health.Passive.Consecutive5xx,
 		EjectFor:              pc.Health.Passive.EjectFor,
 		HedgeTimeout:          buildHedgeTimeout(pc),
+		PreserveHost:          pc.Connect.PreserveHost,
 		Metrics:               metrics,
 		DialTimeout:           pc.Connect.Timeout,
 		KeepAlive:             pc.Connect.KeepAlive,

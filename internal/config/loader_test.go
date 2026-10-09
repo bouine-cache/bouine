@@ -2086,3 +2086,28 @@ routes:
 		})
 	}
 }
+
+func TestParse_PreserveHost(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+    connect:
+      preserve_host: true
+  - name: default-behaviour
+    targets: [other.local:8080]
+routes:
+  - match: { path_prefix: / }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	require.True(t, cfg.UpstreamPools[0].Connect.PreserveHost,
+		"connect.preserve_host: true must decode onto the pool")
+	require.False(t, cfg.UpstreamPools[1].Connect.PreserveHost,
+		"an unset connect.preserve_host must default to false (historical behaviour)")
+	require.NoError(t, cfg.Validate(), "a preserve_host pool with a routed path must validate")
+}

@@ -1,6 +1,6 @@
 # prek configuration for bouine.
 #
-# GO_VERSION_STAMP: 1.27.1
+# GO_VERSION_STAMP: 1.27.2
 #
 # The stamp above is load-bearing, not a decoration. prek-action's CI
 # cache key is the hash of this file (plus OS/arch/python), so stamping
@@ -71,8 +71,12 @@ repos:
   # ---------------------------------------------------------------------
   # Go: format, vet, tests, golangci-lint, mod tidy.
   # ---------------------------------------------------------------------
+  # rev: v2.13.1 is the last release built with go1.27.1, whose bundled
+  # go/types cannot decode go1.27.2's export data (version 5 > maximum
+  # supported 4): typecheck fails with "cannot decode internal/goarch".
+  # The hook rev tracks the toolchain alongside GO_VERSION_STAMP.
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.13.1
+    rev: v2.14.0
     hooks:
       - id: golangci-lint-full
         # On commit, only changed lines (fast). On pre-push the full repo

@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Security
+
+- **Toolchain and `golang.org/x/net` upgraded for GO-2026-6605…GO-2026-6617**
+  — the pinned Go toolchain (`go 1.27.1 → 1.27.2`) fixes the stdlib
+  advisories (`crypto/tls`, `mime/multipart`, the `net/http` HPACK
+  encoder race); `golang.org/x/net v0.59.0 → v0.60.0` fixes the
+  `golang.org/x/net` halves. The same PR syncs every pin of the old
+  version: `GO_VERSION_STAMP` (`.pre-commit-config.yaml` — it keys the
+  CI prek cache), `GO_VERSION` in `ci.yml`/`nightly.yml`/`release.yml`,
+  and the `golang:1.27.2-bookworm` build-stage image (digest-pinned) in
+  the `Dockerfile`. `govulncheck ./...` is clean on 1.27.2 + v0.60.0.
+
 ### Fixed
 
 - **BYPASS traffic is attributed to `origin` on the data-plane metrics** —

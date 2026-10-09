@@ -37,15 +37,16 @@ const (
 	SourceWarm Source = "warm"
 	// SourcePeer — served from a cluster peer via peer-fetch RPC.
 	SourcePeer Source = "peer"
-	// SourceOrigin — fetched from the upstream origin (including error
-	// responses, write-through proxy, and BYPASS).
+	// SourceOrigin — a fetch was dispatched toward the upstream origin:
+	// misses (including failed-fetch error responses), write-through
+	// proxy, and BYPASS.
 	SourceOrigin Source = "origin"
 	// SourceBouine — the response was synthesized by bouine itself (an
-	// only-if-cached 504 or a shed 503): no tier and no origin fetch is
-	// behind it. Carried as an empty X-Cache-Source on the wire; the
-	// metrics layer labels that default slot "bouine" (the same named-
-	// fallback pattern as upstream_pool "_default" and traffic_class
-	// "unclassified").
+	// only-if-cached 504, a shed 503, or the no-client-no-upstream 502):
+	// no tier and no origin fetch is behind it. Carried as an empty
+	// X-Cache-Source on the wire; the metrics layer labels that default
+	// slot "bouine" (the same named-fallback pattern as upstream_pool
+	// "_default" and traffic_class "unclassified").
 	SourceBouine Source = "bouine"
 )
 

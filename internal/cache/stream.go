@@ -250,10 +250,10 @@ func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
 
 // streamBypass fetches the origin response and streams it directly to
 // the client without buffering. Used for BYPASS path where the response
-// is not cached. The response is attributed to the origin
-// (X-Cache-Source: origin) on every branch except the shed 503
-// (writeShed503), where the origin was never reached — the empty source
-// there is labelled "bouine" by the metrics layer.
+// is not cached. A dispatched fetch (success or error) is attributed to
+// the origin; the shed 503 (writeShed503) and the no-client-no-upstream
+// 502 keep the empty source — the origin was never reached — which the
+// metrics layer labels "bouine".
 func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	if h.fastClient == nil {
 		// Upstream fallback (issue #598): a cached-static-route handler
@@ -272,9 +272,12 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
+		// ctx.Error resets the response, so the attribution headers are
+		// written after it. No X-Cache-Source: neither a client nor an
+		// upstream is wired, so no fetch was dispatched — the metrics
+		// layer labels this response "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}

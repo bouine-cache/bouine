@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.28] - 2026-10-09
+
 ### Performance
 
 - **`bouine-cache/xxhash` bumped v3.0.0 → v3.0.1 — XXH3-128 hot loops
@@ -2485,7 +2487,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.27...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.28...HEAD
+[0.5.28]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.28
 [0.5.27]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.27
 [0.5.26]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.26
 [0.5.25]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.25

@@ -26,6 +26,34 @@ the curated, human-readable summary.
   permanent differential test with 2028 C-reference vectors from
   `xxhsum 0.8.4`, hardening the fork against future hash drift.
 
+### Added
+
+- **`connect.preserve_host` keeps the request's own Host header on
+  origin-bound fetches.** The origin pool's fetch paths
+  (`PoolFastClient.doSingleFetch`, the hedged duplicate, and the
+  `FastHandler` bypass) rewrite the request URI to absolute form
+  (`http://pool-target/...`), and fasthttp's `Request.Write` then
+  replaces the outbound Host header with the URI's host — the pool
+  target — whatever Host the request carried. Origins that derive
+  behaviour from the request Host (market/country selection,
+  virtual-host routing) therefore saw the pool target instead of the
+  public hostname. A `preserve_host: true` pool sets fasthttp's
+  `UseHostHeader` flag on every origin-bound fetch, so the request's
+  own Host header (which the cache handler sets to the client's
+  Host) reaches the origin. The dial target is always the configured
+  pool target — only the wire-level Host header changes — and the
+  cache key, `Vary` variant key, `X-Bouine-Host` attribution,
+  ban/purge matching, and `request.forwarded` are untouched (the flag
+  lives on the outbound copy only). Default `false`: host-blind
+  origins keep the historical behaviour exactly, and
+  `request.forwarded: forwarded.host` remains the telling mechanism
+  for origins that read `X-Forwarded-Host`. Pinned by wire-level unit
+  tests (default keeps the pool target as Host, preserve_host
+  forwards the request Host, the hedge duplicate keeps it too, the
+  `FastHandler` proxy path keeps it) and by integration tests on a
+  `preserve_host` cluster against an origin that echoes its received
+  Host.
+
 ### Security
 
 - **Toolchain and `golang.org/x/net` upgraded for GO-2026-6605…GO-2026-6617**

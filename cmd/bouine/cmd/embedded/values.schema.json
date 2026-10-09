@@ -273,6 +273,10 @@
                     "description": "Fire a duplicate request after this duration; first response wins. Empty disables.",
                     "type": "string",
                     "pattern": "^$|^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "preserve_host": {
+                    "description": "Keep the request's Host header on origin-bound requests instead of replacing it with the pool target. The dial target stays the configured pool target. Enable for origins that derive behaviour from the request Host (market selection, vhost routing). Default false.",
+                    "type": "boolean"
                   }
                 }
               }

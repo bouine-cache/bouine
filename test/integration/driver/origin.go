@@ -165,6 +165,13 @@ func originRouteHandler(ctx *fasthttp.RequestCtx) {
 	case "/echo":
 		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
 		fmt.Fprintf(ctx, "uri %s", ctx.RequestURI())
+	case "/host-echo":
+		// Echoes the Host header received on the wire, so integration
+		// tests can assert which Host the origin-bound request carried
+		// (preserve_host pools). no-store: the Host varies per client,
+		// so the body must never be cached or shared in-flight.
+		ctx.Response.Header.Set("Cache-Control", "no-store")
+		fmt.Fprintf(ctx, "host %s", ctx.Host())
 	default:
 		ctx.Response.Header.Set("Cache-Control", "max-age=5, stale-if-error=60, stale-while-revalidate=60")
 		fmt.Fprintf(ctx, "chaos %s at %s", ctx.Path(), time.Now().Format(time.RFC3339Nano))

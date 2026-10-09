@@ -79,6 +79,9 @@ type ClusterStack struct {
 	// experimentalYAML lines are appended to every node config under
 	// the experimental: section (nil = no section).
 	experimentalYAML []string
+	// preserveHost retains the pool's connect.preserve_host setting so
+	// RestartNode rebuilds the same config BootCluster originally wrote.
+	preserveHost bool
 }
 
 // OriginRequests returns the total number of requests the stack's
@@ -86,6 +89,13 @@ type ClusterStack struct {
 // after to prove the request was served without an origin fetch.
 func (s *ClusterStack) OriginRequests() int64 {
 	return s.originCtl.Requests()
+}
+
+// OriginHost returns the bare host:port of the stack's shared origin,
+// which is the pool-target Host a default (non-preserve_host) pool
+// presents to the origin. Integration tests assert against it.
+func (s *ClusterStack) OriginHost() string {
+	return s.origin.addr
 }
 
 // ClusterOptions configures BootCluster.
@@ -102,6 +112,10 @@ type ClusterOptions struct {
 	// node. Both default off; the peer flag requires the fast path.
 	ExperimentalH1FastPath     bool
 	ExperimentalH1FastPeerPath bool
+	// PreserveHost sets connect.preserve_host on the origin pool of
+	// every node, so integration tests can cover the origin-bound Host
+	// header behaviour (the origin echoes its Host on /host-echo).
+	PreserveHost bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -184,6 +198,8 @@ type nodeConfigParams struct {
 	// experimental lines rendered verbatim under the experimental:
 	// section (nil = omit the section entirely).
 	experimental []string
+	// preserveHost renders connect.preserve_host on the origin pool.
+	preserveHost bool
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -210,6 +226,8 @@ cluster:
 upstream_pools:
   - name: origin
     targets: [%q]
+    connect:
+      preserve_host: %t
 routes:
   - match:
       path_prefix: /api/v1/
@@ -237,7 +255,7 @@ routes:
       ttl_default: 60s
 `,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
-		p.originAddr)
+		p.originAddr, p.preserveHost)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -321,6 +339,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			s.experimentalYAML = append(s.experimentalYAML, "  h1_fast_peer_path: true")
 		}
 	}
+	s.preserveHost = opts.PreserveHost
 
 	// Write configs and start each node.
 	for i := range 3 {
@@ -343,6 +362,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			hotMaxBytes:  opts.HotMaxBytes,
 			tls:          tlsOpts,
 			experimental: s.experimentalYAML,
+			preserveHost: opts.PreserveHost,
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
@@ -503,6 +523,7 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		hotMaxBytes:  s.hotMaxBytes,
 		tls:          tlsOpts,
 		experimental: s.experimentalYAML,
+		preserveHost: s.preserveHost,
 	})
 
 	suffix := "-restart"

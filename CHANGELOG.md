@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Performance
+
+- **`bouine-cache/xxhash` bumped v3.0.0 → v3.0.1 — XXH3-128 hot loops
+  unrolled for register allocation** — the upstream fork's scalar unroll
+  keeps the eight hash accumulators in registers instead of spilling
+  them every lane (the same unroll the official C reference uses).
+  Output is bit-for-bit identical, so cache keys and stored objects stay
+  valid across rolling deploys. Hit-path benchmarks (`benchstat`, n=10,
+  Apple M5): `FastPath_Hit` −7.8%, `Evaluate_Hit` −7.5%,
+  `H1Parse_Get` −4.6%, `Reactor_Hit` −3.7%, `BuildKey` family −4–6.5%,
+  `BuildKey_LongURL` −8.1%; upstream microbench: XXH3-128 +68% geomean
+  throughput. Zero B/op and allocs/op change on every gated benchmark;
+  all 35 `make bench-gate` budgets pass unchanged. v3.0.1 also adds a
+  permanent differential test with 2028 C-reference vectors from
+  `xxhsum 0.8.4`, hardening the fork against future hash drift.
+
 ### Security
 
 - **Toolchain and `golang.org/x/net` upgraded for GO-2026-6605…GO-2026-6617**

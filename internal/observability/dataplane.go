@@ -321,7 +321,12 @@ const (
 	// code costs one series instead of a histogram's bucket series.
 	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
 	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
-	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,BOUINE=4
+	// metricSourceSlots bounds the source axis: HOT=0,WARM=1,PEER=2,
+	// ORIGIN=3,BOUINE=4. The set is declared once, as data, in
+	// TestSourceLabelSetClosed, which fails when any encoding of it
+	// (this bound, sourceIndex, sourceIndexBytes, normaliseSource, the
+	// middleware index switch) drifts out of sync.
+	metricSourceSlots = 5
 	// metricClassSlots bounds the traffic_class axis: "unclassified"
 	// (index 0) + the config cap of 8 classes. Static array bound so
 	// the per-pool tables stay one allocation; unused slots cost
@@ -455,7 +460,9 @@ func sourceIndex(s string) int {
 }
 
 // sourceIndexBytes is sourceIndex over a []byte, zero-alloc: the switch
-// form lets the compiler elide the string([]byte) conversion.
+// form lets the compiler elide the string([]byte) conversion. Kept in
+// lockstep with sourceIndex — TestSourceLabelSetClosed fails the build
+// if the two encodings drift.
 func sourceIndexBytes(s []byte) int {
 	switch string(s) {
 	case string(api.SourceHot):
@@ -466,6 +473,8 @@ func sourceIndexBytes(s []byte) int {
 		return 2
 	case string(api.SourceOrigin):
 		return 3
+	case string(api.SourceBouine):
+		return 4
 	case "":
 		return 4
 	default:

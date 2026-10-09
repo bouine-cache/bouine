@@ -24,6 +24,30 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **The SSE no-client 502 lost its `X-Cache: BYPASS` header to the response
+  reset** — in `handleSSE`'s no-`FastClient` branch, the attribution
+  headers were written *before* `ctx.Error`, whose `Response.Reset()` wipes
+  every response header, so the 502 shipped with neither `X-Cache` nor
+  `X-Cache-Source` and the metrics layer classified it as `MISS` (not
+  BYPASS). The reset now runs before the headers are written, matching the
+  sibling 50x branches. A duplicated `X-Cache` set in the same branch was
+  removed.
+- **The no-client-no-upstream 502 is back on the `bouine` source slot
+  (was briefly `origin`)** — the preceding BYPASS-attribution change had
+  labelled the "no fast client configured and no upstream" 502 with
+  `X-Cache-Source: origin`, but no fetch was ever dispatched toward an
+  origin; by the same predicate as the shed 503 and the only-if-cached 504
+  (nothing dispatched → empty wire source, metrics label `bouine`) the
+  misconfiguration 502 now keeps the empty source. Fetch-error 502s — where
+  an origin fetch was attempted and failed — keep the `origin` attribution.
+  Series-identity note: the `BYPASS`/`origin` series for this population
+  (misconfigured deployments only) moves to `bouine`.
+- **The closed `source` label set is now pinned by a cross-invariant test**
+  — `metricSourceSlots`, `sourceIndex`, `sourceIndexBytes`,
+  `normaliseSource`, and the middleware index switch were four hand-synced
+  encodings of one set (`sourceIndexBytes` had already drifted: no
+  `bouine` case). `TestSourceLabelSetClosed` declares the set once, as
+  data, and fails the build when any encoding drifts again.
 - **BYPASS traffic is attributed to `origin` on the data-plane metrics** —
   BYPASS responses are proxied uncached from the upstream, but no bypass
   path ever set `X-Cache-Source`, so the whole BYPASS population landed on

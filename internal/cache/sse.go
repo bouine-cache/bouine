@@ -36,9 +36,10 @@ import (
 //     a few dozen concurrent streams starve every other request on the
 //     route.
 //
-// BYPASS responses are attributed to the origin (X-Cache-Source: origin),
-// matching the miss and streamBypass paths; only the shed 503 keeps the
-// empty source (metrics label "bouine").
+// BYPASS responses carry X-Cache-Source: origin on every branch that
+// dispatched a fetch (success or fetch-error 502). The no-client 502
+// below, like the shed 503, keeps the empty source — the origin was
+// never reached — which the metrics layer labels "bouine".
 //
 // Cache-invalidation semantics for POST/PUT/DELETE are preserved: on a
 // 2xx/3xx response the affected keys are purged as soon as the status is
@@ -46,11 +47,16 @@ import (
 // invalidation indefinitely).
 func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-		h.applyResponseRewrites(&ctx.Response.Header)
+		// ctx.Error resets the response (fasthttp RequestCtx.Error),
+		// wiping every header written before it, so it must run first
+		// and the attribution headers after — the same order as the
+		// sibling 50x branches (handleBypassFast, streamBypass,
+		// handleCacheMiss). No X-Cache-Source: no fetch was ever
+		// dispatched, so the metrics layer labels this response
+		// "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 

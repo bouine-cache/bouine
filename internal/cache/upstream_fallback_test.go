@@ -124,7 +124,9 @@ func TestHandler_UpstreamFallbackNoUpstream502(t *testing.T) {
 	h.ServeRequest(rr2)
 	require.Equal(t, fasthttp.StatusBadGateway, respCode(rr2))
 	require.Equal(t, "BYPASS", respHeader(rr2, header.XCache))
-	// The 502 is dispatched toward the origin (no client/upstream wired):
-	// it carries the origin attribution like the miss-path 502s do.
-	require.Equal(t, string(api.SourceOrigin), respHeader(rr2, header.XCacheSource))
+	// No fetch was ever dispatched (no client, no upstream wired): the
+	// 502 is synthesized by bouine itself, so the wire source stays
+	// empty — the metrics layer labels it "bouine" (the same predicate
+	// as the shed 503 and the only-if-cached 504, not "origin").
+	require.Equal(t, "", respHeader(rr2, header.XCacheSource))
 }

@@ -361,6 +361,43 @@ func TestSourceIndex(t *testing.T) {
 	assert.Equal(t, -1, sourceIndex("unknown"))
 }
 
+// TestSourceLabelSetClosed declares the closed source-label set once, as
+// data, and fails when any hand-synced encoding of it drifts:
+// metricSourceSlots (the poolMetrics array bound), sourceIndex and
+// sourceIndexBytes (slot lookup), normaliseSource (label passthrough and
+// default collapse), and the middleware index switch (reached end-to-end
+// by TestFastHTTPMiddleware_SourceLabel_Default). A new api.Source value
+// added without touching every encoding breaks this test instead of
+// silently collapsing into the "bouine" default slot.
+func TestSourceLabelSetClosed(t *testing.T) {
+	t.Parallel()
+	set := []string{
+		string(api.SourceHot),
+		string(api.SourceWarm),
+		string(api.SourcePeer),
+		string(api.SourceOrigin),
+		string(api.SourceBouine),
+	}
+	require.Equal(t, metricSourceSlots, len(set),
+		"metricSourceSlots must bound exactly the declared source set")
+
+	for i, s := range set {
+		assert.Equal(t, i, sourceIndex(s), "sourceIndex(%q)", s)
+		assert.Equal(t, i, sourceIndexBytes([]byte(s)), "sourceIndexBytes(%q)", s)
+		assert.Equal(t, s, normaliseSource(s), "normaliseSource(%q) passes through", s)
+	}
+
+	// The wire alias of the bouine slot: an empty X-Cache-Source and any
+	// unknown or spoofed value all collapse into it.
+	last := len(set) - 1
+	assert.Equal(t, last, sourceIndex(""), "empty wire value aliases the bouine slot")
+	assert.Equal(t, last, sourceIndexBytes([]byte("")), "empty wire value aliases the bouine slot")
+	assert.Equal(t, set[last], normaliseSource(""))
+	assert.Equal(t, set[last], normaliseSource("evil-tier-99999"))
+	assert.Equal(t, -1, sourceIndex("unknown"), "unknown values stay unindexed; the middleware default collapses them")
+	assert.Equal(t, -1, sourceIndexBytes([]byte("unknown")), "unknown values stay unindexed; the middleware default collapses them")
+}
+
 func TestAccessLogMessage(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "served cache hit", accessLogMessage("HIT", 200))

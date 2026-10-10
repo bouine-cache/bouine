@@ -35,9 +35,9 @@ func TestHandoffTracker_WorkerPoolServesConcurrentMisses(t *testing.T) {
 	const n = 32
 	var wg sync.WaitGroup
 	var served atomic.Int32
-	for i := range n {
+	for range n {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			client, server := net.Pipe()
 			defer client.Close()
@@ -55,7 +55,7 @@ func TestHandoffTracker_WorkerPoolServesConcurrentMisses(t *testing.T) {
 				}
 			}
 			served.Add(1)
-		}(i)
+		}()
 	}
 	wg.Wait()
 	assert.Equal(t, int32(n), served.Load(), "every miss job must be served")

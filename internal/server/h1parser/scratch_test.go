@@ -24,7 +24,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	req, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
+	req, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, 0, &scratch)
 	require.NoError(t, err)
 	require.False(t, fallThrough)
 	assert.Equal(t, "GET", req.Method)
@@ -39,7 +39,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	// reuses the scratch struct. Note: a real keep-alive connection reads
 	// the second request into the same readBuf, which is truncated to
 	// [:0] before reading, so stale header slices are overwritten.
-	req2, fallThrough2, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch)
+	req2, fallThrough2, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, 0, &scratch)
 	require.NoError(t, err)
 	require.False(t, fallThrough2)
 	assert.Equal(t, "POST", req2.Method)
@@ -63,12 +63,12 @@ func TestParseRequest_MalformedSecondRequest(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	_, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
+	_, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, 0, &scratch)
 	require.NoError(t, err)
 
 	// Malformed second request returns an error and must not observe
 	// stale state from the first.
-	_, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch)
+	_, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, 0, &scratch)
 	require.Error(t, err)
 	assert.True(t, fallThrough)
 	// The scratch was reset: NHeaders is 0 before the parse error

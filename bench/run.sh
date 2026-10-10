@@ -59,8 +59,22 @@
 #                                      BuildVaryKey; branch amortizes a network
 #                                      round-trip)
 #   H1Parse_Get:                      0
+#   H1Parse_Get_Headers8:              0  (production-shaped head: long
+#                                      request line + 8 canonical headers;
+#                                      keeps the per-header scan cost
+#                                      visible — the toy 2-header gates
+#                                      hide it)
 #   Reactor_Hit:                      0  (epoll reactor batch serving;
 #                                      parse+TryHit+serialize+flush)
+#   Reactor_Hit_Headers8:              0  (same, production-shaped head)
+#   Reactor_MissRoundTrip:             4  (worker pool dispatch + Serve miss
+#                                      cycle + return-hook reuse + recycle;
+#                                      was ~45 KiB + spawn per round trip
+#                                      before the pool — the remaining allocs
+#                                      are fasthttp's header parser)
+#   FallThrough_Pooled:                2  (pooled RequestCtx + head into the
+#                                      pooled buffer + owned leftover copy;
+#                                      the 16 KiB bufio is pooled)
 
 set -euo pipefail
 
@@ -107,7 +121,9 @@ declare -A BUDGETS=(
     [VaryKey_CookiePresenceRaw]=4
     [VaryKey_NoPresenceZeroCost]=2
     [H1Parse_Get]=0
+    [H1Parse_Get_Headers8]=0
     [Reactor_Hit]=0
+    [Reactor_Hit_Headers8]=0
     [Reactor_Hit_Metrics]=0
     # Middleware_Miss: 12 — the traffic_class access-log attribute
     # grows the attrs slice past the small-array threshold: +1 alloc,
@@ -128,6 +144,8 @@ declare -A BUDGETS=(
 # the stale-budget check stays honest on darwin.
 if [ "$(go env GOOS)" = "linux" ]; then
     BUDGETS[Reactor_Dispatch]=0
+    BUDGETS[Reactor_MissRoundTrip]=4
+    BUDGETS[FallThrough_Pooled]=2
 fi
 
 run_bench() {

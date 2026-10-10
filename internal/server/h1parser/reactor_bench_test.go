@@ -90,6 +90,62 @@ func BenchmarkGate_Reactor_Hit(b *testing.B) {
 	}
 }
 
+// BenchmarkGate_Reactor_Hit_Headers8 measures the same reactor hit core
+// as BenchmarkGate_Reactor_Hit, but on a production-shaped request head
+// (a long request line with a query plus the eight canonical
+// browser/proxy headers, ~500 B) instead of the 2-header toy request.
+// The toy head hides the per-header scan cost that dominates real parse
+// time (~22 ns/header measured, docs/plans/h1-reactor-perf-round-5.md);
+// this gate keeps that cost visible and allocation-free.
+func BenchmarkGate_Reactor_Hit_Headers8(b *testing.B) {
+	p := New(nil, noopHandler, WithScheme("http"))
+	fp := &hitFastPath{}
+	p.fastPath = fp
+
+	reqBytes := benchRealisticHead(8)
+	fio := &fakeIO{}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	defer rc.release()
+
+	fp.resp = api.FastPathResponse{
+		BuffersArr: [3][]byte{
+			[]byte("HTTP/1.1 200 OK\r\n"),
+			[]byte("Content-Length: 5\r\nContent-Type: text/plain\r\n\r\n"),
+			[]byte("hello"),
+		},
+	}
+	fp.resp.Buffers = fp.resp.BuffersArr[:3]
+
+	src := &sliceReader{}
+	rc.readFn = func(b2 []byte) (int, error) {
+		if src.off >= len(src.buf) {
+			return 0, errAgain
+		}
+		n := copy(b2, src.buf[src.off:])
+		src.off += n
+		return n, nil
+	}
+
+	rc.writeVecFn = func(iovs [][]byte) (int, error) {
+		total := 0
+		for _, b := range iovs {
+			total += len(b)
+		}
+		return total, nil
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		src.buf = reqBytes
+		src.off = 0
+		rc.rLen = 0
+		if act := rc.advance(); act != actWaitRead {
+			b.Fatalf("advance = %d, want %d (flush completes inline)", act, actWaitRead)
+		}
+	}
+}
+
 // BenchmarkGate_Reactor_Hit_Metrics measures the reactor hit core with
 // production's metrics wiring: the metrics ring (W3), not a direct
 // hook call — the ring push is what the loop goroutine actually pays

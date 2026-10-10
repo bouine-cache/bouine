@@ -70,7 +70,7 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	_, ftErr := parser.handleFallThrough(serverConn, req, excess)
+	_, _, ftErr := parser.handleFallThrough(serverConn, req, excess)
 	require.NoError(t, ftErr)
 	_ = serverConn.Close()
 	<-done
@@ -82,7 +82,8 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 
 // TestServe_PipelinedBytesAfterHit verifies that bytes pipelined after
 // a cache-hit request's headers (the start of the next request) are not
-// discarded: the connection must process them as the next request.
+// discarded: the connection must process them as the next request,
+// served as itself on the same connection.
 func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 	t.Parallel()
 
@@ -116,13 +117,22 @@ func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 	resp1 := &fasthttp.Response{}
 	require.NoError(t, resp1.Read(reader))
 	assert.Equal(t, 200, resp1.StatusCode())
-	// The second (miss) response must also arrive — its pipelined bytes
-	// were buffered after the first hit.
+	// The second response must also arrive — its pipelined bytes were
+	// buffered after the first hit. mockFastPathHit hits every path, so
+	// the follower is itself served as a hit (previously the fallback
+	// re-served the already-served first request instead of the
+	// follower).
 	resp2 := &fasthttp.Response{}
 	require.NoError(t, resp2.Read(reader))
 	assert.Equal(t, 200, resp2.StatusCode())
-	assert.Equal(t, "miss", string(resp2.Body()))
-	require.Equal(t, 1, handlerCalls, "the pipelined miss must reach the fallback handler")
+	assert.Equal(t, "hello", string(resp2.Body()),
+		"the follower must be served as itself — a hit — not re-fed to the fallback")
+	require.Equal(t, 0, handlerCalls,
+		"the follower must reach the fast path, not the fallback handler")
+	// The follower asked for Connection: close (RFC 9110 §9.6): its
+	// response carries the close header and Serve exits without
+	// reading further.
+	assert.Equal(t, "close", string(resp2.Header.Peek("Connection")))
 
 	_ = client.Close()
 	select {

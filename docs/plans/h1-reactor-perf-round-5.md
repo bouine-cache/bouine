@@ -62,6 +62,55 @@ round-5 plan is written against #605's reactor (return-to-reactor,
   reactorConn pooling) — the plan's rejection of inline pipelining is
   superseded by #605's implementation and its e2e/parity evidence.
 
+## Reactor vs blocking fast path — A/B result (2026-10-10)
+
+The on-demand `reactor-ab` workflow (added with the A/B arms) ran the
+full comparison on a GitHub-hosted arm64 Linux runner — identical
+fresh-response stub, identical request bytes, same run, medians of
+n=15 (run 38082318433):
+
+| arm | p50 | p99 |
+|---|---|---|
+| echo floor (control) | 6.9 µs | 9.9 µs |
+| **blocking fast path, toy head** | **7.6 µs** | **12.0 µs** |
+| **reactor, toy head** | 16.7 µs | 21.4 µs |
+| blocking, 8-header head | 8.0 µs | 12.8 µs |
+| reactor, 8-header head | 16.9 µs | 22.2 µs |
+| blocking, 1 / 4 / 16 clients | 7.6 / 21.5 / 53.3 µs | 11.8 / 55.4 / 158 µs |
+| reactor, 1 / 4 / 16 clients | 16.6 / 22.5 / 78.2 µs | 21.4 / 63.4 / 208 µs |
+
+**Verdict: the reactor is still not faster — ~2.2x slower at p50 and
+~1.8x at p99 on a keep-alive connection, and slower at every concurrency
+(1/4/16 clients).** The previous verdict stands on this hardware class:
+
+- The blocking path is within ~10% of the raw echo floor (7.6 vs
+  6.9 µs): the Go runtime's netpoller park/wake is already cheap, and
+  the hit runs on an already-scheduled goroutine. The reactor trades
+  that for the locked-OS-thread wake chain — every request on a low-
+  concurrency connection pays the epoll_wait wake plus the loop's
+  serialized CPU, which costs ~9 µs here.
+- The realistic head is noise in the RTT (blocking +0.45 µs, reactor
+  +0.27 µs): scheduling dominates; the vectorized parse (W1) matters
+  for loop CPU, not for single-client RTT.
+- At 16 clients the single serialized loop degrades faster (78 vs
+  53 µs p50) than goroutine-per-connection scaling across Ps.
+
+Caveats: this is a shared cloud runner, not the pinned nightly runner
+(CPU affinity, dedicated cores) where ADR-0041's batch-amortization win
+was expected; the pinned-runner stress A/B (pending for #605's
+return-path work) remains the authoritative end-to-end verdict. But
+every measurement to date — round-4 RTT (10.2 vs 5.3 µs), the external
+vegeta harness (zero benefit), and this A/B — points the same way on
+commodity hardware. Per ADR-0041's own criterion ("if the nightly
+numbers don't move, the flag goes back off"), the reactor flag decision
+owes itself a pinned-runner verdict.
+
+Two latent A/B-harness bugs were found and fixed while building this
+(the read loops counted only the body, stranding stale response bytes;
+the shared-response stub drained under blocking serveHit's
+net.Buffers.WriteTo, serving empty bodies from the second hit) — both
+in the benchmarks, not production paths.
+
 ## Where the reactor stands (written against #605)
 
 Rounds 1–4 landed: single-goroutine epoll loop per listener, raw-fd

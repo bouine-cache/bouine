@@ -176,7 +176,26 @@ func BenchmarkSingle_Reactor_KeepAliveRTT(b *testing.B) {
 			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
 		}
 		first = false
-		measureReactorRTT(b, false)
+		measureReactorRTT(b, false, benchHitReq)
+	}
+}
+
+// BenchmarkSingle_Reactor_KeepAliveRTT_Headers8 is the same
+// user-standpoint RTT measurement on a production-shaped request head
+// (long request line + the 8 canonical browser/proxy headers, ~500 B):
+// the shape where per-request parse cost is real. Paired with
+// BenchmarkSingle_BlockingServeRTTControl_Headers8 — both arms use the
+// identical staticFastPath stub, so the delta is purely transport,
+// scheduling, and parse machinery. Single-shot: -benchtime=1x
+// -count=10.
+func BenchmarkSingle_Reactor_KeepAliveRTT_Headers8(b *testing.B) {
+	first := true
+	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
+		measureReactorRTT(b, false, benchRealisticHead(8))
 	}
 }
 
@@ -192,14 +211,15 @@ func BenchmarkSingle_Reactor_ConnectRTT(b *testing.B) {
 			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
 		}
 		first = false
-		measureReactorRTT(b, true)
+		measureReactorRTT(b, true, benchHitReq)
 	}
 }
 
 // measureReactorRTT drives N request/response cycles through a real
 // listener and reports per-cycle RTT plus p50/p99 as metrics. freshConns
-// re-dials per cycle (connect path); otherwise one keep-alive conn.
-func measureReactorRTT(b *testing.B, freshConns bool) {
+// re-dials per cycle (connect path); otherwise one keep-alive conn. req
+// is the request bytes written each cycle.
+func measureReactorRTT(b *testing.B, freshConns bool, req []byte) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatalf("listen: %v", err)
@@ -240,7 +260,7 @@ func measureReactorRTT(b *testing.B, freshConns bool) {
 		defer func() { _ = conn.Close() }()
 		// Warm: one full cycle so the first sample does not pay
 		// accept/registration.
-		_, _ = conn.Write(benchHitReq)
+		_, _ = conn.Write(req)
 		got := 0
 		for got < len(body) {
 			n, rerr := conn.Read(buf)
@@ -259,7 +279,7 @@ func measureReactorRTT(b *testing.B, freshConns bool) {
 			}
 		}
 		start := time.Now()
-		if _, err := conn.Write(benchHitReq); err != nil {
+		if _, err := conn.Write(req); err != nil {
 			b.Fatalf("write: %v", err)
 		}
 		got := 0
@@ -380,12 +400,39 @@ func BenchmarkSingle_BlockingServeRTTControl(b *testing.B) {
 			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
 		}
 		first = false
-		measureBlockingServeRTT(b)
+		measureBlockingServeRTT(b, &mockFastPathHit{}, "hello", benchHitReq)
+	}
+}
+
+// BenchmarkSingle_BlockingServeRTTControl_Headers8 is the twin of
+// BenchmarkSingle_Reactor_KeepAliveRTT_Headers8: the same
+// production-shaped head, the same staticFastPath stub, the same
+// response bytes — served by the blocking Parser instead of the
+// reactor loop. The pair's delta is the reactor's net effect on the
+// hit RTT at real-world request sizes. Single-shot: -benchtime=1x
+// -count=10.
+func BenchmarkSingle_BlockingServeRTTControl_Headers8(b *testing.B) {
+	first := true
+	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
+		body := "rtt-body"
+		resp := &api.FastPathResponse{
+			BuffersArr: [3][]byte{
+				[]byte("HTTP/1.1 200 OK\r\n"),
+				[]byte("Content-Length: " + strconv.Itoa(len(body)) + "\r\nContent-Type: text/plain\r\n\r\n"),
+				[]byte(body),
+			},
+		}
+		resp.Buffers = resp.BuffersArr[:3]
+		measureBlockingServeRTT(b, &staticFastPath{resp: resp}, body, benchRealisticHead(8))
 	}
 }
 
 // measureBlockingServeRTT is measureReactorRTT's twin over Parser.Serve.
-func measureBlockingServeRTT(b *testing.B) {
+func measureBlockingServeRTT(b *testing.B, fp api.FastPathHandler, body string, req []byte) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatalf("listen: %v", err)
@@ -393,9 +440,7 @@ func measureBlockingServeRTT(b *testing.B) {
 	defer func() { _ = ln.Close() }()
 
 	p := New(nil, noopHandler, WithScheme("http"))
-	fp := &mockFastPathHit{}
 	p.fastPath = fp
-	body := "hello"
 	go func() {
 		for {
 			conn, aerr := ln.Accept()
@@ -420,7 +465,7 @@ func measureBlockingServeRTT(b *testing.B) {
 	rtts := make([]time.Duration, 0, samples)
 	for range samples {
 		start := time.Now()
-		if _, err := conn.Write(benchHitReq); err != nil {
+		if _, err := conn.Write(req); err != nil {
 			b.Fatalf("write: %v", err)
 		}
 		got := 0
@@ -492,6 +537,113 @@ func measureReactorRTTConcurrent(b *testing.B, clients int) {
 	}
 	resp.Buffers = resp.BuffersArr[:3]
 	fp.resp = resp
+
+	const perClient = 2000
+	results := make(chan []time.Duration, clients)
+	var wg sync.WaitGroup
+	for range clients {
+		conn, derr := net.Dial("tcp", ln.Addr().String())
+		if derr != nil {
+			b.Fatalf("dial: %v", derr)
+		}
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer func() { _ = c.Close() }()
+			buf := make([]byte, 512)
+			rtts := make([]time.Duration, 0, perClient)
+			// Warm cycle.
+			_, _ = c.Write(benchHitReq)
+			got := 0
+			for got < len(body) {
+				n, _ := c.Read(buf)
+				got += n
+			}
+			for range perClient {
+				start := time.Now()
+				if _, werr := c.Write(benchHitReq); werr != nil {
+					return
+				}
+				got := 0
+				for got < len(body) {
+					n, rerr := c.Read(buf)
+					if rerr != nil {
+						return
+					}
+					got += n
+				}
+				rtts = append(rtts, time.Since(start))
+			}
+			results <- rtts
+		}(conn)
+	}
+	wg.Wait()
+	close(results)
+	var all []time.Duration
+	for r := range results {
+		all = append(all, r...)
+	}
+	slices.Sort(all)
+	b.ReportMetric(float64(all[len(all)/2].Nanoseconds()), "p50-ns")
+	b.ReportMetric(float64(all[len(all)*99/100].Nanoseconds()), "p99-ns")
+}
+
+// BenchmarkSingle_BlockingServe_ConcurrencySweep is the blocking-path
+// twin of BenchmarkSingle_Reactor_ConcurrencySweep: the same N
+// keep-alive clients driving sequential request/response cycles, served
+// by goroutine-per-connection Parser.Serve with the same staticFastPath
+// stub and request bytes. Comparing the two sweeps at the same client
+// count is the reactor-vs-blocking answer under load: closed-loop RPS
+// is clients divided by per-request RTT, so whichever path's p50/p99 is
+// lower serves more requests. Single-shot: -benchtime=1x -count=10.
+func BenchmarkSingle_BlockingServe_ConcurrencySweep(b *testing.B) {
+	for _, clients := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("clients-%d", clients), func(b *testing.B) {
+			first := true
+			for b.Loop() {
+				if !first {
+					b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+				}
+				first = false
+				measureBlockingServeRTTConcurrent(b, clients)
+			}
+		})
+	}
+}
+
+// measureBlockingServeRTTConcurrent is measureReactorRTTConcurrent's
+// twin over Parser.Serve (goroutine per connection, runtime netpoller
+// park/wake — the scheduling model ADR-0041 replaced with the reactor).
+func measureBlockingServeRTTConcurrent(b *testing.B, clients int) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	p := New(nil, noopHandler, WithScheme("http"))
+	body := "rtt-body"
+	resp := &api.FastPathResponse{
+		BuffersArr: [3][]byte{
+			[]byte("HTTP/1.1 200 OK\r\n"),
+			[]byte("Content-Length: " + strconv.Itoa(len(body)) + "\r\nContent-Type: text/plain\r\n\r\n"),
+			[]byte(body),
+		},
+	}
+	resp.Buffers = resp.BuffersArr[:3]
+	p.fastPath = &staticFastPath{resp: resp}
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				_ = p.Serve(c)
+			}(conn)
+		}
+	}()
 
 	const perClient = 2000
 	results := make(chan []time.Duration, clients)

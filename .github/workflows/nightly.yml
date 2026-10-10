@@ -277,9 +277,18 @@ jobs:
           for os_arch in "${platforms[@]}"; do
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
+            # Linux artifacts use the same microarchitecture floors as the
+            # container image (GOAMD64=v3, GOARM64=v8.1 — see the Dockerfile
+            # build stage); darwin stays at baseline (mixed dev-laptop fleets).
+            GO_MICRO=""
+            if [ "${GOOS}/${GOARCH}" = "linux/amd64" ]; then
+              GO_MICRO="GOAMD64=v3"
+            elif [ "${GOOS}/${GOARCH}" = "linux/arm64" ]; then
+              GO_MICRO="GOARM64=v8.1"
+            fi
             bin="bouine-nightly-${GOOS}-${GOARCH}"
-            echo ">> building $bin"
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
+            echo ">> building $bin ${GO_MICRO:-baseline}"
+            env CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH $GO_MICRO go build \
               -trimpath \
               -ldflags "-s -w \
                 -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$VERSION \

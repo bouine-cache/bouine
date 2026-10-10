@@ -44,6 +44,30 @@ func SetTCPFastOpen(fd int, backlog int) error {
 	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_FASTOPEN, backlog)
 }
 
+// SetTCPFastOpenConnect enables the client side of TCP Fast Open on an
+// outbound socket (TCP_FASTOPEN_CONNECT, Linux 4.11+): with a
+// kernel-cached TFO cookie, the first write after connect() rides in
+// the SYN packet, saving one RTT per fresh origin/peer connection.
+// The option is advisory — a kernel, origin, or peer without TFO falls
+// back to the regular handshake, so callers treat per-socket failures
+// as best-effort.
+func SetTCPFastOpenConnect(fd int) error {
+	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT, 1)
+}
+
+// TCPFastOpenConnectSupported reports whether the kernel accepts
+// TCP_FASTOPEN_CONNECT on outbound sockets. The engine probes once at
+// startup so the dialer Control can be left unwired on kernels without
+// the option instead of paying a failing setsockopt on every dial.
+func TCPFastOpenConnectSupported() bool {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = unix.Close(fd) }()
+	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT, 1) == nil
+}
+
 // SetTCPDeferAccept tells the kernel to not wake the acceptor until
 // data arrives, avoiding a wakeup for the bare SYN/ACK roundtrip.
 func SetTCPDeferAccept(fd int, seconds int) error {

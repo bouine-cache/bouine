@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
@@ -223,6 +226,42 @@ func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
 	}
 	rt := buildHedgeTimeout(pc)
 	require.Equal(t, 500*time.Millisecond, rt)
+}
+
+// TestOutboundFastOpenDialControl pins the outbound TCP Fast Open
+// Control wiring rules: an explicitly disabled surface stays unwired;
+// on Linux the nil (default) setting wires a best-effort Control on
+// kernels that support TCP_FASTOPEN_CONNECT and stays nil otherwise;
+// on non-Linux platforms it is always nil. Whatever is returned must
+// never fail a real dial.
+func TestOutboundFastOpenDialControl(t *testing.T) {
+	t.Parallel()
+	logger := newTestLogger()
+
+	disabled := false
+	require.Nil(t, outboundFastOpenDialControl(&disabled, "origin", logger),
+		"an explicitly disabled surface must stay unwired")
+
+	control := outboundFastOpenDialControl(nil, "origin", logger)
+	if runtime.GOOS != "linux" {
+		require.Nil(t, control, "non-Linux platforms have no TCP_FASTOPEN_CONNECT")
+		return
+	}
+	if !platform.TCPFastOpenConnectSupported() {
+		require.Nil(t, control, "a kernel without TCP_FASTOPEN_CONNECT must stay unwired")
+		return
+	}
+	require.NotNil(t, control, "default-enabled Linux must wire the Control")
+
+	// The Control must never fail the dial it decorates: outbound
+	// socket options are advisory, and failing the dial would turn a
+	// latency optimization into availability damage.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	conn, err := (&net.Dialer{Control: control}).Dial("tcp", ln.Addr().String())
+	require.NoError(t, err, "a dial through the TFO Control must succeed")
+	require.NoError(t, conn.Close())
 }
 
 // newTestPool builds an origin pool from an UpstreamPool config so the

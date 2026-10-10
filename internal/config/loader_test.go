@@ -2111,3 +2111,51 @@ routes:
 		"an unset connect.preserve_host must default to false (historical behaviour)")
 	require.NoError(t, cfg.Validate(), "a preserve_host pool with a routed path must validate")
 }
+
+func TestParse_ConnectTCPFastOpen(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+    connect:
+      tcp_fast_open: false
+  - name: default-behaviour
+    targets: [other.local:8080]
+routes:
+  - match: { path_prefix: / }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	require.NotNil(t, cfg.UpstreamPools[0].Connect.TCPFastOpen,
+		"connect.tcp_fast_open: false must decode as an explicit *bool")
+	require.False(t, *cfg.UpstreamPools[0].Connect.TCPFastOpen,
+		"connect.tcp_fast_open: false must decode onto the pool")
+	require.Nil(t, cfg.UpstreamPools[1].Connect.TCPFastOpen,
+		"an unset connect.tcp_fast_open must stay nil so the engine default (enabled on Linux 4.11+) applies")
+	require.NoError(t, cfg.Validate(), "a tcp_fast_open pool with a routed path must validate")
+}
+
+func TestParse_ClusterPeerTCPFastOpen(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+cluster:
+  peer_tcp_fast_open: false
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	require.NotNil(t, cfg.Cluster.PeerTCPFastOpen,
+		"cluster.peer_tcp_fast_open: false must decode as an explicit *bool")
+	require.False(t, *cfg.Cluster.PeerTCPFastOpen,
+		"cluster.peer_tcp_fast_open: false must decode onto the cluster config")
+
+	cfg, err = Parse([]byte("listen:\n  admin: \":9000\"\n"))
+	require.NoError(t, err, "parse without cluster section")
+	require.Nil(t, cfg.Cluster.PeerTCPFastOpen,
+		"an unset cluster.peer_tcp_fast_open must stay nil so the engine default (enabled on Linux 4.11+) applies")
+}

@@ -37,6 +37,31 @@ the curated, human-readable summary.
   bookkeeping drops from 146 ns to 0.3 ns on Apple M5. Each peer fetch
   also allocates one object less (28 to 27 allocs/op), because releasing
   the fetch slot no longer goes through a heap-allocated closure.
+- **Outbound TCP Fast Open on origin and peer connections
+  (`TCP_FASTOPEN_CONNECT`).** bouine already enabled server-side TFO on
+  its listeners; the outbound side was missing: every fresh origin or
+  peer connection paid a full handshake before the first request byte.
+  The origin pool's shared and SSE clients (`connect.tcp_fast_open`,
+  default enabled on Linux 4.11+), the peer-fetch/put pipeline clients,
+  and the invalidation-broadcast fan-out client
+  (`cluster.peer_tcp_fast_open`, same default) now set
+  `TCP_FASTOPEN_CONNECT` before connect, so with a kernel-cached TFO
+  cookie the first request bytes ride in the SYN packet — one full RTT
+  saved on every fresh connection. The option is advisory: origins or
+  peers without TFO never issue a cookie and the dial silently falls
+  back to the regular handshake, so there is no penalty for enabling
+  it (bouine↔bouine peer dials can use TFO end-to-end today: the
+  data-plane listeners already answer TFO; peers' kernels need
+  `net.ipv4.tcp_fastopen` to include the server bit). The kernel is
+  probed once at startup (`platform.TCPFastOpenConnectSupported`) and
+  the option is left unwired when unsupported, logging one warn line;
+  per-socket failures are best-effort and never fail a dial. Loopback
+  peer-RPC benchmarks are unchanged (benchstat n=10, 0 allocs/op
+  change); the per-dial cost is one setsockopt on connection
+  establishment, amortized to ~0 by connection pooling. Layering note:
+  `internal/origin` and `internal/cluster` declare the `DialControl`
+  injection point themselves (depguard keeps them off
+  `internal/platform`); `cmd` wires it.
 
 ### Fixed
 

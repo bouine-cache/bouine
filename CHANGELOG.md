@@ -10,6 +10,29 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Performance
+
+- **Release artifacts now build at `GOAMD64=v3` / `GOARM64=v8.1`
+  microarchitecture floors.** The container image (Dockerfile) and the
+  linux release binaries (release + nightly workflows) were building at
+  Go's baseline levels (`GOAMD64=v1`, `GOARM64=v8.0`), leaving AVX2 /
+  BMI2 (amd64) and LSE atomics + CRC32 instructions (arm64) unused on
+  every production CPU. `v3` covers every x86 server core since Haswell
+  (2013); `v8.1` covers Graviton2, Ampere Altra and every later arm64
+  server core. Darwin binaries stay at baseline — they run on mixed
+  dev-laptop fleets where performance is not the product. darwin/arm64
+  (Apple M5) benchstat, n=10, `GOARM64` v8.0 → v8.1 (LSE atomics on the
+  atomic-heavy hit path): `FastPath_Hit` −5.9%, `Evaluate_Hit` −2.8%,
+  `HotStore_Get_Hit` −2.7%, `SIEVE_Access` −2.8%, `H1Parse_Get` −2.0%,
+  zero B/op or allocs/op change on every gated benchmark; all
+  `make bench-gate` budgets pass unchanged at v8.1. linux/amd64
+  `GOAMD64` v1 → v3 was measured under QEMU TCG emulation (directional
+  only; native validation happens on the self-hosted bench-gate runner
+  at merge): focused hot-path geomeans −9.3% (cache), −5.6% (storage),
+  −1.6% (h1parser). The bench-gate runner itself keeps baseline levels
+  so gate comparisons stay apples-to-apples; both variables are
+  overridable (`--build-arg` / workflow edit) for older fleets.
+
 ## [0.5.28] - 2026-10-09
 
 ### Performance

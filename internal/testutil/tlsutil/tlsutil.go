@@ -5,7 +5,7 @@
 // Two flavours of helper:
 //
 //   - In-process: Cert and ServerConfig return live tls structures
-//     ready to plug into httptest.NewUnstartedServer.
+//     ready to plug into fasthttptest.NewTLSServer.
 //   - On-disk: WriteCertFiles writes PEM files to a directory, used
 //     when an integration test execs the bouine binary which loads
 //     certs from disk.
@@ -82,7 +82,7 @@ func Cert(t *testing.T, hosts ...string) tls.Certificate {
 	}
 }
 
-// ServerConfig returns a *tls.Config suitable for an httptest TLS
+// ServerConfig returns a *tls.Config suitable for a fasthttptest TLS
 // server.
 func ServerConfig(t *testing.T, hosts ...string) *tls.Config {
 	t.Helper()

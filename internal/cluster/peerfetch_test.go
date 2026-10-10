@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"sync"
@@ -11,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,15 +40,22 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	return nil
 }
 
+func encodePeerFetchRequest(req api.PeerFetchRequest) []byte {
+	body := make([]byte, 0, 18+len(req.VaryKey))
+	body = append(body, peerFetchBinaryVersion)
+	body = append(body, req.Key[:]...)
+	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // test input, VaryKey < 256 bytes
+	body = append(body, req.VaryKey...)
+	return body
+}
+
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *fasthttp.RequestCtx {
 	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err, "marshal")
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.Header.SetMethod("POST")
 	ctx.Request.SetRequestURI(PeerFetchPath)
-	ctx.Request.SetBody(body)
-	ctx.Request.Header.Set(header.ContentType, "application/json")
+	ctx.Request.SetBody(encodePeerFetchRequest(req))
+	ctx.Request.Header.Set(header.ContentType, "application/octet-stream")
 	if hop > 0 {
 		ctx.Request.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
 	}
@@ -82,6 +90,26 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	if obj.Key != key || obj.StatusCode != 200 {
 		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
 	}
+}
+
+// TestParsePeerFetchBody_RejectsBadFraming pins the version-only v2
+// framing (shipped in v0.5.21; deliberately not the binaryMagic
+// envelope used by gossip/meta/state — the endpoint channel already
+// discriminates the format): wrong version byte and truncated bodies
+// must be rejected.
+func TestParsePeerFetchBody_RejectsBadFraming(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(1)
+	body := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
+
+	badVersion := append([]byte(nil), body...)
+	badVersion[0] = peerFetchBinaryVersion + 1
+	_, ok := parsePeerFetchBody(badVersion)
+	require.False(t, ok, "unknown version must be rejected")
+
+	short := body[:17]
+	_, ok = parsePeerFetchBody(short)
+	require.False(t, ok, "truncated frame must be rejected")
 }
 
 func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
@@ -149,6 +177,132 @@ func TestPeerFetchHandler_Miss(t *testing.T) {
 	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
+// TestPeerFetchHandler_VaryKeyMismatchMiss is the protocol-side regression
+// for the cross-market body incident: a peer whose only entry under the
+// requested key is a DIFFERENT variant (or the primary-key Vary resolver)
+// must answer a variant-asserting fetch with a miss instead of returning
+// the foreign variant's body.
+func TestPeerFetchHandler_VaryKeyMismatchMiss(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(11)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "X-Region",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Requester asserts the us variant.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "ushash"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a variant-asserting fetch must miss when the stored object is another variant")
+}
+
+// TestPeerFetchHandler_VaryKeyMatchHit pins the positive case: an object
+// whose VaryKey equals the requester's assertion is served.
+func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(12)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "X-Region",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "frhash"}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err, "decode")
+	require.Equal(t, "market=fr", string(obj.Body))
+}
+
+// TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion pins the
+// non-variant case that must keep working: an object WITHOUT Vary
+// (VaryValue == "") stored under its primary key is served to a
+// blank-assertion fetch. Only Vary resolvers are withheld (see
+// TestPeerFetchHandler_ResolverBodyNeverServed).
+func TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(13)
+	plainObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("plain"),
+		VaryKey:    "",
+	}
+	plainObj.Header = header.NewMap(1)
+	plainObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: plainObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"an empty VaryKey assertion must serve a stored object without Vary")
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
+}
+
+// TestPeerFetchHandler_ResolverBodyNeverServed closes the resolver-body
+// leak observed in production after the first cross-variant fix: a
+// non-owner that misses locally peer-fetches the PRIMARY key with a
+// blank assertion (it has no local object to learn the Vary list from),
+// and the owner's only stored entry under that key is the resolver —
+// whose body belongs to whichever variant filled it first. Serving that
+// body was a peer HIT carrying the first variant's content. The resolver
+// exists to publish the Vary list, never to be served: a fetch landing
+// on it must miss so the requester fills (and stores) its own variant.
+// Objects without Vary (VaryValue == "") are unaffected.
+func TestPeerFetchHandler_ResolverBodyNeverServed(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(14)
+	resolverObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "X-Region",
+		VaryKey:    "",
+	}
+	resolverObj.Header = header.NewMap(1)
+	resolverObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: resolverObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Blank-assertion fetch of the primary: the exact flow of a non-owner
+	// cold lookup. Must miss instead of serving the resolver body.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a peer fetch landing on the Vary resolver must miss, never serve its body")
+
+	// A real (no-Vary) object under a primary key: normal hit must survive.
+	plain := &api.Object{
+		Key:        testkey.Key(15),
+		StatusCode: 200,
+		Body:       []byte("plain"),
+	}
+	plain.Header = header.NewMap(1)
+	plain.Header.AppendEntry("Cache-Control", "max-age=60")
+	store2 := &stubStore{objects: map[api.Key]*api.Object{testkey.Key(15): plain}}
+	h2 := NewPeerFetchHandler(store2, 0)
+	ctx2 := postFetch(t, h2, api.PeerFetchRequest{Key: testkey.Key(15)}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode(),
+		"a no-Vary primary entry must still be served")
+	obj, err := storage.DecodeObject(ctx2.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
+}
+
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
@@ -187,6 +341,12 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 		BodySize:   15,
 		TTL:        60 * time.Second,
 		StoredAt:   time.Now(),
+		// ADR-0051: a stayin_alive fill forwarded from a non-owner must
+		// keep its grace-retention stamps on the owner, or the owner's
+		// reaper deletes it mid-outage — in strong mode most entries are
+		// stored exactly this way, so the stamps must survive the wire.
+		KeepGrace: true,
+		Pool:      "origin-main",
 	}
 	encoded := storage.EncodeObject(obj)
 	ctx := postPut(t, h, encoded, "POST")
@@ -195,6 +355,48 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	assert.Equal(t, obj.Body, stored.Body)
+	assert.True(t, stored.KeepGrace, "peer put must preserve KeepGrace on the owner")
+	assert.Equal(t, "origin-main", stored.Pool, "peer put must preserve Pool on the owner")
+}
+
+// TestPeerPutHandler_PreservesTransientFields pins the duplicate-Date
+// fix end to end at the wire boundary (ADR-0053): a non-owner forwards a
+// freshly origin-fetched object carrying Date and no-cache gate flags;
+// the owner's decode must restore them, or every subsequent hit serves
+// two Date lines (the doorman "duplicate header" storm) and a no-cache
+// response degrades into an unvalidated fresh hit.
+func TestPeerPutHandler_PreservesTransientFields(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil)
+	hm := header.NewMap(4)
+	hm.Set(header.Date, "Fri, 02 Oct 2026 13:45:11 GMT")
+	hm.Set(header.CacheControl, "no-cache")
+	hm.Set(header.ContentType, "text/html")
+	obj := &api.Object{
+		Key:                testkey.Key(43),
+		StatusCode:         200,
+		Header:             hm,
+		Body:               []byte("origin fill"),
+		BodySize:           11,
+		TTL:                60 * time.Second,
+		StoredAt:           time.Now(),
+		CacheControl:       "no-cache",
+		OriginAge:          12 * time.Second,
+		HasDate:            true,
+		RespNoCache:        true,
+		RespMustRevalidate: false,
+	}
+	encoded := storage.EncodeObject(obj)
+	ctx := postPut(t, h, encoded, "POST")
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.True(t, stored.HasDate, "stored Date must survive peer put (else hits synthesize a duplicate Date)")
+	assert.True(t, stored.RespNoCache, "no-cache gate must survive peer put (else hits skip revalidation)")
+	assert.Equal(t, obj.CacheControl, stored.CacheControl, "pre-merged CacheControl must survive peer put")
+	assert.Equal(t, obj.OriginAge, stored.OriginAge, "OriginAge must survive peer put")
 }
 
 func TestPeerPutHandler_OnStoreCallback(t *testing.T) {
@@ -282,6 +484,57 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	if latSumMs <= 0 {
 		t.Fatalf("latSumMs=%d, want >0", latSumMs)
 	}
+}
+
+// TestPeerFetcher_SubMillisecondFetchNotTruncatedToZero pins the duration
+// histogram against the ms-truncation regression: Fetch previously observed
+// float64(time.Since(start).Milliseconds())/1000, which floors sub-ms RPCs
+// to 0. Almost every production fetch completes under 1 ms, so p50/p95
+// collapsed into the native histogram's zero bucket and the Grafana panel
+// rendered them as 0. A sub-ms RPC must land in a real (positive) sparse
+// bucket. On a pathologically slow runner the RPC may take >= 1 ms and this
+// test degrades to a pass — it can only fail against the truncation.
+func TestPeerFetcher_SubMillisecondFetchNotTruncatedToZero(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("fast")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, reg, nil)
+	defer f.Close(context.Background())
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.NoError(t, err, "fetch")
+	require.NotNil(t, obj)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	var h *dto.Histogram
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_peer_fetch_duration_seconds" {
+			continue
+		}
+		require.Len(t, mf.GetMetric(), 1, "one fetcher series")
+		h = mf.GetMetric()[0].GetHistogram()
+	}
+	require.NotNil(t, h, "bouine_peer_fetch_duration_seconds must be gathered")
+	assert.Equal(t, uint64(1), h.GetSampleCount(), "one observation")
+	assert.Zero(t, h.GetZeroCount(),
+		"a sub-millisecond RPC must not land in the native histogram zero bucket (duration truncated to 0)")
+	assert.Equal(t, int32(3), h.GetSchema(),
+		"native histogram schema must be present (3 = factor 1.1)")
+	assert.NotEmpty(t, h.GetPositiveSpan(),
+		"the observation must land in a real positive sparse bucket")
+	var positiveCount int64
+	for _, d := range h.GetPositiveDelta() {
+		positiveCount += d
+	}
+	assert.Equal(t, int64(1), positiveCount,
+		"the single sub-millisecond observation must be in the positive buckets")
 }
 
 func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
@@ -414,6 +667,64 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	}
 }
 
+func TestPeerFetcher_ConfigurableFetchConcurrencyBoundsFetches(t *testing.T) {
+	t.Parallel()
+	const customConcurrency = 8
+	var inFlight, maxInFlight atomic.Int32
+
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+		FetchConcurrency:    customConcurrency,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < customConcurrency*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{AdminAddr: srv.Addr},
+				api.PeerFetchRequest{Key: testkey.Key(1)})
+		}()
+	}
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > customConcurrency {
+		t.Fatalf("max concurrent peer-fetches = %d, want <= %d", got, customConcurrency)
+	}
+}
+
+func TestPeerFetcher_FetchConcurrencyCappedAtMax(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FetchConcurrency: MaxPeerFetchConcurrency * 2,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	if got := cap(f.fetchSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("fetch semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
+	}
+	if got := cap(f.putSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("put semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
+	}
+}
+
 func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	t.Parallel()
 	block := make(chan struct{})
@@ -455,6 +766,108 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	wg.Wait()
 }
 
+// TestPeerFetcher_FetchSlotWaitIsBounded proves the fetch-semaphore wait
+// is bounded even with an undedlined context (the fast path passes
+// context.Background): with every slot held, Fetch sheds with
+// ErrPeerFetchShed instead of parking the calling goroutine forever —
+// the fast-path peer-branch wedge from the stress report. The semaphore
+// is filled directly: wedging RPCs server-side would depend on how
+// PipelineClient distributes them over connections.
+func TestPeerFetcher_FetchSlotWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	for range defaultPeerFetchConcurrency {
+		f.fetchSem <- struct{}{} // hold every slot
+	}
+
+	// Bounded caller context so the unfixed code fails this test with a
+	// clean DeadlineExceeded instead of hanging the suite; the fixed code
+	// sheds well before it at the wait bound.
+	start := time.Now()
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := f.Fetch(fetchCtx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(2)})
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrPeerFetchShed)
+	require.Less(t, elapsed, 5*time.Second, "fetch must not park unboundedly on the semaphore")
+}
+
+// TestPeerFetcher_FetchSlotWaitsBrieflyThenAcquires pins that the wait
+// bound does not over-shed under brief contention: the fetch waits for a
+// slot and proceeds once it is freed well within the bound.
+func TestPeerFetcher_FetchSlotWaitsBrieflyThenAcquires(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	// Generous margins against CI scheduling jitter, mirroring
+	// TestDoFetchWaitsBrieflyThenAcquires: free the slot after ~10ms
+	// against a 5s bound.
+	f.fetchWaitTimeout = 5 * time.Second
+	f.fetchSem <- struct{}{} // hold the only slot
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		<-f.fetchSem // free the slot within the bound
+	}()
+
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+}
+
+// TestPeerFetcher_PutSlotWaitIsBounded is the write-to-owner twin of
+// TestPeerFetcher_FetchSlotWaitIsBounded: a Put that cannot get a putSem
+// slot within the wait bound sheds instead of parking forever.
+func TestPeerFetcher_PutSlotWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	for range defaultPeerFetchConcurrency {
+		f.putSem <- struct{}{} // hold every slot
+	}
+
+	start := time.Now()
+	putCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := f.Put(putCtx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		&api.Object{Key: testkey.Key(2)})
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrPeerFetchShed)
+	require.Less(t, elapsed, 5*time.Second, "put must not park unboundedly on the semaphore")
+}
+
 func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{
@@ -473,7 +886,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 0)
 
-	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
+	reqBody := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -481,11 +894,29 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 		ctx.Request.Header.SetMethod("POST")
 		ctx.Request.SetRequestURI(PeerFetchPath)
 		ctx.Request.SetBody(reqBody)
-		ctx.Request.Header.Set(header.ContentType, "application/json")
+		ctx.Request.Header.Set(header.ContentType, "application/octet-stream")
 		h.Handle(ctx)
 		if ctx.Response.StatusCode() != 200 {
 			b.Fatalf("status=%d", ctx.Response.StatusCode())
 		}
+	}
+}
+
+// BenchmarkPeerFetch_BuildRequest pins the allocation budget of the
+// peer-fetch request construction (the miss-path client encode): body
+// into a stack array + SetBody copy into the pooled request's buffer,
+// strconv header value, and a path-only URI (host via SetHost into the
+// pooled request's header buffer). Must stay at 0 allocs/op.
+func BenchmarkPeerFetch_BuildRequest(b *testing.B) {
+	peer := api.PeerInfo{Addr: "10.0.0.1:8080"}
+	// Synthetic VaryKey (a hex-hash assertion in production, never a secret).
+	req := api.PeerFetchRequest{Key: testkey.Key(1), VaryKey: "ushashushash12", Hops: 1} // gitleaks:allow
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		httpReq := buildPeerRequest(peer, req)
+		fasthttp.ReleaseRequest(httpReq)
 	}
 }
 
@@ -588,4 +1019,117 @@ func TestPeerFetcher_CloseConcurrentWithFetchAndPut(t *testing.T) {
 	require.ErrorContains(t, err, "fetcher closed")
 	err = f.Put(context.Background(), peer, obj)
 	require.ErrorContains(t, err, "fetcher closed")
+}
+
+// slowAdminServer returns a server whose /v1/peer/fetch handling blocks
+// for the given duration before answering, to pin the RPC budget.
+func slowAdminServer(t *testing.T, delay time.Duration) *fasthttptest.Server {
+	t.Helper()
+	return fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		time.Sleep(delay)
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+}
+
+func TestPeerFetcher_DeadlinelessContextBoundedByPeerFetchTimeout(t *testing.T) {
+	t.Parallel()
+	// A server slower than the RPC budget: before the fix, a deadline-less
+	// ctx (the *fasthttp.RequestCtx passed by the cache handler) fell back
+	// to transport.PipelineDo's 60s default, so the fetch held a semaphore
+	// slot until the slow response eventually arrived. pipelineDo must cap
+	// the RPC at PeerFetchTimeout and return a timeout error instead.
+	srv := slowAdminServer(t, 3*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Nil(t, obj)
+	// The failure is a timeout inside the budget, not a slow success:
+	// allow generous headroom over PeerFetchTimeout for CI scheduling
+	// jitter, but nothing remotely near the 60s fallback.
+	require.Less(t, elapsed, 2*PeerFetchTimeout,
+		"deadline-less fetch must be bounded by PeerFetchTimeout, took %s", elapsed)
+	require.ErrorContains(t, err, "timeout")
+	// A timeout with a live (uncanceled) caller context counts toward the
+	// breaker.
+	require.Equal(t, 1, f.breaker[srv.Addr].consecutive)
+}
+
+func TestPeerFetcher_PutDeadlinelessContextBoundedByPeerFetchTimeout(t *testing.T) {
+	t.Parallel()
+	srv := slowAdminServer(t, 3*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	err := f.Put(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, 2*PeerFetchTimeout,
+		"deadline-less put must be bounded by PeerFetchTimeout, took %s", elapsed)
+	require.ErrorContains(t, err, "timeout")
+}
+
+func TestPeerFetcher_ShorterCallerDeadlineHonoured(t *testing.T) {
+	t.Parallel()
+	// A caller deadline shorter than PeerFetchTimeout must win: pipelineDo
+	// routes it through DoDeadline with the caller's own budget.
+	srv := slowAdminServer(t, 10*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), PeerFetchTimeout/4)
+	defer cancel()
+	start := time.Now()
+	_, err := f.Fetch(ctx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	// Cancelled-caller failures are not peer failures: the breaker state
+	// must stay clean (the fast path in Fetch checks ctx.Err() first, but
+	// the RPC error path must also skip recordPeerFailure).
+	require.Less(t, elapsed, 2*(PeerFetchTimeout/4),
+		"caller deadline must cap the fetch, took %s", elapsed)
+}
+
+// TestPeerFetcher_DialTimeoutIsSubsecond pins the dial budget: a dead
+// address must fail inside the RPC budget, not the historical 2s. The
+// address is a TCP black hole (LISTEN without accept drain) in the
+// loopback range reserved for benchmarking.
+func TestPeerFetcher_DialTimeoutIsSubsecond(t *testing.T) {
+	t.Parallel()
+	// 198.18.0.0/15 is reserved for benchmarking; nothing routes there,
+	// so the dial hangs until the timeout fires.
+	const blackHole = "198.18.0.1:9000"
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	_, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: blackHole},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, PeerFetchTimeout+200*time.Millisecond,
+		"dial to a dead address must fail within the RPC budget (dial %+v), took %s", peerDialTimeout, elapsed)
 }

@@ -19,6 +19,8 @@ This guide helps operators migrate from Varnish Cache (v4.x–v6.x) to bouine. I
 | `ban()`                      | admin API `POST /v1/ban`    | predicate-based invalidation             |
 | `purge`                      | admin API `POST /v1/purge`  | exact-match invalidation                 |
 | `return (pass)`              | `cache.enabled: false`      | bypass cache for a route                  |
+| `return (pass)` on `req.http.Cookie` | `cache.bypass_on_cookie: true` | bypass cache for cookied requests (ADR-0054) |
+| `return (pass)` on `req.http.User-Agent` | `cache.bypass_on_user_agent: ["*Bot*"]` | bypass cache for matching UA requests (ADR-0055) |
 | Varnish log (`-g request`)   | `slog` access logs          | structured JSON logs to stdout           |
 | `varnishstat`                | `GET /metrics`              | Prometheus-compatible metrics            |
 | VSM/shared memory            | in-process memory           | no mmap, no VSM files                    |
@@ -39,6 +41,12 @@ sub vcl_recv {                →  routes:
     return (pass);            →        path_prefix: /api/
   }                           →      cache:
   return (hash);              →        enabled: false
+}                             →
+sub vcl_recv {                →  routes:
+  if (req.http.Cookie) {      →    - match:
+    return (pass);            →        path_prefix: /
+  }                           →      cache:
+  return (hash);              →        bypass_on_cookie: true
 }                             →
 ```
 

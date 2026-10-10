@@ -8,8 +8,8 @@ import (
 )
 
 // engine.go implements the RFC 9111 cache state machine.
-// Decision and Disposition types, Evaluate, and the private helper
-// functions (evalMiss, evalNoCache, freshWithRequestCC, evalStale,
+// Decision and Disposition types, the shared evaluate core, and the private
+// helper functions (evalMiss, freshWithRequestCC, evalStale,
 // revalidateOrMiss) live here. All other logic is in the sibling files.
 
 // headerGetter is the minimal read interface for HTTP headers. Both
@@ -43,7 +43,11 @@ type Disposition struct {
 	Decision Decision
 }
 
-// Evaluate runs the RFC 9111 state machine.
+// Evaluate runs the RFC 9111 state machine on a RequestInfo (the
+// header.Map serving path). Request directives are parsed here; the
+// decision itself is delegated to the shared evaluate below so every
+// serving path — header.Map, fasthttp Peek, RawRequest fast path — makes
+// identical decisions.
 func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
 	if ri.GetMethod() != "GET" && ri.GetMethod() != "HEAD" {
 		return Disposition{Decision: Bypass}
@@ -57,10 +61,6 @@ func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
 	var reqCC Directives
 	if rawCC := ri.Header.Get(header.CacheControl); rawCC != "" {
 		reqCC = ParseCacheControl(rawCC)
-		if false {
-			// Rare: multiple Cache-Control headers. Re-parse merged value.
-			reqCC = ParseCacheControl(ri.Header.Get(header.CacheControl))
-		}
 	}
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache
@@ -76,28 +76,85 @@ func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
 		return evalMiss(reqCC)
 	}
 
-	// Lead 1: use the pre-parsed CacheControl field instead of re-reading the
-	// header map on every hit. CacheControl is set once by buildObject at
-	// cache-fill time; fall back to the header map only for warm-tier / legacy
-	// objects whose field is empty.
-	//
-	// ponytail: inlined rather than calling objDirectives — objDirectives does
-	// not inline (cost 135 > budget 80) and the extra call frame is a measured
-	// ~6% on the zero-alloc Evaluate_Hit hot path. The cold paths use the
-	// helper; this one copy is the deliberate exception.
+	// Response-side gate from the parsed response Cache-Control.
+	// ponytail: the ccStr fetch is inlined rather than calling objDirectives
+	// — objDirectives does not inline (cost 135 > budget 80) and the extra
+	// call frame is a measured regression on the zero-alloc Evaluate_Hit
+	// hot path. The cold paths use the helper; this one copy is the
+	// deliberate exception.
 	ccStr := obj.CacheControl
 	if ccStr == "" {
 		ccStr = obj.Header.Get(header.CacheControl)
 	}
 	respCC := ParseCacheControl(ccStr)
+	return evaluate(obj, reqCC, respGateFromDirectives(respCC), now)
+}
 
-	if d, ok := evalNoCache(reqCC, respCC, obj); ok {
-		return d
+// respGate is the response-side Cache-Control subset the RFC 9111 state
+// machine branches on: whether the stored response forbids serving without
+// revalidation (no-cache) and whether it forbids serving stale
+// (must-revalidate / proxy-revalidate). It decouples the decision core from
+// where the directives come from — a parsed Cache-Control string (Evaluate)
+// or the pre-parsed api.Object flags set at cache-fill time (fast paths) —
+// so one implementation covers every serving path.
+type respGate struct {
+	noCache        bool
+	mustRevalidate bool
+}
+
+// respGateFromDirectives derives the gate from a parsed response
+// Cache-Control.
+func respGateFromDirectives(respCC Directives) respGate {
+	return respGate{
+		noCache:        respCC.NoCache,
+		mustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 	}
+}
+
+// respGateFromObject derives the gate from the pre-parsed flags set by
+// buildObject at cache-fill time (RespMustRevalidate already ORs
+// proxy-revalidate there). Nil-safe: a nil object yields the zero gate;
+// evaluate never reads the gate for a nil object anyway.
+func respGateFromObject(obj *api.Object) respGate {
+	if obj == nil {
+		return respGate{}
+	}
+	return respGate{noCache: obj.RespNoCache, mustRevalidate: obj.RespMustRevalidate}
+}
+
+// evaluate is the single RFC 9111 decision state machine. Inputs are the
+// pre-parsed request directives, the response-side gate, and the object.
+// All parameters are values or pointers already on hand — zero allocs.
+// The method check is the caller's: Evaluate rejects non-GET/HEAD,
+// evaluateFast checks Peek'd bytes, and the RawRequest fast path is
+// qualified GET/HEAD by construction.
+func evaluate(obj *api.Object, reqCC Directives, rg respGate, now time.Time) Disposition {
+	if reqCC.NoStore {
+		return Disposition{Decision: Bypass}
+	}
+	if obj == nil {
+		return evalMiss(reqCC)
+	}
+
+	// RFC 9111 §5.2.1.4 / §5.2.2: no-cache on either side → revalidate
+	// conditionally when validators exist, else refetch in full.
+	if rg.noCache || reqCC.NoCache {
+		if obj.ETag != "" || !obj.LastModified.IsZero() {
+			return Disposition{Decision: Revalidate, Object: obj}
+		}
+		return Disposition{Decision: Miss}
+	}
+
 	if freshWithRequestCC(obj, reqCC, now) {
 		return Disposition{Decision: Hit, Object: obj}
 	}
-	return evalStale(reqCC, respCC, obj, now)
+
+	// must-revalidate / proxy-revalidate forbid serving stale
+	// (RFC 9111 §5.2.2.3).
+	if rg.mustRevalidate {
+		return revalidateOrMiss(obj)
+	}
+	return evalStale(reqCC, obj, now)
 }
 
 // objDirectives returns the parsed Cache-Control directives for a stored
@@ -132,16 +189,6 @@ func evalMiss(reqCC Directives) Disposition {
 	return Disposition{Decision: Miss}
 }
 
-func evalNoCache(reqCC, respCC Directives, obj *api.Object) (Disposition, bool) {
-	if respCC.NoCache || reqCC.NoCache {
-		if obj.ETag != "" || !obj.LastModified.IsZero() {
-			return Disposition{Decision: Revalidate, Object: obj}, true
-		}
-		return Disposition{Decision: Miss}, true
-	}
-	return Disposition{}, false
-}
-
 // freshWithRequestCC reports whether obj is fresh enough to serve given the
 // request's Cache-Control directives. Base freshness is delegated to
 // api.Object.Fresh — the single source of truth — and request directives can
@@ -173,10 +220,13 @@ func freshWithRequestCC(obj *api.Object, reqCC Directives, now time.Time) bool {
 	return true
 }
 
-func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposition {
-	if respCC.MustRevalidate || respCC.ProxyRevalidate {
-		return revalidateOrMiss(obj)
-	}
+// evalStale evaluates the stale-path directives (RFC 9111 §4.2) once
+// freshness has failed and must-revalidate was ruled out by the gate:
+// max-stale, stale-while-revalidate, stale-if-error, and heuristic
+// freshness. Shared by every serving path — the response Cache-Control
+// is parsed lazily here because this branch only runs for stale objects,
+// well off the hit path.
+func evalStale(reqCC Directives, obj *api.Object, now time.Time) Disposition {
 	originAge := effectiveOriginAge(obj)
 	if reqCC.MaxStaleSet {
 		age := now.Sub(obj.StoredAt) + originAge
@@ -204,6 +254,7 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 	// the object was cached purely heuristically via Last-Modified/10%.
 	// Without must-revalidate, a cache MAY serve it stale rather than always
 	// revalidating on every miss.
+	respCC := objDirectives(obj)
 	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get(header.Expires) == "" {
 		return Disposition{Decision: StaleHit, Object: obj}
 	}

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -331,6 +333,290 @@ func TestHandler_HeadServedFromCache(t *testing.T) {
 	require.Equal(t, 0, len(rr2.Response.Body()))
 }
 
+// expireStoredObject rewinds the stored object's StoredAt past its TTL
+// so the next request revalidates instead of hitting (the reaper is not
+// waited for). Test helper for issue #752.
+func expireStoredObject(t *testing.T, h *Handler, path string) {
+	t.Helper()
+	key := BuildKeyFast([]byte("GET"), []byte(path), []byte("example.com"), []byte(path), false, nil)
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj, "expected the warm GET to have stored the object")
+	obj.StoredAt = obj.StoredAt.Add(-2 * obj.TTL)
+	require.NoError(t, h.store.Put(t.Context(), key, obj))
+}
+
+// TestHandler_HeadRevalidate_Origin200_MustNotReplaceStoredBody is the
+// issue #752 regression: a HEAD revalidation whose origin answers 200
+// (content changed, body absent because the request was HEAD) must not
+// store the empty response under the GET-shared cache key. A subsequent
+// GET must still serve a non-empty body — either the previous stored
+// body or a fresh origin fetch, never the poisoned empty one.
+func TestHandler_HeadRevalidate_Origin200_MustNotReplaceStoredBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			// Content changed: full 200. A real origin sends the new body
+			// to a conditional GET and no body to a conditional HEAD
+			// (RFC 9110 §9.3.2: HEAD responses have no body).
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v2"`)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			if !ctx.IsHead() {
+				_, _ = ctx.WriteString("changed-body")
+			}
+			return
+		}
+		origin200("original-body")(ctx)
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/hd")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "original-body", respBody(rr))
+
+	expireStoredObject(t, h, "/hd")
+
+	hr := testCtx("HEAD", "http://example.com/hd")
+	h.ServeRequest(hr)
+	require.Equal(t, 200, respCode(hr))
+	// The origin answered 200 (not 304), so the client receives the
+	// fresh origin response — X-Cache: MISS from writeAndMaybeStore.
+	require.Equal(t, "MISS", respHeader(hr, header.XCache))
+	require.Equal(t, 0, len(hr.Response.Body()), "HEAD response must not carry a body")
+
+	gr := testCtx("GET", "http://example.com/hd")
+	h.ServeRequest(gr)
+	// The HEAD exchange left the previous body stored; the GET
+	// revalidates (origin 200 + full body) and serves the new content —
+	// never the poisoned empty body.
+	require.Equal(t, "changed-body", respBody(gr),
+		"GET after a HEAD-200 revalidation must never serve the poisoned empty body (issue #752)")
+}
+
+// TestHandler_HeadRevalidate_Origin304_KeepsStoredBody pins the healthy
+// half of the same exchange: a 304 refresh clones the body from the
+// stale object (refreshFrom304), so a HEAD revalidation must keep the
+// stored body servable to subsequent GETs.
+func TestHandler_HeadRevalidate_Origin304_KeepsStoredBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		origin200("full-body")(ctx)
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/hd304")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "full-body", respBody(rr))
+
+	expireStoredObject(t, h, "/hd304")
+
+	hr := testCtx("HEAD", "http://example.com/hd304")
+	h.ServeRequest(hr)
+	require.Equal(t, 200, respCode(hr))
+	require.Equal(t, "REVALIDATED", respHeader(hr, header.XCache))
+	require.Equal(t, 0, len(hr.Response.Body()))
+
+	gr := testCtx("GET", "http://example.com/hd304")
+	h.ServeRequest(gr)
+	require.Equal(t, "HIT", respHeader(gr, header.XCache))
+	require.Equal(t, "full-body", respBody(gr),
+		"HEAD-304 revalidation must preserve the stored body for subsequent GETs")
+}
+
+// TestHandler_HeadRevalidate_Origin200_RingChangeNoPeerPut pins the
+// strong-mode half of issue #752: a node that stored the object while it
+// owned the key (then lost it to a ring change) must not forward the
+// empty-body HEAD-200 object to the new owner via the write-to-owner
+// RPC. Without the guard, one HEAD against a changed origin would blank
+// the object on the new owner too.
+func TestHandler_HeadRevalidate_Origin200_RingChangeNoPeerPut(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	var peerPutCalls atomic.Int32
+	var peerPutBodies []string
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v2"`)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			if !ctx.IsHead() {
+				_, _ = ctx.WriteString("changed-body")
+			}
+			return
+		}
+		origin200("original-body")(ctx)
+	}
+	// Ownership flips after the fill: this node owns the key when the
+	// object is stored (so storeObject works), then loses it to a
+	// simulated ring change before the revalidation.
+	isLocal := atomic.Bool{}
+	isLocal.Store(true)
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, isLocal.Load()
+		},
+		PeerPut: func(_ context.Context, _ api.PeerInfo, obj *api.Object) {
+			peerPutCalls.Add(1)
+			peerPutBodies = append(peerPutBodies, string(obj.Body))
+		},
+	})
+
+	rr := testCtx("GET", "http://example.com/hd-owner")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	assert.Empty(t, peerPutBodies, "owner-local fill does not forward to itself")
+
+	expireStoredObject(t, h, "/hd-owner")
+
+	// Ring change: the key now belongs to another node.
+	isLocal.Store(false)
+
+	hr := testCtx("HEAD", "http://example.com/hd-owner")
+	h.ServeRequest(hr)
+	require.Equal(t, "MISS", respHeader(hr, header.XCache))
+	assert.Equal(t, int32(0), peerPutCalls.Load(),
+		"the HEAD-200 revalidation must not forward an empty-body object to the new owner (issue #752)")
+}
+
+// TestHandler_HeadSWR_BgRevalidate_RefreshesWithRealBody pins the
+// third poison route of issue #752: a HEAD served as StaleHit inside a
+// stale-while-revalidate window triggers a background revalidation
+// whose origin fetch previously carried Method=HEAD, so the origin's
+// empty-body 200 replaced the stored GET object. The background fetch
+// now remaps HEAD→GET (remapHeadToGet), so the refresh carries the
+// changed content — never an empty body.
+func TestHandler_HeadSWR_BgRevalidate_RefreshesWithRealBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			// Content changed: full 200. A conditional HEAD gets no
+			// body (RFC 9110 §9.3.2); a conditional GET gets the new
+			// body. The background revalidation must send GET.
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v2"`)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			if !ctx.IsHead() {
+				_, _ = ctx.WriteString("changed-body")
+			}
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=600")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.WriteString("original-body")
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/hd-swr")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "original-body", respBody(rr))
+
+	key := BuildKeyFast([]byte("GET"), []byte("/hd-swr"), []byte("example.com"), []byte("/hd-swr"), false, nil)
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	// Expire past max-age=1 but inside the swr=600 window.
+	obj.StoredAt = obj.StoredAt.Add(-2 * time.Second)
+	require.NoError(t, h.store.Put(t.Context(), key, obj))
+
+	hr := testCtx("HEAD", "http://example.com/hd-swr")
+	h.ServeRequest(hr)
+	require.Equal(t, "STALE", respHeader(hr, header.XCache))
+
+	// The background revalidation must land the changed content —
+	// an empty body here is the exact poison of issue #752.
+	require.Eventually(t, func() bool {
+		o, _, err := h.store.Get(t.Context(), key)
+		return err == nil && o != nil && string(o.Body) == "changed-body"
+	}, 3*time.Second, 10*time.Millisecond,
+		"HEAD-triggered SWR revalidation must refresh with the GET body, never store an empty one (issue #752)")
+
+	gr := testCtx("GET", "http://example.com/hd-swr")
+	h.ServeRequest(gr)
+	require.Equal(t, "changed-body", respBody(gr))
+}
+
+// TestHandler_HeadShedRefill_StoresRealBody pins the shed-refill half
+// of the background-fetch fix: a HEAD whose miss is shed (fetch slots
+// full) schedules doShedRefill, whose origin fetch previously carried
+// Method=HEAD and would have stored an empty body. The refill now
+// remaps HEAD→GET (remapHeadToGet), so the store ends with the real
+// body.
+func TestHandler_HeadShedRefill_StoresRealBody(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		if !ctx.IsHead() {
+			_, _ = ctx.WriteString("real-body")
+		}
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	key := BuildKeyFast([]byte("GET"), []byte("/hd-shed"), []byte("example.com"), []byte("/hd-shed"), false, nil)
+	ri := requestInfoFromCtx(testCtx("HEAD", "http://example.com/hd-shed"))
+	h.triggerShedRefill(ri, key)
+
+	require.Eventually(t, func() bool {
+		o, _, err := h.store.Get(t.Context(), key)
+		return err == nil && o != nil && string(o.Body) == "real-body"
+	}, 3*time.Second, 10*time.Millisecond,
+		"shed refill for a HEAD request must fetch and store the GET body, never an empty one (issue #752)")
+}
+
 func testHandlerStayinAlive(t *testing.T, upstream fasthttp.RequestHandler) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{
@@ -342,7 +628,69 @@ func testHandlerStayinAlive(t *testing.T, upstream fasthttp.RequestHandler) *Han
 		FastClient:  &testFastClient{handler: upstream},
 		Store:       store,
 		StayinAlive: true,
+		PoolName:    "origin-main",
 	})
+}
+
+// TestHandler_StayinAlive_StampsGraceOnFill pins the P1b stamping half
+// (ADR-0051): objects filled on a stayin_alive route carry KeepGrace and
+// the route's pool name, so the storage layer can gate time-based reaping
+// on origin availability without knowing anything about routes. Objects
+// on ordinary routes stay ungraced.
+func TestHandler_StayinAlive_StampsGraceOnFill(t *testing.T) {
+	t.Parallel()
+	upstream := origin200(`{"ok":true}`)
+	h := testHandlerStayinAlive(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/grace-fill")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr), "fill status")
+
+	stored, _, err := h.store.Get(context.Background(), h.buildKey(rr))
+	require.NoError(t, err, "store get")
+	require.NotNil(t, stored, "object must be stored after fill")
+	require.True(t, stored.KeepGrace, "stayin_alive fill must stamp KeepGrace")
+	require.Equal(t, "origin-main", stored.Pool, "stayin_alive fill must stamp the pool name")
+
+	// Control: an ordinary route's fill is ungraced.
+	plain := testHandler(t, upstream)
+	rr2 := testCtx("GET", "http://example.com/plain-fill")
+	plain.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "plain fill status")
+	stored2, _, err := plain.store.Get(context.Background(), plain.buildKey(rr2))
+	require.NoError(t, err, "store get plain")
+	require.NotNil(t, stored2, "plain object must be stored")
+	require.False(t, stored2.KeepGrace, "non-stayin_alive fill must not stamp KeepGrace")
+}
+
+// TestHandler_StayinAlive_RefreshFrom304RestampsGrace pins W1: a 304
+// revalidation on a stayin_alive route must restamp KeepGrace/Pool from
+// the route's current config — the refreshed object replaces the stored
+// one, so inheriting a stale (or missing) flag would silently re-open the
+// reaper hole mid-life.
+func TestHandler_StayinAlive_RefreshFrom304RestampsGrace(t *testing.T) {
+	t.Parallel()
+	h := testHandlerStayinAlive(t, origin200("body"))
+
+	now := time.Now()
+	stale := &api.Object{
+		Key:        testkey.Hash([]byte("304-grace")),
+		StatusCode: 200,
+		Header:     headerMap(header.ContentType, "text/plain"),
+		Body:       []byte("stale body"),
+		BodySize:   10,
+		StoredAt:   now.Add(-2 * time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+	}
+	stale.Header.Set(header.ETag, `"v1"`)
+
+	res := fetchResult{StatusCode: 304}
+	res.Header = fromHeaderMap(headerMap(header.ETag, `"v1"`))
+
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromCtx(testCtx("GET", "http://example.com/x")), now)
+	require.True(t, refreshed.KeepGrace, "304 refresh on a stayin_alive route must restamp KeepGrace")
+	require.Equal(t, "origin-main", refreshed.Pool, "304 refresh must restamp the pool name")
 }
 
 func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
@@ -838,7 +1186,7 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	})
 
 	// Fill exactly MaxVariants distinct variants.
-	for i := range MaxVariants {
+	for i := range DefaultMaxVariants {
 		req := testCtx("GET", "http://example.com/vary")
 		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
 		rr := req
@@ -851,6 +1199,39 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	req.Request.Header.Set("X-Test-Variant", "overflow")
 	rr := req
 	h.ServeRequest(rr)
+	require.Equal(t, 1, hitCount)
+}
+
+func TestMaxVariants_CustomCapPerRoute(t *testing.T) {
+	t.Parallel()
+	hitCount := 0
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:    orig,
+		FastClient:  &testFastClient{handler: orig},
+		Store:       store,
+		Logger:      slog.Default(),
+		MaxVariants: 4,
+		VaryCapHits: counterFunc(func() { hitCount++ }),
+	})
+
+	for i := range 4 {
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		h.ServeRequest(req)
+	}
+	require.Equal(t, 0, hitCount)
+
+	req := testCtx("GET", "http://example.com/vary")
+	req.Request.Header.Set("X-Test-Variant", "overflow")
+	h.ServeRequest(req)
 	require.Equal(t, 1, hitCount)
 }
 
@@ -905,7 +1286,7 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 		VaryCapHits: counterFunc(func() { hitCount++ }),
 	})
 
-	for i := range MaxVariants + 10 {
+	for i := range DefaultMaxVariants + 10 {
 		req := testCtx("GET", "http://example.com/vary")
 		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
 		rr := req
@@ -1732,7 +2113,7 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	require.False(t, r.DecrementPersist(key))
 
 	req := testCtx("GET", "http://example.com/test")
-	r.Register(key, requestInfoFromCtx(req), "", 2)
+	r.Register(key, requestInfoFromCtx(req), "", 2, nil)
 
 	// persist=2 → decrement to 1.
 	require.True(t, r.DecrementPersist(key))
@@ -1796,7 +2177,7 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 		panic(errAbortHandler)
 	})
 	req := testCtx("GET", "http://example.com/")
-	res := h.collapsedFetch(req, api.Key{})
+	res := h.collapsedFetch(req, api.Key{}, api.Key{}, nil, requestInfoFromCtx(req))
 	require.NotNil(t, res.Err)
 	require.True(t, errors.Is(res.Err, errAbortHandler))
 }
@@ -1987,7 +2368,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=3600, no-cache=\"X-Sensitive\"", header.ETag, `"v2"`)),
 	}
 
-	refreshed := h.refreshFrom304(stale, res, time.Now())
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
 
 	// SerializedHead is lazy — must be nil after refresh (not eagerly computed).
 	require.Nil(t, refreshed.LoadSerializedHead())
@@ -2283,22 +2664,70 @@ func TestSourceSlice(t *testing.T) {
 func TestComputeTTL_NegativeTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 404, Directives{}, 30*time.Second, 0, 0, 0, time.Now())
+	ttl := computeTTL(h, 404, Directives{}, mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)), 0, 0, 0, time.Now())
 	assert.Equal(t, 30*time.Second, ttl)
 }
 
 func TestComputeTTL_HeuristicTTL(t *testing.T) {
 	t.Parallel()
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
-	ttl := computeTTL(h, 200, Directives{}, 0, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := computeTTL(h, 200, Directives{}, nil, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl)
 }
 
 func TestComputeTTL_DefaultTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 200, Directives{}, 0, 60*time.Second, 0, 0, time.Now())
+	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
 	assert.Equal(t, 60*time.Second, ttl)
+}
+
+func TestComputeTTL_StatusTTLOutranksDefaultTTL(t *testing.T) {
+	t.Parallel()
+	// The per-status policy is the operator's explicit statement about
+	// error responses; ttl_default must not extend a negative-cached
+	// 5xx past it (review finding: defaultTTL used to shadow the policy).
+	h := header.Map{}
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 503, Directives{}, neg, 60*time.Second, 0, 0, time.Now())
+	assert.Equal(t, 10*time.Second, ttl)
+}
+
+func TestComputeTTL_StatusTTLOutranksHeuristic(t *testing.T) {
+	t.Parallel()
+	// A 5xx echoing Last-Modified must not get age/10 (potentially
+	// hours) when the operator pinned 10s for the range.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 503, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 10*time.Second, ttl)
+}
+
+func TestComputeTTL_HeuristicStillAppliesToHeuristicStatuses(t *testing.T) {
+	t.Parallel()
+	// A negative_ttl policy for 5xx must not leak into a 404's heuristic
+	// or a 200's default TTL: statuses the policy does not cover keep
+	// the pre-existing resolution.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	ttl := computeTTL(h, 404, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 876*time.Hour, ttl, "uncovered status keeps heuristic TTL")
+}
+
+func TestComputeTTL_HeuristicOutranksDefaultTTL(t *testing.T) {
+	t.Parallel()
+	// Pre-existing resolution, pinned since the negative_ttl work
+	// touched this chain: heuristic freshness (Last-Modified age/10)
+	// outranks ttl_default for any status the policy does not cover.
+	// Without this pin, ttl_default silently flips ordinary 200s with
+	// Last-Modified from hours of heuristic TTL to the operator default.
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 876*time.Hour, ttl, "heuristic outranks ttl_default")
+
+	// No heuristic source at all: ttl_default applies.
+	ttl = computeTTL(header.Map{}, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
+	assert.Equal(t, 60*time.Second, ttl, "ttl_default applies without heuristic freshness")
 }
 
 func TestHandler_OnlyIfCachedBypass(t *testing.T) {
@@ -2346,7 +2775,7 @@ func TestBuildObject_CDNCacheControl(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 120*time.Second, obj.TTL)
 	assert.Contains(t, obj.CacheControl, "max-age=120")
@@ -2360,7 +2789,7 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -2373,7 +2802,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 		Body:       []byte("hello world"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
 }
@@ -2387,7 +2816,7 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, now)
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", now)
 	require.NotNil(t, obj)
 	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
@@ -2401,7 +2830,7 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.False(t, obj.LastModified.IsZero())
 }
@@ -2414,7 +2843,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -2427,7 +2856,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -2440,7 +2869,7 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), 0, 0, 0, 0, 0, 0, nil, time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
 	require.NotNil(t, obj)
 	// VaryKey should be non-empty (the object has a Vary header).
 	assert.NotEqual(t, "", obj.VaryKey)
@@ -2463,7 +2892,7 @@ func TestDoBackgroundRefresh_BadURL(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register with a URL containing a control character that url.Parse rejects.
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/\x00bad"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/\x00bad"), "", 0, nil)
 	// This should unregister and skip without panicking.
 	h.doBackgroundRefresh(context.Background(), key, &api.Object{
 		StoredAt: time.Now(),
@@ -2477,7 +2906,7 @@ func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register the key with a valid URL.
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	// Use an upstream that returns 502 (error response).
 	errUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(502)
@@ -2504,7 +2933,7 @@ func TestDoBackgroundRefresh_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(2)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 	stale := &api.Object{
@@ -2526,7 +2955,7 @@ func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(3)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	// Upstream returns no-store (uncacheable).
 	nsUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "no-store")
@@ -2553,7 +2982,7 @@ func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.allowSetCookie = false
 	key := testkey.Key(4)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	scUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.Response.Header.Set(header.SetCookie, "sid=abc")
@@ -2580,7 +3009,7 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.maxObjectSize = 5
 	key := testkey.Key(5)
-	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 	bigUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
 		ctx.SetStatusCode(200)
@@ -2813,7 +3242,12 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 
 func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	t.Parallel()
+	// A 404 covered by the negative-caching policy (here with explicit
+	// origin freshness, so the object was NOT stored via negative
+	// caching) must still skip proactive refresh: re-fetching an origin
+	// that is already returning errors amplifies the outage.
 	h := testRefreshHandler(t, 1)
+	h.neg = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
 	key := testkey.Key(11)
 	r := testCtx("GET", "http://example.com/404")
 	obj := &api.Object{
@@ -2826,7 +3260,52 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 		TTL:        30 * time.Second,
 	}
 	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
-	// Negative cacheable objects should NOT be scheduled for refresh.
+	// Negative-cached-eligible objects should NOT be scheduled for refresh.
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestStoreObject_HealthyStatusStillRefreshesWithoutPolicy(t *testing.T) {
+	t.Parallel()
+	// With no negative-caching policy at all, nothing is excluded from
+	// the refresh loop.
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(14)
+	r := testCtx("GET", "http://example.com/ok")
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=30"),
+		Body:       []byte("ok"),
+		BodySize:   2,
+		StoredAt:   time.Now(),
+		TTL:        30 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+}
+
+func TestStoreObject_StatusTTLCached5xxSkipRefresh(t *testing.T) {
+	t.Parallel()
+	// A 503 cached only via a negative_ttl class entry must not be
+	// scheduled for proactive refresh: re-fetching a failing origin
+	// amplifies the outage. Without the policy check in storeObject
+	// this state (refresh_before_expiry + negative_ttl 5xx) loops
+	// forever.
+	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
+	h := testRefreshHandler(t, 1)
+	h.neg = neg
+	key := testkey.Key(12)
+	r := testCtx("GET", "http://example.com/flaky")
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 503,
+		Header:     header.Map{},
+		Body:       []byte("overloaded"),
+		BodySize:   11,
+		StoredAt:   time.Now(),
+		TTL:        10 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
 
@@ -2884,7 +3363,7 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer1:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return peerObj, nil
 		},
 	})
@@ -2894,6 +3373,228 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 	require.Equal(t, 200, respCode(rr))
 	assert.Equal(t, "from-peer", respBody(rr))
 	assert.Equal(t, int32(0), originCalls.Load())
+}
+
+// TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch pins the
+// owner-miss hint: when the H1 fast path already got a definitive miss
+// from the owner for a plain key (transferred via
+// api.OwnerMissContextKey), the slow path skips the duplicate owner
+// lookup + peer RPC and goes straight to origin.
+func TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/hinted-miss")
+	r.SetUserValue(api.OwnerMissContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(0), peerFetchCalls.Load(), "hint must skip the duplicate peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy pins the hint's
+// key-scope guard: the production fast path is built without the route's
+// KeyPolicy, so on a policied route the fast path's miss was computed
+// under a DIFFERENT key (unstripped query params here) and proves
+// nothing about the slow path's stripped key. The hint must be ignored
+// and the peer RPC with the correct key must run.
+func TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchKeys []api.Key
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		// A query-param-stripping policy: BuildKey drops "utm_foo", so
+		// the slow path's lookup key differs from the fast path's
+		// nil-policy key for the same URL.
+		Policy: NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			peerFetchKeys = append(peerFetchKeys, key)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/policied?utm_foo=x")
+	r.SetUserValue(api.OwnerMissContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(),
+		"hint from the nil-policy fast path must not suppress the policied route's peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+	if len(peerFetchKeys) == 1 {
+		want := BuildKey(requestInfoFromURL("GET", "http://example.com/policied?utm_foo=x"),
+			NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false))
+		assert.Equal(t, want, peerFetchKeys[0], "peer RPC must use the policied (stripped) key")
+	}
+}
+
+// TestHandleCacheMiss_GateRejectHintSkipsPeerFetchOnNilPolicy pins the
+// gate-rejection skip: when the H1 fast path asked the owner and its
+// object failed the variant gate (transferred via
+// api.OwnerGateRejectContextKey), a nil-policy slow path skips the
+// duplicate peer RPC — the two gates are byte-identical for the same
+// wire bytes, so the retry would be rejected again — and goes straight
+// to origin.
+func TestHandleCacheMiss_GateRejectHintSkipsPeerFetchOnNilPolicy(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/gate-rejected")
+	r.SetUserValue(api.OwnerGateRejectContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(0), peerFetchCalls.Load(),
+		"gate rejection must skip the deterministically-rejected duplicate peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_GateRejectHintIgnoredWithKeyPolicy pins the
+// gate-rejection hint's policy scope: on a policied route the slow
+// path's gate computes a different VaryKey (query/header policy
+// excluded from the variant key), so the identical-question argument
+// does not hold and the peer RPC must run.
+func TestHandleCacheMiss_GateRejectHintIgnoredWithKeyPolicy(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/policied-gate?utm_foo=x")
+	r.SetUserValue(api.OwnerGateRejectContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(),
+		"policied route's gate may differ from the nil-policy fast path's — retry must run")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerMissHintIgnoredWhenStaleObjectStored pins the
+// hint's scope: with a stale object in the store (obj != nil) the slow
+// path's peer question carries peerVaryAssertion(obj) — a different
+// question than the fast path's plain "" — so the hint must not
+// suppress the fetch.
+func TestHandleCacheMiss_OwnerMissHintIgnoredWhenStaleObjectStored(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	url := "http://example.com/hinted-stale"
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
+	stale := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("stale-body"),
+		BodySize:   10,
+		StoredAt:   time.Now().Add(-2 * time.Minute),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, stale))
+
+	var peerFetchCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("from-origin"))
+		},
+		FastClient: &testFastClient{
+			handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+				ctx.SetStatusCode(200)
+				_, _ = ctx.Write([]byte("from-origin"))
+			},
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil // peer miss
+		},
+	})
+
+	r := testCtx("GET", url)
+	r.SetUserValue(api.OwnerMissContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(), "hint must not suppress the fetch when a stale object exists")
 }
 
 // TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch pins the strong-mode
@@ -2920,7 +3621,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return nil, nil // peer miss
 		},
 		PeerPut: func(_ context.Context, _ api.PeerInfo, obj *api.Object) {
@@ -2973,7 +3674,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return peerObj, nil
 		},
 		PeerPut: func(_ context.Context, _ api.PeerInfo, _ *api.Object) {
@@ -3019,7 +3720,7 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "self:8080"}, true // local owner
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			t.Fatal("owner should not peer-fetch its own keys")
 			return nil, nil
 		},
@@ -3042,6 +3743,107 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 
 	// The owner must not forward to itself via peerPut.
 	assert.Equal(t, int32(0), peerPutCalls.Load())
+}
+
+// TestHandleCacheMiss_PeerFetchWrongVariant is the end-to-end regression for
+// the production cross-market body incident: a strong-mode non-owner with a
+// cold variant cache must not serve the owner's primary-key (Vary resolver)
+// entry as if it were the requested variant. Before the gate, the owner
+// returned the first market's body for a second market's request and the
+// non-owner served it as a HIT (X-Cache-Source: peer) without touching origin.
+func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+
+	// The owner's store holds the fr variant under the primary key (the
+	// pre-fix Vary resolver fill) and returns it for any fetch of that
+	// primary key, regardless of the requesting variant.
+	riFr := requestInfoFromHTTP("http://example.com/vary-peer", "/vary-peer",
+		headerMap("X-Region", "fr"))
+	frObj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
+		Body:       []byte("market=fr"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		VaryValue:  "X-Region",
+		// VaryKey stamped at cache-fill time with the fr selecting set.
+		VaryKey: BuildVaryKey("X-Region", riFr.Header, nil),
+	}
+	frObj.CacheControl = "max-age=60"
+
+	var peerFetchVary atomic.Pointer[string]
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "X-Region")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("X-Region"))))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, varyKey string) (*api.Object, error) {
+			peerFetchVary.Store(&varyKey)
+			return frObj, nil
+		},
+	})
+
+	// A cold non-owner requests the us market: the peer returns the fr
+	// body; the handler must treat it as a miss and fetch from origin.
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-peer", "X-Region", "us")
+	h.ServeRequest(rUs)
+	require.Equal(t, "MISS", respHeader(rUs, header.XCache),
+		"a peer fetch that returns another variant's body must be treated as a miss")
+	require.Equal(t, "market=us", respBody(rUs),
+		"the us request must be served the us body, not the fr peer body")
+	require.NotNil(t, peerFetchVary.Load(), "peer fetch must have been attempted")
+}
+
+// TestHandleCacheMiss_PeerFetchMatchingVariantServes pins the positive case
+// for the Vary gate: a peer object whose variant dimension matches the
+// request's selecting headers is still served (no over-blocking).
+func TestHandleCacheMiss_PeerFetchMatchingVariantServes(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	riFr := requestInfoFromHTTP("http://example.com/vary-peer-match", "/vary-peer-match",
+		headerMap("X-Region", "fr"))
+	frObj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "X-Region"),
+		Body:       []byte("market=fr"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		VaryValue:  "X-Region",
+		// VaryKey stamped at cache-fill time with the fr selecting set —
+		// identical to what the requesting node recomputes for its fr
+		// request, so the peer hit must be served.
+		VaryKey: BuildVaryKey("X-Region", riFr.Header, nil),
+	}
+	frObj.CacheControl = "max-age=60"
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			t.Fatal("origin must not be called when the peer returns the matching variant")
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			return frObj, nil
+		},
+	})
+
+	r := testCtxWithHeader("GET", "http://example.com/vary-peer-match", "X-Region", "fr")
+	h.ServeRequest(r)
+	require.Equal(t, "HIT", respHeader(r, header.XCache))
+	require.Equal(t, "peer", respHeader(r, header.XCacheSource))
+	require.Equal(t, "market=fr", respBody(r))
 }
 
 func TestLookup_VaryVariantMiss(t *testing.T) {
@@ -3068,7 +3870,7 @@ func TestLookup_VaryVariantMiss(t *testing.T) {
 func TestAppendCanonicalQueryString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [256]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	// "q=test&utm=x" → should strip utm, keep q.
 	n := appendCanonicalQueryString(buf[:], 0, "q=test&utm=x", policy)
 	result := string(buf[:n])
@@ -3097,7 +3899,7 @@ func TestAppendCanonicalQueryString_MoreThan8Params(t *testing.T) {
 func TestAppendCanonicalQuerySlowString_Policy(t *testing.T) {
 	t.Parallel()
 	var buf [512]byte
-	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false, nil, false)
 	n := appendCanonicalQuerySlowString(buf[:], 0, "q=test&utm=x&fbclid=123", policy)
 	result := string(buf[:n])
 	assert.Contains(t, result, "q=test")
@@ -3147,7 +3949,7 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		updated, _, _ := h.store.Get(context.Background(), key)
@@ -3196,7 +3998,7 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -3245,7 +4047,7 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -3363,7 +4165,7 @@ func TestTriggerBgRefresh_NotFound(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 		key := testkey.Key(999)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -3408,7 +4210,7 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 			TTL:        time.Second,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -3454,7 +4256,7 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 	})
@@ -3622,7 +4424,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0, nil)
 
 		// Schedule refresh at now + 50ms and advance synthetic time.
 		// synctest.Sleep advances the fake clock AND waits for all
@@ -4065,4 +4867,438 @@ func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
 	require.True(t, owned)
 
 	require.Equal(t, 0, h.refreshRegistry.Len(), "refresh registry should be cleared after soft purge with hard delete")
+}
+
+// --- cache.key.include_headers (issue #632) ---
+
+// TestIncludeHeaders_OriginNoVary is the acceptance test for
+// cache.key.include_headers: a route whose policy includes
+// Accept-Language, an origin that sends no Vary at all, must still
+// store distinct variants per Accept-Language value — exactly as if
+// the origin had sent "Vary: Accept-Language". A request without the
+// header selects the empty-value variant (RFC 9111 Vary semantics),
+// and list-value normalization collapses "en, FR" and "fr, en".
+func TestIncludeHeaders_OriginNoVary(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("lang=" + string(ctx.Request.Header.Peek(header.AcceptLanguage))))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false),
+	})
+
+	serve := func(al string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", "http://example.com/v")
+		if al != "" {
+			ctx.Request.Header.Set(header.AcceptLanguage, al)
+		}
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	// en and fr store distinct variants.
+	rEn := serve("en")
+	require.Equal(t, "MISS", respHeader(rEn, header.XCache))
+	require.Equal(t, "lang=en", respBody(rEn))
+	rFr := serve("fr")
+	require.Equal(t, "MISS", respHeader(rFr, header.XCache))
+	require.Equal(t, "lang=fr", respBody(rFr))
+
+	// Each variant hits with its own body.
+	rEn2 := serve("en")
+	require.Equal(t, "HIT", respHeader(rEn2, header.XCache))
+	require.Equal(t, "lang=en", respBody(rEn2))
+	rFr2 := serve("fr")
+	require.Equal(t, "HIT", respHeader(rFr2, header.XCache))
+	require.Equal(t, "lang=fr", respBody(rFr2))
+
+	// A request without the header selects the empty-value variant.
+	rNone := serve("")
+	require.Equal(t, "MISS", respHeader(rNone, header.XCache))
+	require.Equal(t, "lang=", respBody(rNone))
+	rNone2 := serve("")
+	require.Equal(t, "HIT", respHeader(rNone2, header.XCache))
+	require.Equal(t, "lang=", respBody(rNone2))
+
+	// Accept-Language bucketing (plan §10): "en, FR" ties at top
+	// weight, the bucket is the lexicographic winner ("en"), and the
+	// outbound rewrite hands the origin the winner tag — so the
+	// chain-spelling variants collapse onto the en bucket AND the
+	// origin sees one spelling per bucket.
+	rA := serve("en, FR")
+	require.Equal(t, "HIT", respHeader(rA, header.XCache), `"en, FR" must hit the "en" bucket variant`)
+	require.Equal(t, "lang=en", respBody(rA), "origin must receive the winner tag, not the raw chain")
+	rB := serve("FR, en")
+	require.Equal(t, "HIT", respHeader(rB, header.XCache), `"FR, en" must hit the same "en" bucket variant`)
+	require.Equal(t, "lang=en", respBody(rB))
+	// A distinct winner fills its own variant.
+	rC := serve("de;q=1.0, fr;q=0.5")
+	require.Equal(t, "MISS", respHeader(rC, header.XCache))
+	require.Equal(t, "lang=de", respBody(rC))
+
+	require.Equal(t, int32(4), originCalls.Load(), "en, fr, empty and en-FR variants fetch once each")
+}
+
+// TestIncludeHeaders_MixedWithOriginVary covers the union case: origin
+// sends "Vary: Accept-Encoding" and the route includes Accept-Language —
+// both fields key the variant.
+func TestIncludeHeaders_MixedWithOriginVary(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("enc=" + string(ctx.Request.Header.Peek(header.AcceptEncoding)) +
+			" lang=" + string(ctx.Request.Header.Peek(header.AcceptLanguage))))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false),
+	})
+
+	serve := func(enc, lang string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", "http://example.com/v")
+		ctx.Request.Header.Set(header.AcceptEncoding, enc)
+		if lang != "" {
+			ctx.Request.Header.Set(header.AcceptLanguage, lang)
+		}
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	// (gzip, en) stores a variant.
+	r1 := serve("gzip", "en")
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	// (gzip, fr) is a different variant: same Vary field, different
+	// include field.
+	r2 := serve("gzip", "fr")
+	require.Equal(t, "MISS", respHeader(r2, header.XCache))
+	require.Equal(t, "enc=gzip lang=fr", respBody(r2))
+	// (gzip, en) hits.
+	r3 := serve("gzip", "en")
+	require.Equal(t, "HIT", respHeader(r3, header.XCache))
+	require.Equal(t, "enc=gzip lang=en", respBody(r3))
+	require.Equal(t, int32(2), originCalls.Load())
+}
+
+// TestIncludeHeaders_304RefreshKeepsUnion pins the 304 revalidation
+// path: an object stored under an include-listed field must keep the
+// union in VaryValue after revalidation, or the refreshed object would
+// collapse onto the primary key and cross-variant contamination
+// follows.
+func TestIncludeHeaders_304RefreshKeepsUnion(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false)
+
+	// A stored object whose origin sent no Vary: the union is the
+	// include list alone.
+	storedHeader := headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`)
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		StatusCode: 200,
+		Header:     storedHeader.Clone(),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+		VaryValue:  "accept-language",
+	}
+
+	// 304 responses carry no Vary line at all.
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.CacheControl, "max-age=60")),
+	}
+	frReq := requestInfoFromURL("GET", "http://example.com/test")
+	frReq.Header.Set(header.AcceptLanguage, "fr")
+	refreshed := h.refreshFrom304(stale, res, frReq, time.Now())
+	require.Equal(t, "accept-language", refreshed.VaryValue,
+		"a 304 without Vary must not drop the include_headers union from VaryValue")
+	require.Equal(t, BuildVaryKey("accept-language", frReq.Header, nil), refreshed.VaryKey,
+		"VaryValue and VaryKey must stay a matching pair across revalidation")
+
+	// And a 304 that re-sends a partial Vary keeps the union too.
+	res2 := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.Vary, "Accept-Encoding")),
+	}
+	refreshed2 := h.refreshFrom304(stale, res2, frReq, time.Now())
+	require.Equal(t, "accept-encoding, accept-language", refreshed2.VaryValue)
+	require.Equal(t, BuildVaryKey("accept-encoding, accept-language", frReq.Header, nil), refreshed2.VaryKey,
+		"a 304 that changes Vary must recompute VaryKey from the new union, or the peer gates reject the pair")
+}
+
+// TestIncludeHeaders_304VaryStarFailsSafe pins the one path where a
+// union can contain "*": a 304 runs before any cacheability gate, and
+// MergeHeaders304 copies its Vary lines wholesale, so a "Vary: *"
+// 304 over an include-keyed object produces a "*" union in VaryValue.
+// refreshFrom304 must then blank VaryKey — the pair stays consistent
+// and every variant-key constructor treats the object as unkeyable,
+// so the damage is failed hits, never a cross-variant body.
+func TestIncludeHeaders_304VaryStarFailsSafe(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	h.policy = NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language"}, false)
+
+	storedHeader := headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`)
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		StatusCode: 200,
+		Header:     storedHeader.Clone(),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+		VaryValue:  "accept-language",
+		VaryKey:    BuildVaryKey("accept-language", headerMap(header.AcceptLanguage, "fr"), nil),
+	}
+
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(headerMap(header.ETag, `"v1"`, header.Vary, "*")),
+	}
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromURL("GET", "http://example.com/test"), time.Now())
+	require.Equal(t, "*, accept-language", refreshed.VaryValue,
+		"a 304's Vary: * merges into the union — the one documented '*' path")
+	require.Empty(t, refreshed.VaryKey,
+		"a '*' union must blank VaryKey so the pair never lies to the peer gates")
+}
+
+// TestIncludeHeaders_PeerVaryGateParity mirrors
+// TestPeerVaryGateHeaderParity for include-keyed variants: the owner
+// stores the object with the union in VaryValue and hashes it into
+// VaryKey from its view of the wire bytes, while the requester-side
+// gate recomputes BuildVaryKey over the stored VaryValue from its own
+// view. Parity — the two views must produce identical Vary keys for
+// the same wire bytes — is what makes the include-keyed variant gate
+// resolve instead of rejecting every peer hit.
+func TestIncludeHeaders_PeerVaryGateParity(t *testing.T) {
+	t.Parallel()
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"Accept-Language", "X-Region"}, false)
+
+	wire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: fr\r\nX-Region: US\r\n\r\n"
+
+	// The requester's view: the request head parsed by the h1parser
+	// (the production header stage via the test bridge), the same way
+	// a fast-path peer request materializes its headers.
+	var scratch api.RawRequest
+	require.NoError(t, h1parser.ParseHeadersForTest([]byte(wire), &scratch))
+	rawView := reqHeaderMapFromRaw(&scratch)
+
+	// The owner's view: the same wire bytes re-parsed by fasthttp —
+	// handleFallThrough replays the head through Request.Read, so the
+	// owner-side BuildVaryKey (buildObject, refreshFrom304) sees this
+	// map.
+	var rctx fasthttp.RequestCtx
+	require.NoError(t, rctx.Request.Read(bufio.NewReader(strings.NewReader(wire))))
+	fastView := headerFromCtx(&rctx)
+
+	// An object stored with the union as VaryValue: origin sent
+	// "Vary: Accept-Encoding", include list contributed the rest.
+	varyValue := effectiveVary(headerMap(header.Vary, "Accept-Encoding"), policy)
+	require.Equal(t, "accept-encoding, accept-language, x-region", varyValue)
+
+	// The owner's stored VaryKey (buildObject) vs the requester-side
+	// gate's recomputation: identical wire bytes must produce
+	// identical keys from both header views.
+	ownerVK := BuildVaryKey(varyValue, fastView, nil)
+	gateVK := BuildVaryKey(varyValue, rawView, nil)
+	require.Equal(t, ownerVK, gateVK,
+		"owner (fasthttp view) and requester (h1parser raw view) must compute identical Vary keys for the same wire bytes")
+
+	// A different Accept-Language must NOT match the stored VaryKey —
+	// the cross-variant body-swap guard.
+	otherWire := "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Language: en\r\nX-Region: US\r\n\r\n"
+	var other fasthttp.RequestCtx
+	require.NoError(t, other.Request.Read(bufio.NewReader(strings.NewReader(otherWire))))
+	otherVK := BuildVaryKey(varyValue, headerFromCtx(&other), nil)
+	require.NotEqual(t, ownerVK, otherVK, "a different include-listed header value must fail the peer gate")
+}
+
+func TestHandler_StatusTTL(t *testing.T) {
+	t.Parallel()
+	newStatusHandler := func(neg *StatusTTL, upstream fasthttp.RequestHandler) *Handler {
+		t.Helper()
+		return NewHandler(HandlerConfig{
+			Upstream:   upstream,
+			FastClient: &testFastClient{handler: upstream},
+			Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+			Negative:   neg,
+		})
+	}
+	t.Run("range_caches_503", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(503)
+			_, _ = ctx.Write([]byte("overloaded"))
+		}
+		h := newStatusHandler(mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second}), upstream)
+		rr := testCtx("GET", "http://example.com/flaky")
+		h.ServeRequest(rr)
+		require.Equal(t, 503, respCode(rr))
+		require.Equal(t, "MISS", respHeader(rr, header.XCache))
+
+		rr2 := testCtx("GET", "http://example.com/flaky")
+		h.ServeRequest(rr2)
+		require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+		require.Equal(t, 1, originCalls)
+	})
+
+	t.Run("explicit_zero_blocks_even_with_legacy_ttl", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		h := newStatusHandler(mustStatusTTL(t, map[string]time.Duration{"404": 0}), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		require.Equal(t, 404, respCode(rr))
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "MISS", respHeader(rr2, header.XCache))
+		require.Equal(t, 2, originCalls)
+	})
+
+	t.Run("scalar_shorthand_caches_404", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		// negative_ttl: 30s decodes to the default error set.
+		h := newStatusHandler(mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+		require.Equal(t, 1, originCalls)
+	})
+	t.Run("no_policy_never_caches_404", func(t *testing.T) {
+		t.Parallel()
+		var originCalls int
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			originCalls++
+			ctx.SetStatusCode(404)
+		}
+		h := newStatusHandler(mustStatusTTL(t, nil), upstream)
+		rr := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr)
+		rr2 := testCtx("GET", "http://example.com/missing")
+		h.ServeRequest(rr2)
+		require.Equal(t, "MISS", respHeader(rr2, header.XCache))
+		require.Equal(t, 2, originCalls)
+	})
+}
+
+// --- cache.key.include_host: false (host-agnostic keys) ---
+
+// TestExcludeHost_TwoHostsShareEntry is the end-to-end acceptance test
+// for include_host: false: two requests differing only in Host share
+// one stored entry — the second host's request is a HIT on the first
+// host's fill, and the origin sees exactly one fetch. The stored
+// X-Bouine-Host metadata keeps the filler's host (the value ban
+// predicates match), pinned below.
+func TestExcludeHost_TwoHostsShareEntry(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true),
+	})
+
+	serve := func(url string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", url)
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	r1 := serve("http://internal.example.com/p?q=1")
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	r2 := serve("http://public.example.com/p?q=1")
+	require.Equal(t, "HIT", respHeader(r2, header.XCache),
+		"a request under a different Host must hit the entry the first Host filled")
+	require.Equal(t, "body", respBody(r2))
+	require.Equal(t, int32(1), originCalls.Load(), "one entry means one origin fetch")
+
+	// The stored metadata keeps the filler's host — what ban predicates
+	// see. Fetch it via the handler's own key computation.
+	key := BuildKeyFromURL("http://internal.example.com/p?q=1",
+		NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true))
+	obj, src, err := store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	require.Equal(t, api.SourceHot, src)
+	require.Equal(t, "internal.example.com", obj.Header.Get(header.XBouineHost),
+		"X-Bouine-Host records the filler's host, not the requester's")
+
+	// Default (host-keyed) routes on the same handler pair still split.
+	// A nil-policy handler over the same store keeps two entries.
+	hDefault := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+	d1 := testCtx("GET", "http://internal.example.com/other")
+	hDefault.ServeRequest(d1)
+	d2 := testCtx("GET", "http://public.example.com/other")
+	hDefault.ServeRequest(d2)
+	require.Equal(t, "MISS", respHeader(d2, header.XCache), "nil policy keeps host in the key")
+}
+
+// TestExcludeHost_HostStillForwarded pins that only key computation
+// changes: the origin-bound request carries the client's original
+// Host, so an upstream that *is* host-sensitive still sees correct
+// input (it is the operator's contract that it isn't).
+func TestExcludeHost_HostStillForwarded(t *testing.T) {
+	t.Parallel()
+	var seenHost atomic.Value
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		seenHost.Store(string(ctx.Host()))
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("b"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, nil, true),
+	})
+	ctx := testCtx("GET", "http://kept.example.com/x")
+	h.ServeRequest(ctx)
+	require.Equal(t, "kept.example.com", seenHost.Load().(string),
+		"include_host: false must not rewrite the origin-bound Host")
 }

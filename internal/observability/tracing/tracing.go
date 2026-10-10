@@ -28,6 +28,15 @@ import (
 
 const tracerName = "bouine"
 
+// Span re-exports otel's trace.Span so L3 code can hold and end spans
+// without importing go.opentelemetry.io directly (depguard).
+type Span = trace.Span
+
+// otelUserValueKey is where FastHTTPMiddleware stores the server span
+// context. It is Background-based, so it is safe to retain past handler
+// return, unlike the RequestCtx itself.
+const otelUserValueKey = "otel.ctx"
+
 // tracerEnabled is set to true when InitTracer configures a real exporter.
 // When false, StartSpan returns a no-op span without calling into the OTel
 // global tracer, avoiding ~3 allocations per fetch on the miss path.
@@ -70,9 +79,46 @@ func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.
 			),
 		)
 		defer span.End()
-		ctx.SetUserValue("otel.ctx", spanCtx)
+		ctx.SetUserValue(otelUserValueKey, spanCtx)
 		next(ctx)
 	}
+}
+
+// SpanContextFromRequest returns the span context stored by
+// FastHTTPMiddleware, or Background when the request never passed
+// through it. Never carries the RequestCtx.
+func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
+	if c, ok := ctx.UserValue(otelUserValueKey).(context.Context); ok {
+		return c
+	}
+	return context.Background()
+}
+
+// StartOriginSpan starts the "bouine.origin" span for an origin fetch,
+// parented on the client's trace. method and path are byte slices so the
+// disabled-tracer path converts nothing; route is the bounded route label
+// (http.route), never the raw path. Attributes are built conditionally so
+// empty pool/route values are omitted rather than counted as dropped
+// attributes by the SDK.
+func StartOriginSpan(parent context.Context, method, path []byte, pool, route string) (context.Context, trace.Span) {
+	if !tracerEnabled.Load() {
+		return parent, trace.SpanFromContext(parent)
+	}
+	attrs := make([]attribute.KeyValue, 0, 4)
+	attrs = append(attrs,
+		attribute.String("http.method", string(method)),
+		attribute.String("http.path", string(path)),
+	)
+	if pool != "" {
+		attrs = append(attrs, attribute.String("upstream_pool", pool))
+	}
+	if route != "" {
+		attrs = append(attrs, attribute.String("http.route", route))
+	}
+	ctx, span := Tracer().Start(parent, "bouine.origin",
+		trace.WithAttributes(attrs...),
+	)
+	return ctx, span
 }
 
 // StartSpan is a thin helper that starts a child span in ctx and
@@ -178,4 +224,11 @@ type TracingConfig struct {
 	ServiceName string `yaml:"service_name"`
 	// SamplingRate is a float in [0, 1]. 0 = never sample, 1 = always sample (default).
 	SamplingRate float64 `yaml:"sampling_rate"`
+}
+
+// EnableForTest toggles span creation for tests in other packages that
+// install their own tracer provider via a test-support helper. Production
+// code must use InitTracer instead.
+func EnableForTest(enabled bool) {
+	tracerEnabled.Store(enabled)
 }

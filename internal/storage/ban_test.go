@@ -128,8 +128,10 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 	require.Equal(t, int64(n), after-before)
 }
 
-// TestBan_ParallelSurrogateKey verifies that parallel Ban correctly
-// matches by surrogate key across shards.
+// TestBan_ParallelSurrogateKey verifies that surrogate-key bans are
+// enforced across shards. Surrogate-only bans skip the eager scan
+// (Option B): the count is 0 and matching entries are evicted lazily
+// on next lookup, with non-matching entries untouched.
 func TestBan_ParallelSurrogateKey(t *testing.T) {
 	t.Parallel()
 
@@ -150,8 +152,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 
 	count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "target"})
 	require.NoError(t, err, "Ban")
-	want := n / 3
-	require.Equal(t, want, count)
+	require.Zero(t, count, "surrogate-only bans skip the eager scan (lazy enforcement)")
 
 	for i := range n {
 		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
@@ -219,4 +220,154 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		assert.Nil(t, got)
 	}
+}
+
+// TestBan_ScanCoalescing_SkipsEagerWithinWindow verifies that a second
+// Ban arriving within banScanCoalesceWindow of a completed scan skips
+// the eager pass (count 0) but still registers in the lazy list, so
+// objects that would have matched the second ban are evicted on lookup.
+func TestBan_ScanCoalescing_SkipsEagerWithinWindow(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 8})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	const n = 100
+	for i := range n {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 64)
+		o.Header.Set(header.XBouineHost, "storm.example.com")
+		_ = s.Put(context.Background(), k, o)
+	}
+
+	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: `storm\.example\.com`})
+	require.NoError(t, err, "first Ban")
+	require.Equal(t, n, count)
+
+	// A matching entry stored BEFORE the coalesced ban (StoredAt <
+	// CreatedAt, so it is subject to it per RFC 9111 §4.4 semantics)
+	// is caught lazily on next lookup — the lazy list does not skip.
+	k := testkey.Key(uint64(n + 1))
+	o := obj(k, 64)
+	o.Header.Set(header.XBouineHost, "storm.example.com")
+	_ = s.Put(context.Background(), k, o)
+
+	// Second ban within the coalesce window: eager scan skipped, count 0.
+	count, err = s.Ban(context.Background(), api.BanExpr{HostRegex: `storm\.example\.com`})
+	require.NoError(t, err, "coalesced Ban")
+	require.Equal(t, 0, count)
+
+	got, _, _ := s.Get(context.Background(), k)
+	assert.Nil(t, got, "lazy ban must evict matching entry on lookup")
+}
+
+// TestBan_LiteralHostAndPath verifies that metacharacter-free host and
+// path patterns match by exact string equality: literal patterns match
+// identical values and reject non-identical ones (previously a regex
+// like "example.com" also matched "examplexcom").
+func TestBan_LiteralHostAndPath(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 8})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	hosts := []string{"literal.example.com", "other.example.com"}
+	paths := []string{"/api/v1", "/api/v2"}
+	for i, host := range hosts {
+		for j, path := range paths {
+			k := testkey.Key(uint64(i*len(paths) + j))
+			o := obj(k, 64)
+			o.Header.Set(header.XBouineHost, host)
+			o.Header.Set(header.XBouinePath, path)
+			_ = s.Put(context.Background(), k, o)
+		}
+	}
+
+	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "literal.example.com", PathRegex: "/api/v1"})
+	require.NoError(t, err, "Ban")
+	require.Equal(t, 1, count)
+
+	// The literal host pattern must NOT regex-match "literalxexample.com"
+	// (a plain regex would treat "." as any-char). It is registered in the
+	// lazy list; verify via MatchesActiveBan on a synthetic object.
+	pred := api.Object{Header: header.Map{}}
+	pred.Header.Set(header.XBouineHost, "literalxexample.com")
+	assert.False(t, s.MatchesActiveBan(&pred), "literal pattern must not substring/regex-match")
+}
+
+// TestBan_AnchoredRegexStillCompiles verifies that patterns containing
+// metacharacters still take the regexp path and evaluate with regex
+// semantics (anchors, alternation).
+func TestBan_AnchoredRegexStillCompiles(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 8})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	for i, path := range []string{"/a", "/b", "/c"} {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 64)
+		o.Header.Set(header.XBouinePath, path)
+		_ = s.Put(context.Background(), k, o)
+	}
+
+	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: `^/(a|b)$`})
+	require.NoError(t, err, "Ban")
+	require.Equal(t, 2, count)
+}
+
+// TestBan_InvalidRegexStillRejected verifies the literal fast-path does
+// not bypass regexp validation of malformed patterns.
+func TestBan_InvalidRegexStillRejected(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 8})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	_, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/unclosed["})
+	require.Error(t, err, "malformed regexp must be rejected")
+}
+
+// TestBan_IdenticalReissuedDedups verifies that re-issuing the same ban
+// pattern refreshes the existing lazy-list entry instead of appending a
+// duplicate — a storm of identical bans must not grow the list that
+// every subsequent cache hit walks.
+func TestBan_IdenticalReissuedDedups(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	for range 1000 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "same.example.com"})
+	}
+	assert.Equal(t, 1, s.bans.len(), "identical re-issued bans must dedup to one list entry")
+
+	// A different pattern still appends.
+	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "other.example.com"})
+	assert.Equal(t, 2, s.bans.len())
+}
+
+// TestBan_ListCapBoundsGrowth verifies that distinct bans stop growing
+// the lazy list past banListCap and that the newest ban remains active.
+func TestBan_ListCapBoundsGrowth(t *testing.T) {
+	t.Parallel()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	for i := range banListCap + 50 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: fmt.Sprintf("host-%d.example.com", i)})
+	}
+	require.Equal(t, banListCap, s.bans.len(), "ban list must be capped")
+
+	// The newest ban must still be active. Store a matching object
+	// BEFORE re-issuing the ban so it is subject to it (objects
+	// stored after a ban's CreatedAt are exempt per RFC 9111 §4.4).
+	o := obj(testkey.Key(9999), 64)
+	o.Header.Set(header.XBouineHost, fmt.Sprintf("host-%d.example.com", banListCap+49))
+	_ = s.Put(context.Background(), testkey.Key(9999), o)
+	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: fmt.Sprintf("host-%d.example.com", banListCap+49)})
+	got, _, _ := s.Get(context.Background(), testkey.Key(9999))
+	assert.Nil(t, got, "newest ban must remain active at the cap")
 }

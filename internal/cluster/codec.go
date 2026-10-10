@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -18,9 +19,11 @@ const (
 )
 
 const (
-	msgTypePurge   byte = 1
-	msgTypeBan     byte = 2
-	msgTypeRefresh byte = 3
+	msgTypePurge        byte = 1
+	msgTypeBan          byte = 2
+	msgTypeRefresh      byte = 3
+	msgTypePurgeBatch   byte = 4
+	msgTypeRefreshBatch byte = 5
 )
 
 var (
@@ -64,6 +67,62 @@ func readString(buf []byte, offset int) (string, int, error) {
 		return "", offset, errShortFrame
 	}
 	return string(buf[offset : offset+n]), offset + n, nil
+}
+
+// ---- generic framing ----
+//
+// Every invalidation frame is: magic, version, [msgType], payload.
+// Gossip frames carry the msgType byte (the gossip channel delivers
+// multiple event kinds); HTTP peer frames omit it (one endpoint per
+// kind). encodeFrame/decodeFrame implement the shared guard once.
+
+// encodeFrame writes magic+version (+msgType when msgType > 0) and the
+// payload produced by put into a buffer sized total.
+func encodeFrame(total int, msgType byte, put func(buf []byte, off int) (int, error)) ([]byte, error) {
+	buf := make([]byte, total)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	off := binaryHdrLen
+	if msgType != 0 {
+		buf[2] = msgType
+		off = gossipHdrLen
+	}
+	off, err := put(buf, off)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:off], nil
+}
+
+// decodeFrame validates magic, version, and — when wantType > 0 — the
+// msgType byte, then decodes the payload at the frame-header offset.
+func decodeFrame(buf []byte, wantType byte, decode func(buf []byte, off int) error) error {
+	hdrLen := binaryHdrLen
+	if wantType != 0 {
+		hdrLen = gossipHdrLen
+	}
+	if len(buf) < hdrLen {
+		return errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	if wantType != 0 && buf[2] != wantType {
+		return fmt.Errorf("cluster: wrong msgType %d (want %d)", buf[2], wantType)
+	}
+	return decode(buf, hdrLen)
+}
+
+// frameLen computes the total frame size for an HTTP (no msgType byte)
+// or gossip frame around a payload of payloadLen bytes.
+func frameLen(gossip bool, payloadLen int) int {
+	if gossip {
+		return gossipHdrLen + payloadLen
+	}
+	return binaryHdrLen + payloadLen
 }
 
 func purgePayloadLen(evt api.PurgeEvent) int {
@@ -115,60 +174,36 @@ func decodePurgePayload(buf []byte, off int) (api.PurgeEvent, error) {
 
 // EncodePurgeGossip serializes a PurgeEvent as a gossip frame.
 func EncodePurgeGossip(evt api.PurgeEvent) ([]byte, error) {
-	total := gossipHdrLen + purgePayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	buf[2] = msgTypePurge
-	off, err := putPurgePayload(buf, gossipHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(true, purgePayloadLen(evt)), msgTypePurge,
+		func(buf []byte, off int) (int, error) { return putPurgePayload(buf, off, evt) })
 }
 
 // EncodePurgeHTTP serializes a PurgeEvent for the HTTP peer-purge endpoint.
 func EncodePurgeHTTP(evt api.PurgeEvent) ([]byte, error) {
-	total := binaryHdrLen + purgePayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	off, err := putPurgePayload(buf, binaryHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(false, purgePayloadLen(evt)), 0,
+		func(buf []byte, off int) (int, error) { return putPurgePayload(buf, off, evt) })
 }
 
 // DecodePurgeGossip decodes a PurgeEvent from a gossip frame.
 func DecodePurgeGossip(buf []byte) (api.PurgeEvent, error) {
-	if len(buf) < gossipHdrLen {
-		return api.PurgeEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.PurgeEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.PurgeEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	if buf[2] != msgTypePurge {
-		return api.PurgeEvent{}, fmt.Errorf("cluster: wrong msgType %d for purge", buf[2])
-	}
-	return decodePurgePayload(buf, gossipHdrLen)
+	var evt api.PurgeEvent
+	err := decodeFrame(buf, msgTypePurge, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodePurgePayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 // DecodePurgeHTTP decodes a PurgeEvent from an HTTP peer-purge body.
 func DecodePurgeHTTP(buf []byte) (api.PurgeEvent, error) {
-	if len(buf) < binaryHdrLen {
-		return api.PurgeEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.PurgeEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.PurgeEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	return decodePurgePayload(buf, binaryHdrLen)
+	var evt api.PurgeEvent
+	err := decodeFrame(buf, 0, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodePurgePayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 func banPayloadLen(evt api.BanEvent) int {
@@ -242,60 +277,36 @@ func decodeBanPayload(buf []byte, off int) (api.BanEvent, error) {
 
 // EncodeBanGossip serializes a BanEvent as a gossip frame.
 func EncodeBanGossip(evt api.BanEvent) ([]byte, error) {
-	total := gossipHdrLen + banPayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	buf[2] = msgTypeBan
-	off, err := putBanPayload(buf, gossipHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(true, banPayloadLen(evt)), msgTypeBan,
+		func(buf []byte, off int) (int, error) { return putBanPayload(buf, off, evt) })
 }
 
 // EncodeBanHTTP serializes a BanEvent for the HTTP peer-ban endpoint.
 func EncodeBanHTTP(evt api.BanEvent) ([]byte, error) {
-	total := binaryHdrLen + banPayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	off, err := putBanPayload(buf, binaryHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(false, banPayloadLen(evt)), 0,
+		func(buf []byte, off int) (int, error) { return putBanPayload(buf, off, evt) })
 }
 
 // DecodeBanGossip decodes a BanEvent from a gossip frame.
 func DecodeBanGossip(buf []byte) (api.BanEvent, error) {
-	if len(buf) < gossipHdrLen {
-		return api.BanEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.BanEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.BanEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	if buf[2] != msgTypeBan {
-		return api.BanEvent{}, fmt.Errorf("cluster: wrong msgType %d for ban", buf[2])
-	}
-	return decodeBanPayload(buf, gossipHdrLen)
+	var evt api.BanEvent
+	err := decodeFrame(buf, msgTypeBan, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeBanPayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 // DecodeBanHTTP decodes a BanEvent from an HTTP peer-ban body.
 func DecodeBanHTTP(buf []byte) (api.BanEvent, error) {
-	if len(buf) < binaryHdrLen {
-		return api.BanEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.BanEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.BanEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	return decodeBanPayload(buf, binaryHdrLen)
+	var evt api.BanEvent
+	err := decodeFrame(buf, 0, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeBanPayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 func refreshPayloadLen(evt api.RefreshEvent) int {
@@ -339,60 +350,36 @@ func decodeRefreshPayload(buf []byte, off int) (api.RefreshEvent, error) {
 
 // EncodeRefreshGossip serializes a RefreshEvent as a gossip frame.
 func EncodeRefreshGossip(evt api.RefreshEvent) ([]byte, error) {
-	total := gossipHdrLen + refreshPayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	buf[2] = msgTypeRefresh
-	off, err := putRefreshPayload(buf, gossipHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(true, refreshPayloadLen(evt)), msgTypeRefresh,
+		func(buf []byte, off int) (int, error) { return putRefreshPayload(buf, off, evt) })
 }
 
 // EncodeRefreshHTTP serializes a RefreshEvent for the HTTP peer-refresh endpoint.
 func EncodeRefreshHTTP(evt api.RefreshEvent) ([]byte, error) {
-	total := binaryHdrLen + refreshPayloadLen(evt)
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	off, err := putRefreshPayload(buf, binaryHdrLen, evt)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:off], nil
+	return encodeFrame(frameLen(false, refreshPayloadLen(evt)), 0,
+		func(buf []byte, off int) (int, error) { return putRefreshPayload(buf, off, evt) })
 }
 
 // DecodeRefreshGossip decodes a RefreshEvent from a gossip frame.
 func DecodeRefreshGossip(buf []byte) (api.RefreshEvent, error) {
-	if len(buf) < gossipHdrLen {
-		return api.RefreshEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.RefreshEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.RefreshEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	if buf[2] != msgTypeRefresh {
-		return api.RefreshEvent{}, fmt.Errorf("cluster: wrong msgType %d for refresh", buf[2])
-	}
-	return decodeRefreshPayload(buf, gossipHdrLen)
+	var evt api.RefreshEvent
+	err := decodeFrame(buf, msgTypeRefresh, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeRefreshPayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 // DecodeRefreshHTTP decodes a RefreshEvent from an HTTP peer-refresh body.
 func DecodeRefreshHTTP(buf []byte) (api.RefreshEvent, error) {
-	if len(buf) < binaryHdrLen {
-		return api.RefreshEvent{}, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return api.RefreshEvent{}, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return api.RefreshEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	return decodeRefreshPayload(buf, binaryHdrLen)
+	var evt api.RefreshEvent
+	err := decodeFrame(buf, 0, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeRefreshPayload(buf, off)
+		return err
+	})
+	return evt, err
 }
 
 // IsBinaryFrame reports whether msg starts with the binary magic byte.
@@ -406,4 +393,125 @@ func GossipMsgType(msg []byte) byte {
 		return 0
 	}
 	return msg[2]
+}
+
+// ---- meta / push-pull state frames (binary, no msgType byte) ----
+//
+// Meta carries PeerInfo (memberlist node metadata), state carries
+// RingDigest (push/pull sync). Both are framed with binaryMagic +
+// binaryVersion; the channel implies the payload type, so no msgType
+// byte is spent.
+
+// peerInfoStrings returns the frame's string fields in wire order.
+func peerInfoStrings(info api.PeerInfo) []string {
+	return []string{info.Name, info.Addr, info.AdminAddr, info.DataAddr, info.Version}
+}
+
+func peerInfoPayloadLen(info api.PeerInfo) int {
+	return 8 + // JoinedAt (unix nanos, 0 = zero)
+		5*2 + // five length-prefixed strings
+		len(info.Name) + len(info.Addr) + len(info.AdminAddr) +
+		len(info.DataAddr) + len(info.Version) +
+		8 // Weight (float64)
+}
+
+func putPeerInfoPayload(buf []byte, off int, info api.PeerInfo) int {
+	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(info.JoinedAt))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	for _, s := range peerInfoStrings(info) {
+		// String lengths are validated by EncodePeerInfoMeta; the
+		// buffer is sized to peerInfoPayloadLen, so putString cannot
+		// fail here.
+		off, _ = putString(buf, off, s)
+	}
+	binary.LittleEndian.PutUint64(buf[off:], math.Float64bits(info.Weight))
+	return off + 8
+}
+
+func readPeerInfoPayload(buf []byte, off int) (api.PeerInfo, int, error) {
+	var info api.PeerInfo
+	if off+8 > len(buf) {
+		return info, off, errShortFrame
+	}
+	info.JoinedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	var err error
+	for _, dst := range []*string{&info.Name, &info.Addr, &info.AdminAddr, &info.DataAddr, &info.Version} {
+		*dst, off, err = readString(buf, off)
+		if err != nil {
+			return info, off, err
+		}
+	}
+	if off+8 > len(buf) {
+		return info, off, errShortFrame
+	}
+	info.Weight = math.Float64frombits(binary.LittleEndian.Uint64(buf[off:]))
+	return info, off + 8, nil
+}
+
+// EncodePeerInfoMeta serializes PeerInfo as the memberlist node meta
+// frame (binaryMagic + version + payload).
+func EncodePeerInfoMeta(info api.PeerInfo) ([]byte, error) {
+	for _, s := range peerInfoStrings(info) {
+		if len(s) > maxStringLen {
+			return nil, errStringTooLong
+		}
+	}
+	buf := make([]byte, binaryHdrLen+peerInfoPayloadLen(info))
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	putPeerInfoPayload(buf, binaryHdrLen, info)
+	return buf, nil
+}
+
+// DecodePeerInfoMeta decodes a PeerInfo from a memberlist meta frame.
+func DecodePeerInfoMeta(buf []byte) (api.PeerInfo, error) {
+	if len(buf) < binaryHdrLen {
+		return api.PeerInfo{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.PeerInfo{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.PeerInfo{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	info, _, err := readPeerInfoPayload(buf, binaryHdrLen)
+	return info, err
+}
+
+func encodeRingDigestPayload(buf []byte, off int, d api.RingDigest) int {
+	binary.LittleEndian.PutUint64(buf[off:], d.Hash)
+	binary.LittleEndian.PutUint64(buf[off+8:], uint64(d.Size)) //nolint:gosec // wire format: int size for LE encoding
+	binary.LittleEndian.PutUint64(buf[off+16:], d.Version)
+	return off + 24
+}
+
+// EncodeRingDigestState serializes the ring digest as the memberlist
+// push/pull state frame (binaryMagic + version + payload).
+func EncodeRingDigestState(d api.RingDigest) []byte {
+	buf := make([]byte, binaryHdrLen+24)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	encodeRingDigestPayload(buf, binaryHdrLen, d)
+	return buf
+}
+
+// DecodeRingDigestState decodes the ring digest from a push/pull state
+// frame.
+func DecodeRingDigestState(buf []byte) (api.RingDigest, error) {
+	if len(buf) < binaryHdrLen+24 {
+		return api.RingDigest{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.RingDigest{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.RingDigest{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	off := binaryHdrLen
+	return api.RingDigest{
+		Hash:    binary.LittleEndian.Uint64(buf[off:]),
+		Size:    int(binary.LittleEndian.Uint64(buf[off+8:])), //nolint:gosec // wire format: int size for LE encoding
+		Version: binary.LittleEndian.Uint64(buf[off+16:]),
+	}, nil
 }

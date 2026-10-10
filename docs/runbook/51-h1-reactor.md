@@ -23,7 +23,7 @@
   job queue and the 1024-worker pool saturate — clients see connection
   resets while hit-path latency stays flat. This is deliberate: the
   alternative would stall every cache hit multiplexed on that
-  listener. Before the worker-pool change (ADR-0043) the shed point
+  listener. Before the worker-pool change (ADR-0059) the shed point
   was the 128-job spawn queue alone; sustained miss storms now queue
   for workers instead of resetting until roughly 8x deeper saturation.
 - **Starved loop** (diagnose with the telemetry below, not pprof): if
@@ -90,6 +90,6 @@
 - `docs/decisions/0042-h1-epoll-reactor-return-path.md` —
   return-to-reactor, pipelined-inline hits, and the telemetry
   counters.
-- `docs/decisions/0043-h1-worker-pool-rc-reuse.md` — the miss
+- `docs/decisions/0059-h1-worker-pool-rc-reuse.md` — the miss
   round-trip worker pool and reactorConn reuse (the shed-point and
   churn budget changes above).

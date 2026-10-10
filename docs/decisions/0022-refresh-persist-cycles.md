@@ -9,7 +9,7 @@
 `refresh_min_hits` (ADR-0021) gates re-scheduling after a background
 refresh: objects that accumulated fewer than N hits during their TTL
 window are not re-scheduled and expire naturally. This filters long-tail
-content on routes like `/product-page/` (100k products, ~165 req/s,
+content on routes like long-tail catalog routes (100k products, ~165 req/s,
 1-minute TTL).
 
 The problem is that the average inter-access time for a product is
@@ -19,7 +19,7 @@ t=0 gets one refresh cycle at t=54s. If nobody accesses it during
 When the product is accessed again at t=300s, it's a full cache MISS.
 
 With `refresh_min_hits: 1`, only objects accessed during their 54s
-window stay fresh. For the product-page route, this is ~10% of the
+window stay fresh. For such routes, this is ~10% of the
 catalog — the other 90% expire and re-miss on next access, yielding a
 14% hit ratio.
 

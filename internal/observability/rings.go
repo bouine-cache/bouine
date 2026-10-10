@@ -1,7 +1,7 @@
-// Package observability — rings.go
-// In-memory ring buffers for the dashboard data layer.
-// Hot path: only atomic.Add calls. Rings are updated by a background
-// goroutine every 10s from live atomic accumulators.
+// rings.go holds the in-memory ring buffers for the dashboard data
+// layer. Hot path: only atomic.Add calls. Rings are updated by a
+// background goroutine every 10s from live atomic accumulators.
+
 package observability
 
 import (
@@ -26,8 +26,8 @@ const (
 	peerBucketSecs    = 30                              // 30-second buckets for the peer health ring
 	peerBuckets       = 30 * 60 / peerBucketSecs        // 60 = 30 min
 	// latencyHistBuckets is the number of fixed log-scale latency buckets
-	// recorded per request window (10 finite bands + 1 overflow).
-	latencyHistBuckets = 11
+	// recorded per request window (13 finite bands + 1 overflow).
+	latencyHistBuckets = 14
 	// routeRingCap is the max number of distinct routes tracked by the
 	// RouteRing. Best-effort: a few extra entries may appear under
 	// concurrent inserts before the cap is observed (same TOCTOU as
@@ -36,10 +36,10 @@ const (
 	routeRingCap = 256
 )
 
-// LatencyBoundsMs are the inclusive upper bounds (ms) for the first 10
-// latency histogram buckets; the 11th bucket captures everything above
+// LatencyBoundsMs are the inclusive upper bounds (ms) for the first 13
+// latency histogram buckets; the 14th bucket captures everything above
 // the last bound. Index i holds requests with bound[i-1] < dur <= bound[i].
-var LatencyBoundsMs = [latencyHistBuckets - 1]int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000}
+var LatencyBoundsMs = [latencyHistBuckets - 1]int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000}
 
 // latencyBucketIndex returns the histogram bucket for a duration in ms.
 func latencyBucketIndex(durMs int64) int {
@@ -56,7 +56,7 @@ type LatencyHistogram [latencyHistBuckets]int64
 
 // Percentile returns the upper bound (ms) of the bucket containing the
 // p-th percentile (0..1), or 0 when the histogram is empty. The overflow
-// bucket reports the last finite bound (i.e. ">1000ms" → 1000).
+// bucket reports the last finite bound (i.e. ">10000ms" → 10000).
 func (h LatencyHistogram) Percentile(p float64) int64 {
 	var total int64
 	for _, c := range h {
@@ -155,7 +155,6 @@ func (r *RequestRing) RecordRequest(xCache string, statusCode int, durMs int64) 
 	r.liveDurSumMs.Add(durMs)
 	r.liveDurN.Add(1)
 	r.liveLatHist[latencyBucketIndex(durMs)].Add(1)
-	// Update max via CAS loop.
 	for {
 		old := r.liveP99MS.Load()
 		if durMs <= old {
@@ -212,11 +211,16 @@ func (r *RequestRing) Snapshot(n int) []RequestBucket {
 
 // RouteBucket holds per-route aggregated counters for one minute.
 type RouteBucket struct {
-	Route     string
-	Requests  int64
-	Hits      int64
-	Misses    int64
-	Errors    int64 // HTTP 5xx
+	Route    string
+	Requests int64
+	Hits     int64
+	Misses   int64
+	Errors   int64 // HTTP 5xx
+	// Cookied counts requests carrying a non-empty Cookie header.
+	// The signal behind the cookie-bypass insight rule (ADR-0054): a
+	// route that stores responses while serving cookied traffic is the
+	// personalized-SSR leak shape unless bypass_on_cookie is on.
+	Cookied   int64
 	LatHist   LatencyHistogram
 	Timestamp int64
 }
@@ -238,6 +242,7 @@ type routeCounters struct {
 	hits     atomic.Int64
 	misses   atomic.Int64
 	errors   atomic.Int64
+	cookied  atomic.Int64
 	latHist  [latencyHistBuckets]atomic.Int64
 }
 
@@ -245,9 +250,12 @@ type routeCounters struct {
 // xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
 // statusCode is used to track 5xx errors per route.
 // durMs is the request duration in milliseconds, used for per-route latency.
+// cookied reports whether the request carried a non-empty Cookie header —
+// the insight signal for cookie-bypass coverage (ADR-0054); it does not
+// feed Prometheus (no new label; cardinality rules §9).
 // New routes are silently dropped once routeRingCap distinct routes are
 // tracked (best-effort, same TOCTOU as URLRing).
-func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64) {
+func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64, cookied bool) {
 	v, ok := r.liveRoutes.Load(route)
 	if !ok {
 		if r.size.Load() >= routeRingCap {
@@ -261,6 +269,9 @@ func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int6
 	}
 	c := v.(*routeCounters)
 	c.requests.Add(1)
+	if cookied {
+		c.cookied.Add(1)
+	}
 	switch xCache {
 	case "HIT":
 		c.hits.Add(1)
@@ -285,6 +296,7 @@ func (r *RouteRing) Flush(now time.Time) {
 			Hits:      c.hits.Swap(0),
 			Misses:    c.misses.Swap(0),
 			Errors:    c.errors.Swap(0),
+			Cookied:   c.cookied.Swap(0),
 			Timestamp: ts,
 		}
 		for i := range c.latHist {
@@ -320,6 +332,7 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 		s.Hits += b.Hits
 		s.Misses += b.Misses
 		s.Errors += b.Errors
+		s.Cookied += b.Cookied
 		s.LatHist = s.LatHist.Merge(b.LatHist)
 	}
 
@@ -365,6 +378,7 @@ type RouteStat struct {
 	Hits      int64
 	Misses    int64
 	Errors    int64 // HTTP 5xx
+	Cookied   int64 // requests carrying a Cookie header (ADR-0054 signal)
 	P99MS     int64
 	HitPct    float64 // 0-100
 }
@@ -621,14 +635,6 @@ func (ri *Rings) Summary() MetricsSummary {
 	}
 }
 
-// MergeSummaries aggregates multiple MetricsSummary into one.
-// Merge strategy:
-//   - Counters: sum
-//   - Ratios: weighted average
-//   - Latency p99: max
-//   - Latency histogram: element-wise sum (so the dashboard latency
-//     distribution reflects the combined cluster traffic, not just one node)
-//
 // mergeRequestBuckets accumulates per-bucket counters and latency histogram
 // bins from all summaries into merged.
 func mergeRequestBuckets(merged *MetricsSummary, summaries []MetricsSummary) {
@@ -671,6 +677,7 @@ func mergeRouteStatsList(summaries []MetricsSummary) []RouteStat {
 			a.Requests += rs.Requests
 			a.Hits += rs.Hits
 			a.Misses += rs.Misses
+			a.Cookied += rs.Cookied
 			if len(rs.Sparkline) == sparklinePoints {
 				if len(a.Sparkline) != sparklinePoints {
 					a.Sparkline = make([]int64, sparklinePoints)
@@ -722,7 +729,7 @@ func mergeURLStatsList(summaries []MetricsSummary) []URLStat {
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max
-//   - Latency histogram: element-wise sum across all peer summaries
+//   - Latency histogram: element-wise sum across all peer summaries.
 func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 	if len(summaries) == 0 {
 		return MetricsSummary{}

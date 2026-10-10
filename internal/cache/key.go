@@ -56,8 +56,13 @@ func BuildKey(ri RequestInfo, policy *KeyPolicy) api.Key {
 		n += copyOverflow(buf[:], n, "http|")
 	}
 
-	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, ri.GetHost())
+	// Host (canonical). include_host: false emits the empty segment
+	// ("http||/") instead of removing the delimiter so the canonical
+	// form stays unambiguous against paths carrying '|' and the
+	// overflow-length arithmetic is unchanged.
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(buf[:], n, ri.GetHost())
+	}
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
@@ -95,7 +100,9 @@ func buildKeyHeap(ri RequestInfo, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, "http|")
 	}
 
-	n = appendCanonicalHost(heap, n, ri.GetHost())
+	if includeHostKey(policy) {
+		n = appendCanonicalHost(heap, n, ri.GetHost())
+	}
 	n = appendByte(heap, n, '|')
 
 	n = appendCanonicalPathString(heap, n, ri.GetPath())
@@ -131,8 +138,11 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 		n += copyOverflowBytes(buf[:], n, sHTTP)
 	}
 
-	// Host (canonical).
-	n = appendCanonicalHostBytes(buf[:], n, host)
+	// Host (canonical), unless the route opts out (include_host: false
+	// emits the empty segment — see BuildKey).
+	if includeHostKey(policy) {
+		n = appendCanonicalHostBytes(buf[:], n, host)
+	}
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
@@ -140,7 +150,6 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	// Extract query from URI bytes — only convert to string if non-empty.
 	rawQuery := extractRawQueryBytes(uri)
 	if len(rawQuery) > 0 {
 		n = appendCanonicalQueryString(buf[:], n, string(rawQuery), policy)
@@ -166,7 +175,9 @@ func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) a
 	} else {
 		n += copyOverflowBytes(heap, n, sHTTP)
 	}
-	n = appendCanonicalHostBytes(heap, n, host)
+	if includeHostKey(policy) {
+		n = appendCanonicalHostBytes(heap, n, host)
+	}
 	n = appendByte(heap, n, '|')
 	n = appendCanonicalPathBytes(heap, n, path)
 	n = appendByte(heap, n, '|')
@@ -421,14 +432,56 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 		}
 		n += copyOverflow(dst, n, f)
 		n = appendByte(dst, n, '=')
-		val := reqHeader.Get(f)
-		if isListValuedVaryField(f) {
-			val = normaliseListHeader(val)
+		var val string
+		if f == cookiePresenceField && policy.hasCookiePresence() {
+			// Cookie-presence assertion (issue #768): the same
+			// presence-bit string variantKeyCore hashes, or peers
+			// reject every presence-keyed exchange. CookieAll joins
+			// multi-line Cookie entries with the RFC 6265 §4.2
+			// separator — GetAll's ", " join would fold the second
+			// line's first pair into the first line's last value, where
+			// the ";"-split never sees it and the bits hash wrong
+			// (the RawRequest-derived map keeps lines separate).
+			val = policy.cookiePresenceValue(reqHeader.CookieAll())
+		} else {
+			val = varyAssertionValue(f, reqHeader.Get(f), policy)
 		}
 		n += copyOverflow(dst, n, val)
 		n = appendByte(dst, n, ';')
 	}
 	return n
+}
+
+// varyAssertionValue normalizes one Vary-nominated request header value
+// for the stored-assertion hash (BuildVaryKey — the hex stored on
+// objects and compared by the peer gates). Accept-Encoding is bucketed
+// by encodingBucket unless the policy pins verbatim, and
+// Accept-Language by langBucket (docs/plans/
+// accept-encoding-bucketing.md §10; an unbucketable value falls back
+// to the legacy normalization) — both rules MUST match varyHeaderValue
+// (vary.go) or the peer gates reject every bucketed-variant exchange
+// (ADR-0051; pinned by
+// TestVaryKeyEncodingBucket_ParityAcrossPaths). Every other field keeps
+// this path's legacy semantics: the four list-valued headers are
+// lowercase+sorted, all other field values pass through verbatim —
+// NOT the normalize-everything rule of varyHeaderValue. The two paths
+// already disagreed before bucketing; unifying them would silently
+// rekey every stored variant on routes with custom Vary headers.
+func varyAssertionValue(field, value string, policy *KeyPolicy) string {
+	switch field {
+	case "accept-encoding":
+		if !policy.verbatimEncoding() {
+			return encodingBucket(value)
+		}
+	case "accept-language":
+		if tag, ok := langBucket(value); ok {
+			return strings.ToLower(tag)
+		}
+	}
+	if isListValuedVaryField(field) {
+		return normaliseListHeader(value)
+	}
+	return value
 }
 
 // isListValuedVaryField reports whether a Vary field name contains a

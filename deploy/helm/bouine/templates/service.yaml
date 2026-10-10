@@ -1,3 +1,4 @@
+{{- $httpsPort := include "bouine.listenPort" (dict "key" "https" "value" .Values.config.listen.https) }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -23,10 +24,16 @@ spec:
       port: {{ .Values.service.httpPort }}
       targetPort: http
       protocol: TCP
+    {{- /* targetPort: https resolves by the containerPort name declared
+      from config.listen; an empty address disables the plane, so the
+      Service port goes with it instead of advertising a listener that
+      will never accept. */}}
+    {{- if $httpsPort }}
     - name: https
       port: {{ .Values.service.httpsPort }}
       targetPort: https
       protocol: TCP
+    {{- end }}
   selector:
     {{- include "bouine.selectorLabels" . | nindent 4 }}
 ---

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,9 @@ type Config struct {
 	Rings        *observability.Rings
 	// CFPurgeSkippedFn returns total CF purges skipped.
 	CFPurgeSkippedFn func() int64
+	// FetchShedFn returns total foreground origin fetches shed
+	// (queue wait exceeded fetch_wait_timeout).
+	FetchShedFn func() int64
 	// BroadcastFailuresFn returns total cluster broadcast failures.
 	BroadcastFailuresFn func() int64
 	// Storage stats.
@@ -102,7 +106,11 @@ func New(cfg Config) (fasthttp.RequestHandler, *Handler) {
 }
 
 func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
-	switch string(ctx.Path()) {
+	p, m := string(ctx.Path()), string(ctx.Method())
+	if h.handleAPIRoutes(ctx, p, m) {
+		return
+	}
+	switch p {
 	case "/dashboard/":
 		h.overview(ctx)
 	case "/dashboard/performance":
@@ -117,21 +125,31 @@ func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
 		h.config(ctx)
 	case "/dashboard/insights":
 		h.insights(ctx)
-	case "/dashboard/api/purge":
-		if string(ctx.Method()) == "POST" {
-			h.apiPurge(ctx)
-		}
-	case "/dashboard/api/ban":
-		if string(ctx.Method()) == "POST" {
-			h.apiBan(ctx)
-		}
-	case "/dashboard/api/refresh":
-		if string(ctx.Method()) == "POST" {
-			h.apiRefresh(ctx)
-		}
 	default:
 		ctx.Error("not found", fasthttp.StatusNotFound)
 	}
+}
+
+// handleAPIRoutes dispatches the POST-only invalidation API endpoints.
+// It returns false for anything else so the page router handles it
+// (unknown paths, or wrong methods, fall through to 404).
+func (h *Handler) handleAPIRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
+	if m != "POST" {
+		return false
+	}
+	switch p {
+	case "/dashboard/api/purge":
+		h.apiPurge(ctx)
+	case "/dashboard/api/purge/batch":
+		h.apiPurgeBatch(ctx)
+	case "/dashboard/api/ban":
+		h.apiBan(ctx)
+	case "/dashboard/api/refresh":
+		h.apiRefresh(ctx)
+	default:
+		return false
+	}
+	return true
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -226,12 +244,14 @@ func sortURLStats(stats []observability.URLStat) []observability.URLStat {
 	return stats
 }
 
+// parseTimeRange maps the range query parameter to a bucket count and
+// display label. Only 1h and 6h are selectable; the request ring holds
+// 6h of 10-second buckets (requestBuckets), so a longer range cannot be
+// served truthfully. Legacy 24h URLs fall back to the 6h view.
 func parseTimeRange(s string) (buckets int, label string) {
 	switch s {
 	case "1h":
 		return 360, "1h"
-	case "24h":
-		return 2160, "24h"
 	default:
 		return 2160, "6h"
 	}
@@ -518,7 +538,6 @@ func sloBuckets(h observability.LatencyHistogram, total int64) []templates.SLOBu
 
 // toPeerResultsEnriched joins PeerResult with PeerInfo (for DataAddr/AdminAddr/Weight/JoinedAt).
 func toPeerResultsEnriched(in []PeerResult, peersFn func() []api.PeerInfo) []templates.PeerResult {
-	// Build name → PeerInfo map
 	infoMap := map[string]api.PeerInfo{}
 	if peersFn != nil {
 		for _, p := range peersFn() {
@@ -681,6 +700,86 @@ func (h *Handler) apiPurge(ctx *fasthttp.RequestCtx) {
 	h.apiOK(ctx, "purged")
 }
 
+// maxPurgeBatchURLs caps the dashboard batch purge form; it mirrors the
+// admin API's default batch cap so both surfaces accept the same load.
+const maxPurgeBatchURLs = 1000
+
+// maxBatchPurgeBytes caps the batch purge request body (the single-URL
+// forms stay at maxAdminFormBytes; a 1000-URL list needs more room).
+const maxBatchPurgeBytes = 128 << 10
+
+// apiPurgeBatch purges a list of URLs submitted one per line (form
+// field "urls") or as a JSON {"urls": [...]} array. Each URL runs the
+// same purge path as the single-URL form; the broadcaster coalesces the
+// per-key events into one batch frame (ADR-0044), so the cluster sees a
+// single wire broadcast.
+func (h *Handler) apiPurgeBatch(ctx *fasthttp.RequestCtx) {
+	if h.cfg.PurgeFn == nil {
+		h.apiError(ctx, "purge not configured")
+		return
+	}
+	if len(ctx.PostBody()) > maxBatchPurgeBytes {
+		ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	var urls []string
+	if raw := string(ctx.PostArgs().Peek("urls")); raw != "" {
+		for _, line := range strings.Split(raw, "\n") {
+			if u := strings.TrimSpace(line); u != "" {
+				urls = append(urls, u)
+			}
+		}
+	} else {
+		var req struct {
+			URLs []string `json:"urls"`
+		}
+		_ = json.Unmarshal(ctx.PostBody(), &req)
+		urls = req.URLs
+	}
+	if len(urls) == 0 {
+		h.apiError(ctx, "at least one URL is required")
+		return
+	}
+	if len(urls) > maxPurgeBatchURLs {
+		h.apiError(ctx, fmt.Sprintf("batch exceeds the %d URL limit", maxPurgeBatchURLs))
+		return
+	}
+	for _, u := range urls {
+		if msg := validateCacheURL(u); msg != "" {
+			h.apiError(ctx, msg)
+			return
+		}
+	}
+
+	purged := 0
+	var firstErr error
+	for _, u := range urls {
+		if err := h.cfg.PurgeFn(context.Background(), u); err != nil {
+			h.cfg.Rings.OpsLog.Record("purge", u, err.Error())
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		h.cfg.Rings.OpsLog.Record("purge", u, "ok")
+		purged++
+	}
+	if firstErr != nil {
+		h.apiError(ctx, fmt.Sprintf("purged %d of %d — first error: %s", purged, len(urls), firstErr))
+		return
+	}
+	h.apiOK(ctx, fmt.Sprintf("purged %d URL%s", purged, pluralSuffix(purged)))
+}
+
+// pluralSuffix returns "s" for counts other than one.
+func pluralSuffix(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func (h *Handler) apiBan(ctx *fasthttp.RequestCtx) {
 	if h.cfg.BanFn == nil {
 		h.apiError(ctx, "ban not configured")
@@ -721,7 +820,15 @@ func (h *Handler) apiBan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("ban", arg, fmt.Sprintf("ok, %d evicted", n))
-	h.apiOK(ctx, fmt.Sprintf("banned, %d entries evicted", n))
+	if n > 0 {
+		h.apiOK(ctx, fmt.Sprintf("banned, %d entries evicted now; matching entries are also rejected on every subsequent lookup (lazy)", n))
+	} else {
+		// n == 0 either when no entry matches or when the eager scan was
+		// coalesced into a recent scan window (ban scan coalescing); in
+		// both cases the predicate is registered and applied lazily on
+		// every lookup, so the ban is in force either way.
+		h.apiOK(ctx, "banned; predicate is registered and matching entries are rejected on next lookup (lazy — the eager eviction scan may have been coalesced)")
+	}
 }
 
 func (h *Handler) apiRefresh(ctx *fasthttp.RequestCtx) {
@@ -862,6 +969,10 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 	if h.cfg.CFPurgeSkippedFn != nil {
 		cfPurgeSkipped = h.cfg.CFPurgeSkippedFn()
 	}
+	var fetchShed int64
+	if h.cfg.FetchShedFn != nil {
+		fetchShed = h.cfg.FetchShedFn()
+	}
 	return insights.InsightData{
 		Config:            h.cfg.Config,
 		StoreStats:        storeStats,
@@ -875,6 +986,7 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 		VaryCapHits:       varyCapHits,
 		BroadcastFailures: broadcastFailures,
 		CFPurgeSkipped:    cfPurgeSkipped,
+		FetchShed:         fetchShed,
 	}
 }
 
@@ -937,7 +1049,7 @@ func (h *Handler) buildRouteToPool() map[string]string {
 	for _, rc := range h.cfg.Config.Routes {
 		name := rc.Name
 		if name == "" {
-			name = rc.Match.PathPrefix
+			name = rc.Match.PathLabel()
 		}
 		m[name] = rc.Pool
 	}
@@ -984,7 +1096,7 @@ func clientNode() templates.ArchNode {
 		Type:   "client",
 		Label:  "Clients",
 		Status: "healthy",
-		Detail: "HTTP/1.1 + h2c + h3",
+		Detail: "HTTP/1.1 only (ADR-0034)",
 	}
 }
 

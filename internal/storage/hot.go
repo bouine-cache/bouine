@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
@@ -64,44 +67,101 @@ type HotStore struct {
 	// Unprotect (not Delete) the warm copy — demoting it to
 	// SIEVE-managed without destroying it (#484).
 	onEvictDemoted func(key api.Key)
+	// mayReap gates the TTL reaper for expired KeepGrace entries
+	// (ADR-0051). Set via HotConfig.MayReap; nil reaps everything.
+	mayReap func(obj *api.Object) bool
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
-	// bans is the lazy ban list, stored as an atomic pointer to an
-	// immutable snapshot. Ban() appends + prunes under bansMu, then
-	// publishes a new slice via atomic.Store. The read path
-	// (matchesActiveBan) does a lock-free atomic.Load and iterates the
-	// snapshot — no lock, no allocation, no mutation on the hit path.
-	// Objects stored AFTER a ban's CreatedAt are not subject to it
-	// (RFC 9111 §4.4 semantics).
-	bans   atomic.Pointer[[]activeBan]
+	// lastBanScan is the wall-clock time the last eager ban scan
+	// completed. Ban uses it to coalesce scans within
+	// banScanCoalesceWindow so a ban storm costs one scan instead of
+	// one per ban. Accessed atomically; stored as int64 nanoseconds
+	// (UnixNano) to keep the fast path lock-free.
 	shards []shard
-	stats  hotStats
-	// wg tracks the sweeper and reaper goroutines so Close can wait
-	// for them to fully exit before munmapping slab regions. Without
-	// this, a goroutine mid-flushSlabFrees could access munmap'd
-	// memory and segfault.
-	wg       sync.WaitGroup
-	maxBytes int64
-	mask     uint64
-	// reaperInterval is how often the TTL reaper wakes to scan for
-	// expired entries. Zero disables background reaping.
+	// bans is the lazy ban state: the ordered activeBan list (source
+	// snapshot without locks or allocation. Objects stored AFTER a
+	// ban's CreatedAt are not subject to it — RFC 9111 §4.4 invalidation
+	// only removes responses that existed at invalidation time;
+	// the TTL reaper prunes expired bans each tick.
+	bans  banListState
+	stats hotStats
+	wg    sync.WaitGroup
+
+	lastBanScan    atomic.Int64
+	maxBytes       int64
+	mask           uint64
 	reaperInterval time.Duration
-	bansMu         sync.Mutex
+	banTTL         time.Duration
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
 type activeBan struct {
 	pred    banPredicate
 	created time.Time
+	// exemptAfter is the ORIGINAL expr.CreatedAt of the ban (possibly
+	// zero = no exemption). It mirrors the exemption check inside pred:
+	// objects stored after this instant are not subject to the ban
+	// (RFC 9111 §4.4 invalidation only removes responses that existed
+	// at invalidation time). The composite ban snapshot consults it directly
+	// to reject exempt objects without calling pred.
+	exemptAfter time.Time
+	// expr records the pattern fields of the api.BanExpr the predicate
+	// was compiled from (CreatedAt excluded). BanExpr patterns are
+	// strings, so this is comparable and used to dedup identical
+	// re-issued bans: re-registering the same pattern refreshes the
+	// existing entry instead of growing the list (a storm of 10k
+	// identical bans must not leave 10k list entries that every
+	// subsequent cache hit walks).
+	pattern banPattern
 }
 
-// banTTL is how long a lazy ban stays in the active list. Bans older
-// than this cannot match any live object: objects stored after the ban
-// are exempt (StoredAt > ban.created), and objects stored before it
-// have either been re-cached or expired by now. This is a bouine policy
-// constant, not an RFC requirement.
-const banTTL = 24 * time.Hour
+// banPattern holds the comparable pattern fields of a BanExpr. Two
+// bans with equal patterns are the same ban.
+type banPattern struct {
+	hostRegex    string
+	pathRegex    string
+	surrogateKey string
+}
+
+// patternOf extracts the comparable identity of expr.
+func patternOf(expr api.BanExpr) banPattern {
+	return banPattern{
+		hostRegex:    expr.HostRegex,
+		pathRegex:    expr.PathRegex,
+		surrogateKey: expr.SurrogateKey,
+	}
+}
+
+// defaultBanTTL is how long a lazy ban stays in the active list by
+// default. Bans older than this cannot match any live object: objects
+// stored after the ban are exempt (StoredAt > ban.created), and objects
+// stored before it have either been re-cached or expired by now. This is
+// a bouine policy constant, not an RFC requirement; operators bound the
+// blast radius of an over-broad ban (a typo currently poisons the hit
+// ratio for the full window) via config invalidation.ban_ttl. The
+// reaper + TTL expiry reclaim pre-ban copies and refills are exempt, so
+// a minutes-scale window is sufficient for external invalidation surrogate
+// invalidations — the default stays conservative (24h) for behavioral
+// compatibility (ADR-0045).
+const defaultBanTTL = 24 * time.Hour
+
+// banListCap bounds the lazy ban list. A storm of distinct bans must
+// not degrade every cache hit linearly (matchesActiveBan walks the
+// list) or make Ban's snapshot copy quadratic. When the cap is hit,
+// the oldest bans are dropped first — they are the least likely to
+// match anything still cached (their matching entries have had the
+// longest time to be evicted lazily or reclaimed by the reaper).
+const banListCap = 1024
+
+// banScanCoalesceWindow bounds how eagerly Ban rescans the hot tier.
+// The eager scan is the expensive half of Ban — a full O(entries) walk
+// under each shard's write lock. During a ban storm, rescanning per ban
+// multiplies CPU linearly with storm length and stalls hot-path reads.
+// Within the window, a prior eager scan is deemed sufficient: entries
+// that were missed are still caught lazily by matchesActiveBan on the
+// next lookup and reclaimed by the TTL reaper if never looked up again.
+const banScanCoalesceWindow = 50 * time.Millisecond
 
 type shard struct {
 	entries     map[api.Key]*hotEntry
@@ -136,13 +196,13 @@ var hotEntryPool = sync.Pool{
 
 // newEvictList builds a per-shard eviction list from the HotConfig's
 // algorithm selection. SIEVE is the default (zero-value config). When
-// HotEvictionAlgorithm == "cachaner" the list is a cachaner list that
+// HotEvictionAlgorithm == EvictionCachaner the list is a cachaner list that
 // uses a 3-bit freq counter packed into ioBits to give hot objects up
 // to 7 second chances (vs SIEVE's 1). Both implementations satisfy the
 // evictor.List interface so the rest of the hot tier is agnostic to the
 // active policy. The warm tier has an identical dispatch function.
 func newEvictList(cfg HotConfig) evictor.List[api.Key] {
-	if cfg.HotEvictionAlgorithm == "cachaner" {
+	if cfg.HotEvictionAlgorithm == config.EvictionCachaner {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -189,9 +249,10 @@ func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason st
 }
 
 type hotStats struct {
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
+	hits       atomic.Int64
+	misses     atomic.Int64
+	evictions  atomic.Int64
+	graceHolds atomic.Int64
 }
 
 // evictReason classifies the caller of notifyEvict so the OnEvict
@@ -238,17 +299,28 @@ type HotConfig struct {
 	// to a warmUnprotectQueue drained outside the hot lock to avoid a
 	// lock-ordering cycle with warm.idxMu).
 	OnEvictDemoted func(key api.Key)
+	// MayReap gates the TTL reaper for expired entries whose object
+	// requested grace retention (KeepGrace, set by stayin_alive routes
+	// at fill time). Returning false holds the entry for the next
+	// reaper pass; true reaps it on the normal schedule. Only consulted
+	// for expired KeepGrace entries; non-graced entries are reaped
+	// without a callback. Nil keeps the historical behavior: every
+	// expired entry is reaped — grace cannot engage without wiring.
+	//
+	// CONSTRAINT: invoked while the shard write lock is held. It must
+	// be O(1), non-blocking, no I/O, no calls back into HotStore —
+	// same constraint family as OnEvict.
+	MayReap func(obj *api.Object) bool
 	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before eviction.
+	// See the config.EvictionAlgorithm doc for the supported values and
+	// their semantics; "" means the documented default (EvictionSieve).
 	//
 	// This is the resolved per-tier value: builders copy either
 	// config.Storage.HotEvictionAlgorithm (when set) or the shared
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	HotEvictionAlgorithm string
+	HotEvictionAlgorithm config.EvictionAlgorithm
 	// MaxBytes is the total memory budget across all shards.
 	MaxBytes int64
 	// NumShards overrides the default shard count. Zero means
@@ -259,6 +331,12 @@ type HotConfig struct {
 	// default (30 s). A negative value disables background reaping
 	// entirely (lazy expiry on Get remains).
 	ReaperInterval time.Duration
+	// BanTTL is how long a lazy ban stays in the active list before the
+	// reaper prunes it. Zero applies the built-in default (24 h). A
+	// shorter window bounds the blast radius of an over-broad ban: the
+	// reaper + TTL expiry reclaim pre-ban copies and refills are exempt,
+	// so external invalidation surrogate invalidations need only minutes.
+	BanTTL time.Duration
 	// Slab enables the mmap'd slab allocator for body bytes. When
 	// true, bodies are allocated from mmap'd regions instead of Go
 	// heap, reducing GC pressure. Default false (Go heap).
@@ -288,17 +366,24 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	if cfg.ReaperInterval > 0 {
 		reaperInterval = cfg.ReaperInterval
 	}
+	banTTL := defaultBanTTL
+	if cfg.BanTTL > 0 {
+		banTTL = cfg.BanTTL
+	}
 	h := &HotStore{
 		shards:         shards,
 		mask:           uint64(n - 1), //nolint:gosec // n is always a positive power of two
 		maxBytes:       cfg.MaxBytes,
 		evictSignal:    make(chan int, n),
 		reaperInterval: reaperInterval,
+		banTTL:         banTTL,
+		mayReap:        cfg.MayReap,
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
 		onEvictDemoted: cfg.OnEvictDemoted,
 	}
+	h.bans.ttl = banTTL
 	if cfg.Slab {
 		slab, err := NewSlabAllocator()
 		if err != nil {
@@ -366,7 +451,12 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 		s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 			return e.entry
 		})
-		e.obj.Hits++
+		// Atomic increment: the warm-tier encoder reads Hits outside
+		// the shard lock (tiered.writeHotOnlyToWarm → encodeObject),
+		// so the read/write pair must not race (issue #218). The lock
+		// already serializes writers; the atomic store pairs with the
+		// encoder's atomic load.
+		atomic.AddUint64(&e.obj.Hits, 1)
 		e.windowHits.Add(1)
 		stored = e.obj
 	}
@@ -534,7 +624,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		stillOver = true
 	}
 
-	// Remove old entry if replacing, return to pool.
 	if old, exists := s.entries[key]; exists {
 		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)
@@ -595,6 +684,7 @@ func (h *HotStore) reaperLoop() {
 // has elapsed. Each shard is locked individually and for at most
 // reaperShardBudget to avoid blocking readers.
 func (h *HotStore) reapExpired(now time.Time) {
+	h.bans.pruneExpired(now)
 	for i := range h.shards {
 		h.reapShard(i, now)
 	}
@@ -613,6 +703,18 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		}
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
+			// Grace-gated reaping (ADR-0051): a stayin_alive object is
+			// held while its origin pool cannot refill a miss — deleting
+			// it would break the route's serve-stale-while-outage
+			// contract. The gate is only consulted for expired KeepGrace
+			// entries; nil (unwired) keeps the historical reap so a
+			// bare HotStore never pins memory. Capacity eviction
+			// (SIEVE, warm budget) is NOT gated — bounded resources
+			// always win.
+			if e.obj.KeepGrace && h.mayReap != nil && !h.mayReap(e.obj) {
+				h.stats.graceHolds.Add(1)
+				continue
+			}
 			recordEviction(&logs, key, e, "expired")
 			h.notifyEvict(key, e, &slabFrees, evictReasonReaper)
 			s.bytes -= objSize(e.obj)
@@ -732,12 +834,51 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 // whose stored object matches the ban predicate. After the eager
 // scan, the predicate is registered in the lazy ban list so objects
 // filled after this scan are also checked on next lookup (RFC 9111
-// §4.4 lazy semantics). This handles the common case of
+// §4.4 invalidation, applied lazily). This handles the common case of
 // host/path/surrogate-key invalidation on administrative APIs.
+//
+// Scan coalescing: the eager scan is O(entries) under each shard's
+// write lock. During a ban storm (an invalidation spike), rescanning
+// per ban multiplies CPU linearly with storm length and stalls the
+// hot path. Within banScanCoalesceWindow of the last completed scan,
+// the eager pass is skipped and correctness rests on the lazy ban
+// list — every lookup of a matching object still evicts it, and the
+// TTL reaper reclaims entries that are never looked up again. The
+// predicate is always registered in the lazy list regardless.
 func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	pred, err := compileBanPredicate(expr)
 	if err != nil {
 		return 0, err
+	}
+
+	// Register in the lazy ban list FIRST so objects filled during
+	// (and after) the eager scan are also checked on next lookup
+	// (RFC 9111 §4.4 invalidation, applied lazily).
+	now := h.registerBan(expr, pred)
+
+	// Pure surrogate-key bans never need an eager scan: the compiled
+	// snapshot's surrogates set enforces them in O(1) on every lookup
+	// (evictBanned reclaims the entry then), and the TTL reaper
+	// collects entries that are never accessed again. The eager scan
+	// would walk every shard under a write lock only to find the few
+	// tagged entries — all of that work is redundant with the lazy
+	// check, and its lock holds stall the hit path during ban storms
+	// (measured: ~2.7 ms per scan over ~500K entries, shard write
+	// lock held throughout). external invalidation traffic are 100%
+	// surrogate-key bans, so this skips the scan for the entire
+	// production storm workload. Host/path bans and multi-condition
+	// (opaque) bans keep the coalesced scan below.
+	if isSurrogateOnlyBan(expr) {
+		return 0, nil
+	}
+
+	// Coalesce the eager scan: at most one full-store walk per
+	// banScanCoalesceWindow. A zero lastBanScan means no scan has
+	// run yet (store construction), so the first ban always scans.
+	nowNano := now.UnixNano()
+	last := h.lastBanScan.Load()
+	if last != 0 && nowNano-last < int64(banScanCoalesceWindow) {
+		return 0, nil
 	}
 
 	var total atomic.Int64
@@ -756,30 +897,39 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	if err := g.Wait(); err != nil {
 		return 0, err
 	}
+	// Anchor the coalesce window at scan completion, not registration:
+	// the window must not be eaten by the scan's own duration, or a
+	// slow scan (large store, CPU contention) leaves bans that arrive
+	// right after it paying a full eager pass — exactly the storm
+	// amplification the window exists to prevent.
+	h.lastBanScan.Store(time.Now().UnixNano())
+	return int(total.Load()), nil
+}
 
-	// Register in the lazy ban list so objects filled AFTER this scan
-	// are also checked on next lookup (RFC 9111 §4.4 lazy semantics).
+// isSurrogateOnlyBan reports whether expr is a pure surrogate-key ban:
+// no host or path patterns, so the compiled snapshot classifies it as
+// banClassLiteralSurrogate and the O(1) surrogates set check enforces
+// it on every lookup. Multi-condition bans carrying a surrogate key
+// plus patterns are NOT surrogate-only (they classify opaque and need
+// the scan for immediate reclaim of matching entries).
+func isSurrogateOnlyBan(expr api.BanExpr) bool {
+	return expr.SurrogateKey != "" && expr.HostRegex == "" && expr.PathRegex == ""
+}
+
+// registerBan appends (or refreshes) expr's predicate in the lazy ban
+// list and returns the registration wall-clock time. Identical
+// re-issued patterns refresh in place instead of duplicating; the
+// list is capped at banListCap with the oldest bans dropped first.
+// Each registration rebuilds the compiled snapshot (O(list), bounded
+// by the cap).
+func (h *HotStore) registerBan(expr api.BanExpr, pred banPredicate) time.Time {
 	createdAt := expr.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
-	h.bansMu.Lock()
-	cur := h.bans.Load()
-	var base []activeBan
-	if cur != nil {
-		base = *cur
-	}
-	updated := make([]activeBan, 0, len(base)+1)
 	now := time.Now()
-	for _, b := range base {
-		if now.Sub(b.created) < banTTL {
-			updated = append(updated, b)
-		}
-	}
-	updated = append(updated, activeBan{pred: pred, created: createdAt})
-	h.bans.Store(&updated)
-	h.bansMu.Unlock()
-	return int(total.Load()), nil
+	h.bans.register(expr, pred, createdAt)
+	return now
 }
 
 // banShard locks one shard, evicts all entries matching pred, and
@@ -819,47 +969,81 @@ type banPredicate func(*api.Object) bool
 
 // compileBanPredicate pre-compiles the regexps in expr and returns a
 // closure that evaluates the full predicate against a single Object.
+//
+// Literal fast-path: expressions whose host/path pattern contains no
+// regexp metacharacters ("example.com", "/api/v1") match by plain
+// string equality instead of a *regexp.Regexp. Most administrative
+// bans are literals, and the predicate runs both in the eager scan
+// (per stored entry) and in matchesActiveBan (per cache hit) —
+// replacing regexp.MatchString with == removes the dominant CPU and
+// allocation cost on both paths while preserving semantics for
+// anchors ("^/foo") which the regexp engine evaluates identically.
 func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
-	var hostRE, pathRE *regexp.Regexp
-	if expr.HostRegex != "" {
-		re, err := regexp.Compile(expr.HostRegex)
-		if err != nil {
-			return nil, fmt.Errorf("ban: invalid host_regex: %w", err)
-		}
-		hostRE = re
+	hostRE, hostLit, err := compileBanPattern(expr.HostRegex)
+	if err != nil {
+		return nil, fmt.Errorf("ban: invalid host_regex: %w", err)
 	}
-	if expr.PathRegex != "" {
-		re, err := regexp.Compile(expr.PathRegex)
-		if err != nil {
-			return nil, fmt.Errorf("ban: invalid path_regex: %w", err)
-		}
-		pathRE = re
+	pathRE, pathLit, err := compileBanPattern(expr.PathRegex)
+	if err != nil {
+		return nil, fmt.Errorf("ban: invalid path_regex: %w", err)
 	}
 	return func(obj *api.Object) bool {
-		// Skip objects stored after the ban was issued.
+		// Skip objects stored after the ban was issued. Checked
+		// first: it is a single comparison and exempts the vast
+		// majority of post-ban traffic from every other check.
 		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
 			return false
 		}
 		if hostRE != nil && !hostRE.MatchString(obj.Header.Get(header.XBouineHost)) {
 			return false
 		}
+		if hostLit != "" && obj.Header.Get(header.XBouineHost) != hostLit {
+			return false
+		}
 		if pathRE != nil && !pathRE.MatchString(obj.Header.Get(header.XBouinePath)) {
 			return false
 		}
-		if expr.SurrogateKey != "" {
-			found := false
-			for _, sk := range obj.SurrogateKeys {
-				if sk == expr.SurrogateKey {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return false
-			}
+		if pathLit != "" && obj.Header.Get(header.XBouinePath) != pathLit {
+			return false
+		}
+		if expr.SurrogateKey != "" && !hasSurrogateKey(obj.SurrogateKeys, expr.SurrogateKey) {
+			return false
 		}
 		return true
 	}, nil
+}
+
+// hasSurrogateKey reports whether keys contains key. Surrogate-key
+// lists are tiny (typically 0-3 entries), so a linear scan beats a map.
+func hasSurrogateKey(keys []string, key string) bool {
+	return slices.Contains(keys, key)
+}
+
+// compileBanPattern compiles one host/path ban pattern. When the
+// pattern is regexp-metacharacter-free it returns a literal to
+// compare with == (re nil, lit non-empty); otherwise it compiles and
+// returns the regexp (re non-nil, lit ""). An empty pattern matches
+// everything and returns both zero values.
+func compileBanPattern(pattern string) (re *regexp.Regexp, lit string, err error) {
+	if pattern == "" {
+		return nil, "", nil
+	}
+	if isBanLiteral(pattern) {
+		return nil, pattern, nil
+	}
+	r, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, "", err
+	}
+	return r, "", nil
+}
+
+// isBanLiteral reports whether pattern contains no regexp
+// metacharacters and can be matched with plain string equality.
+// Go's regexp syntax reserves these characters; a pattern without
+// any of them can only match itself.
+func isBanLiteral(pattern string) bool {
+	return !strings.ContainsAny(pattern, `\.+*?()|[]{}^$`)
 }
 
 // MatchesActiveBan reports whether obj is subject to any active lazy
@@ -870,23 +1054,13 @@ func (h *HotStore) MatchesActiveBan(obj *api.Object) bool {
 }
 
 // matchesActiveBan reports whether obj is subject to any active lazy
-// ban. It loads the immutable ban snapshot via atomic.Pointer (lock-
-// free, zero allocation) and iterates it. Pruning of expired bans
-// happens in Ban(), not on the read path.
+// ban. It reads the compiled ban snapshot and applies the O(1)
+// rejection: literal host/path/surrogate set lookups first, anchored
+// prefixes second, and only non-rejectable (regex or multi-condition)
+// bans fall through to predicate evaluation. Pruning of expired bans
+// happens in Ban() and in the TTL reaper, not on the read path.
 func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
-	cur := h.bans.Load()
-	if cur == nil || len(*cur) == 0 {
-		return false
-	}
-	for _, b := range *cur {
-		if obj.StoredAt.After(b.created) {
-			continue // object stored after ban — not subject to it
-		}
-		if b.pred(obj) {
-			return true
-		}
-	}
-	return false
+	return h.bans.snapshot().matches(obj)
 }
 
 // Stats returns an atomic snapshot.
@@ -900,11 +1074,12 @@ func (h *HotStore) Stats() api.Stats {
 		s.mu.RUnlock()
 	}
 	return api.Stats{
-		HotEntries: hotEntries,
-		HotBytes:   hotBytes,
-		Hits:       h.stats.hits.Load(),
-		Misses:     h.stats.misses.Load(),
-		Evictions:  h.stats.evictions.Load(),
+		HotEntries:       hotEntries,
+		HotBytes:         hotBytes,
+		Hits:             h.stats.hits.Load(),
+		Misses:           h.stats.misses.Load(),
+		Evictions:        h.stats.evictions.Load(),
+		ReaperGraceHolds: h.stats.graceHolds.Load(),
 	}
 }
 
@@ -967,11 +1142,8 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	}
 }
 
-// evictPreferBacked selects and removes an entry from the SIEVE list,
-// preferring entries with a backup. It tries up to maxSkips
-// SIEVE evictions, re-inserting hot-only entries at the head for a
-// second chance (via Access + MarkVisited).
-// If no backed entries are found, falls back to standard eviction.
+// maxEvictSkips caps how many SIEVE evictions evictPreferBacked may
+// attempt while hunting for a backed entry.
 const maxEvictSkips = 4
 
 // maxSweepProbes caps the number of SIEVE entries scanned per Evict
@@ -981,6 +1153,11 @@ const maxEvictSkips = 4
 // at 1 M entries). See ADR 0026.
 const maxSweepProbes = 128
 
+// evictPreferBacked selects and removes an entry from the SIEVE list,
+// preferring entries with a backup. It tries up to maxEvictSkips
+// SIEVE evictions, re-inserting hot-only entries at the head for a
+// second chance (via Access + MarkVisited).
+// If no backed entries are found, falls back to standard eviction.
 func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 	if s.backedCount == 0 {
 		return s.evict.EvictBounded(maxSweepProbes)
@@ -1104,7 +1281,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 320 // unsafe.Sizeof(api.Object{}) — 312 → 320: composedHeadPtr, the per-second fast-path response-head cache (PR #567). Update when fields are added.
+	objectStructSize    int64 = 336 // unsafe.Sizeof(api.Object{}) — 320 → 336: KeepGrace + Pool, the stayin_alive grace-retention stamps (ADR-0051). Update when fields are added.
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.

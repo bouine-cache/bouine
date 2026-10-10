@@ -18,7 +18,9 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — release 0.5.8 (changelog curation + promotion, chart bump) — started: 2026-09-04 — ETA: same day
+- [WIP] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_cookie` per-route cookie bypass (#762: slow path + fast path + builder wiring, tests, ADR-0054, runbook 56, changelog) — started: 2026-10-04 — ETA: same day
+- [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
+- [WIP] crush — release 0.5.28 (changelog curation + promotion, chart bump) — started: 2026-10-09 — ETA: same day
 
 ## fasthttp migration — phase claims
 
@@ -42,6 +44,28 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 **Parallelization:** Phases 5-8 can run in parallel after Phase 2 lands the `fasthttp.RequestHandler` interface. Phases 3-4 depend on Phase 5 but can overlap with 6-8. One agent per package at a time. PR size limit: 400 changed lines (AGENTS.md §15.4).
 
 ## Recently completed
+
+- [DONE] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_user_agent` per-route UA-conditioned cache bypass (issue #771: config field + validation, zero-alloc glob matcher, slow-path + fast-path gates, builder wiring, tests, ADR-0055, runbook 57, threat-model T52, changelog) — 2026-10-07
+- [DONE] crush — release 0.5.26 (changelog curation + promotion, chart bump) — 2026-10-05
+- [DONE] crush — release 0.5.25 (changelog curation + promotion, chart bump) — 2026-09-30
+- [DONE] crush — release 0.5.24 (changelog curation + promotion, chart bump) — 2026-09-29
+- [DONE] crush — release 0.5.23 (changelog curation + promotion, chart bump) — 2026-09-29
+- [DONE] crush — internal/config, internal/cache, cmd/bouine/cmd, docs — implement `cache.key.include_headers` (issue #632: config field + validation, KeyPolicy include list folded into stored Vary via effectiveVary, tests, ADR-0046, docs) — 2026-09-17
+
+- [DONE] crush — release 0.5.17 (changelog curation + promotion, chart bump) — 2026-09-11
+- [DONE] crush — internal/cluster — peer retire hardening: race-safe retired-address semantics (retire until the Cluster un-retires on ring re-add; a stale-owner fetch can no longer mint a client for a dead address) + peer_fetch_queue_wait_seconds metric (production postmortem follow-up) (fix/peer-retire-race) — 2026-09-12
+- [DONE] crush — internal/cluster — bound peer-fetch/put RPCs by PeerFetchTimeout + 200ms peer dial timeout (fix/peer-fetch-rpc-budget) — 2026-09-12
+- [DONE] crush — internal/cluster — self-heal stale peer ring entries + peer-address failure breaker (fix/cluster-stale-peer-selfhealing) — 2026-09-11
+- [DONE] crush — internal/storage — batch the ban snapshot rebuild (deferred compile on read, in-place list mutation) (perf/ban-snapshot-batch-rebuild) — 2026-09-11
+- [DONE] crush — release 0.5.16 (changelog curation + promotion, chart bump) — 2026-09-10
+- [DONE] crush — internal/storage — Option B: surrogate-key bans skip the eager scan (lazy-only, reaper reclaims) (follow-up to #660, PR #664) — 2026-09-10
+- [DONE] crush — release 0.5.15 (changelog curation + promotion, chart bump) — 2026-09-10
+- [DONE] crush — internal/storage, internal/cluster, internal/admin, cmd/bouine/cmd — invalidation CPU mitigation series: ban scan coalescing + literal fast-path (perf/ban-storm), batched invalidation delivery + seq dedup with ADR-0044 (perf/invalidation-batching), end-to-end /v1/purge/batch (perf/purge-batch, stacked) — 2026-09-09
+- [DONE] crush — release 0.5.12 (changelog curation + promotion, chart bump) — 2026-09-08
+
+- [DONE] crush — release 0.5.11 (changelog curation + promotion, chart bump) — 2026-09-08
+
+- [DONE] crush — internal/origin, internal/config, cmd/bouine/cmd, deploy/helm — per-route origin timeout: route fetch_timeout authoritative (client ReadTimeout cap removed, pool response_header_timeout inherited as default, validation + tests + ADR-0043) — 2026-09-07
 
 - [DONE] crush — internal/cache, internal/server/h1parser, internal/origin, pkg/header — SSE support: hinted dispatch, live unbuffered streaming, idle read/write deadlines, per-event flush, tests (ADR-0042) — 2026-09-03
 

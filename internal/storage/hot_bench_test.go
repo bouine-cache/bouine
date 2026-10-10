@@ -2,12 +2,15 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -99,7 +102,7 @@ func BenchmarkGate_Cachaner_Access(b *testing.B) {
 	s := NewHotStore(HotConfig{
 		MaxBytes:             256 << 20,
 		NumShards:            1,
-		HotEvictionAlgorithm: "cachaner",
+		HotEvictionAlgorithm: config.EvictionCachaner,
 	})
 	defer func() { _ = s.Close(context.Background()) }()
 	k := testkey.Hash([]byte("cachaner-bench"))
@@ -182,6 +185,205 @@ func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 			_, _, _ = s.Get(ctx, k)
 		}
 	})
+}
+
+// BenchmarkGate_HotStore_Get_Hit_Bans pins the hit-path cost while a
+// ban list is active (the continuous invalidation-storm case: bans sit
+// in the lazy list for banTTL and are evaluated on every hit). The
+// literal fast-path keeps this at zero allocations and a handful of
+// comparisons per active ban. Alloc budget: 0.
+func BenchmarkGate_HotStore_Get_Hit_Bans(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-hit-with-bans"))
+	_ = s.Put(context.Background(), k, obj(k, 1024))
+	// Register non-matching bans with future CreatedAt so no hit evicts
+	// and each Get pays the full ban-list walk.
+	for range 8 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			HostRegex: "nomatch.invalid",
+			CreatedAt: time.Now().Add(time.Hour),
+		})
+	}
+	_, _, _ = s.Get(context.Background(), k) // warm the visited bit
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotStore_Ban_Steady measures the ban registration cost once
+// scan coalescing absorbs the eager pass (the storm steady state: every
+// ban after the first inside the window). The literal host pattern
+// avoids regexp compilation on this path.
+func BenchmarkHotStore_Ban_Steady(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-hit-ban-storm"))
+	_ = s.Put(context.Background(), k, obj(k, 1024))
+	// Prime the coalescer so b.Loop iterations exercise the skip path.
+	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "prime.invalid"})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "storm.invalid"})
+	}
+}
+
+// BenchmarkHotStore_Ban_SaturatedList measures ban registration against
+// a list pre-filled to banListCap — the production steady state, where
+// an external invalidation service registers 100+ surrogate bans/s over a list that sits
+// at the cap. The refresh path (re-issued tag) and the evict-append
+// path (distinct tag rotating through a fixed set, keeping the list at
+// cap) are measured separately.
+func BenchmarkHotStore_Ban_SaturatedList(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range banListCap {
+		_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: "fill-" + strconv.Itoa(i)})
+	}
+
+	b.Run("refresh", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: "fill-0"})
+		}
+	})
+	b.Run("evict-append", func(b *testing.B) {
+		keys := make([]string, 64)
+		for i := range keys {
+			keys[i] = "rotate-" + strconv.Itoa(i)
+		}
+		next := 0
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: keys[next%len(keys)]})
+			next++
+		}
+	})
+}
+
+// benchSubjectObj builds an object shaped like production traffic: a
+// 16-entry header map and StoredAt two hours in the past, so it is
+// SUBJECT to bans issued more recently — the production shape when a
+// ban list is active over an existing cache.
+func benchSubjectObj(key api.Key, host string, bodySize int) *api.Object {
+	o := obj(key, bodySize)
+	o.Header.Set(header.XBouineHost, host)
+	o.Header.Set(header.XBouinePath, "/some/path")
+	for i := range 12 {
+		o.Header.Set(fmt.Sprintf("X-Extra-%d", i), "value")
+	}
+	o.StoredAt = time.Now().Add(-2 * time.Hour)
+	return o
+}
+
+// benchSeedSubjectBans registers nBans distinct non-matching bans with
+// CreatedAt one hour in the past — after the object's StoredAt, so the
+// object is subject to every ban and each Get pays the ban check.
+// The literal seeds use dot-free patterns (isBanLiteral shape) and
+// alternate with anchored-exact escaped-dot hostnames, reflecting the
+// production ban forms that classify into the snapshot's fast paths;
+// the regex seeds are genuinely opaque (alternation, any-char dots).
+func benchSeedSubjectBans(s *HotStore, nBans int, class string) {
+	for i := range nBans {
+		var pat string
+		switch class {
+		case "literal":
+			if i%2 == 0 {
+				pat = "host-" + strconv.Itoa(i) + "-invalidx"
+			} else {
+				pat = "^host-" + strconv.Itoa(i) + `\.invalid$`
+			}
+		case "prefix":
+			pat = "^host-" + strconv.Itoa(i) + "/"
+		default: // opaque regex
+			pat = "host-" + strconv.Itoa(i) + `.invalid` // any-char dot, unanchored
+		}
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			HostRegex: pat,
+			CreatedAt: time.Now().Add(-time.Hour),
+		})
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_256 is the continuous invalidation-storm
+// baseline: a hit on an object subject to 256 active bans. Before the
+// composite ban snapshot this scaled linearly (~4 µs at 256 bans);
+// after it the cost is O(1) regardless of ban count.
+func BenchmarkHotGet_SubjectBans_256(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-256"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 256, "literal")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_1024 is the worst case at the ban-list
+// cap: before the composite snapshot ~10 µs (literal bans) to ~23 µs
+// (regex bans) per hit; after, O(1).
+func BenchmarkHotGet_SubjectBans_1024(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-1024"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 1024, "literal")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_1024_Regex keeps 1024 regex bans active:
+// the composite snapshot cannot fully collapse regex bans, but the
+// common rejection path still exits after the host/path set checks.
+func BenchmarkHotGet_SubjectBans_1024_Regex(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-1024-regex"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 1024, "opaque")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotStore_Ban_Eager measures a full eager scan (the spike
+// case: first ban outside the coalesce window) against a populated
+// store. Not a gate — cost is O(entries) by design.
+func BenchmarkHotStore_Ban_Eager(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range 50_000 {
+		k := testkey.Key(uint64(i))
+		_ = s.Put(context.Background(), k, obj(k, 256))
+	}
+	// Coalesce window elapsed between iterations is NOT guaranteed, so
+	// reset the coalescer per iteration to force the eager path.
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		s.lastBanScan.Store(0)
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "scan.invalid"})
+	}
 }
 
 // BenchmarkHotPut_Overflow drives a working set 1.5x larger than the
@@ -315,4 +517,25 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 			_, _, _ = s.Get(ctx, k)
 		}
 	})
+}
+
+// BenchmarkHotStore_Ban_SurrogateStorm measures the dominant production
+// ban shape: distinct surrogate-key bans against a populated store.
+// Option B makes these O(1) (lazy enforcement, no eager scan), so the
+// per-ban cost is registration + snapshot rebuild only — compare with
+// BenchmarkHotStore_Ban_Eager for the scanned path.
+func BenchmarkHotStore_Ban_SurrogateStorm(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range 50_000 {
+		k := testkey.Key(uint64(i))
+		_ = s.Put(context.Background(), k, obj(k, 256))
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			SurrogateKey: fmt.Sprintf("storm-tag-%d", b.N),
+		})
+	}
 }

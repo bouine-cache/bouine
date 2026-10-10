@@ -759,7 +759,8 @@ handler construction from `RouteCache.RefreshReactiveFirst`.
 ### Phase E: Documentation and metrics
 
 **Files:**
-- `docs/decisions/0024-predictive-refresh-prioritization.md` — new ADR
+- A new ADR for the popularity-gate semantics change (never landed;
+  number 0024 was later taken by async WAL fsync)
 - `docs/plans/refresh-prioritization.md` — this document (finalize)
 - `internal/observability/dataplane.go` — new metrics if needed
 - `internal/dashboard/` — dashboard tiles for refresh score distribution
@@ -957,7 +958,7 @@ total refresh rate is the sum across nodes, bounded by
 | `internal/observability/dataplane.go` | New skip reasons |
 | `internal/cache/handler_test.go` | Updated and new tests |
 | `internal/storage/hot_test.go` | `windowHits` tests |
-| `docs/decisions/0024-predictive-refresh-prioritization.md` | New ADR |
+| New ADR for the popularity-gate change (number TBD; 0024 taken) |
 | `docs/plans/refresh-prioritization.md` | This document (finalize) |
 
 ## 14. Relationship to existing ADRs
@@ -978,84 +979,8 @@ total refresh rate is the sum across nodes, bounded by
 
 ## 15. Revision history
 
-- **Revision 1 (2026-07-11):** Initial draft. Four changes: per-window hit
-  reset, cost-weighted score, rate limit, reactive-first mode.
-- **Revision 2 (2026-07-11):** Amended after Linus review. Key changes:
-  - **BLOCKER fix:** `Object.Hits` only increments once per SIEVE cycle
-    (slow path only). Added Change 1: new `windowHits` counter on `hotEntry`
-    that increments on every Get. This is a storage-layer change (L2), not
-    handler-only as originally claimed.
-  - **BLOCKER fix:** SWR path calls `storeObject` with `isRefresh=false`,
-    not `true` as claimed. Documented the SWR behavioral change explicitly
-    (§4.4) and wired it into the plan.
-  - **bug fix:** Factored the hit-count and score gates into a single
-    `shouldRefresh` function to eliminate duplicated persist/unregister
-    blocks.
-  - **bug fix:** Switched to `math/rand/v2` for jitter (concurrency-safe).
-  - **taste fix:** Documented SIEVE eviction interaction with `windowHits`
-    (they are now independent).
-  - **nit fix:** ADR number changed from 0023 to 0024 (0023 is taken by
-    warm-tier-eviction).
-  - **nit fix:** Renamed `prevHits` to `staleHits` for clarity.
-  - Removed false claim that all changes use "already stored data" — Change
-    1 adds new per-entry state (`windowHits`).
-- **Revision 3 (2026-07-11):** Amended after second Linus review:
-  - **bug fix:** Removed `ResetWindowHits` — `Put` already creates a new
-    `hotEntry` with `windowHits = 0` (zero value), making explicit reset
-    dead code. Removed from `Store` interface, `HotStore`, `TieredStore`,
-    and the `storeObject` call.
-  - Clarified that `staleHits` must be read in `triggerBgRefresh`
-    immediately after `Get` to minimize the race window.
-  - Clarified that `doBackgroundRevalidate` reads `windowHits` before the
-    `collapsedFetch` call (pre-fetch count from the expiring window).
-- **Revision 4 (2026-07-11):** Amended after third Linus review:
-  - **bug fix:** Added missing 8th call site of `storeObject` (POST/PUT
-    invalidation re-cache at `handler.go:1298`).
-  - **bug fix:** Removed unused `key` parameter from `shouldRefresh`
-    (would fail `unparam` linter).
-  - **bug fix:** Documented foreground revalidation interaction with
-    reactive-first mode (§7.4.1) — the early return correctly blocks
-    proactive refresh for foreground revalidation stores too.
-  - **nit fix:** Corrected "Two new config fields" to "One" for Change 4.
-  - **nit fix:** Updated status header to revision 3.
-- **Revision 5 (2026-07-11):** Amended after fourth Linus review:
-  - **bug fix:** Rate limiter switched from atomic CAS to `sync.Mutex` —
-    the CAS loop had refill race conditions (dropped refills + token leaks
-    under concurrent access). Mutex is correct for a background-path
-    limiter (at most `refresh_max_rps` calls/s per route).
-  - **bug fix:** Fixed `shouldRefresh` doc comment — it described the
-    caller's persist-cycle logic, not the function's behavior.
-  - **bug fix:** Added `handler_bench_test.go` to Phase A files (compile-time
-    `Store` assertion exercises `WindowHits`).
-  - **taste fix:** Added note explaining why a mutex-based limiter is chosen
-    over the existing channel-based pattern in `admin/server.go`.
-- **Revision 6 (2026-07-11):** Amended after fifth Linus review:
-  - **bug fix:** Updated §10 Concurrency section — was still describing the
-    old atomic rate limiter ("no mutex") after the switch to `sync.Mutex`.
-  - **bug fix:** Updated §10 Memory budget — rate limiter is 32 bytes
-    (Mutex + 3 int64), not 24 bytes (3 atomic.Int64).
-  - **nit fix:** Updated §10 Layer dependencies — "two methods" → "one
-    method (`WindowHits`)" after `ResetWindowHits` was removed.
-- **Revision 7 (2026-07-11):** Amended after sixth Linus review:
-  - **bug fix:** Clarified reactive-first check placement — must go
-    inside the `refreshBeforeExpiry` block, after `store.Put` and the
-    owner check, not at the top of the function (would skip the Put).
-  - **bug fix:** Added `refresh_min_hits > 0` to `refresh_reactive_first`
-    validation — reactive-first is useless without the popularity gate.
-  - **bug fix:** Added Handler struct field notes to each phase
-    (`refreshMinScore`, `refreshLimiter`, `refreshReactiveFirst`).
-  - Acknowledged `windowHits` fast-path race with concurrent `Put` and
-    explained why the lost update is semantically correct.
-- **Revision 8 (2026-07-11):** Amended after seventh Linus review:
-  - **bug fix:** Fixed cross-reference — SWR call-site rationale pointed
-    to "Change 5 §6.3" but should point to "§4.4".
-  - **bug fix:** Added note that SWR call sites read `staleHits` via
-    `h.store.WindowHits(key)` in `doBackgroundRevalidate` before
-    `collapsedFetch` — the value doesn't appear by magic.
-  - **nit fix:** Corrected `refresh_max_rps` config summary range to
-    "0 (unlimited) or 1–10000" to match the validation semantics.
-- **Revision 9 (2026-07-11):** Amended after eighth Linus review:
-  - **nit fix:** Fixed §6.3 validation text for `refresh_max_rps` — was
-    still "Range 1–10000", now "0 (unlimited, default) or 1–10000" to
-    match §9 config summary.
-  - Round 8 verdict: **Solid**. Plan is ready for implementation.
+Drafted 2026-07-11 through eight Linus review rounds (per-window hit
+counter storage placement, SWR call-site wiring, rate-limiter
+concurrency model, reactive-first check placement, and config-validation
+fixes are all folded into the sections above). Round-8 verdict: solid,
+ready for implementation.

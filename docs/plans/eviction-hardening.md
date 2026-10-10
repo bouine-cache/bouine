@@ -593,7 +593,8 @@ independently. Aggregate the `total` count atomically.
   the progress guarantee (continuous writes produce unvisited entries),
   and why 128/256 probes were chosen.
 
-6.2. Write `docs/decisions/0027-warm-index-heap-cap.md` — documents the
+6.2. Write an ADR for the warm-index heap cap (never landed; ADR number
+   0027 was later taken by the dead-wire-types removal) — documents the
   `warm_max_entries` config, the `EstimatedWarmLocHeapBytes` constant,
   the 15% GOMEMLIMIT default ratio, the inline constant in `loader.go`
   to avoid circular import, and the tradeoff (warm Put rejection when
@@ -762,6 +763,6 @@ Phase 6 (docs)        --- depends on 1, 4 (ADRs reference those decisions)
 | `cmd/bouine/cmd/serve.go` | 4 | Call `ResolveWarmMaxEntries` |
 | `config/default.yaml` | 6 | `warm_max_entries` / `warm_max_entries_ratio` comments |
 | `docs/decisions/0026-sieve-sweep-cap.md` | 6 | New ADR |
-| `docs/decisions/0027-warm-index-heap-cap.md` | 6 | New ADR |
+| New ADR for the warm-index heap cap (number TBD) | 6 | New ADR |
 | `docs/runbook/10-cluster-modes.md` | 6 | Tuning guidance |
 | `docs/architecture.md` | 6 | Section 4.2 update |

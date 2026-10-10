@@ -278,6 +278,9 @@ func TestSegmentCloseOnUnopened(t *testing.T) {
 // write".
 func TestSnapshotConcurrentWithCompact(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy concurrent I/O test in short mode")
+	}
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 4 << 10})
 	require.NoError(t, err, "new")

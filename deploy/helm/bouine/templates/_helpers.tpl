@@ -51,6 +51,31 @@ bouine.adminServiceName returns the name of the dedicated admin
 {{- end }}
 
 {{/*
+bouine.listenPort extracts the numeric port from a config.listen address
+value (e.g. ":80" → 80, "0.0.0.0:8080" → 8080), or returns an empty
+string for an empty value. An empty listen address is the app's
+documented "disabled plane" form (internal/config/config.go: "Listen
+enumerates the listener addresses. Empty strings disable.") — the common
+case being TLS termination upstream, where no data-plane TLS listener is
+wanted. Callers gate derived wiring (StatefulSet containerPorts, Service
+named-port resolution, NetworkPolicy DNAT-side ports) on the result so
+a user who overrides config.listen.* keeps routing, probes, and policy
+coherent. A non-empty value without a trailing port fails at template
+time.
+*/}}
+{{- define "bouine.listenPort" -}}
+{{- $addr := toString .value -}}
+{{- $port := "" -}}
+{{- if contains ":" $addr -}}
+{{- $port = last (splitList ":" $addr) -}}
+{{- end -}}
+{{- if and $addr (not $port) -}}
+{{- fail (printf "config.listen.%s must end in a port (got %q)" .key .value) -}}
+{{- end -}}
+{{- $port -}}
+{{- end }}
+
+{{/*
 bouine.goMemLimit returns the GOMEMLIMIT env var value.
 If .Values.goMemLimit is set, it is used as-is (manual override).
 Otherwise, the value is auto-computed as 75% of

@@ -12,18 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReportFastPathError(t *testing.T) {
-	t.Parallel()
-	errCh := make(chan error, 1)
-	reportFastPathError(io.EOF, errCh)
-	// reportFastPathError is a no-op by design — it should not send to errCh.
-	select {
-	case <-errCh:
-		t.Fatal("reportFastPathError should not send to errCh")
-	case <-time.After(10 * time.Millisecond):
-	}
-}
-
 func TestHandleTLSFastPath_HandshakeFail(t *testing.T) {
 	t.Skip("handleTLSFastPath removed — TLS handled inline in handleFastPathConn")
 }

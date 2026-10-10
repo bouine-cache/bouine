@@ -1,6 +1,3 @@
-// Package server is the data-plane front door. It owns HTTP/1.1
-// listeners (TLS and cleartext) and the route-matching router
-// that dispatches requests to cache handlers.
 package server
 
 import (
@@ -237,6 +234,10 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 		HeaderReceived:        sseHeaderReceived,
+		// Route fasthttp's internal error diagnostics (accept failures,
+		// per-connection serve errors) into slog instead of its raw
+		// stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "http"),
 	}
 	return &Listener{
 		inner:          srv,
@@ -278,6 +279,9 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		CloseOnShutdown:       true,
 		TLSConfig:             cfg.TLSConfig,
 		HeaderReceived:        sseHeaderReceived,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "https"),
 	}
 	return &Listener{
 		inner:          srv,
@@ -461,7 +465,14 @@ func (s *Listener) Shutdown(_ context.Context) error {
 			s.reactorLoop.Close()
 		}
 	})
-	return s.inner.Shutdown()
+	// Serve's ctx.Done branch may have already closed the listener
+	// and called inner.Shutdown concurrently. A double-close surfaces
+	// as net.ErrClosed — the listener is in the desired state, so
+	// suppress the benign error instead of logging it as shutdown noise.
+	if err := s.inner.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // Name returns the protocol label ("http", "https").

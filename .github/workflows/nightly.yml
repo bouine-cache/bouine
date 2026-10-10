@@ -290,7 +290,7 @@ jobs:
           cd dist
           sha256sum bouine-* > SHA256SUMS
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0.24.2
+        uses: anchore/sbom-action@v0.24.3
         with:
           path: ./
           format: spdx-json
@@ -319,9 +319,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.3.0
+        uses: docker/setup-qemu-action@v4.4.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.3.0
+        uses: docker/setup-buildx-action@v4.4.1
       - name: Login to Docker Hub
         uses: docker/login-action@v4.6.0
         with:
@@ -340,7 +340,7 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           push: true

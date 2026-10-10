@@ -32,6 +32,15 @@ commonAnnotations: {}
 # bouine config. Rendered into a ConfigMap and mounted at /etc/bouine/.
 config:
   listen:
+    # The ports below are the container ports: the StatefulSet derives
+    # its containerPorts from them, the Services resolve them by name,
+    # and the NetworkPolicy allows them post-DNAT (issue #586).
+    # Overriding any port keeps routing, probes, and policy coherent.
+    # Address form: [host:]port (e.g. ":8080" or "10.0.0.1:9000").
+    # An empty string disables the plane: the app skips the listener and
+    # the chart drops the derived containerPort, Service port, and
+    # NetworkPolicy rule. Set https: "" when TLS terminates upstream
+    # (reverse proxy / LB) — the app requires at least one listener.
     http: ":80"
     https: ":443"
     admin: ":9000"
@@ -78,9 +87,63 @@ config:
   #       max_connections: 64           # per origin host (default 64)
   #       max_idle_conn_duration: 90s   # idle pooled-connection lifetime (default 90s);
   #                                     # keep below any LB idle timeout in the path (AWS NLB: 350s)
-  #       response_header_timeout: 30s  # wait for origin response headers (default 30s)
+  #       response_header_timeout: 30s  # origin wait default inherited by routes without cache.fetch_timeout; keep < 5m (data plane safety net)
   #       hedge_timeout: 50ms           # fire a duplicate request after this delay
+  #       preserve_host: true           # keep the request's Host header on origin fetches
+  #                                     # instead of the pool target; for origins that derive
+  #                                     # behaviour from the Host (market selection, vhost routing)
   upstream_pools: []
+  # Header rewrite directives (request.header_set, request.header_remove,
+  # response.header_set, response.header_remove) apply per route.
+  # Client-identity forwarding (issue #769): request.forwarded injects
+  # X-Forwarded-For (append-only, bouine's immediate peer), X-Forwarded-Proto
+  # (scheme bouine received), X-Forwarded-Host (received Host), and Via
+  # "1.1 bouine" onto origin-bound requests only — never the hit path, never
+  # the cache key. Requires a pool; mutually exclusive with header_set
+  # entries targeting the same headers; XFF/Via chains capped at max_append
+  # entries (default 5, range 1..64). Compact forms (both mean all four
+  # headers on): `forwarded: standard` or `forwarded: [client_ip, proto, host, via]`;
+  # `forwarded: false` / `none` opts a route out of a route_default.
+  # Declare once for every route via route_defaults (merged before
+  # validation; only request.forwarded is mergeable today):
+  #   route_defaults:
+  #     request:
+  #       forwarded: standard
+  #   routes:
+  #     - name: inherit   # inherits the default
+  #       pool: app
+  #     - name: optout    # explicit opt-out
+  #       pool: app
+  #       request: {forwarded: none}
+  #     - name: subset    # exactly these headers (replaces default flags)
+  #       pool: app
+  #       request: {forwarded: [proto, host]}
+  #     - name: tuned    # mapping form ORs with the default flags, tunes the cap
+  #       pool: app
+  #       request:
+  #         forwarded: {max_append: 12}
+  # Request path rewrites: request.strip_prefix (pure prefix removal) and
+  # request.path_rewrite {match, replace} (Go RE2 regex, nginx
+  # `rewrite ... break` equivalent; mutually exclusive) rewrite the
+  # origin-bound path while the cache key keeps the public path:
+  #   routes:
+  #     - name: web
+  #       pool: app
+  #       request:
+  #         header_remove: [X-Client-Trace]
+  #         forwarded: standard   # one line — or expand to the mapping form:
+  #         # forwarded:
+  #         #   client_ip: true    # append peer IP to X-Forwarded-For
+  #         #   proto: true        # set X-Forwarded-Proto from the listener
+  #         #   host: true         # set X-Forwarded-Host to the received Host
+  #         #   via: true          # append Via: 1.1 bouine
+  #         #   max_append: 5      # XFF/Via chain cap (default 5)
+  #         path_rewrite:
+  #           match: ^/public/webhook/(.*)$
+  #           replace: /internal/webhook/$1
+  #       response:
+  #         header_set:
+  #           X-Content-Type-Options: nosniff
   routes: []
   # Cloudflare Cache API invalidation propagation.
   # When zone_id and api_token are set, bouine forwards purge/ban/refresh
@@ -179,12 +242,10 @@ terminationGracePeriodSeconds: 40
 # Pod management policy for the StatefulSet.
 # Parallel: all pods start simultaneously (correct for strong-mode
 # clusters where peers join via gossip concurrently).
-# maxUnavailable controls rolling update concurrency — set to 1 to
-# roll one pod at a time while allowing parallel initial boot.
 podManagementPolicy: Parallel
 updateStrategy:
   type: RollingUpdate
-  maxUnavailable: 1
+  rollingUpdate: {}
 
 # Seconds after a pod becomes Ready before it enters Service endpoints.
 # Gives the cluster ring time to converge after a pod joins, reducing
@@ -372,6 +433,11 @@ serviceMonitor:
   labels: {}
   interval: 60s
   scrapeTimeout: ""  # uses default
+  # Native histogram scraping. requires prometheus-operator >= v0.80.
+  scrapeNativeHistograms: true
+  # Also ingest the classic histogram series (_bucket/_sum/_count) for
+  # metrics exposed as native histograms.
+  scrapeClassicHistograms: true
   relabelings: []
   metricRelabelings: []
 

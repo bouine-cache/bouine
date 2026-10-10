@@ -16,11 +16,13 @@ spec:
   podManagementPolicy: {{ .Values.podManagementPolicy | default "Parallel" }}
   minReadySeconds: {{ .Values.minReadySeconds | default 30 }}
   updateStrategy:
-    type: {{ .Values.updateStrategy.type | default "RollingUpdate" }}
     {{- if eq (.Values.updateStrategy.type | default "RollingUpdate") "RollingUpdate" }}
+    {{- with .Values.updateStrategy.rollingUpdate }}
     rollingUpdate:
-      maxUnavailable: {{ .Values.updateStrategy.maxUnavailable | default 1 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
+    {{- end }}
+    type: {{ .Values.updateStrategy.type | default "RollingUpdate" }}
   selector:
     matchLabels:
       {{- include "bouine.selectorLabels" . | nindent 6 }}
@@ -112,21 +114,32 @@ spec:
                   key: {{ .Values.cloudflare.apiTokenSecretKey | default "CF_API_TOKEN" }}
             {{- end }}
           ports:
+            {{- /* containerPorts derive from config.listen so a listen override keeps routing, probes, and policy coherent (issue #586). An empty address disables the plane (and its derived wiring). */}}
+            {{- $httpPort := include "bouine.listenPort" (dict "key" "http" "value" .Values.config.listen.http) }}
+            {{- $httpsPort := include "bouine.listenPort" (dict "key" "https" "value" .Values.config.listen.https) }}
+            {{- $adminPort := include "bouine.listenPort" (dict "key" "admin" "value" .Values.config.listen.admin) }}
+            {{- $clusterPort := include "bouine.listenPort" (dict "key" "cluster" "value" .Values.config.listen.cluster) }}
             - name: http
-              containerPort: 80
+              containerPort: {{ $httpPort }}
               protocol: TCP
+            {{- if $httpsPort }}
             - name: https
-              containerPort: 443
+              containerPort: {{ $httpsPort }}
               protocol: TCP
+            {{- end }}
+            {{- if $adminPort }}
             - name: admin
-              containerPort: 9000
+              containerPort: {{ $adminPort }}
               protocol: TCP
+            {{- end }}
+            {{- if $clusterPort }}
             - name: cluster
-              containerPort: 8443
+              containerPort: {{ $clusterPort }}
               protocol: TCP
             - name: cluster-udp
-              containerPort: 8443
+              containerPort: {{ $clusterPort }}
               protocol: UDP
+            {{- end }}
           startupProbe:
             {{- toYaml .Values.startupProbe | nindent 12 }}
           readinessProbe:

@@ -21,7 +21,7 @@ import (
 
 // TestServeRequest_HitBodyStableUnderSlowClientAndEviction is the
 // normal-path twin of TestFastPathHit_BodyStableUnderSlowClientAndEviction:
-// the preprod incident kept producing corrupt 200s after the H1 fast path
+// the staging incident kept producing corrupt 200s after the H1 fast path
 // was disabled, because serveObject serves obj.Body via SetBodyRaw on the
 // same storage aliasing hole. This test pins the standard fasthttp hit
 // path: a slow-reading client holds an in-flight hit response while the

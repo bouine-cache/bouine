@@ -2,17 +2,18 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/xxhash/v3"
 	"github.com/hashicorp/memberlist"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -28,6 +29,17 @@ const defaultHandoffQueueDepth = 4096
 // list; 1<<20 × 50 peers ≈ 50 M entries worst case. config.maxHandoffQueueDepth
 // mirrors this value for YAML validation.
 const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
+
+// DefaultPushPullInterval is the memberlist push/pull sync interval used
+// when the config leaves it unset. It replaces memberlist's 30s default
+// so invalidations propagate promptly. Also surfaced on the dashboard.
+const DefaultPushPullInterval = 5 * time.Second
+
+// DefaultReconcileInterval is how often the background reconcile pass
+// self-heals the ring from memberlist's live member view. It backs up
+// the NotifyJoin/NotifyLeave event delegates and the push/pull prune,
+// which can both miss a peer that restarted without a delivered event.
+const DefaultReconcileInterval = 30 * time.Second
 
 // Config controls the cluster membership layer.
 //
@@ -47,10 +59,11 @@ type Config struct {
 	// useful behind NAT or in K8s where the pod IP differs).
 	AdvertiseAddr string
 	// Mode determines how cache keys are distributed across the cluster.
-	// "strong" uses a consistent hash ring with peer fetch on miss.
-	// "eventual" caches locally with no peer fetch; invalidation by gossip.
-	// Defaults to "strong" for backward compatibility.
-	Mode string
+	// ClusterModeStrong uses a consistent hash ring with peer fetch on
+	// miss. ClusterModeEventual caches locally with no peer fetch;
+	// invalidation by gossip. Defaults to ClusterModeStrong for
+	// backward compatibility.
+	Mode config.ClusterMode
 	// Join is the list of seed addresses for bootstrapping.
 	Join []string
 	// VirtualNodes is the number of virtual nodes per real node on
@@ -73,6 +86,11 @@ type Config struct {
 	// upstream default of 1024 to absorb production bursts of cache
 	// invalidations. See issue #201.
 	HandoffQueueDepth int
+	// ReconcileInterval is how often the background reconcile pass
+	// prunes dead ring entries and refreshes stale peer addresses from
+	// memberlist metadata. Default 30s. Negative disables the loop
+	// (the push/pull merge prune still runs).
+	ReconcileInterval time.Duration
 }
 
 // Invalidator holds callbacks for applying purge, ban, and refresh
@@ -95,20 +113,58 @@ type Member struct {
 //
 // Stable.
 type Cluster struct {
-	local   api.PeerInfo
-	inv     Invalidator
-	logger  observability.Logger
-	ml      *memberlist.Memberlist
-	ring    *ring
-	peers   map[string]*Member // keyed by NodeName
-	metrics *Metrics
+	local api.PeerInfo
+	// inv is stored atomically: memberlist's packet-handler goroutine
+	// (started inside memberlist.Create, before SetInvalidator can be
+	// called) reads the callbacks on every gossip frame — the same
+	// reason the slogAdapter and metrics fields hold atomics. A plain
+	// field raced with SetInvalidator under -race in the integration
+	// suite.
+	inv    atomic.Pointer[Invalidator]
+	logger observability.Logger
+	ml     *memberlist.Memberlist
+	ring   *ring
+	peers  map[string]*Member // keyed by NodeName
+	// metrics is stored atomically: memberlist goroutines (gossip
+	// dispatch, reconcile loop) read it and memberlist.Create starts
+	// them before SetMetrics can be called — the same reason the
+	// slogAdapter in this package holds an atomic.Pointer.
+	metrics atomic.Pointer[Metrics]
 	adapter *slogAdapter
+	// done is closed by Leave to stop the reconcile loop;
+	// closeOnce makes repeated Leave calls safe. The reconcile
+	// liveness fields are grouped at the tail so the small values
+	// pack after the mutexes instead of padding before pointers.
+	done chan struct{}
+	// seqs dedups received invalidation events by (Issuer, Seq) per
+	// ADR-0044: strong mode double-delivers (HTTP + gossip) and both
+	// paths share this tracker so each event applies exactly once.
+	seqs *seqTracker
+	// onPeerRetired, when set, receives peer addresses that stopped
+	// being current (peer left, or restarted at a new address). Set
+	// via SetOnPeerRetired before Join.
+	onPeerRetired atomic.Pointer[func(addr string)]
+	// onPeerUnretired, when set, receives an address the moment the
+	// ring learns it is current again (a peer added or re-added at
+	// that address). The PeerFetcher uses it to lift a previous
+	// retirement so fetches dial the address again. Set via
+	// SetOnPeerRetired before Join.
+	// Both callbacks are stored atomically: memberlist's event
+	// goroutines (started inside memberlist.Create, before the engine
+	// can call SetOnPeerRetired) invoke them from addPeer/removePeer —
+	// the same reason inv and metrics hold atomics. Plain fields raced
+	// with SetOnPeerRetired under -race in the integration suite
+	// (addPeer read the zero value while the engine wrote it).
+	onPeerUnretired atomic.Pointer[func(addr string)]
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
-	gossipQueue []gossipBroadcast
-	cfg         Config
-	mu          sync.RWMutex
-	gossipMu    sync.Mutex
+	gossipQueue   []gossipBroadcast
+	cfg           Config
+	mu            sync.RWMutex
+	gossipMu      sync.Mutex
+	closeOnce     sync.Once
+	reconcileLive atomic.Bool
+	reconcileWg   sync.WaitGroup
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -140,6 +196,8 @@ func New(cfg Config) (*Cluster, error) {
 		local:  cfg.PeerInfo,
 		logger: cfg.Logger,
 		ring:   newRing(cfg.VirtualNodes),
+		seqs:   newSeqTracker(),
+		done:   make(chan struct{}),
 	}
 
 	mlCfg := memberlist.DefaultLANConfig()
@@ -161,7 +219,7 @@ func New(cfg Config) (*Cluster, error) {
 	if cfg.PushPullInterval > 0 {
 		mlCfg.PushPullInterval = cfg.PushPullInterval
 	} else {
-		mlCfg.PushPullInterval = 5 * time.Second
+		mlCfg.PushPullInterval = DefaultPushPullInterval
 	}
 
 	if cfg.BindAddr != "" {
@@ -171,7 +229,7 @@ func New(cfg Config) (*Cluster, error) {
 		}
 		var port int
 		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-			return nil, fmt.Errorf("cluster: bad port in %q: %w", cfg.BindAddr, err)
+			return nil, fmt.Errorf("cluster: bad port in bind addr %q: %w", cfg.BindAddr, err)
 		}
 		mlCfg.BindAddr = host
 		mlCfg.BindPort = port
@@ -187,6 +245,15 @@ func New(cfg Config) (*Cluster, error) {
 		}
 		mlCfg.AdvertiseAddr = host
 		mlCfg.AdvertisePort = port
+	} else if cfg.BindAddr != "" {
+		// Advertise what we bind. Without this, memberlist announces its
+		// default advertise address (interface IP : 7946) for every node;
+		// two clusters whose nodes share names but bind different ports
+		// then reconcile each other's membership over that address
+		// (observed in the integration suite: the strong and eventual
+		// stacks merged into one memberlist cluster and a booting node
+		// received a foreign stack's purge frame mid-build).
+		mlCfg.AdvertiseAddr, mlCfg.AdvertisePort = mlCfg.BindAddr, mlCfg.BindPort
 	}
 
 	ml, err := memberlist.Create(mlCfg)
@@ -195,7 +262,22 @@ func New(cfg Config) (*Cluster, error) {
 	}
 	c.ml = ml
 	c.addPeer(cfg.NodeName, cfg.PeerInfo)
+	c.startReconcileLoop(cfg.ReconcileInterval)
 	return c, nil
+}
+
+// startReconcileLoop starts the background reconcile loop unless
+// interval is negative (disabled). Zero applies the default interval.
+func (c *Cluster) startReconcileLoop(interval time.Duration) {
+	if interval < 0 {
+		return
+	}
+	if interval == 0 {
+		interval = DefaultReconcileInterval
+	}
+	c.reconcileLive.Store(true)
+	c.reconcileWg.Add(1)
+	go c.reconcileLoop(interval)
 }
 
 // Join connects to the given seed addresses.
@@ -232,7 +314,7 @@ func (c *Cluster) Owner(key api.Key) api.PeerInfo {
 	defer c.mu.RUnlock()
 	name := c.ring.get(key)
 	if name == "" {
-		c.metrics.IncRingEmpty()
+		c.metrics.Load().IncRingEmpty()
 		c.logger.Warn("cluster: ring empty, cannot determine owner",
 			"key", key, "peers", len(c.peers))
 		return api.PeerInfo{}
@@ -257,6 +339,9 @@ func (c *Cluster) Digest() api.RingDigest {
 
 // Leave announces departure and shuts down the gossip layer.
 func (c *Cluster) Leave(ctx context.Context) error {
+	c.closeOnce.Do(func() { close(c.done) })
+	c.reconcileWg.Wait()
+	c.adapter.markClosing()
 	if err := c.ml.Leave(0); err != nil {
 		c.logger.Warn("cluster leave error", "error", err)
 	}
@@ -266,104 +351,220 @@ func (c *Cluster) Leave(ctx context.Context) error {
 // ---- memberlist.Delegate interface ----
 
 // NodeMeta serialises PeerInfo as the node's user metadata.
+// Oversized payloads are dropped whole: a truncated frame fails
+// decoding on every receiver, and a decode failure means the peer
+// cannot be added to the ring at all, so sending nothing is no worse
+// than sending garbage. The drop is logged so the misconfiguration is
+// visible at the node that causes it.
 func (c *Cluster) NodeMeta(limit int) []byte {
-	b, _ := json.Marshal(c.local)
+	b, err := EncodePeerInfoMeta(c.local)
+	if err != nil {
+		c.logger.Error("cluster: cannot encode node meta, joining without peer metadata",
+			"error", err)
+		return nil
+	}
 	if len(b) > limit {
-		return b[:limit]
+		c.logger.Error("cluster: encoded node meta exceeds memberlist limit, dropping",
+			"size", len(b), "limit", limit,
+			"hint", "shorten PeerInfo strings (name, addresses, version)")
+		return nil
 	}
 	return b
 }
 
-// NotifyMsg handles incoming gossip user messages (purge/ban events).
-// Binary frames (purge/ban) are dispatched by the msgType byte;
-// JSON frames are dispatched by the "type" field. Malformed or unrecognised
-// payloads are logged and skipped.
+// NotifyMsg handles incoming gossip user messages (purge/ban events),
+// dispatched by the msgType byte. Malformed or unrecognised payloads
+// are logged and skipped.
 func (c *Cluster) NotifyMsg(msg []byte) {
 	if IsBinaryFrame(msg) {
 		c.handleBinaryGossip(msg)
 		return
 	}
-	c.handleJSONGossip(msg)
+	c.logger.Debug("cluster: unrecognized gossip message", "len", len(msg))
+}
+
+// SeenFromPeer reports whether an invalidation event from issuer with
+// the given Seq has already been applied, and records it otherwise.
+// The HTTP peer endpoints use it to dedup the gossip fallback copy of
+// each event (ADR-0044). It returns false for events that carry no
+// issuer, so legacy senders are never dropped.
+func (c *Cluster) SeenFromPeer(issuer string, seq uint64) bool {
+	return c.seqs.seen(issuer, seq)
+}
+
+// seenFromPeer is the nil-safe internal form used by the gossip
+// receive path. Clusters constructed outside New (tests) have a nil
+// seqs tracker; they never dedup.
+func (c *Cluster) seenFromPeer(issuer string, seq uint64) bool {
+	if c.seqs == nil {
+		return false
+	}
+	return c.seqs.seen(issuer, seq)
 }
 
 func (c *Cluster) handleBinaryGossip(msg []byte) {
 	switch GossipMsgType(msg) {
 	case msgTypePurge:
-		if c.inv.PurgeFn == nil {
-			return
-		}
-		evt, err := DecodePurgeGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip purge decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.PurgeFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip purge apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("purge")
-		c.logger.Info("received purge from peer",
-			"key", evt.Key,
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipPurge(msg)
+	case msgTypePurgeBatch:
+		c.handleGossipPurgeBatch(msg)
 	case msgTypeBan:
-		if c.inv.BanFn == nil {
-			return
-		}
-		evt, err := DecodeBanGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip ban decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.BanFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip ban apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("ban")
-		c.logger.Info("received ban from peer",
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipBan(msg)
 	case msgTypeRefresh:
-		if c.inv.RefreshFn == nil {
-			return
-		}
-		evt, err := DecodeRefreshGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip refresh decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.RefreshFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("refresh")
-		c.logger.Info("received refresh from peer",
-			"key", evt.Key,
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipRefresh(msg)
+	case msgTypeRefreshBatch:
+		c.handleGossipRefreshBatch(msg)
 	default:
 		c.logger.Debug("cluster: unrecognized binary gossip msgType", "msgType", GossipMsgType(msg), "len", len(msg))
 	}
 }
 
-func (c *Cluster) handleJSONGossip(msg []byte) {
-	var hdr struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(msg, &hdr); err != nil {
-		c.logger.Debug("cluster: malformed gossip message", "error", err)
+// handleGossipPurge applies a single purge gossip frame.
+func (c *Cluster) handleGossipPurge(msg []byte) {
+	inv := c.inv.Load()
+	if inv == nil || inv.PurgeFn == nil {
 		return
 	}
-	c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
+	evt, err := DecodePurgeGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip purge decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := inv.PurgeFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip purge apply failed", "error", err)
+		return
+	}
+	c.metrics.Load().IncGossipInvalidation("purge")
+	c.logger.Info("received purge from peer",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipPurgeBatch applies a batched purge gossip frame,
+// deduping events already delivered via the HTTP fan-out path
+// (ADR-0044).
+func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
+	inv := c.inv.Load()
+	if inv == nil || inv.PurgeFn == nil {
+		return
+	}
+	evts, err := DecodePurgeBatchGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip purge batch decode failed", "error", err)
+		return
+	}
+	applied := 0
+	for _, evt := range evts {
+		if c.seenFromPeer(evt.Issuer, evt.Seq) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		err := inv.PurgeFn(ctx, evt)
+		cancel()
+		if err != nil {
+			c.logger.Warn("cluster: gossip purge batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
+			continue
+		}
+		applied++
+	}
+	if applied > 0 {
+		c.metrics.Load().IncGossipInvalidation("purge_batch")
+		c.logger.Info("received purge batch from peer", "events", len(evts), "applied", applied)
+	}
+}
+
+// handleGossipBan applies a single ban gossip frame.
+func (c *Cluster) handleGossipBan(msg []byte) {
+	inv := c.inv.Load()
+	if inv == nil || inv.BanFn == nil {
+		return
+	}
+	evt, err := DecodeBanGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip ban decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := inv.BanFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip ban apply failed", "error", err)
+		return
+	}
+	c.metrics.Load().IncGossipInvalidation("ban")
+	c.logger.Info("received ban from peer",
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipRefresh applies a single refresh gossip frame.
+func (c *Cluster) handleGossipRefresh(msg []byte) {
+	inv := c.inv.Load()
+	if inv == nil || inv.RefreshFn == nil {
+		return
+	}
+	evt, err := DecodeRefreshGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip refresh decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := inv.RefreshFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
+		return
+	}
+	c.metrics.Load().IncGossipInvalidation("refresh")
+	c.logger.Info("received refresh from peer",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipRefreshBatch applies a batched refresh gossip frame,
+// deduping events already delivered via the HTTP fan-out path.
+func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
+	inv := c.inv.Load()
+	if inv == nil || inv.RefreshFn == nil {
+		return
+	}
+	evts, err := DecodeRefreshBatchGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip refresh batch decode failed", "error", err)
+		return
+	}
+	applied := 0
+	for _, evt := range evts {
+		if c.seenFromPeer(evt.Issuer, evt.Seq) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		err := inv.RefreshFn(ctx, evt)
+		cancel()
+		if err != nil {
+			c.logger.Warn("cluster: gossip refresh batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
+			continue
+		}
+		applied++
+	}
+	if applied > 0 {
+		c.metrics.Load().IncGossipInvalidation("refresh_batch")
+		c.logger.Info("received refresh batch from peer", "events", len(evts), "applied", applied)
+	}
 }
 
 // QueueBroadcast enqueues a message for gossip delivery. The message is
@@ -382,15 +583,34 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	//
 	// In eventual mode, there is no HTTP fan-out, so the direct
 	// SendBestEffort remains the primary delivery path.
-	if c.ml != nil && c.cfg.Mode != "strong" {
+	if c.ml != nil && c.cfg.Mode != config.ClusterModeStrong {
 		for _, n := range c.ml.Members() {
 			_ = c.ml.SendBestEffort(n, msg)
 		}
 	}
 }
 
+// gossipMaxFrame is the largest frame data the memberlist delegate drain
+// can ever deliver in one gossip round. memberlist calls GetBroadcasts
+// with the limit UDPBufferSize (DefaultLANConfig: 1400) minus the
+// compound-header (2) and label (0) overheads, and charges each frame
+// a per-entry overhead of compoundOverhead+userMsgOverhead (3):
+// 1400-2-0-3 = 1395. Frames larger than this can never fit any round
+// and are dropped at drain time rather than re-queued forever
+// (issue #754). Update alongside the pinned memberlist version and
+// the DefaultLANConfig in New.
+const gossipMaxFrame = 1395
+
 // GetBroadcasts returns pending broadcast messages up to the byte limit.
 // memberlist calls this on every gossip round; we drain the queue.
+// A frame that can never fit even a full gossip round is dropped with a
+// metric instead of being re-queued forever: memberlist has no escape
+// hatch for oversized delegate frames, so re-queuing would wedge the
+// queue (issue #754). The batcher splits batch frames at enqueue time
+// (EncodePurgeBatchGossipBudgeted), so this valve only fires on
+// regressions or pathological single events. Frames that fit a full
+// round but not the remaining budget of this round (memberlist's own
+// traffic may already fill it) are re-queued as before.
 func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 	c.gossipMu.Lock()
 	defer c.gossipMu.Unlock()
@@ -401,6 +621,16 @@ func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 	used := 0
 	var remaining []gossipBroadcast
 	for _, b := range c.gossipQueue {
+		if len(b.data) > gossipMaxFrame {
+			// Cannot fit any gossip round; waiting cannot change
+			// that. Drop and count it.
+			c.metrics.Load().IncGossipOversizedDrop()
+			c.logger.Warn("cluster: dropping oversized gossip frame",
+				"bytes", len(b.data),
+				"cap", gossipMaxFrame,
+			)
+			continue
+		}
 		if used+overhead+len(b.data) > limit {
 			remaining = append(remaining, b)
 			continue
@@ -423,43 +653,60 @@ type gossipBroadcast struct {
 // is true on the first sync after joining.
 func (c *Cluster) LocalState(_ bool) []byte {
 	digest := c.Digest()
-	b, _ := json.Marshal(digest)
-	return b
+	return EncodeRingDigestState(digest)
 }
 
 // MergeRemoteState reconciles a remote node's ring digest with the
-// local peer table. If the remote node reports peers this node doesn't
-// know about it re-parses their NodeMeta as PeerInfo and adds them to
-// the ring so ownership stays consistent across restarts. It also prunes
-// peers present locally but absent from memberlist's live member set —
-// dead peers evicted during partition recovery would otherwise stay in
-// the ring forever, routing keys to dead nodes (issue #305).
+// local peer table. It does two things:
+//
+//   - Add path (digest mismatch only): if the remote node reports peers
+//     this node doesn't know about, re-parse their NodeMeta as PeerInfo
+//     and add them to the ring so ownership stays consistent across
+//     restarts. Matching digests imply identical peer sets, so the add
+//     loop can safely skip.
+//   - Prune path (always): remove peers present locally but absent from
+//     memberlist's live member set. Dead peers evicted during partition
+//     recovery would otherwise stay in the ring forever, routing keys to
+//     dead nodes (issue #305). The prune must run even when digests
+//     match: when every peer holds the same stale ring (e.g. after an
+//     HPA scale-down where push/pull resurrected the dead node during
+//     the convergence window), matching digests are precisely the
+//     equilibrium that prevents cleanup (issue #648).
 func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	if len(buf) == 0 {
 		return
 	}
-	var remote api.RingDigest
-	if err := json.Unmarshal(buf, &remote); err != nil {
+	remote, err := DecodeRingDigestState(buf)
+	if err != nil {
 		c.logger.Debug("cluster: bad remote state", "error", err)
 		return
 	}
-	local := c.Digest()
-	if local.Hash == remote.Hash {
-		return // rings already in sync
-	}
-	c.logger.Debug("cluster: ring digest mismatch, re-syncing",
-		"local", local.Hash, "remote", remote.Hash,
-		"join", join)
 	liveMembers := c.ml.Members()
+	local := c.Digest()
+	if local.Hash != remote.Hash {
+		c.logger.Debug("cluster: ring digest mismatch, re-syncing",
+			"local", local.Hash, "remote", remote.Hash,
+			"join", join)
+		for _, n := range liveMembers {
+			c.mu.RLock()
+			_, ok := c.peers[n.Name]
+			c.mu.RUnlock()
+			if !ok {
+				c.NotifyJoin(n)
+			}
+		}
+	}
+	c.pruneStalePeers(liveMembers)
+}
+
+// pruneStalePeers removes ring entries that are absent from the given
+// memberlist live member set (issue #305, #648). Callers pass
+// c.ml.Members() so the prune reflects this node's own liveness view,
+// not a remote ring's.
+func (c *Cluster) pruneStalePeers(liveMembers []*memberlist.Node) {
 	liveSet := make(map[string]struct{}, len(liveMembers))
 	for _, n := range liveMembers {
 		liveSet[n.Name] = struct{}{}
-		c.mu.RLock()
-		_, ok := c.peers[n.Name]
-		c.mu.RUnlock()
-		if !ok {
-			c.NotifyJoin(n)
-		}
 	}
 	c.mu.RLock()
 	stale := make([]string, 0, len(c.peers))
@@ -471,19 +718,93 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	c.mu.RUnlock()
 	for _, name := range stale {
 		c.removePeer(name)
-		c.logger.Info("cluster: pruned stale peer during state merge", "name", name)
+		c.logger.Info("cluster: pruned stale peer", "name", name)
 	}
+}
+
+// reconcileOnce self-heals the local peer set from memberlist's live
+// member view. It complements the event delegates (NotifyJoin/Leave)
+// and the push/pull merge prune, which only run when memberlist pushes
+// an event or a remote state exchange happens. Two failure modes are
+// healed here:
+//
+//   - A peer that left without a delivered NotifyLeave (e.g. a pod
+//     killed mid-partition, or a resurrected-then-dead entry from
+//     issue #648) lingers in the ring between merges, and every
+//     peer-fetch routed to it pays a full dial timeout.
+//   - A live member whose recorded PeerInfo still carries a
+//     pre-restart address (observed in production after a rolling
+//     restart: memberlist reports the node alive at its new address,
+//     but the ring entry keeps the old AdminAddr, so peer fetches dial
+//     a dead IP indefinitely). The entry is re-read from the
+//     memberlist node metadata and refreshed in place.
+func (c *Cluster) reconcileOnce() {
+	liveMembers := c.ml.Members()
+	c.pruneStalePeers(liveMembers)
+	for _, n := range liveMembers {
+		info, err := DecodePeerInfoMeta(n.Meta)
+		if err != nil {
+			c.logger.Warn("cluster: undecodable peer meta, skipping reconcile",
+				"node", n.Name, "error", err)
+			continue
+		}
+		info.Name = n.Name
+		c.mu.RLock()
+		existing, ok := c.peers[n.Name]
+		c.mu.RUnlock()
+		if !ok {
+			c.addPeer(n.Name, info)
+			continue
+		}
+		old := existing.Info
+		if info.Addr != old.Addr || info.AdminAddr != old.AdminAddr || info.DataAddr != old.DataAddr {
+			c.addPeer(n.Name, info)
+			c.logger.Info("cluster: refreshed stale peer address from memberlist",
+				"name", n.Name, "addr", info.Addr, "admin_addr", info.AdminAddr,
+				"old_admin_addr", old.AdminAddr)
+		}
+	}
+}
+
+// reconcileLoop periodically runs reconcileOnce so stale ring state
+// heals within one interval regardless of memberlist event delivery
+// or push/pull timing. Started by New when ReconcileInterval is not
+// negative; stopped by Leave.
+func (c *Cluster) reconcileLoop(interval time.Duration) {
+	defer c.reconcileWg.Done()
+	defer c.reconcileLive.Store(false)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.reconcileOnce()
+		}
+	}
+}
+
+// reconcileRunning reports whether the reconcile loop goroutine is
+// still registered (used by tests to verify shutdown).
+func (c *Cluster) reconcileRunning() bool {
+	return c.reconcileLive.Load()
 }
 
 // ---- memberlist.EventDelegate ----
 
 // NotifyJoin is called when a new node joins.
 func (c *Cluster) NotifyJoin(n *memberlist.Node) {
-	var info api.PeerInfo
-	if err := json.Unmarshal(n.Meta, &info); err != nil {
-		c.logger.Warn("cluster: malformed peer meta", "node", n.Name, "error", err)
-		info.Name = n.Name
-		info.Addr = fmt.Sprintf("%s:%d", n.Addr, n.Port)
+	info, err := DecodePeerInfoMeta(n.Meta)
+	if err != nil {
+		// A meta we cannot decode carries no usable data addresses;
+		// adding a fallback peer would put it in the ring and route
+		// peer-fetches to an address that cannot serve them. Skip it —
+		// reconcile and future NotifyUpdate events retry with fresh
+		// metadata.
+		c.logger.Warn("cluster: undecodable peer meta, not adding peer",
+			"node", n.Name, "error", err)
+		return
 	}
 	c.addPeer(n.Name, info)
 	c.logger.Info("cluster peer joined", "name", n.Name, "addr", info.Addr)
@@ -509,16 +830,52 @@ func (c *Cluster) NotifyUpdate(n *memberlist.Node) {
 
 func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	old, existed := c.peers[name]
 	c.peers[name] = &Member{Info: info}
+	// Remove any existing vnodes first so the ring doesn't accumulate
+	// duplicates on resurrection cycles (issue #648). ring.add appends
+	// without checking, so a re-add without remove would grow r.nodes
+	// unboundedly across HPA scale-up/down cycles.
+	c.ring.remove(name)
 	c.ring.add(name, c.cfg.VirtualNodes)
+	c.mu.Unlock()
+	// The address is current the moment the ring carries it: lift any
+	// previous retirement (a peer that comes back at the same address
+	// keeps working). This — not getPipelineClient — is the only place
+	// a retirement may be lifted: a fetch can hold a stale owner
+	// PeerInfo from before a ring change, and clearing the mark from
+	// the fetch path would resurrect a client for a dead address.
+	if addr := peerAddr(info); addr != "" {
+		if cb := c.onPeerUnretired.Load(); cb != nil {
+			(*cb)(addr)
+		}
+	}
+	// A peer restarting at a new address leaves its old address dead:
+	// retire the old PipelineClient so its worker stops dialing it
+	// (fasthttp cannot stop a worker whose dial fails — see
+	// PeerFetcher.RetireAddress).
+	if existed && name != c.cfg.NodeName {
+		if oldAddr, newAddr := peerAddr(old.Info), peerAddr(info); oldAddr != "" && oldAddr != newAddr {
+			if cb := c.onPeerRetired.Load(); cb != nil {
+				(*cb)(oldAddr)
+			}
+		}
+	}
 }
 
 func (c *Cluster) removePeer(name string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	old, existed := c.peers[name]
 	delete(c.peers, name)
 	c.ring.remove(name)
+	c.mu.Unlock()
+	if existed && name != c.cfg.NodeName {
+		if addr := peerAddr(old.Info); addr != "" {
+			if cb := c.onPeerRetired.Load(); cb != nil {
+				(*cb)(addr)
+			}
+		}
+	}
 }
 
 // ---- Consistent-hash ring ----
@@ -635,19 +992,38 @@ func (c *Cluster) Config() Config {
 	return c.cfg
 }
 
-// Mode returns the cluster consistency mode ("strong" or "eventual").
-func (c *Cluster) Mode() string { return c.cfg.Mode }
+// Mode returns the cluster consistency mode (ClusterModeStrong or
+// ClusterModeEventual).
+func (c *Cluster) Mode() config.ClusterMode { return c.cfg.Mode }
 
 // SetMetrics registers cluster-level Prometheus counters. Must be called
 // before Join. Nil receiver is a no-op. Safe to call concurrently with
 // memberlist's logging goroutine — the adapter stores the pointer atomically.
 func (c *Cluster) SetMetrics(m *Metrics) {
-	c.metrics = m
+	c.metrics.Store(m)
 	if c.adapter != nil {
 		c.adapter.setMetrics(m)
 	}
 }
 
 // SetInvalidator registers callbacks for applying purge and ban events
-// received via gossip. Must be called before Join.
-func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
+// received via gossip. Safe to call after New: memberlist's packet
+// handlers read the callbacks through the atomic pointer, so a
+// bootstrap-phase SetInvalidator cannot race a gossip frame received
+// before the call.
+func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv.Store(&inv) }
+
+// SetOnPeerRetired registers the retire/unretire callbacks. retire is
+// invoked with a peer's address when that address stops being current
+// (the peer left the ring, or restarted at a different address); the
+// PeerFetcher uses it to evict and park the stale PipelineClient
+// (fasthttp's worker would otherwise re-dial the dead address
+// forever). unretire is invoked when the ring learns an address is
+// current again (a peer added or re-added at that address), so a
+// previous retirement is lifted and fetches dial it normally. Must be
+// called before Join. The callbacks must not call back into the
+// Cluster.
+func (c *Cluster) SetOnPeerRetired(retire, unretire func(addr string)) {
+	c.onPeerRetired.Store(&retire)
+	c.onPeerUnretired.Store(&unretire)
+}

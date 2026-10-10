@@ -313,7 +313,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		}
 	}
 
-	// Start the warm sync goroutine if warm tier and sync are enabled.
 	if ts.warm != nil && warmSyncInterval > 0 {
 		ts.syncWg.Add(1)
 		go ts.warmSyncLoop()
@@ -328,7 +327,6 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		go ts.tombstoneDrainLoop()
 	}
 
-	// Start the checkpoint loop if warm tier and WAL are both enabled.
 	if ts.warm != nil && ts.wal != nil && ts.checkpointInterval > 0 {
 		ts.checkpointWg.Add(1)
 		go ts.checkpointLoop()
@@ -534,24 +532,33 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		t.evictWarm(key)
 		return nil, "", nil
 	}
-	// Re-derive transient fields not serialised to disk (tagged json:"-").
-	// CacheControl and OriginAge are recalculated here so Evaluate and
-	// ComputeAge work without re-parsing headers on every hit. SerializedHead
-	// is left nil — the H1 fast-path falls back to appendResponseHeaders
-	// (header iteration) for warm-tier objects until they are re-stored
-	// via buildObject on a subsequent cache fill.
-	if cc := loaded.Header.Get(header.CacheControl); cc != "" {
-		loaded.CacheControl = cc
-	}
-	if age := loaded.Header.Get(header.Age); age != "" {
-		var secs int64
-		for _, b := range []byte(age) {
-			if b < '0' || b > '9' {
-				break
-			}
-			secs = secs*10 + int64(b-'0')
+	// Re-derive the pre-v6 transient fields (tagged json:"-"): pre-v6
+	// blobs carry no CacheControl/OriginAge on the wire, so they are
+	// recalculated here so Evaluate and ComputeAge work without
+	// re-parsing headers on every hit. Codec v6 blobs (ADR-0053) already
+	// carry both values — including the multi-line-merged CacheControl
+	// and the apparent-age-adjusted OriginAge that buildObject computed
+	// at fill time — and MUST NOT be overwritten by these single-header
+	// approximations. SerializedHead is left nil — the H1 fast-path
+	// falls back to appendResponseHeaders (header iteration) for
+	// warm-tier objects until they are re-stored via buildObject on a
+	// subsequent cache fill.
+	if loaded.CacheControl == "" {
+		if cc := loaded.Header.Get(header.CacheControl); cc != "" {
+			loaded.CacheControl = cc
 		}
-		loaded.OriginAge = time.Duration(secs) * time.Second
+	}
+	if loaded.OriginAge == 0 {
+		if age := loaded.Header.Get(header.Age); age != "" {
+			var secs int64
+			for _, b := range []byte(age) {
+				if b < '0' || b > '9' {
+					break
+				}
+				secs = secs*10 + int64(b-'0')
+			}
+			loaded.OriginAge = time.Duration(secs) * time.Second
+		}
 	}
 	// Promote to hot tier (best-effort: ignore error).
 	_ = t.hot.Put(ctx, key, loaded)
@@ -567,13 +574,17 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 }
 
 // Put stores an object in the hot tier and, for large objects, also
-// in the warm tier (with a WAL record).
+// in the warm tier (with a WAL record). KeepGrace objects (stayin_alive
+// routes, ADR-0051) are eagerly warm-backed regardless of
+// BodyThreshold: a warm copy turns hot SIEVE pressure into a demotion
+// instead of a deletion, and Protect shields the copy from warm
+// eviction while the hot tier holds it.
 func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) error {
 	if err := t.hot.Put(ctx, key, obj); err != nil {
 		return err
 	}
 
-	if t.warm != nil && obj.BodySize > t.bodyThreshold {
+	if t.warm != nil && (obj.BodySize > t.bodyThreshold || obj.KeepGrace) {
 		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(key, body) //nolint:gosec // segID fits int32
 		if err != nil {
@@ -1175,7 +1186,7 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 // warm.Unprotect on each key. This is the Fix A drain path: SIEVE
 // evictions enqueue keys here (via OnEvictDemoted), and this function
 // clears the protected flag outside the hot shard lock, avoiding the
-// hot.mu → warm.idxMu lock-ordering cycle (see plan §5). No WAL
+// hot.mu → warm.idxMu lock-ordering cycle (ADR-0032). No WAL
 // entries — Unprotect does not write to disk; the on-disk record stays
 // live until warm SIEVE evicts it and writes its own tombstone.
 func (t *TieredStore) drainWarmUnprotects() int {

@@ -9,14 +9,14 @@ There are two separate Cloudflare propagation paths:
    default, retry with jitter, rate-limit handling, metrics, and a
    `GET /v1/cloudflare/status` endpoint.
 
-2. **cache-lifecycle** (`purge.Service` in `pkg/purge/service.go`): Event-driven
+2. **the invalidation service** (`purge.Service` in `pkg/purge/service.go`): Event-driven
    — consumes cache-tag-expired events, batches per market, purges bouine
    first (best-effort), then CF by tags. Per-market zone IDs, rate limiting,
    batching.
 
-**bouine will ultimately replace cache-lifecycle.** As a first step, bouine's
+**bouine will ultimately replace the invalidation service.** As a first step, bouine's
 `cfPropagator` becomes the single component that calls the Cloudflare API, and
-cache-lifecycle is migrated to call bouine's `cfPropagator` instead of its own
+the invalidation service is migrated to call bouine's `cfPropagator` instead of its own
 CF client.
 
 ## Pain Points Identified
@@ -28,7 +28,7 @@ CF client.
 - No circuit breaker — during CF outages, every invalidation hammers the API.
 - Compound bans (host AND path) are skipped entirely — CF cache stays stale.
 - bouine uses a single zone ID (no per-market support).
-- Duplicated CF client logic across bouine-cache and cache-lifecycle.
+- Duplicated CF client logic across bouine-cache and the invalidation service.
 - Skipped propagations are counted but not comprehensively observable.
 
 ## Improvement Plan
@@ -148,23 +148,23 @@ Failure scenarios to instrument:
 - `cmd/bouine/cmd/cloudflare.go` (emit metrics for each scenario)
 - `internal/admin/server.go` (expand status endpoint)
 
-### G. Migration Path for cache-lifecycle
+### G. Migration Path for the invalidation service
 
-**Goal:** cache-lifecycle calls bouine's cfPropagator instead of its own CF
+**Goal:** the invalidation service calls bouine's cfPropagator instead of its own CF
 client.
 
-- bouine exposes an HTTP endpoint that cache-lifecycle calls instead of
+- bouine exposes an HTTP endpoint that the invalidation service calls instead of
   the CF API directly.
   - Endpoint: `POST /v1/cloudflare/propagate` — accepts tags, URLs, prefixes,
     hosts.
   - bouine's cfPropagator handles batching, retry, circuit breaker, etc.
-- cache-lifecycle's `purge.Service` replaces `cfClient.PurgeByTags` with a
+- the invalidation service's `purge.Service` replaces `cfClient.PurgeByTags` with a
   call to bouine's propagate API.
-- cache-lifecycle's CF client, retry, and error code can then be deprecated.
+- the invalidation service's CF client, retry, and error code can then be deprecated.
 
 **Files affected:**
 - bouine: `internal/admin/server.go` (new endpoint), `api/openapi.yaml`
-- cache-lifecycle: `pkg/cloudflare/client.go` (replace with bouine client),
+- the invalidation service: `pkg/cloudflare/client.go` (replace with bouine client),
   `pkg/purge/service.go` (call bouine instead of CF)
 
 ## Execution Order
@@ -175,7 +175,7 @@ client.
 4. **Persistent Retry Queue / DLQ** (D)
 5. **Over-Purge for Compound Bans** (E)
 6. **Comprehensive Failure Observability** (F)
-7. **cache-lifecycle Migration** (G)
+7. **the invalidation service Migration** (G)
 
 ## Quality Gates
 

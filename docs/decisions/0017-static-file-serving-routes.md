@@ -54,9 +54,9 @@ We add a `static` block to `Route` config as an alternative to `pool`.
    Weak ETags from mtime+size break in cluster-with-shared-storage
    topologies where different nodes report different mtimes.
 
-8. **Range requests follow RFC 9110 §14.3.2.** Single range → 206.
+8. **Range requests follow RFC 9110 §14.2.** Single range → 206.
    Multipart range → collapsed to first range as 206 (server MAY
-   collapse per spec). Unsatisfiable range → 416.
+   collapse per spec, §15.3.7.2). Unsatisfiable range → 416.
 
 9. **Only GET and HEAD are accepted.** All other methods return 405.
    Enforced in the handler, not via route config, so operators cannot
@@ -126,6 +126,6 @@ Deferred to a follow-up.
 - `internal/config/config.go` — `StaticConfig`, `Route.Static`.
 - `internal/config/loader.go` — `validateRoute`, `validateStatic`.
 - `cmd/bouine/cmd/builder.go` — `buildStaticRoute`.
-- RFC 9110 §14.3.2 (Range), §8.8.3 (ETag).
+- RFC 9110 §14.2 (Range), §15.3.7.2 (Multiple Parts), §8.8.3 (ETag).
 - `docs/plans/static-file-serving.md` — Implementation plan.
 - `docs/plans/static-file-serving-review.md` — Linus review findings.

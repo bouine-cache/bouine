@@ -45,6 +45,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
@@ -410,7 +411,7 @@ type Store struct {
 	// evictionAlgorithm records the configured policy so compact can
 	// rebuild the correct list type. Stored separately from evictList
 	// because evictList is replaced during compaction.
-	evictionAlgorithm string
+	evictionAlgorithm config.EvictionAlgorithm
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
@@ -445,10 +446,10 @@ type Store struct {
 
 // newEvictList builds the warm-tier eviction list from the Config's
 // algorithm selection. SIEVE is the default (zero-value config). When
-// WarmEvictionAlgorithm == "cachaner" the list is a cachaner list,
+// WarmEvictionAlgorithm == EvictionCachaner the list is a cachaner list,
 // mirroring the hot tier's dispatch.
 func newEvictList(cfg Config) evictor.List[api.Key] {
-	if cfg.WarmEvictionAlgorithm == "cachaner" {
+	if cfg.WarmEvictionAlgorithm == config.EvictionCachaner {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -484,17 +485,15 @@ type Config struct {
 	Metrics *Metrics
 	Dir     string
 	// WarmEvictionAlgorithm selects the eviction policy for the warm tier.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction.
+	// See the config.EvictionAlgorithm doc for the supported values and
+	// their semantics; "" means the documented default (EvictionSieve).
 	//
 	// This is the resolved per-tier value: builders copy either
 	// config.Storage.WarmEvictionAlgorithm (when set) or the shared
 	// config.Storage.EvictionAlgorithm into this field. The distinct
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
-	WarmEvictionAlgorithm string
+	WarmEvictionAlgorithm config.EvictionAlgorithm
 	MaxBytes              int64
 	SegMax                int64 // per-segment max, default 64 MiB
 	// SegmentCacheSize caps the number of concurrently open segment
@@ -571,7 +570,6 @@ func NewStore(cfg Config) (*Store, error) {
 	if s.fdCache != nil && s.fdCache.capacity > len(s.segs) && len(s.segs) > 0 {
 		s.fdCache.capacity = len(s.segs)
 	}
-	// Set the max_bytes gauge once at construction. 0 means unlimited.
 	if s.metrics != nil {
 		s.metrics.SetMaxBytes(cfg.MaxBytes)
 	}
@@ -684,7 +682,7 @@ func (s *Store) preallocateSegments() error {
 // double-checks whether the last segment is still full under s.mu.Lock —
 // so N goroutines that hit errSegFull simultaneously create exactly one
 // new segment, not N.
-//
+
 // ensureBudgetLocked checks whether recSize fits within the configured
 // budgets, attempting eviction if not. Returns nil if the record fits
 // (either directly or after eviction), errSegFull if the active segment

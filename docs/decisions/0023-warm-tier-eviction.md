@@ -25,7 +25,7 @@ Issue #204 requires: evict live entries when over budget, tombstone
 evicted keys, clear hot-tier `hasBackup`, and avoid evicting entries that
 are also in the hot tier.
 
-Code-symbol mapping (see plan `docs/plans/decouple-hot-warm-naming.md`):
+Code-symbol mapping:
 `Protect` = "mark as hot-resident", `ClearBacked` = "clear warm-backup flag".
 This ADR keeps the architectural terms ("hot tier" / "warm tier") when
 describing the system, and uses the current code names (`protected`,

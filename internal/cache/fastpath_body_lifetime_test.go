@@ -98,7 +98,7 @@ func readResponse(t *testing.T, conn net.Conn, chunkSize int, delay time.Duratio
 }
 
 // TestFastPathHit_BodyStableUnderSlowClientAndEviction is the regression
-// test for the preprod front-office 500s: a slow-reading client holds an
+// test for the staging front-office 500s: a slow-reading client holds an
 // in-flight cache-hit writev while the origin path concurrently refreshes
 // the same key (Put-overwrite), evicts neighbors under memory pressure,
 // and reuses the caller's body buffer. The client must still receive the

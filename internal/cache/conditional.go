@@ -72,13 +72,32 @@ func etagMatch(list, needle string) bool {
 // stored response, except for content-specific headers.
 func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	// Skipped headers are content-specific (RFC 9111 §3.2) and must not
-	// be updated from a 304. Set-Cookie is excluded because SetValues
-	// joins multi-values with ", " which is non-conformant per RFC 9110
+	// be updated from a 304. Set-Cookie is excluded because the joined
+	// multi-value form is non-conformant per RFC 9110
 	// §5.2 and serving stale cookies is a security risk.
+	//
+	// Vary is replaced wholesale instead of Set per line: Set writes the
+	// first matching entry, so per-line Sets on a stored multi-line Vary
+	// clobber the first slot repeatedly and corrupt the stored list
+	// (e.g. stored "Vary: Accept-Encoding" + "Vary: X-Region" became
+	// "X-Region" twice). RFC 9111 §3.2: the 304's field replaces the
+	// stored field, and Vary is list-based so all its field lines move
+	// together.
+	if resp304Header.Has(header.Vary) {
+		for stored.Header.Has(header.Vary) {
+			stored.Header.Del(header.Vary)
+		}
+		resp304Header.Range(func(k, v string) bool {
+			if k == header.Vary {
+				stored.Header.AppendEntry(k, v)
+			}
+			return true
+		})
+	}
 	resp304Header.Range(func(k, v string) bool {
 		switch k {
 		case header.ContentLength, header.ContentEncoding,
-			header.TransferEncoding, header.SetCookie:
+			header.TransferEncoding, header.SetCookie, header.Vary:
 			return true
 		}
 		stored.Header.Set(k, v)
@@ -86,7 +105,7 @@ func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	})
 }
 
-// ConditionalHeaders sets If-None-Match and If-Modified-Since on a
+// setConditionalHeaders sets If-None-Match and If-Modified-Since on a
 // revalidation request from the stored object's validators.
 func setConditionalHeaders(set func(key, value string), obj *api.Object) {
 	if obj.ETag != "" {

@@ -32,6 +32,21 @@ type Config struct {
 	UpstreamPools []UpstreamPool `yaml:"upstream_pools,omitempty" json:"upstream_pools,omitempty"`
 	// Routes are matched in declaration order; the first match wins.
 	Routes []Route `yaml:"routes,omitempty" json:"routes,omitempty"`
+	// Metrics configures observability axes derived from the request
+	// Host. Empty = no traffic classes (all requests fall into the
+	// "unclassified" label value; the metric shape is unchanged).
+	// Grouped with the slice fields so the GC-scan region stays
+	// contiguous (fieldalignment).
+	Metrics MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
+	// RouteDefaults is merged into every route before validation
+	// (see mergeRouteDefaults), so per-route blocks that repeat across
+	// routes can be declared once. Only request.forwarded and
+	// cache.bypass_on_user_agent are mergeable today; other fields are
+	// rejected at decode so their merge semantics get designed when
+	// they are needed, not inherited by accident. Unstable. Sits with
+	// the slice-typed fields (fieldalignment: the block carries a
+	// slice once cache defaults exist).
+	RouteDefaults RouteDefaults `yaml:"route_defaults,omitempty" json:"route_defaults,omitempty"`
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
 	// Cluster controls peer discovery and fan-out.
@@ -52,23 +67,41 @@ type Config struct {
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
 }
 
+// MetricsConfig configures data-plane metric axes that need
+// operator-declared inputs (see ADR-0047).
+type MetricsConfig struct {
+	// TrafficClasses declares named traffic populations distinguished
+	// by the request Host. Declaration order is precedence. Capped at
+	// 8 classes, each with at most 64 host patterns (validated). The
+	// reserved name "unclassified" is rejected — it is the fallback
+	// for requests matching no class.
+	TrafficClasses []TrafficClass `yaml:"traffic_classes,omitempty" json:"traffic_classes,omitempty"`
+}
+
+// TrafficClass is one named traffic population matched by host
+// patterns. Class names carry no semantics — the csr/ssr-style meaning
+// is a deployment convention.
+type TrafficClass struct {
+	// Name is the Prometheus traffic_class label value: lowercase
+	// identifier, unique across classes, never the reserved
+	// "unclassified".
+	Name string `yaml:"name" json:"name"`
+	// Hosts holds the glob host patterns: an exact host, leading
+	// "*." (suffix match), or trailing ".*"/"*" (prefix match); a
+	// "*" anywhere else is a config error, as is a bare "*" (it would
+	// match every host and dead-config every later class).
+	Hosts []string `yaml:"hosts" json:"hosts"`
+}
+
 // ExperimentalConfig holds opt-in experimental features.
 type ExperimentalConfig struct {
 	// H1FastPath enables the custom HTTP/1.1 parser that bypasses
-	// net/http on cache hits. When true, GET/HEAD requests with no
-	// conditional headers are served directly from the parsed request
-	// without allocating *http.Request or http.ResponseWriter. Misses
-	// and non-GET/HEAD requests fall through to net/http unchanged.
+	// fasthttp's pooled *fasthttp.RequestCtx machinery on cache hits.
+	// When true, GET/HEAD requests with no conditional headers are
+	// served directly from the parsed request. Misses and non-GET/HEAD
+	// requests fall through to the regular fasthttp handler unchanged.
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
-
-	// FasthttpMigration enables the fasthttp HTTP stack for the entire
-	// daemon (data plane, origin fetch, peer fetch, admin, dashboard).
-	// When false, the daemon uses net/http (legacy behavior). When true,
-	// the daemon uses fasthttp with the rewritten h1parser for cache-hit
-	// zero-alloc serving. See ADR-0034 and issue #521 for the full
-	// migration plan. Default false.
-	FasthttpMigration bool `yaml:"fasthttp_migration,omitempty" json:"fasthttp_migration,omitempty"`
 
 	// H1Reactor enables the single-goroutine epoll event loop that
 	// batch-serves cache hits without per-request goroutine park/unpark
@@ -77,6 +110,14 @@ type ExperimentalConfig struct {
 	// failure), the listener logs a warning and uses the blocking
 	// parser path. Default false.
 	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
+
+	// H1FastPeerPath enables the fast-path peer branch: on a local cache
+	// miss the H1 fast path asks the key's ring owner before falling
+	// through to the slow path (issue #636). Requires h1_fast_path and a
+	// cluster in strong mode; unwired otherwise (an error is logged at
+	// startup). Not wired under the epoll reactor, where TryHit must
+	// never block on network I/O. Default false.
+	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.
@@ -121,11 +162,24 @@ type Listen struct {
 	ReadTimeout time.Duration `yaml:"read_timeout,omitempty" json:"read_timeout,omitempty"`
 }
 
+// TLSVersion is the minimum TLS protocol version accepted on the
+// data-plane listener. Values are the wire strings used in
+// tls.min_version; the zero value means the documented default
+// (TLSVersion1_2).
+type TLSVersion string
+
+const (
+	// TLSVersion1_2 is TLS 1.2, the minimum supported version (AGENTS.md §6).
+	TLSVersion1_2 TLSVersion = "1.2"
+	// TLSVersion1_3 is TLS 1.3.
+	TLSVersion1_3 TLSVersion = "1.3"
+)
+
 // TLS configures the data-plane TLS handshake. Multiple certs are
 // supported via SNI; the first matching cert wins.
 type TLS struct {
-	MinVersion string    `yaml:"min_version,omitempty" json:"min_version,omitempty"`
-	Certs      []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
+	MinVersion TLSVersion `yaml:"min_version,omitempty" json:"min_version,omitempty"`
+	Certs      []TLSCert  `yaml:"certs,omitempty" json:"certs,omitempty"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -135,24 +189,38 @@ type TLSCert struct {
 	SNI      []string `yaml:"sni,omitempty" json:"sni,omitempty"`
 }
 
+// EvictionAlgorithm selects a cache eviction policy for the storage
+// tiers. Values are the wire strings used in the
+// storage.*_eviction_algorithm config fields; the zero value means the
+// documented default (EvictionSieve).
+type EvictionAlgorithm string
+
+const (
+	// EvictionSieve uses the SIEVE visited-bit sweep.
+	EvictionSieve EvictionAlgorithm = "sieve"
+	// EvictionCachaner uses SIEVE with a 3-bit frequency counter that
+	// gives hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction.
+	EvictionCachaner EvictionAlgorithm = "cachaner"
+)
+
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	// EvictionAlgorithm selects the eviction policy for both tiers.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction. This is the shared default; per-tier fields below
-	// override it.
-	EvictionAlgorithm string `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
+	// "" and EvictionSieve (the default) use the SIEVE visited-bit
+	// sweep. This is the shared default; per-tier fields below
+	// override it. See the EvictionAlgorithm type for the supported
+	// values and their semantics.
+	EvictionAlgorithm EvictionAlgorithm `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
 	// WarmEvictionAlgorithm overrides the eviction policy for the warm
 	// tier only. When non-empty, it takes precedence over
 	// EvictionAlgorithm. Accepts the same values.
-	WarmEvictionAlgorithm string `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
-	WarmDir               string `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
+	WarmEvictionAlgorithm EvictionAlgorithm `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
+	WarmDir               string            `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
 	// HotEvictionAlgorithm overrides the eviction policy for the hot
 	// tier only. When non-empty, it takes precedence over
 	// EvictionAlgorithm. Accepts the same values.
-	HotEvictionAlgorithm string `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
+	HotEvictionAlgorithm EvictionAlgorithm `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
 	// WarmSyncInterval controls how often the hot→warm background sync
 	// runs. Default 60s (applied when warm_dir is set and the field is
 	// zero). Set to -1 to explicitly disable the sync loop. Only
@@ -246,15 +314,20 @@ type Storage struct {
 	HotMmapSlab bool `yaml:"hot_mmap_slab,omitempty" json:"hot_mmap_slab,omitempty"`
 }
 
+// ClusterMode is the cluster consistency model. Values are the wire
+// strings used in cluster.mode; the zero value means the documented
+// default (ClusterModeStrong).
+type ClusterMode string
+
 // Cluster consistency modes. The mode controls how cache keys are
 // distributed across nodes and how invalidations propagate.
 const (
 	// ClusterModeStrong shards keys via consistent hash ring; peer fetch on
 	// miss; 1 copy per key; invalidation via HTTP fan-out + gossip.
-	ClusterModeStrong = "strong"
+	ClusterModeStrong ClusterMode = "strong"
 	// ClusterModeEventual caches locally with no peer fetch; N independent
 	// copies; invalidation via gossip only (eventual consistency).
-	ClusterModeEventual = "eventual"
+	ClusterModeEventual ClusterMode = "eventual"
 )
 
 // maxHandoffQueueDepth is the upper bound for cluster.handoff_queue_depth.
@@ -277,10 +350,10 @@ type Cluster struct {
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
 	//   "eventual"  — local cache, gossip invalidation, no peer fetch
-	// Empty defaults to "strong" for backward compatibility.
-	Mode     string   `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
-	HopLimit int      `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
+	// Empty defaults to ClusterModeStrong for backward compatibility.
+	Mode     ClusterMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Join     []string    `yaml:"join,omitempty" json:"join,omitempty"`
+	HopLimit int         `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
 	// JoinTimeout is the maximum time to wait for cluster join before
 	// giving up. In strong mode, the pod stays not-ready if join fails
 	// within this timeout. In eventual mode, the pod becomes ready and
@@ -310,6 +383,30 @@ type Cluster struct {
 	// pipe and the fetch falls back to origin. validatePeerFetchConfig
 	// enforces the ordering against admin.idle_timeout.
 	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
+	// PeerFetchConcurrency bounds concurrent peer-fetch and peer-put
+	// RPCs per node. The semaphore prevents memory blow-up during miss
+	// fan-out (issue #133). Under strong-mode cluster traffic where most
+	// hits are peer hits (non-owner pods fetch from the key owner), the
+	// default of 4 can queue requests behind in-flight fetches and add
+	// tail latency. Raise together with peer_max_conns_per_host so the
+	// pipeline clients stay the binding constraint. Zero applies the
+	// default (4); negative values and values above 128 are rejected
+	// by validatePeerFetchConfig.
+	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
+	// BanTTL is how long a lazy invalidation ban (purge, surrogate-key
+	// or predicate ban) stays in the store's active ban list before the
+	// reaper prunes it. RFC 9111 §4.4 invalidation only removes
+	// responses that already existed when the invalidating request
+	// arrives, so objects stored after the ban are naturally exempt and
+	// the TTL only bounds how long PRE-ban copies
+	// keep being rejected — and those are reclaimed by TTL expiry, the
+	// reaper, and exempt refills anyway. The default (24h) is
+	// conservative; external invalidation surrogate invalidations are safe at
+	// minutes scale, which bounds the hit-ratio damage of an over-broad
+	// ban (a typo currently poisons the hit ratio for the full window).
+	// Zero applies the default; negative values and values below 1s are
+	// rejected by validatePeerFetchConfig.
+	BanTTL time.Duration `yaml:"ban_ttl,omitempty" json:"ban_ttl,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.
@@ -379,20 +476,39 @@ type ConnectPolicy struct {
 	MaxIdleConnDuration time.Duration `yaml:"max_idle_conn_duration,omitempty" json:"max_idle_conn_duration,omitempty"`
 	// ResponseHeaderTimeout bounds the time waiting for the origin's
 	// response headers after the request is fully sent. Zero applies a
-	// safe built-in default (30s). This is the primary defence against
-	// slow-origin resource exhaustion now that WriteTimeout is 0 on the
-	// data plane.
+	// safe built-in default (30s). With the origin client no longer
+	// carrying a client-level read cap, this knob doubles as the
+	// per-route origin timeout default: every route on the pool that
+	// does not set its own cache.fetch_timeout inherits this value as
+	// its origin wait (header + body). It is the primary defence
+	// against slow-origin resource exhaustion now that WriteTimeout is
+	// 0 on the data plane. Must stay below the data plane's 5-minute
+	// safety-net WriteTimeout (config.maxFetchTimeout).
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty" json:"response_header_timeout,omitempty"`
 	// HedgeTimeout fires a duplicate request to the same pool when the
 	// primary does not respond within this duration. Zero disables hedging.
 	// Only applies to idempotent methods (GET, HEAD, OPTIONS).
 	HedgeTimeout time.Duration `yaml:"hedge_timeout,omitempty" json:"hedge_timeout,omitempty"`
+	// PreserveHost keeps the request's own Host header on the
+	// origin-bound request instead of replacing it with the pool target.
+	// The dial target is always the configured pool target — only the
+	// wire-level Host header changes. Origins that derive behaviour
+	// from the request Host (market/country selection, virtual-host
+	// routing) need this; host-blind origins keep it off (default).
+	// Host-agnostic cache keys (cache.key.include_host: false) remain
+	// orthogonal: this changes the origin-bound header, not the key.
+	PreserveHost bool `yaml:"preserve_host,omitempty" json:"preserve_host,omitempty"`
 }
 
 // Route declares a host/path match and its per-request behaviour.
 // A route must specify exactly one of Pool or Static.Root — the former
 // proxies to an upstream pool, the latter serves files from a local
 // directory.
+//
+// config grouping (match, request, response, static, cache) rather
+// than size order; the route table is cold, the padding is irrelevant.
+//
+//nolint:govet // fieldalignment: fields follow the operator-facing
 type Route struct {
 	// Name is the human-readable route label used in Prometheus metrics and
 	// the operator dashboard. Defaults to host:path_prefix when empty.
@@ -423,17 +539,43 @@ type StaticConfig struct {
 	MaxFileSize ByteSize `yaml:"max_file_size,omitempty" json:"max_file_size,omitempty"`
 }
 
-// RouteMatch is the predicate for selecting a route.
+// RouteMatch is the predicate for selecting a route. Fields follow the
+// operator-facing config-file order; the route table is cold, the
+// padding is irrelevant.
 type RouteMatch struct {
 	Host       string `yaml:"host,omitempty" json:"host,omitempty"`
 	PathPrefix string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	// Path is an RE2 regular expression matched against the request
+	// path (query excluded), e.g. `^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`
+	// (issue #772). Mutually exclusive with PathPrefix; must be
+	// anchored (start `^`, end `$`); compiled once at startup so the
+	// data plane never pays compile cost. Empty means no path
+	// constraint. Validated by config.Validate.
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 	// Methods restricts this route to the listed HTTP methods (e.g.
 	// [GET, HEAD]). Empty means match all methods (default).
 	// Methods are normalised to upper-case at parse time.
 	Methods []string `yaml:"methods,omitempty" json:"methods,omitempty"`
 }
 
+// PathLabel returns the route's path predicate as a single display
+// string: the RE2 pattern when Path is set, the path prefix otherwise.
+// It feeds the auto-derived route name, the dashboard route tables, and
+// the config insights, so every surface shows the predicate that
+// actually selects the route.
+func (m RouteMatch) PathLabel() string {
+	if m.Path != "" {
+		return m.Path
+	}
+	return m.PathPrefix
+}
+
 // RouteCache is the per-route cache policy.
+//
+// operators read (toggles, key, refresh, TTLs) rather than size
+// order; the route table is cold, the padding is irrelevant.
+//
+//nolint:govet // fieldalignment: fields follow the config-file order
 type RouteCache struct {
 	// AllowSetCookie controls whether responses containing a Set-Cookie
 	// header are eligible for caching.
@@ -448,6 +590,57 @@ type RouteCache struct {
 	// intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie,omitempty" json:"allow_set_cookie,omitempty"`
 	Enabled        *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// BypassOnCookie, when true, routes any request carrying a
+	// non-empty Cookie header entirely around the cache: no lookup,
+	// no storage, no in-flight sharing (the Varnish `return (pass)`
+	// equivalent for `req.http.Cookie`). Designed for personalized SSR
+	// HTML behind a login session: the origin reads the request cookie
+	// and renders per-user content, so such a response must never be
+	// stored, never served to the requesting user, and never shared
+	// in-flight with another concurrent request (ADR-0052 rationale
+	// applied to cookies; ADR-0054 for the full contract).
+	// Default (nil / false): cookied requests participate in the cache
+	// normally per RFC 9111 — the cache-tests `other-cookie` optimal
+	// case (serve a stored fresh response to a cookied request) keeps
+	// passing.
+	// The trigger is Cookie-header presence, not a name list: an
+	// A/B or analytics cookie also bypasses; scope the flag per route
+	// accordingly.
+	BypassOnCookie *bool `yaml:"bypass_on_cookie,omitempty" json:"bypass_on_cookie,omitempty"`
+	// BypassOnUserAgent lists User-Agent glob patterns that route the
+	// request entirely around the cache (issue #771, ADR-0055): no
+	// lookup, no storage, no in-flight sharing — the same contract as
+	// bypass_on_cookie, triggered by the request's User-Agent instead.
+	// Built for layered deployments (client → edge → bouine) where the
+	// edge already bypasses its own cache for a verified crawler (e.g.
+	// a shopping-feed bot that must see current product data); without
+	// mirroring the rule here, bouine would serve its own stored copy
+	// and silently defeat the edge rule's freshness intent.
+	// Patterns are matched against the full User-Agent string,
+	// case-insensitively; `*` is the only wildcard (matches any run of
+	// bytes, including `/`); an exact pattern matches the whole string,
+	// not a substring — use `*ShoppingFeedBot*` for substring
+	// semantics. The User-Agent is client-controlled and spoofable: a
+	// spoofed UA merely costs an origin fetch (same as a no-cache
+	// request), never an invalidation (bypass ≠ purge; threat-model
+	// T52). The check runs only on routes with patterns configured;
+	// pattern-less routes pay a single nil check. Default (empty): no
+	// UA-conditioned behavior, RFC 9111 semantics unchanged.
+	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
+	// BypassOnCookieNames routes a request carrying any cookie whose
+	// name is in this list entirely around the cache — the same
+	// contract as bypass_on_cookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Names are matched case-insensitively on the cookie-name token
+	// only, never on values or substrings (RFC 6265 §4.1.1). Requests
+	// carrying only unlisted cookies participate in the cache per
+	// RFC 9111: the knob exists so ubiquitous analytics/consent
+	// cookies do not force the blunt presence trigger.
+	// Mutually exclusive with bypass_on_cookie (the presence trigger
+	// is a strict superset — listing names under it is dead config).
+	// Capped at 16 entries; empty entries and case-insensitive
+	// duplicates are rejected.
+	BypassOnCookieNames []string `yaml:"bypass_on_cookie_names,omitempty" json:"bypass_on_cookie_names,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 	// RefreshMinHits is the minimum number of cache hits an object must
@@ -510,10 +703,24 @@ type RouteCache struct {
 	// fetches wait up to fetch_wait_timeout for a slot and then shed.
 	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
+	// MaxVariants caps the number of distinct Vary variants stored per
+	// primary cache key on this route. When the cap is reached, further
+	// variant storage is skipped (and vary_cap_hits_total increments) —
+	// requests keep being proxied, only caching is affected. Guards
+	// against Vary explosion (RFC 9110 §12.5.5). Zero (default) applies
+	// the built-in default (1024). Negative values are rejected; there is
+	// no upper bound, but the cap itself cannot be disabled.
+	MaxVariants int `yaml:"max_variants,omitempty" json:"max_variants,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
-	// a 502 (or stale content if stayin-alive is enabled). Zero applies
-	// a safe built-in default (60s). This replaces the blanket
+	// a 502 (or stale content if stayin-alive is enabled). It is the
+	// per-route origin timeout: it overrides the pool-wide
+	// connect.response_header_timeout for this route, and — since the
+	// origin client no longer applies a client-level read cap — the
+	// configured value is enforced verbatim, in either direction.
+	// Zero (unset) makes the route inherit the pool's
+	// connect.response_header_timeout (default 30s) instead of the
+	// built-in 60s fetch default. This replaces the blanket
 	// WriteTimeout on the data plane, which was the wrong tool for a
 	// caching reverse proxy.
 	//
@@ -556,9 +763,26 @@ type RouteCache struct {
 	// refresh fetch. Default 10s. Range 5s-120s.
 	RefreshTimeout       time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
 	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate,omitempty" json:"stale_while_revalidate,omitempty"`
-	// NegativeTTL caches error responses (404, 405, 410, 501) for
-	// the configured duration. Zero disables negative caching.
-	NegativeTTL time.Duration `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
+	// NegativeTTL is the route's negative-caching policy, written as
+	// one key with two forms:
+	//
+	//	negative_ttl: 30s                        # default-set shorthand
+	//	negative_ttl: {404: 1m, 5xx: 10s, 410: 0} # per-status map
+	//
+	// Both forms are the same policy internally: the scalar expands to
+	// the default error set (404/405/410/501); the map is a complete
+	// per-status policy mirroring Cloudflare's "Cache TTL by status
+	// code" — keys are a single error status ("404") or a class
+	// ("4xx", "5xx"), with exact codes in 400-599 only (2xx/3xx
+	// entries are rejected: they would look like normal cache fills
+	// but skip proactive refresh). An exact code shadows its class,
+	// giving the "blanket + exception" idiom (5xx: 10s, 503: 30s).
+	// Values are durations; zero explicitly disables caching for
+	// that status. The policy only applies when the origin sends no
+	// explicit freshness, and outranks ttl_default and heuristic
+	// freshness for the statuses it covers; RFC 9111 blocking
+	// directives (no-store, private, Set-Cookie, ...) still win.
+	NegativeTTL NegativeTTLConfig `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
 	// RefreshMinScore is the minimum refresh priority score required for
 	// re-scheduling after a background refresh. The score is computed as
 	// staleHits × obj.BodySize, where staleHits is the per-window hit count
@@ -575,8 +799,11 @@ type RouteCache struct {
 	// clients always see cache hits. On 200, the object is replaced.
 	//
 	// Requires caching to be enabled. Objects with TTL < 5s are not
-	// scheduled. Negative-cached objects (404/405/410/501) are not
-	// refreshed.
+	// scheduled. Objects with an error status covered by the
+	// negative_ttl policy (default set, exact code, or class) are
+	// never refreshed — regardless of how the object was cached —
+	// because proactively re-fetching an origin that is already
+	// returning errors would amplify the outage.
 	RefreshBeforeExpiry bool `yaml:"refresh_before_expiry,omitempty" json:"refresh_before_expiry,omitempty"`
 	// RefreshReactiveFirst changes the refresh strategy from proactive to
 	// reactive for the initial TTL window. New objects are not scheduled
@@ -590,12 +817,40 @@ type RouteCache struct {
 	// StayinAlive enables emergency stale mode: when the upstream is
 	// unreachable or returns 5xx, serve the cached object regardless
 	// of how long ago it expired. Keeps the route alive until the
-	// upstream recovers.
+	// upstream recovers. The TTL reaper also withholds this route's
+	// expired entries while the route's origin pool has no healthy
+	// target, so the promise survives outages longer than
+	// TTL + SWR + SIE (ADR-0051). Full protection requires the pool
+	// to have passive (health.passive.consecutive_5xx) or active
+	// health checks configured — without a health signal the reaper
+	// keeps its normal schedule.
 	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
 }
 
 // RouteKey configures cache key construction for a route.
 type RouteKey struct {
+	// IncludeHost controls whether the request Host participates in
+	// the primary cache key. nil (absent) and true keep today's key
+	// form scheme|host|path|query|method; explicitly false omits the
+	// host segment so the same URL+query resolves to one entry no
+	// matter which Host the request arrives with. Requests are still
+	// forwarded upstream with their original Host; only key
+	// computation changes. A pointer (like allow_set_cookie) because
+	// the default is true: a plain bool would flip the key form of
+	// every existing config that does not set the field.
+	//
+	// Use it only on routes whose origin is provably host-blind (no
+	// redirects, no absolute Location/links, no host-keyed feature
+	// flags): collapsing two hosts the origin serves differently is a
+	// wrong-body bug, not a miss. The flag must be identical across
+	// all cluster nodes serving the route — a node with a different
+	// setting stores and resolves the same logical URL under different
+	// keys, and the consistent-hash ring then splits ownership of
+	// those keys (same hazard class as exclude_headers /
+	// include_headers). Validation rejects combining it with
+	// match.host: a route that selects on host and then ignores host
+	// in the key is almost certainly a config error.
+	IncludeHost *bool `yaml:"include_host,omitempty" json:"include_host,omitempty"`
 	// StripQueryParams removes the listed query parameter names from
 	// the cache key. The parameters are still forwarded to the upstream.
 	// This prevents tracking/analytics params (utm_source, fbclid, etc.)
@@ -608,6 +863,51 @@ type RouteKey struct {
 	// per-request headers (X-Request-ID, X-Trace-ID) from fragmenting
 	// the cache when the origin includes them in Vary.
 	ExcludeHeaders []string `yaml:"exclude_headers,omitempty" json:"exclude_headers,omitempty"`
+	// IncludeHeaders adds the listed request header names to the
+	// Vary-based variant key, exactly as if the origin had listed
+	// them in Vary: the effective Vary is the union of the response's
+	// Vary field names and this list, never a replacement. Use this
+	// when the origin varies by a header but does not — or cannot —
+	// send Vary. A request header absent from the request hashes as
+	// an empty value (one variant), matching RFC 9111 Vary
+	// semantics. Each entry must be a single RFC 9110 §5.1 header
+	// name (one comma-free token; comparisons run on the trimmed
+	// entry). Validation rejects "*" (padded or not), whitespace-only
+	// or non-token entries, case-insensitive duplicates, entries
+	// also listed in exclude_headers (an excluded header
+	// force-included into the key would collapse variants), and more
+	// than 16 entries. The
+	// list must be identical across all cluster nodes serving the
+	// route: a node with a different include list stores and
+	// resolves variants under different keys (same hazard class as
+	// exclude_headers).
+	IncludeHeaders []string `yaml:"include_headers,omitempty" json:"include_headers,omitempty"`
+	// CookiePresence lists cookie names whose PRESENCE participates in
+	// the variant key (cache.key.cookie_presence, issue #768): each
+	// listed name contributes one bit — present or absent, never the
+	// cookie's value (values are PII and would explode the variant
+	// space; the CDN equivalent is check_presence). Use when the origin
+	// renders different content depending on whether a consent,
+	// analytics, or A/B cookie exists, while all value-spellings share
+	// one variant.
+	//
+	// The bits multiply the stored variant count (N names = up to 2^N
+	// presence combinations per primary key); cap the list (16, same as
+	// include_headers) and prefer listing only cookies the origin
+	// actually reads. max_variants bounds the total; a Put over the
+	// cap is refused, never a wrong variant served.
+	//
+	// Cookie names must be valid RFC 6265 §4.1.1 tokens, unique
+	// case-insensitively. Mutually exclusive with
+	// bypass_on_cookie_names and bypass_on_cookie on the same route:
+	// a bypassed request never reaches the cache, so keying it is
+	// dead config; validation rejects the combination so operators do
+	// not discover the conflict after a warm cache.
+	//
+	// Like include_headers: identical across all cluster nodes serving
+	// the route or nodes store/resolve variants under different keys
+	// (peer gates fail safe — miss, never a wrong body).
+	CookiePresence []string `yaml:"cookie_presence,omitempty" json:"cookie_presence,omitempty"`
 	// KeepQueryParams, when non-empty, restricts the cache key to only
 	// these query parameters; all others are excluded. Mutually
 	// exclusive with strip_query_params and strip_query_prefix.
@@ -627,24 +927,281 @@ type RouteKey struct {
 	// (matches Varnish qs.unique()). Values are NOT sorted when dedup
 	// is enabled.
 	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
-	// CanonicalizePath normalizes the path component at parse time:
-	// percent-decode unreserved chars, uppercase remaining hex,
-	// resolve dot-segments. Applies at the listener level: if any
-	// route on a listener enables this, all requests on that
-	// listener get canonical paths. Default false.
-	CanonicalizePath bool `yaml:"canonicalize_path,omitempty" json:"canonicalize_path,omitempty"`
+	// VerbatimEncoding selects how the Accept-Encoding request header
+	// participates in the cache key (docs/architecture.md §3.3).
+	// false (default, bucket) — the header value is reduced to the
+	// negotiated coding (zstd > br > gzip by q-value; absent or no
+	// acceptable coding -> identity) and origin-bound requests carry
+	// the canonical token, so all clients that accept the same best
+	// coding share one stored variant. true (verbatim) — the raw
+	// value is lowercased+sorted (pre-bucketing behavior) and
+	// forwarded to the upstream unchanged; use only when the origin
+	// varies response bodies by the full AE string — it re-fragments
+	// the variant space. Like include_headers, this must be identical
+	// across all cluster nodes serving the route: a node with a
+	// different policy stores and resolves variants under different
+	// keys. Peer gates fail safe (miss, never a wrong body).
+	VerbatimEncoding bool `yaml:"verbatim_encoding,omitempty" json:"verbatim_encoding,omitempty"`
 }
 
-// RouteRequest is the per-route request-side header rewrite block.
+// RouteRequest is the per-route request-side rewrite block.
 type RouteRequest struct {
 	HeaderSet map[string]string `yaml:"header_set,omitempty" json:"header_set,omitempty"`
 	// StripPrefix removes this path prefix from the request URL before
 	// forwarding to the upstream. The cache key uses the original path
 	// so different routes with the same stripped path don't collide.
-	// Must start with "/" when non-empty.
-	StripPrefix  string   `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	// Must start with "/" when non-empty. Mutually exclusive with
+	// path_rewrite.
+	StripPrefix string `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	// PathRewrite is a regex path rewrite applied to the origin-bound
+	// request URI (nginx `rewrite ... break` / Varnish regsub equivalent).
+	// Mutually exclusive with strip_prefix. See PathRewriteConfig.
+	PathRewrite PathRewriteConfig `yaml:"path_rewrite,omitempty" json:"path_rewrite,omitempty"`
+	// HeaderRemove removes the listed request headers from the
+	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
 	HeaderRemove []string `yaml:"header_remove,omitempty" json:"header_remove,omitempty"`
+	// Forwarded injects client-identity headers on the origin-bound
+	// fetch (config.ForwardedConfig contract, issue #769). Off by
+	// default; requires a pool.
+	Forwarded ForwardedConfig `yaml:"forwarded,omitempty" json:"forwarded,omitempty"`
 }
+
+// ForwardedConfig is the per-route client-identity forwarding block
+// (request.forwarded, issue #769). Injection happens at origin-bound
+// request construction only — miss, invalidating proxy (POST/PUT/DELETE),
+// bypass, revalidate, background revalidate/refresh, shed refill, and
+// streaming/SSE fetches. Never on the cache-hit path, never into the
+// cache key, and never into the stored RequestInfo headers (threat-model
+// T06: headers participate in keying ONLY via Vary or the explicit
+// cache.key.include_headers).
+//
+// Spoofing model (threat-model T04): a client-supplied X-Forwarded-For is
+// untrusted input. bouine appends the address of its immediate peer
+// (the edge's connection address) and never parses or acts on existing
+// entries. X-Forwarded-Proto and X-Forwarded-Host are SET (replacing any
+// client-supplied value) because bouine is authoritative about what it
+// itself received. Unstable.
+//
+// The YAML value accepts four shapes, mirroring the negative_ttl
+// dual-form precedent (loader.go "negative_ttl YAML unmarshalling"):
+//
+//	forwarded: standard            # preset: all four headers
+//	forwarded: [client_ip, proto]  # token list: exactly these headers
+//	forwarded: false               # opt-out (kills a route_default)
+//	forwarded: {client_ip: true, max_append: 10}  # full mapping
+//
+// All shapes decode to this one struct, so downstream (merge,
+// validation, builder) never sees a second representation. Unstable.
+type ForwardedConfig struct {
+	// ClientIP appends the address of bouine's immediate peer to any
+	// existing X-Forwarded-For chain (append-only, never rewritten).
+	ClientIP bool `yaml:"client_ip,omitempty" json:"client_ip,omitempty"`
+	// Proto sets X-Forwarded-Proto to the scheme bouine received the
+	// request on ("https" on a TLS listener, "http" otherwise) — not
+	// the scheme used towards the origin.
+	Proto bool `yaml:"proto,omitempty" json:"proto,omitempty"`
+	// Host sets X-Forwarded-Host to the Host header bouine received,
+	// replacing any client-supplied value. On the cache-handler paths
+	// the forwarded Host is identical (bouine preserves it); the header
+	// still tells multi-host origins which hostname was requested, and
+	// matters wherever the outbound Host is rewritten to a pool target.
+	Host bool `yaml:"host,omitempty" json:"host,omitempty"`
+	// Via appends "1.1 bouine" to any existing Via chain (RFC 9110
+	// §7.6.3) for loop detection, complementing the internal Bouine-Hop
+	// hop limit.
+	Via bool `yaml:"via,omitempty" json:"via,omitempty"`
+
+	// form records which YAML shape the block was written in, so the
+	// route_defaults merge knows whether this value replaces, combines
+	// with, or opts out of the inherited default (see mergeRouteDefaults).
+	// Unexported: it never leaves the config layer. Zero (unset) on
+	// programmatically built configs. Grouped with the flags so the
+	// struct stays one machine word of bools + one int (fieldalignment).
+	form forwardedForm
+	// inherited marks a value wholly supplied by route_defaults, so
+	// validation can distinguish "the operator asked for forwarded
+	// headers on a static route" (error) from "a default landed on a
+	// static route" (silently ignored, see mergeRouteDefaults).
+	inherited bool
+
+	// MaxAppend caps the number of entries kept in the X-Forwarded-For
+	// and Via chains after bouine's append: the rightmost (nearest,
+	// most recent) entries are kept, older entries are dropped. The
+	// chain also stays under the 8 KiB per-header cap (threat-model
+	// T37) by dropping the oldest entries. 0 means
+	// DefaultForwardedMaxAppend (5); allowed range 1..64.
+	MaxAppend int `yaml:"max_append,omitempty" json:"max_append,omitempty"`
+}
+
+// forwardedForm is the YAML shape a ForwardedConfig was decoded from.
+// It drives the route_defaults merge semantics.
+type forwardedForm uint8
+
+const (
+	// forwardedFormUnset: the block was absent (or programmatically
+	// built). Inherits route_defaults wholesale when all fields are
+	// zero; a non-zero value is treated as forwardedFormExact so the
+	// merge never clobbers programmatic values.
+	forwardedFormUnset forwardedForm = iota
+	// forwardedFormOff: written as `forwarded: false` or `none`. The
+	// explicit opt-out: nothing is inherited, nothing is injected.
+	forwardedFormOff
+	// forwardedFormExact: a preset or token list. The flags are the
+	// complete set; only max_append can still be inherited.
+	forwardedFormExact
+	// forwardedFormMerge: the mapping form. Flags combine (OR) with the
+	// route_defaults flags, so a false field means "not set here";
+	// dropping a single default flag requires the token-list form.
+	forwardedFormMerge
+)
+
+// Forwarded token names for the list form, and preset names for the
+// scalar form. Tokens map 1:1 to the struct's header flags.
+const (
+	// ForwardedTokenClientIP enables X-Forwarded-For appending.
+	ForwardedTokenClientIP = "client_ip"
+	// ForwardedTokenProto enables X-Forwarded-Proto.
+	ForwardedTokenProto = "proto"
+	// ForwardedTokenHost enables X-Forwarded-Host.
+	ForwardedTokenHost = "host"
+	// ForwardedTokenVia enables Via.
+	ForwardedTokenVia = "via"
+
+	// ForwardedPresetStandard enables all four headers — the shape an
+	// edge-fronted origin wants.
+	ForwardedPresetStandard = "standard"
+	// ForwardedPresetNone disables the block — the explicit opt-out.
+	ForwardedPresetNone = "none"
+)
+
+// ForwardedStandard returns the "standard" preset programmatically
+// (tests, SDK): every header on, max_append left to validation's
+// defaulting. The single construction path for the preset — the YAML
+// scalar form decodes through it too, so the two can never disagree.
+func ForwardedStandard() ForwardedConfig {
+	return ForwardedConfig{
+		ClientIP: true,
+		Proto:    true,
+		Host:     true,
+		Via:      true,
+		form:     forwardedFormExact,
+	}
+}
+
+// RouteDefaults holds defaults merged into every route before
+// validation, so blocks that would otherwise repeat on every route are
+// declared once. The merge is field-scoped and form-aware (see
+// mergeRouteDefaults in loader.go). Unstable.
+type RouteDefaults struct {
+	// Cache holds cache-side defaults. Only bypass_on_user_agent is
+	// mergeable today; other RouteCache fields are rejected here at
+	// decode time (strict mode), same rationale as Request. Declared
+	// before Request (fieldalignment: it carries the block's only
+	// slice).
+	Cache RouteDefaultsCache `yaml:"cache,omitempty" json:"cache,omitempty"`
+	// Request holds request-side defaults. Only forwarded is
+	// mergeable; other RouteRequest fields are rejected here at decode
+	// time (strict mode) so their merge semantics are designed when
+	// they are needed, not inherited by accident.
+	Request RouteDefaultsRequest `yaml:"request,omitempty" json:"request,omitempty"`
+}
+
+// RouteDefaultsRequest is the request half of route_defaults. It is a
+// distinct type from RouteRequest on purpose: sharing the type would
+// silently accept every route field under route_defaults, including
+// ones with no defined merge semantics (lists, regexes, static roots).
+type RouteDefaultsRequest struct {
+	// Forwarded is the request.forwarded default inherited by every
+	// route that does not opt out. See ForwardedConfig for the shapes
+	// and mergeRouteDefaults for the precedence rules.
+	Forwarded ForwardedConfig `yaml:"forwarded,omitempty" json:"forwarded,omitempty"`
+}
+
+// RouteDefaultsCache is the cache half of route_defaults — a distinct
+// type from RouteCache for the same reason as RouteDefaultsRequest:
+// sharing the type would silently accept every cache field under
+// route_defaults before its merge semantics are designed.
+type RouteDefaultsCache struct {
+	// BypassOnUserAgent is the cache.bypass_on_user_agent default
+	// (issue #771, ADR-0055), so a layered deployment declares its
+	// verified-bot bypass patterns once instead of repeating them on
+	// every route. Every pool route without its own list inherits it
+	// wholesale; a route's own list replaces it (never a union); an
+	// explicit empty list (`bypass_on_user_agent: []`) opts out.
+	// Static routes inherit nothing — the knob is wired on pool routes
+	// only. Patterns are validated at route_defaults' own path before
+	// the merge (validateRouteDefaults).
+	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
+}
+
+// DefaultForwardedMaxAppend is the X-Forwarded-For / Via chain cap applied
+// when request.forwarded.max_append is unset. Five entries cover the
+// realistic hop count (client → edge → bouine → origin) while keeping the
+// forwarded chain well inside the per-header 8 KiB budget even with
+// IPv6-with-port entries.
+const DefaultForwardedMaxAppend = 5
+
+// MaxForwardedAppend is the upper bound for request.forwarded.max_append.
+// A larger cap only serves to bloat every origin-bound request header;
+// the per-header 8 KiB budget would clamp it anyway.
+const MaxForwardedAppend = 64
+
+// PathRewriteConfig is the per-route regex path rewrite. The pattern is
+// compiled once at startup (Go RE2 — linear time, no backtracking) and
+// applied to every origin-bound request URI for this route: miss, bypass
+// (POST and other non-cacheable methods), revalidation, background
+// refresh, and streaming fetches. The cache key, ban matching, purges,
+// and every client-facing surface keep the original (public) path, the
+// same contract as strip_prefix. Only the first match is replaced
+// (nginx semantics), and the query string is never matched or modified.
+// Unstable.
+type PathRewriteConfig struct {
+	// Match is the RE2 pattern applied to the path part of the request
+	// URI. Use capture groups (`(.*)`) and reference them from Replace
+	// (`$1`). Anchors (`^`, `$`) are the operator's choice, exactly like
+	// nginx rewrite. Capped at MaxPathRewritePatternBytes. Raw control
+	// bytes (CR, LF, NUL, ...) are rejected at validation: request paths
+	// cannot carry them, so they could only produce a corrupted origin
+	// request. Escaped forms in the pattern (`\x0d`) remain legal
+	// syntax — they simply never match a path. Required.
+	Match string `yaml:"match,omitempty" json:"match,omitempty"`
+	// Replace is the replacement template substituted for the first
+	// match. `$1`, `$2`, ... reference capture groups (`$0` is the whole
+	// match); `(?P<name>...)` groups are referenced as `$name`.
+	// `$name` grabs the longest word-run that follows, so write
+	// `${1}x` for "group 1 plus literal x" — `$1x` references a group
+	// named "1x". Every reference must resolve against the pattern's
+	// groups: an out-of-range index, a leading-zero index (`$01`), or an
+	// unknown name is rejected at validation, because Go's Expand
+	// would otherwise silently expand it to the empty string. Raw bytes
+	// that cannot appear in a request-target (control bytes, space,
+	// '?', '#') are also rejected: the query string is never modified
+	// by the template, and those bytes could only corrupt the origin
+	// request. Note for config files: the loader's ${VAR} interpolation
+	// only applies to env-var-shaped names, so `${1}x` loads as
+	// written; a braced named reference (`${name}`) collides with env
+	// interpolation when an env var of that name is set — escape the
+	// dollar as `$${name}`. A literal dollar in the template is `$$`,
+	// written `$$$$` in a config file (the loader's `$$` escape
+	// consumes one level). Capped at MaxPathRewritePatternBytes.
+	// Required. The rewritten path must start with "/" — a replacement
+	// producing a relative path would corrupt the origin request line,
+	// so the rewrite is skipped at runtime instead (the origin sees the
+	// original path).
+	Replace string `yaml:"replace,omitempty" json:"replace,omitempty"`
+}
+
+// MaxPathRewritePatternBytes bounds the match pattern and replacement
+// template. Rewrites are route configuration, not user input: 512 B
+// leaves room for a dozen labeled groups while keeping the compiled
+// program and per-route config small enough to audit by eye.
+const MaxPathRewritePatternBytes = 512
+
+// MaxRoutePathPatternBytes bounds the match.path RE2 pattern. Same
+// rationale as MaxPathRewritePatternBytes: route configuration, not
+// user input — the cap keeps the compiled program and the per-request
+// match work auditable (issue #772).
+const MaxRoutePathPatternBytes = 512
 
 // RouteResponse is the per-route response-side header rewrite block.
 type RouteResponse struct {

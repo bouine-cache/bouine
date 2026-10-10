@@ -3,9 +3,17 @@ package api
 import (
 	"net"
 	"time"
-
-	"github.com/valyala/fasthttp"
 )
+
+// OwnerMissContextKey is the fasthttp user-value key under which the
+// h1parser transfers RawRequest.OwnerMiss to the fallback RequestCtx
+// on a fast-path fall-through (see RawRequest.OwnerMiss).
+const OwnerMissContextKey = "bouine.owner_miss"
+
+// OwnerGateRejectContextKey is the fasthttp user-value key under which
+// the h1parser transfers RawRequest.OwnerGateReject to the fallback
+// RequestCtx on a fast-path fall-through (see RawRequest.OwnerGateReject).
+const OwnerGateRejectContextKey = "bouine.owner_gate_reject"
 
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
 // from a pooled read buffer — all string fields are slices of that buffer,
@@ -14,10 +22,7 @@ import (
 //
 // Unstable.
 //
-// same allocator size class (3456), and the field order keeps the
-// per-request hot string group contiguous ahead of the scalar tail.
-//
-//nolint:govet // fieldalignment: the reported 8-byte saving is inside the
+//nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
 type RawRequest struct {
 	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
 	// leads the struct so the scalar tail stays in the final cache
@@ -39,7 +44,7 @@ type RawRequest struct {
 	// ConnectionClose reports whether the request carried a
 	// "Connection: close" token (RFC 9110 §7.6.1). The parser sets it
 	// once while scanning headers; the fast path reads it to emit
-	// "Connection: close" on the response (§9.6) and its callers to
+	// "Connection: close" on the response (RFC 9112 §9.6) and its callers to
 	// close the connection after the hit instead of re-scanning
 	// headers. False for the zero value.
 	//
@@ -52,6 +57,35 @@ type RawRequest struct {
 	// Hand-built RawRequests that set Headers without ScanFlags must
 	// call req.RecomputeScanFlags() first (see its doc).
 	ConnectionClose bool
+	// OwnerMiss reports that the fast path already asked the key's ring
+	// owner for this request and got a definitive miss (nil object, nil
+	// error). The h1parser transfers it to the fallback RequestCtx under
+	// OwnerMissContextKey so handleCacheMiss skips the duplicate owner
+	// lookup and peer RPC and goes straight to origin. The slow path
+	// only honors the hint on routes WITHOUT a KeyPolicy: the hint flag
+	// does not bind to the producing route's policy, so on a policied
+	// route the slow path cannot prove its peer question identical to
+	// the fast path's and keeps the retry. Never set on peer errors
+	// (the slow-path retry is kept) or on gate rejections (the slow
+	// path, with the route's key policy, may still accept). Reset to
+	// false by the parser's per-request soft reset; zero value = unset.
+	OwnerMiss bool
+	// OwnerGateReject reports that the fast path asked the key's ring
+	// owner and got back an object whose VaryKey failed this request's
+	// variant gate — the owner HAS content for the key, just not for
+	// this variant. The h1parser transfers it to the fallback
+	// RequestCtx under OwnerGateRejectContextKey. On a route WITHOUT a
+	// KeyPolicy (and obj == nil), handleCacheMiss skips its duplicate
+	// peer RPC: the two paths' gates are byte-identical for the same
+	// wire bytes (parity pinned by internal/cache's
+	// TestPeerVaryGateHeaderParity), so the identical question is
+	// deterministically rejected twice. Policiied routes keep the
+	// retry: the hint flag does not bind to the producing route's
+	// policy, so the identical-question proof only holds on nil-policy
+	// routes, and the retry is the conservative choice. Reset to false
+	// by the parser's per-request soft reset;
+	// zero value = unset.
+	OwnerGateReject bool
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results
@@ -92,7 +126,7 @@ const (
 )
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.
-// Requests exceeding this fall through to net/http.
+// Requests exceeding this fall through to the fasthttp slow path.
 const MaxRawHeaders = 100
 
 // RawHeader is a single parsed header key-value pair. Both Key and Value
@@ -124,6 +158,34 @@ func (r *RawRequest) HasHeader(key string) bool {
 	return false
 }
 
+// CookieValue returns the joined RFC 6265 §4.2 cookie field value:
+// every Cookie header line's value, joined with "; ". RFC 9110 §5.2
+// folds duplicate field lines into one list value, and cookie pairs
+// are ";"-separated within it, so the joined string is the canonical
+// single-field-line form. Callers that must see every cookie (cache
+// keying, bypass matching) use this instead of Header("Cookie"),
+// which returns only the first line.
+//
+// Unstable.
+func (r *RawRequest) CookieValue() string {
+	first := true
+	var b []byte
+	for i := 0; i < r.NHeaders; i++ {
+		if !EqualFold(r.Headers[i].Key, "Cookie") {
+			continue
+		}
+		if r.Headers[i].Value == "" {
+			continue
+		}
+		if !first {
+			b = append(b, ';', ' ')
+		}
+		b = append(b, r.Headers[i].Value...)
+		first = false
+	}
+	return string(b)
+}
+
 // FastPathHandler is implemented by the cache layer (L3). L1 calls it
 // through this interface — no upward import from L1 to L3.
 //
@@ -131,7 +193,7 @@ func (r *RawRequest) HasHeader(key string) bool {
 // request qualifies (GET/HEAD, no conditional headers, cache hit), it
 // returns a non-nil FastPathResponse. If the request does not qualify
 // (miss, conditional, range, etc.), it returns nil — the caller falls
-// through to net/http.
+// through to the fasthttp slow path.
 //
 // Release returns a FastPathResponse (and its pooled header buffer) to
 // the pool. The caller MUST call Release after serveHit has finished
@@ -141,23 +203,6 @@ func (r *RawRequest) HasHeader(key string) bool {
 // Unstable.
 type FastPathHandler interface {
 	TryHit(req *RawRequest, now time.Time) (*FastPathResponse, bool)
-	Release(resp *FastPathResponse)
-}
-
-// FastPathHandlerCtx is the fasthttp-native version of FastPathHandler.
-// It receives a *fasthttp.RequestCtx (populated by the rewritten
-// h1parser) instead of *RawRequest. The response is written directly
-// to net.Conn via FastPathResponse.Buffers — ctx is only used for
-// reading the request, not for writing the response.
-//
-// This interface will replace FastPathHandler after the h1parser
-// rewrite (Phase 1 of the fasthttp migration, issue #521). It exists
-// now so that Phase 0 can land the interface change without breaking
-// the existing h1parser, which still uses *RawRequest.
-//
-// Unstable.
-type FastPathHandlerCtx interface {
-	TryHit(ctx *fasthttp.RequestCtx, now time.Time) (*FastPathResponse, bool)
 	Release(resp *FastPathResponse)
 }
 
@@ -176,7 +221,7 @@ type FastPathHandlerCtx interface {
 // every TryHit avoids allocating a new [][]byte backing array on pool reuse.
 //
 // CloseConn, when true, tells the writer the response header block ends
-// with "Connection: close" (RFC 9110 §9.6): the connection must not be
+// with "Connection: close" (RFC 9112 §9.6): the connection must not be
 // reused for another request after this response. Set by the fast path
 // when the request requested close; the h1parser and the reactor both
 // read it to terminate their keep-alive loops after the flush.
@@ -189,11 +234,16 @@ type FastPathResponse struct {
 	// Pool is the upstream pool serving the hit, consumed by the
 	// metrics hook as the upstream_pool label. It comes from the
 	// route's pool config, never from request input.
-	Pool       string
-	BuffersArr [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
-	Buffers    net.Buffers
-	HeaderBuf  []byte
-	StatusCode int
+	Pool string
+	// TrafficClass is the config-sourced traffic class of the
+	// request's Host, consumed by the metrics hook as the
+	// traffic_class label. Like Pool it is a config-owned string (safe
+	// to retain) and never request input; empty means "unclassified".
+	TrafficClass string
+	BuffersArr   [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
+	Buffers      net.Buffers
+	HeaderBuf    []byte
+	StatusCode   int
 	// StatusEnd splits BuffersArr[0] (status line) from [1] (header
 	// block): the offset of the first header byte inside HeaderBuf or
 	// the composed head. Stored so the composed-head cache can slice a
@@ -294,7 +344,10 @@ func ScanFlagForHeader(key, value string) RequestScanFlags {
 //
 // Unstable.
 type FastPathMetrics interface {
-	RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	// RecordHit records one fast-path hit. trafficClass is the
+	// config-sourced traffic class ("" = unclassified), from the
+	// classifier's stable strings — never request input.
+	RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	// IncrementSmugglingRejected is called when the h1parser detects an
 	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
 	// obs-fold). The implementation increments a Prometheus counter.

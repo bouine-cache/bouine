@@ -164,7 +164,8 @@ func (m *multiTokenPurger) Purge(
 		return &cache.CachePurgeResponse{}, nil
 	}
 
-	// Check if this was a rate limit error — if so, mark the token.
+	// A 429 means the token itself is rate-limited (not the zone), so
+	// the pool must rotate it out for the Retry-After window.
 	var apiErr *cloudflare.Error
 	if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
 		var retryAfter time.Duration

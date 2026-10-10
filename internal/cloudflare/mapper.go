@@ -88,9 +88,9 @@ func MapPathRegex(pattern string) MapResult {
 	// Strip leading ^ anchor — CF prefixes are implied anchors.
 	literal := strings.TrimPrefix(pattern, "^")
 
-	// A trailing $ anchor means exact-match, not prefix-match. Check this
-	// before the metacharacter rejection below ($ is itself a metacharacter)
-	// so we can give a more specific skip reason.
+	// Check the trailing $ anchor before the metacharacter rejection
+	// below ($ is itself a metacharacter) so we can report a more
+	// specific skip reason.
 	if strings.HasSuffix(literal, "$") {
 		return MapResult{
 			Skipped:    true,
@@ -98,7 +98,6 @@ func MapPathRegex(pattern string) MapResult {
 		}
 	}
 
-	// Reject any remaining metacharacters.
 	if metaCharPattern.MatchString(literal) {
 		return MapResult{
 			Skipped:    true,
@@ -123,10 +122,9 @@ func MapHostRegex(pattern string) MapResult {
 		return MapResult{Skipped: true, SkipReason: "empty host regex"}
 	}
 
-	// Unescape literal dot "\." → ".".
 	literal := strings.ReplaceAll(pattern, `\.`, ".")
 
-	// Reject if any metacharacters remain.
+	// Reject if any metacharacters remain after unescaping.
 	if metaCharPattern.MatchString(literal) {
 		return MapResult{
 			Skipped:    true,

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -16,7 +16,6 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage"
-	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -31,8 +30,12 @@ var peerFetchEncodePool = sync.Pool{
 }
 
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
-// request format. v2 uses 16-byte (128-bit) keys. Must not collide with
-// JSON's '{' (0x7B).
+// request body. The framing is version-byte-first, WITHOUT the
+// binaryMagic header used by gossip/meta/state frames: the request
+// arrives on a dedicated endpoint, so the channel already discriminates
+// the format and a magic byte would only break the v2 framing shipped
+// in v0.5.21. v2 uses 16-byte (128-bit) keys. This is the only accepted
+// format: the legacy JSON fallback was removed (retrocompat drop).
 const peerFetchBinaryVersion = 2
 
 const (
@@ -52,10 +55,13 @@ const (
 	ClusterVersionHeader = header.XBouineClusterVersion
 	// ClusterProtocolVersion is the current protocol version.
 	// Bumped to "3" in issue #187: the peer-fetch response format
-	// changed from JSON to the binary storage codec. A mixed v2/v3
-	// cluster fails detectably on version-mismatch instead of
-	// silently producing codec decode errors.
-	ClusterProtocolVersion = "3"
+	// changed from JSON to the binary storage codec. Bumped to "4"
+	// with the storage codec v5 (ADR-0051): the peer-fetch response
+	// and peer-put request bodies now carry the grace-retention
+	// stamps (KeepGrace + Pool). A mixed-version cluster fails
+	// detectably on codec decode errors instead of silently
+	// dropping the stamps.
+	ClusterProtocolVersion = "4"
 	// PeerFetchTimeout is the maximum time for a peer-fetch or peer-put RPC.
 	// Exported so the engine wiring can reuse the same budget for the
 	// write-to-owner goroutine (issue #509).
@@ -63,6 +69,18 @@ const (
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
+	// peerFetchWaitTimeout bounds how long a fetch or put waits for a
+	// semaphore slot before shedding with ErrPeerFetchShed — the peer
+	// analogue of the origin fetch shed bound (cache handler,
+	// fetchWaitTimeout, issue #562). Healthy RPCs are sub-ms, so this fires
+	// only under saturation, where the slow-path shed/origin fallback is right.
+	peerFetchWaitTimeout = 100 * time.Millisecond
+	// MaxPeerFetchConcurrency is the exported upper bound for the
+	// configurable fetch/put concurrency (cluster.peer_fetch_concurrency).
+	// The config loader uses it for validation; each in-flight peer fetch
+	// holds a goroutine and buffers up to maxPeerFetchBytes (64 MiB) while
+	// decoding, so the cap bounds worst-case decode memory.
+	MaxPeerFetchConcurrency = 128
 )
 
 // maxPeerFetchBytes caps the response body read from a peer during
@@ -86,7 +104,63 @@ const (
 	// requests per connection. With 8 connections × 16 pending = 128
 	// concurrent peer fetches per peer, matching the old HTTP/2 capacity.
 	peerMaxPendingRequests = 16
+	// peerDialTimeout bounds one TCP dial to a peer. Peer traffic is
+	// intra-cluster (same VPC, usually the same zone): healthy dials
+	// complete in single-digit milliseconds. The previous 2s meant a
+	// dead address held a fetch slot for the full window before erroring
+	// — on production, fetches queued behind dial timeouts to pod IPs that
+	// died during a rolling restart showed up as 1–2.5s "HIT" latencies
+	// (a peer-served hit is attributed X-Cache: HIT). 200ms is ~40 round
+	// trips of headroom and stays comfortably above the fetch RPC
+	// budget's own envelope: with the RPC bounded by PeerFetchTimeout
+	// (see pipelineDo), the caller abandons the request at 500ms, but
+	// the dial itself must also fail inside that window or the pipeline
+	// worker parks a connection slot for the dial duration.
+	peerDialTimeout = 200 * time.Millisecond
 )
+
+// Peer address breaker defaults. A peer address that fails
+// consecutive RPCs (dial timeouts against a peer that died without a
+// ring update — e.g. a pod restart whose NotifyUpdate was never
+// delivered) is blacklisted for a cooldown so fetches fail fast and
+// fall back to origin instead of paying a full dial timeout per
+// request.
+const (
+	defaultPeerFailureThreshold = 3
+	defaultPeerFailureCooldown  = 30 * time.Second
+)
+
+// ErrPeerBlacklisted is returned by Fetch and Put when the target
+// address is in cooldown after consecutive failures. Callers treat it
+// like any other peer-fetch error: fall back to origin.
+var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
+
+// ErrPeerFetchShed is returned by Fetch and Put when no concurrency
+// slot could be acquired within peerFetchWaitTimeout. It mirrors the
+// cache handler's ErrFetchShed (issue #562): shed excess demand instead
+// of parking callers — without the bound, the fast path's undedlined
+// context parked one keep-alive connection goroutine per queued miss
+// until the whole connection pool sat in the semaphore queue.
+var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
+
+// errPeerAddrRetired is returned by a parked dial once the fetcher
+// closes. It reports itself as a timeout so fasthttp's pipeline worker
+// throttles its restart loop (1s sleep) instead of spinning while the
+// process drains.
+var errPeerAddrRetired = &timeoutError{errors.New("peer address retired")}
+
+type timeoutError struct{ error }
+
+func (e *timeoutError) Error() string   { return e.error.Error() }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
+// addrFailureState tracks consecutive transport failures for one peer
+// address and the cooldown deadline once the threshold trips.
+type addrFailureState struct {
+	trippedUntil time.Time
+	consecutive  int
+}
 
 // PeerFetcherConfig configures a PeerFetcher.
 type PeerFetcherConfig struct {
@@ -94,6 +168,18 @@ type PeerFetcherConfig struct {
 	HopLimit            int
 	MaxConnsPerHost     int
 	MaxIdleConnDuration time.Duration
+	// FetchConcurrency bounds concurrent peer-fetch and peer-put RPCs.
+	// Zero applies defaultPeerFetchConcurrency. Negative values are
+	// rejected by the config loader (cluster.peer_fetch_concurrency).
+	FetchConcurrency int
+	// FailureThreshold is the number of consecutive transport failures
+	// before an address is blacklisted. Zero applies
+	// defaultPeerFailureThreshold.
+	FailureThreshold int
+	// FailureCooldown is how long a blacklisted address stays tripped
+	// before the fetcher probes it again. Zero applies
+	// defaultPeerFailureCooldown.
+	FailureCooldown time.Duration
 }
 
 // PeerFetcher issues cache-lookup RPCs to peer nodes using HTTP/1.1
@@ -112,6 +198,27 @@ type PeerFetcher struct {
 	// pActive is the current number of in-flight peer-fetch RPCs.
 	// Detects queue buildup before timeouts appear.
 	pActive prometheus.Gauge
+	// pQueueWait observes the time a fetch spends waiting for a
+	// fetchSem slot before the RPC is submitted. The RPC-duration
+	// histogram starts after the semaphore, so a saturated fetch
+	// pipeline (bursts, or slots pinned by fetches slow to fail against
+	// dead addresses) was invisible: fetch RPCs looked healthy while
+	// requests queued — on production, peer-served "HITs" sat in the
+	// 1–2.5s duration bucket with a clean fetch histogram. This metric
+	// makes the queue the first thing the dashboards see.
+	pQueueWait prometheus.Observer
+	// pBlacklisted reports the number of peer addresses currently in
+	// breaker cooldown, when a registry was passed.
+	pBlacklisted prometheus.Gauge
+	// pShed counts RPCs that shed at the bounded semaphore wait (no slot
+	// within peerFetchWaitTimeout). pQueueWait only observes successful
+	// acquisitions, so without this counter a saturated queue that sheds
+	// everything is invisible in metrics: no waits land in the histogram.
+	pShed prometheus.Counter
+	// breaker is the per-address failure breaker: consecutive transport
+	// failures trip a cooldown so dead peer addresses fail fast
+	// instead of paying a dial timeout per RPC.
+	breaker map[string]*addrFailureState
 	// Prometheus counters — registered if a non-nil registry is passed.
 	logger observability.Logger
 	// putSem bounds concurrent write-to-owner RPCs to prevent memory
@@ -126,17 +233,41 @@ type PeerFetcher struct {
 	// the nightly -race integration run, TestTLS_CertRotation). nil means
 	// the fetcher is closed — callers fail fast and fall back to origin.
 	pipelineClients atomic.Pointer[sync.Map] // map[string]*fasthttp.PipelineClient
-	latSumMs        atomic.Int64
-	maxBodyBytes    int64
+	// retiredAddrs holds addresses whose cached PipelineClient was
+	// evicted because the address is no longer a live peer's current
+	// address (ring prune or peer restart). Dials for these addresses
+	// park instead of dialing: fasthttp's pipeline worker cannot be
+	// stopped once its dial fails (no Close API; it exits only after a
+	// successful dial plus idle retire), so without the guard a worker
+	// whose peer died would re-dial the dead address every ~3s forever,
+	// logging "error in PipelineClient" for the life of the process.
+	//
+	// done is closed by Close (guarded by doneClosed) to release dials
+	// parked on retired addresses. Both sit with the pointer-carrying
+	// fields so the GC-scan prefix stays compact.
+	done         chan struct{}
+	retiredAddrs sync.Map // set[string]
+	latSumMs     atomic.Int64
+	maxBodyBytes int64
 	// pipelining configuration (Phase 6.4).
 	maxConnsPerHost     int
 	maxIdleConnDuration time.Duration
-	hopLimitHits        atomic.Int64
-	latN                atomic.Int64
-	misses              atomic.Int64
-	hits                atomic.Int64
-	hopLimit            int
-	useTLS              bool
+	// breaker tuning: consecutive-failure threshold and cooldown.
+	breakerMu        sync.Mutex
+	failureThreshold int
+	failureCooldown  time.Duration
+	// fetchWaitTimeout bounds the fetch/put semaphore wait before
+	// shedding with ErrPeerFetchShed. Zero applies peerFetchWaitTimeout
+	// (tests raise it to pin the brief-contention acquire without racing
+	// the shed arm).
+	fetchWaitTimeout time.Duration
+	hopLimitHits     atomic.Int64
+	latN             atomic.Int64
+	misses           atomic.Int64
+	hits             atomic.Int64
+	hopLimit         int
+	useTLS           bool
+	doneClosed       atomic.Bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -152,27 +283,47 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // already loaded the old map complete on their own goroutines; the
 // PipelineClients' own idle timeouts reclaim their sockets.
 func (f *PeerFetcher) Close(_ context.Context) error {
+	if f.doneClosed.CompareAndSwap(false, true) {
+		close(f.done)
+	}
 	f.pipelineClients.Store(nil)
 	return nil
 }
 
-// NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
-// mTLS credentials. If nil a plain HTTP client is used (test-only).
-// reg, if non-nil, receives Prometheus metric registration.
-// hopLimit caps the number of peers a request may traverse; 0 uses MaxHops.
-func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer, hopLimit int) *PeerFetcher {
-	return NewPeerFetcherWithConfig(PeerFetcherConfig{
-		TLSConfig: tlsCfg,
-		HopLimit:  hopLimit,
-	}, reg, nil)
+// RetireAddress evicts the PipelineClient cached for addr and parks
+// its dialing worker. Call when addr stops being a live peer's current
+// address: a peer that left the ring (prune, NotifyLeave) or a peer
+// that restarted at a new address (ring refresh). The eviction means
+// later traffic for a returned address transparently gets a fresh
+// client; the parked worker — which fasthttp offers no way to stop —
+// costs one parked goroutine until process exit instead of a dial
+// attempt and a log line every ~3s.
+//
+// Retirement stays until UnretireAddress reports the address current
+// again. getPipelineClient must NOT clear the mark itself: a fetch
+// holding a stale owner PeerInfo (captured before a ring change) can
+// race RetireAddress and would re-create a client for the dead
+// address — resurrecting the exact zombie the retire exists to park.
+func (f *PeerFetcher) RetireAddress(addr string) {
+	if addr == "" {
+		return
+	}
+	f.retiredAddrs.Store(addr, struct{}{})
+	if clients := f.pipelineClients.Load(); clients != nil {
+		clients.Delete(addr)
+	}
 }
 
-// NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
-func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger, hopLimit int) *PeerFetcher {
-	return NewPeerFetcherWithConfig(PeerFetcherConfig{
-		TLSConfig: tlsCfg,
-		HopLimit:  hopLimit,
-	}, reg, logger)
+// UnretireAddress lifts a retirement. Only the Cluster may call it —
+// when a peer (re)joins at addr, the address is provably current
+// again, so new fetches dial it normally and a leftover parked worker
+// (if any) is dropped along with its retired mark. Called from addPeer
+// for every current address so the common case is a no-op.
+func (f *PeerFetcher) UnretireAddress(addr string) {
+	if addr == "" {
+		return
+	}
+	f.retiredAddrs.Delete(addr)
 }
 
 // NewPeerFetcherWithConfig creates a PeerFetcher with full pipelining
@@ -191,44 +342,94 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	if maxIdle <= 0 {
 		maxIdle = defaultPeerMaxIdleConnDur
 	}
+	fetchConcurrency := cfg.FetchConcurrency
+	if fetchConcurrency <= 0 {
+		fetchConcurrency = defaultPeerFetchConcurrency
+	}
+	if fetchConcurrency > MaxPeerFetchConcurrency {
+		fetchConcurrency = MaxPeerFetchConcurrency
+	}
+	waitTimeout := peerFetchWaitTimeout
+	failureThreshold := cfg.FailureThreshold
+	if failureThreshold <= 0 {
+		failureThreshold = defaultPeerFailureThreshold
+	}
+	failureCooldown := cfg.FailureCooldown
+	if failureCooldown <= 0 {
+		failureCooldown = defaultPeerFailureCooldown
+	}
 	f := &PeerFetcher{
 		useTLS:              cfg.TLSConfig != nil,
 		hopLimit:            hopLimit,
 		maxBodyBytes:        maxPeerFetchBytes,
-		fetchSem:            make(chan struct{}, defaultPeerFetchConcurrency),
-		putSem:              make(chan struct{}, defaultPeerFetchConcurrency),
+		fetchSem:            make(chan struct{}, fetchConcurrency),
+		putSem:              make(chan struct{}, fetchConcurrency),
+		fetchWaitTimeout:    waitTimeout,
 		logger:              observability.ResolveLogger(logger),
 		maxConnsPerHost:     maxConns,
 		maxIdleConnDuration: maxIdle,
 		tlsConfig:           cfg.TLSConfig,
+		breaker:             make(map[string]*addrFailureState),
+		failureThreshold:    failureThreshold,
+		failureCooldown:     failureCooldown,
+		done:                make(chan struct{}),
 	}
 	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
-		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_hits_total",
-			Help: "Cache objects served from a cluster peer (L0 promotion).",
-		})
-		f.pMisses = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_misses_total",
-			Help: "Peer-fetch RPCs that returned a miss; fell through to origin.",
-		})
-		f.pHopLimit = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_hop_limit_hits_total",
-			Help: "Peer-fetch attempts aborted because MaxHops was reached.",
-		})
-		dur := prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "bouine", Name: "peer_fetch_duration_seconds",
-			Help:    "Round-trip time for successful peer-fetch RPCs.",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
-		})
-		f.pDuration = dur
-		f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "bouine", Name: "peer_fetch_active",
-			Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
-		})
-		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive)
+		f.registerMetrics(reg)
 	}
 	return f
+}
+
+// registerMetrics constructs and registers the fetcher's Prometheus
+// series on reg. Every field it assigns is nil-guarded at use: the
+// fetcher works with a nil registry (tests, embedded use).
+func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
+	f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_hits_total",
+		Help: "Cache objects served from a cluster peer (L0 promotion).",
+	})
+	f.pMisses = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_misses_total",
+		Help: "Peer-fetch RPCs that returned a miss; fell through to origin.",
+	})
+	f.pHopLimit = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_hop_limit_hits_total",
+		Help: "Peer-fetch attempts aborted because MaxHops was reached.",
+	})
+	dur := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace:                       "bouine",
+		Name:                            "peer_fetch_duration_seconds",
+		Help:                            "Round-trip time for successful peer-fetch RPCs. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+		Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
+	})
+	f.pDuration = dur
+	f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine", Name: "peer_fetch_active",
+		Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
+	})
+	queueWait := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace:                       "bouine",
+		Name:                            "peer_fetch_queue_wait_seconds",
+		Help:                            "Time a peer fetch spent waiting for a fetch-semaphore slot before the RPC was submitted. The RPC-duration histogram starts after the semaphore, so a saturated fetch pipeline (bursts, or slots pinned by fetches slow to fail against dead addresses) is only visible here. Also exposed as a native (sparse-bucket) histogram.",
+		Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
+	})
+	f.pQueueWait = queueWait
+	f.pBlacklisted = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine", Name: "peer_addr_blacklisted",
+		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
+	})
+	f.pShed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_shed_total",
+		Help: "Peer-fetch/put RPCs shed because no concurrency slot freed within the queue-wait bound. Rising alongside peer_fetch_active at capacity means demand exceeds the configured peer_fetch_concurrency.",
+	})
+	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, f.pShed)
 }
 
 // getPipelineClient returns the PipelineClient for the given peer
@@ -237,10 +438,24 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 // of pipelined connections (default 8) that can handle up to 16
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
+//
+// A retired address gets a client whose dial parks: the caller's RPC
+// fails fast (the fetch/put timeout), falls back to origin, and the
+// parked worker costs nothing further. The retired mark is never
+// cleared here — a fetch can hold a stale owner PeerInfo captured
+// before a ring change, and minting a live client for a dead address
+// would resurrect the zombie the retire exists to park. Only
+// UnretireAddress (driven by the Cluster's addPeer) lifts a
+// retirement, once the address is provably current again.
 func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	clients := f.pipelineClients.Load()
 	if clients == nil {
 		return nil // closed during shutdown
+	}
+	// Never hand back the evicted client whose worker may already be
+	// parked on the retired mark.
+	if _, retired := f.retiredAddrs.Load(addr); retired {
+		clients.Delete(addr)
 	}
 	if v, ok := clients.Load(addr); ok {
 		return v.(*fasthttp.PipelineClient)
@@ -255,15 +470,51 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 		IsTLS:                         f.useTLS,
 		TLSConfig:                     f.tlsConfig,
 		DisableHeaderNamesNormalizing: true,
+		// The pipeline worker logs every connection failure through its
+		// Logger — fasthttp's default is a raw log.Logger on stderr, which
+		// bypasses the slog pipeline and lands in log shippers as
+		// unstructured info-level lines (seen in production). Classify through
+		// the client adapter: routine teardown noise (EOF, broken pipe,
+		// retired-address parking) at Debug, degraded peers at Warn.
+		Logger: observability.NewFastHTTPClientLogger(f.logger, "cluster"),
 		Dial: func(addr string) (net.Conn, error) {
+			if _, retired := f.retiredAddrs.Load(addr); retired {
+				// Park instead of dialing: this client was evicted by
+				// RetireAddress, and returning a dial error would send
+				// fasthttp's worker into its restart loop, re-dialing
+				// the dead address forever. Block until the fetcher
+				// closes; the goroutine dies with the process, bounded
+				// by one per retired address.
+				<-f.done
+				return nil, errPeerAddrRetired
+			}
 			return (&net.Dialer{
-				Timeout:   2 * time.Second,
+				Timeout:   peerDialTimeout,
 				KeepAlive: 30 * time.Second,
 			}).Dial("tcp", addr)
 		},
 	}
 	actual, _ := clients.LoadOrStore(addr, pc)
 	return actual.(*fasthttp.PipelineClient)
+}
+
+// pipelineDo performs a bounded peer RPC. Peer callers pass the
+// *fasthttp.RequestCtx as context, which carries no deadline, so
+// transport.PipelineDo's deadline-less fallback applies its 60s default
+// — a hung peer would hold a fetch/put slot for a full minute while
+// only the RPC-level ReadTimeout eventually kills the request. This
+// wrapper guarantees the PeerFetchTimeout budget regardless of the
+// caller's context: a caller deadline shorter than the budget is
+// preserved (honoured via DoDeadline), and a deadline-less context is
+// capped by the budget itself (DoTimeout).
+func (f *PeerFetcher) pipelineDo(ctx context.Context, c *fasthttp.PipelineClient, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < PeerFetchTimeout {
+		return c.DoDeadline(req, resp, deadline)
+	}
+	return c.DoTimeout(req, resp, PeerFetchTimeout)
 }
 
 // peerAddr returns the address (with scheme context) for a peer.
@@ -275,35 +526,206 @@ func peerAddr(peer api.PeerInfo) string {
 	return addr
 }
 
+// breakerAllowed reports whether addr may be dialed now. A blacklisted
+// address becomes allowed again once its cooldown lapses — the next
+// request then probes the address (the peer may have come back); if it
+// fails again the retained consecutive count re-trips the breaker
+// immediately, so a still-dead address costs at most one dial per
+// cooldown.
+func (f *PeerFetcher) breakerAllowed(addr string) bool {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	st, ok := f.breaker[addr]
+	if !ok || st.trippedUntil.IsZero() {
+		return true
+	}
+	if time.Now().Before(st.trippedUntil) {
+		return false
+	}
+	st.trippedUntil = time.Time{}
+	f.updateBlacklistedLocked()
+	return true
+}
+
+// recordPeerSuccess clears the failure state for addr: any successful
+// round trip (including a 404 miss — the peer is reachable) proves the
+// address healthy.
+func (f *PeerFetcher) recordPeerSuccess(addr string) {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	if _, ok := f.breaker[addr]; !ok {
+		return
+	}
+	delete(f.breaker, addr)
+	f.updateBlacklistedLocked()
+}
+
+// recordPeerFailure counts one transport failure for addr and trips the
+// cooldown once the configured threshold of consecutive failures is
+// reached.
+func (f *PeerFetcher) recordPeerFailure(addr string) {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	st := f.breaker[addr]
+	if st == nil {
+		st = &addrFailureState{}
+		f.breaker[addr] = st
+	}
+	st.consecutive++
+	if st.consecutive >= f.failureThreshold && st.trippedUntil.IsZero() {
+		st.trippedUntil = time.Now().Add(f.failureCooldown)
+		f.logger.Warn("peer address blacklisted after consecutive failures",
+			"addr", addr, "consecutive", st.consecutive, "cooldown", f.failureCooldown.String())
+	}
+	f.updateBlacklistedLocked()
+}
+
+// updateBlacklistedLocked refreshes the blacklisted-address gauge. The
+// breaker mutex must be held.
+func (f *PeerFetcher) updateBlacklistedLocked() {
+	if f.pBlacklisted == nil {
+		return
+	}
+	now := time.Now()
+	n := 0
+	for _, st := range f.breaker {
+		if !st.trippedUntil.IsZero() && now.Before(st.trippedUntil) {
+			n++
+		}
+	}
+	f.pBlacklisted.Set(float64(n))
+}
+
 // buildPeerRequest constructs a fasthttp.Request for a peer-fetch RPC.
-func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) *fasthttp.Request {
+//
+// Zero-alloc: the URI is the package constant PeerFetchPath (stored
+// as-is, no concat), the host is copied into the pooled request's own
+// header buffer, and the body is encoded into a stack array before
+// SetBody copies it into the pooled request's internal buffer. The
+// scheme needs no representation in the URI — the PipelineClient's
+// IsTLS flag (fixed at fetcher construction) selects TLS; the request
+// line carries only the path.
+func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Request {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
 		fetchAddr = peer.Addr
 	}
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
-	uri := scheme + "://" + fetchAddr + PeerFetchPath
 
-	body := make([]byte, 0, 18+len(req.VaryKey))
-	body = append(body, peerFetchBinaryVersion)
-	body = append(body, req.Key[:]...)
-	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
-	body = append(body, req.VaryKey...)
+	// Encode into a stack array (max body = 1+16+1+255 = 273 bytes) and
+	// let SetBody copy into the pooled request's internal buffer
+	// (bytebufferpool), which ReleaseRequest returns for reuse. The
+	// previous make'd slice + SetBodyRaw allocated on every fetch;
+	// steady-state peer fetches now allocate nothing for the request
+	// body. The wire format is fully rewritten from byte 0 on every
+	// call, so no reset of the stack buffer is needed.
+	var body [273]byte
+	n := 0
+	body[n] = peerFetchBinaryVersion
+	n++
+	n += copy(body[n:], req.Key[:])
+	body[n] = byte(len(req.VaryKey)) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
+	n++
+	n += copy(body[n:], req.VaryKey)
 
 	httpReq := fasthttp.AcquireRequest()
 	httpReq.Header.SetMethod(fasthttp.MethodPost)
-	httpReq.SetRequestURI(uri)
-	httpReq.SetBodyRaw(body)
+	httpReq.SetRequestURI(PeerFetchPath)
+	httpReq.SetHost(fetchAddr)
+	httpReq.SetBody(body[:n])
 	httpReq.Header.Set(header.ContentType, "application/octet-stream")
-	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
+	httpReq.Header.Set(BouineHopHeader, strconv.Itoa(req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 	return httpReq
 }
 
-// Fetch asks a peer for a cached object. Returns nil, nil on a cache
+// acquireSlot takes one slot from sem with a bounded wait: the happy
+// path is a non-blocking send (zero allocs — the fast path's miss budget
+// must not move); the timer is created only when the semaphore is
+// momentarily full. When the bound expires the RPC sheds with
+// ErrPeerFetchShed instead of parking the caller — previously a caller
+// with an undedlined context (the fast path passes context.Background)
+// parked here forever, one keep-alive connection goroutine per queued
+// miss, until the whole connection pool sat in the queue. A live ctx
+// cancellation still wins the race with the timer.
+//
+// The wait bound deliberately does not extend the RPC budget: it bounds
+// the queue, not the RPC, mirroring the cache handler's split between
+// fetchWaitTimeout and fetch_timeout.
+func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error {
+	select {
+	case sem <- struct{}{}:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(f.waitTimeout())
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-timer.C:
+		if f.pShed != nil {
+			f.pShed.Inc()
+		}
+		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// waitTimeout resolves the configured semaphore-wait bound; zero applies
+// the built-in default.
+func (f *PeerFetcher) waitTimeout() time.Duration {
+	if f.fetchWaitTimeout <= 0 {
+		return peerFetchWaitTimeout
+	}
+	return f.fetchWaitTimeout
+}
+
+// acquireFetchSlot takes one fetchSem slot, observing the time spent
+// waiting in pQueueWait (queueStart is taken by the caller before this
+// call) and bumping pActive for the slot's hold. Returns the release
+// function paired with the acquisition, or an error when the context is
+// cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
+func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
+	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
+		if errors.Is(err, ErrPeerFetchShed) && f.pQueueWait != nil {
+			// A shed after a full wait window is exactly the queue
+			// signal the histogram exists for — record it too, or a
+			// fully-shedding queue disappears from the metric (only
+			// successful acquisitions would ever be observed).
+			f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+		}
+		return nil, err
+	}
+	if f.pQueueWait != nil {
+		f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+	}
+	if f.pActive != nil {
+		f.pActive.Inc()
+	}
+	return func() {
+		if f.pActive != nil {
+			f.pActive.Dec()
+		}
+		<-f.fetchSem
+	}, nil
+}
+
+// recordPeerMiss counts and logs one peer-fetch miss (404 answer).
+func (f *PeerFetcher) recordPeerMiss(req api.PeerFetchRequest, peer api.PeerInfo) {
+	f.misses.Add(1)
+	if f.pMisses != nil {
+		f.pMisses.Inc()
+	}
+	f.logger.Info("peer fetch miss",
+		"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
+}
+
+// Fetch asks a peer for a cached object. varyKey, when non-empty, is the
+// requesting node's Vary assertion for key (RFC 9111 §4.1): the peer must
+// only return an object stored under that same variant dimension — a peer
+// whose only entry for key is the primary-key Vary resolver answers with a
+// miss instead of another variant's body. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
 //
 //nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
@@ -317,39 +739,45 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	httpReq := buildPeerRequest(peer, req, f.useTLS)
+	httpReq := buildPeerRequest(peer, req)
 	defer fasthttp.ReleaseRequest(httpReq)
 
-	select {
-	case f.fetchSem <- struct{}{}:
-		defer func() { <-f.fetchSem }()
-		if f.pActive != nil {
-			f.pActive.Inc()
-			defer f.pActive.Dec()
-		}
-	case <-ctx.Done():
-		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ctx.Err())
+	addr := peerAddr(peer)
+	if !f.breakerAllowed(addr) {
+		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
+
+	// queueStart precedes the semaphore: the wait for a fetchSem slot
+	// is the queue time acquireFetchSlot observes. Time on this line
+	// is not part of the RPC-duration measurement below, which starts
+	// after acquisition.
+	queueStart := time.Now()
+	releaseSlot, err := f.acquireFetchSlot(ctx, queueStart)
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
+	}
+	defer releaseSlot()
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
 	start := time.Now()
-	pc := f.getPipelineClient(peerAddr(peer))
+	pc := f.getPipelineClient(addr)
 	if pc == nil {
 		return nil, fmt.Errorf("peer fetch %s: fetcher closed during shutdown", peer.Addr)
 	}
-	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
+	if err := f.pipelineDo(ctx, pc, httpReq, resp); err != nil {
+		// A canceled caller context is not a peer failure — do not
+		// count it toward the breaker.
+		if ctx.Err() == nil {
+			f.recordPeerFailure(addr)
+		}
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
+	f.recordPeerSuccess(addr)
 
 	if resp.StatusCode() == fasthttp.StatusNotFound {
-		f.misses.Add(1)
-		if f.pMisses != nil {
-			f.pMisses.Inc()
-		}
-		f.logger.Info("peer fetch miss",
-			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
+		f.recordPeerMiss(req, peer)
 		return nil, nil // peer miss
 	}
 	if resp.StatusCode() != fasthttp.StatusOK {
@@ -374,11 +802,14 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if f.pHits != nil {
 		f.pHits.Inc()
 	}
-	latMs := time.Since(start).Milliseconds()
+	// The histogram must observe the untruncated duration: Milliseconds()
+	// floors sub-ms RPCs to 0. latSumMs/latN stay ms (ms-resolution readout).
+	lat := time.Since(start)
+	latMs := lat.Milliseconds()
 	f.latSumMs.Add(latMs)
 	f.latN.Add(1)
 	if f.pDuration != nil {
-		f.pDuration.Observe(float64(latMs) / 1000)
+		f.pDuration.Observe(lat.Seconds())
 	}
 	f.logger.Info("peer fetch hit",
 		"key", req.Key, "peer", peer.Addr, "hops", req.Hops,
@@ -389,8 +820,11 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 // PeerFetchHandler is a fasthttp.RequestHandler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
-	store    PeerStore
-	logger   observability.Logger
+	store  PeerStore
+	logger observability.Logger
+	// metrics counts variant-assertion rejections on the serving side
+	// (label "server"). Nil-safe: nil counts nothing.
+	metrics  *Metrics
 	hopLimit int
 }
 
@@ -409,10 +843,33 @@ func NewPeerFetchHandler(store PeerStore, hopLimit int) *PeerFetchHandler {
 // NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
 // structured logger.
 func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger, hopLimit int) *PeerFetchHandler {
+	return NewPeerFetchHandlerWithMetrics(store, logger, hopLimit, nil)
+}
+
+// NewPeerFetchHandlerWithMetrics creates a peer-fetch handler with a
+// structured logger and cluster metrics. metrics may be nil (tests,
+// single-node use); variant-assertion rejections are then only logged.
+func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger, hopLimit int, metrics *Metrics) *PeerFetchHandler {
 	if hopLimit <= 0 {
 		hopLimit = MaxHops
 	}
-	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
+	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger), metrics: metrics}
+}
+
+// parsePeerFetchBody decodes the binary peer-fetch request body (v2).
+// ok=false maps to a 400 response.
+func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
+	var req api.PeerFetchRequest
+	if len(body) < 18 || body[0] != peerFetchBinaryVersion {
+		return req, false
+	}
+	copy(req.Key[:], body[1:17])
+	varyLen := int(body[17])
+	if len(body) < 18+varyLen {
+		return req, false
+	}
+	req.VaryKey = string(body[18 : 18+varyLen])
+	return req, true
 }
 
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
@@ -441,26 +898,8 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	var req api.PeerFetchRequest
-	switch body[0] {
-	case peerFetchBinaryVersion:
-		if len(body) < 18 {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		copy(req.Key[:], body[1:17])
-		varyLen := int(body[17])
-		if len(body) < 18+varyLen {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		req.VaryKey = string(body[18 : 18+varyLen])
-	case '{':
-		if err := json.Unmarshal(body, &req); err != nil {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-	default:
+	req, ok := parsePeerFetchBody(body)
+	if !ok {
 		ctx.Error("bad request", fasthttp.StatusBadRequest)
 		return
 	}
@@ -468,6 +907,37 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	obj, _, err := h.store.Get(ctx, req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
+	// Vary assertion (RFC 9111 §4.1): when the requester asked for a
+	// specific variant and the only stored entry under req.Key is the
+	// primary-key Vary resolver (filled by a different selecting-header
+	// set), answer with a miss. Returning the resolver's body would serve
+	// one variant's content to a request selecting another — the
+	// cross-market body served in production before this gate.
+	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
+		h.metrics.IncPeerFetchVariantMismatch("server")
+		h.logger.Info("served peer fetch miss: variant mismatch",
+			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
+	// Resolver-body leak: the primary-key entry is the Vary resolver —
+	// its body belongs to whichever variant filled it first (the handler
+	// stores it so lookups can learn the Vary list, not to be served). A
+	// requester that misses locally peer-fetches its primary key with a
+	// blank assertion (it has no local object to derive the Vary list
+	// from), so the previous gate never fired and the owner handed back
+	// the resolver body — the first market's content — as a peer HIT.
+	// RFC 9111 §4.1: a request that selects a variant must never be
+	// satisfied by an entry stored under the bare primary key, so answer
+	// with a miss and let the requester fill (and assert) its own
+	// variant. A peer fetch for a REAL variant key never lands here:
+	// variant entries carry a non-empty VaryKey.
+	if obj.VaryKey == "" && obj.VaryValue != "" {
+		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
+			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
@@ -489,34 +959,31 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 // to the owner for future peer-fetches (issue #509). Best-effort: errors
 // are logged and returned but do not block the caller's response. The
 // caller is responsible for running this off the response path.
-// Bounded by putSem to prevent unbounded goroutine fan-out during miss
-// storms; if the semaphore is full, the RPC is skipped (best-effort).
+// Bounded by putSem with the same wait bound as fetch (acquireSlot) to
+// prevent unbounded goroutine fan-out during miss storms; on a full
+// semaphore the RPC sheds with ErrPeerFetchShed (best-effort skip).
 func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Object) error {
 	if obj == nil {
 		return nil
 	}
 
-	select {
-	case f.putSem <- struct{}{}:
-		defer func() { <-f.putSem }()
-	case <-ctx.Done():
-		return fmt.Errorf("peer put %s: %w", peer.Addr, ctx.Err())
+	addr := peerAddr(peer)
+	if !f.breakerAllowed(addr) {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
-	fetchAddr := peer.AdminAddr
-	if fetchAddr == "" {
-		fetchAddr = peer.Addr
-	}
-	scheme := "http"
-	if f.useTLS {
-		scheme = "https"
-	}
-	uri := scheme + "://" + fetchAddr + PeerPutPath
 
+	if err := f.acquireSlot(ctx, f.putSem); err != nil {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
+	}
+	defer func() { <-f.putSem }()
 	body := storage.EncodeObject(obj)
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(fasthttp.MethodPost)
-	req.SetRequestURI(uri)
+	// Path-only URI + Host header: zero per-RPC URI allocation; the
+	// PipelineClient's IsTLS flag selects the scheme (see buildPeerRequest).
+	req.SetRequestURI(PeerPutPath)
+	req.SetHost(addr)
 	req.SetBodyRaw(body)
 	req.Header.Set(header.ContentType, "application/octet-stream")
 	req.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
@@ -524,13 +991,19 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	putClient := f.getPipelineClient(peerAddr(peer))
+	putClient := f.getPipelineClient(addr)
 	if putClient == nil {
 		return fmt.Errorf("peer put %s: fetcher closed during shutdown", peer.Addr)
 	}
-	if err := transport.PipelineDo(ctx, putClient, req, resp); err != nil {
+	if err := f.pipelineDo(ctx, putClient, req, resp); err != nil {
+		// A canceled caller context is not a peer failure — do not
+		// count it toward the breaker.
+		if ctx.Err() == nil {
+			f.recordPeerFailure(addr)
+		}
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
+	f.recordPeerSuccess(addr)
 	if resp.StatusCode() != fasthttp.StatusOK {
 		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode())
 	}
@@ -596,6 +1069,3 @@ func (h *PeerPutHandler) Handle(ctx *fasthttp.RequestCtx) {
 	h.logger.Debug("served peer put", "key", obj.Key)
 	ctx.SetStatusCode(fasthttp.StatusOK)
 }
-
-// Ensure unused imports are referenced for future use.
-var _ = json.Marshal

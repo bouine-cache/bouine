@@ -4,7 +4,10 @@ Date: 2026-08-22
 
 ## Status
 
-Accepted
+Accepted — implementation complete. The `FromHTTP`/`WriteTo` bridge
+methods named below have since been removed with the rest of the
+net/http surface (issue #593); only the fasthttp-native conversion
+remains.
 
 ## Context
 

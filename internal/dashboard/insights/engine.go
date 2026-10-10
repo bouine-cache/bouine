@@ -69,6 +69,7 @@ type InsightData struct {
 	VaryCapHits       int64
 	BroadcastFailures int64 // total cluster broadcast failures
 	CFPurgeSkipped    int64 // total CF purges skipped
+	FetchShed         int64 // total foreground origin fetches shed (queue wait exceeded)
 }
 
 // PeerInfo is a simplified peer status for insight evaluation.

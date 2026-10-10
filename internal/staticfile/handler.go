@@ -203,11 +203,6 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	h.streamFastFile(ctx, f, servedPath)
 }
 
-// ServeHTTP implements http.Handler. Retained for cache-handler upstream
-// compatibility until the cache handler is fully migrated to fasthttp.
-//
-//nolint:depguard // net/http required for cache-handler upstream interface
-
 // isPathContained checks whether the cleaned path, when joined with
 // root, stays within the root directory.
 func (h *Handler) isPathContained(cleaned string) bool {
@@ -349,7 +344,7 @@ func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f *os.File, cleanedPa
 // ServeHTTP resets it to 0 before any body streaming.
 //
 // Returns an empty string if the content hash cannot be computed
-// (seek/read error). Per ADR-0017 §7, a missing ETag is strictly safer
+// (seek/read error). Per ADR-0017 (decision item 7), a missing ETag is strictly safer
 // than a wrong mtime-based one: clients fall back to If-Modified-Since
 // validation, which is correct.
 func (h *Handler) computeETag(f *os.File, cleanedPath string, stat os.FileInfo) string {
@@ -431,7 +426,7 @@ const (
 // written (either 206 or 416). Returns false if the range is invalid and
 // the caller should fall through to a full 200 response.
 //
-// Per RFC 9110 §14.3.2, a server MAY collapse a multipart range request
+// Per RFC 9110 §15.3.7.2, a server MAY collapse a multipart range request
 // into a single 206 response. We serve the first range only.
 //
 // The already-opened file f is reused from resolveFile — no second

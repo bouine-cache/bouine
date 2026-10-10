@@ -1,12 +1,17 @@
 {{- $adminSvc := include "bouine.adminServiceName" . }}
 {{- $adminPort := .Values.adminService.port | default .Values.service.adminPort }}
+{{- $httpsPort := include "bouine.listenPort" (dict "key" "https" "value" .Values.config.listen.https) }}
 Thank you for installing {{ include "bouine.name" . }}!
 
 Your bouine cache cluster is being deployed as a StatefulSet with {{ .Values.replicaCount }} replica(s).
 
 == Data-plane ports ==
   HTTP:  {{ .Values.service.httpPort }}
+{{- if $httpsPort }}
   HTTPS: {{ .Values.service.httpsPort }}
+{{- else }}
+  HTTPS: disabled (config.listen.https is empty — set it to enable the TLS data plane)
+{{- end }}
 
 == Admin port ==
   {{ $adminPort }}

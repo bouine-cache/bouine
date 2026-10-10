@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -205,4 +206,97 @@ func TestGossipMsgType_Refresh(t *testing.T) {
 	buf, _ := EncodeRefreshGossip(api.RefreshEvent{Key: testkey.Key(1)})
 	require.True(t, IsBinaryFrame(buf))
 	require.Equal(t, msgTypeRefresh, GossipMsgType(buf))
+}
+
+// TestMsgTypes_NonZero pins the encodeFrame/decodeFrame sentinel: 0
+// means "HTTP frame, no msgType byte", so no gossip msgType may be 0 —
+// a zero-valued type would silently emit HTTP-framed bytes on the
+// gossip channel.
+func TestMsgTypes_NonZero(t *testing.T) {
+	t.Parallel()
+	for _, mt := range []byte{msgTypePurge, msgTypeBan, msgTypeRefresh, msgTypePurgeBatch, msgTypeRefreshBatch} {
+		require.NotZero(t, mt, "msgType 0 is reserved for HTTP frames")
+	}
+}
+
+func TestPeerInfoMeta_RoundTrip(t *testing.T) {
+	t.Parallel()
+	info := api.PeerInfo{Name: "n1", Addr: "127.0.0.1:1", Weight: 2, JoinedAt: time.Now()}
+	b, err := EncodePeerInfoMeta(info)
+	require.NoError(t, err)
+	require.Equal(t, binaryMagic, b[0])
+	require.Equal(t, binaryVersion, b[1])
+
+	got, err := DecodePeerInfoMeta(b)
+	require.NoError(t, err)
+	require.True(t, info.JoinedAt.Equal(got.JoinedAt))
+	info.JoinedAt, got.JoinedAt = time.Time{}, time.Time{}
+	require.Equal(t, info, got)
+}
+
+func TestPeerInfoMeta_RejectsBadMagic(t *testing.T) {
+	t.Parallel()
+	_, err := DecodePeerInfoMeta([]byte(`{"name":"n1"}`))
+	require.ErrorIs(t, err, errBadMagic)
+}
+
+func TestPeerInfoMeta_RejectsUnknownVersion(t *testing.T) {
+	t.Parallel()
+	b, err := EncodePeerInfoMeta(api.PeerInfo{Name: "n1"})
+	require.NoError(t, err)
+	b[1] = binaryVersion + 1
+	_, err = DecodePeerInfoMeta(b)
+	require.ErrorIs(t, err, errUnsupportedVer)
+}
+
+func TestRingDigestState_RoundTrip(t *testing.T) {
+	t.Parallel()
+	digest := api.RingDigest{Hash: 0xDEADBEEFCAFEF00D, Size: 3, Version: 42}
+	got, err := DecodeRingDigestState(EncodeRingDigestState(digest))
+	require.NoError(t, err)
+	require.Equal(t, digest, got)
+}
+
+func BenchmarkCodec_NodeMeta(b *testing.B) {
+	info := api.PeerInfo{
+		Name: "bench-node", Addr: "10.0.0.1:8080", AdminAddr: "10.0.0.1:8081",
+		DataAddr: "10.0.0.1:8082", Version: "0.5.21", Weight: 1,
+		JoinedAt: time.Now(),
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := EncodePeerInfoMeta(info); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCodec_LocalState(b *testing.B) {
+	digest := api.RingDigest{Hash: 0xDEADBEEFCAFEF00D, Size: 3, Version: 42}
+	b.ReportAllocs()
+	for b.Loop() {
+		EncodeRingDigestState(digest)
+	}
+}
+
+func BenchmarkCodec_DecodeMeta(b *testing.B) {
+	info := api.PeerInfo{
+		Name: "bench-node", Addr: "10.0.0.1:8080", AdminAddr: "10.0.0.1:8081",
+		DataAddr: "10.0.0.1:8082", Version: "0.5.21", Weight: 1,
+	}
+	buf, err := EncodePeerInfoMeta(info)
+	require.NoError(b, err)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := DecodePeerInfoMeta(buf); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestPeerInfoMeta_RejectsOversizedString(t *testing.T) {
+	t.Parallel()
+	info := api.PeerInfo{Name: "n1", Version: strings.Repeat("v", maxStringLen+1)}
+	_, err := EncodePeerInfoMeta(info)
+	require.ErrorIs(t, err, errStringTooLong)
 }

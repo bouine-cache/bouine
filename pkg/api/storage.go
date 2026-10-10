@@ -26,7 +26,7 @@ type Object struct {
 	// header block (static headers as "Key: Value\r\n" pairs, without
 	// status line or trailing \r\n). Computed on the first fast-path
 	// cache hit, not at store time — objects never served via the
-	// fast-path (misses, net/http path) never pay the ~512-byte cost.
+	// fast-path (misses, slow-path requests) never pay the ~512-byte cost.
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
@@ -40,6 +40,12 @@ type Object struct {
 	composedHeadPtr atomic.Pointer[composedHead] `json:"-"`
 	// ETag is the strong or weak entity tag from the origin.
 	ETag string `json:"etag,omitempty"`
+	// Pool is the name of the origin pool the storing route fetches
+	// from — the identity MayReap resolves to a health check. Only
+	// meaningful alongside KeepGrace; empty for non-graced objects
+	// (and for pool-less routes, whose grace cannot be health-gated
+	// and therefore never engages).
+	Pool string `json:"pool,omitempty"`
 	// VaryKey is the secondary key derived from Vary headers. Empty
 	// string if the response does not Vary.
 	VaryKey string `json:"vary_key,omitempty"`
@@ -106,6 +112,14 @@ type Object struct {
 	// RespMustRevalidate indicates the response Cache-Control has
 	// must-revalidate or proxy-revalidate. Pre-computed at build time.
 	RespMustRevalidate bool `json:"-"`
+	// KeepGrace marks an object from a stayin_alive route: the TTL
+	// reaper must not remove it by time alone while its origin pool
+	// cannot refill a miss. The HotStore consults the injected
+	// MayReap gate for expired entries carrying this flag; capacity
+	// pressure (SIEVE, warm budget) still applies — grace suppresses
+	// time-based deletion only, never bounded-resource eviction.
+	// Stamped at cache-fill time together with Pool.
+	KeepGrace bool `json:"keep_grace,omitempty"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -138,11 +152,8 @@ func (o *Object) StoreSerializedHead(head []byte) {
 // afterwards; pooled bytes would be overwritten under live readers.
 // Immutable once stored: concurrent composers race benignly (same
 // content), and a new second or variant replaces the pointer.
-// the head slice ahead of the identity scalars it is keyed by; this
-// one-entry-per-object cache is cold relative to the hit path, and
-// 8 bytes of padding is not worth obscuring the layout.
 //
-//nolint:govet // fieldalignment: the reported "optimal" order would move
+//nolint:govet // fieldalignment: "optimal" order buries head slice behind scalars on a cold path
 type composedHead struct {
 	unix        int64
 	statusEnd   int
@@ -206,15 +217,25 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		ETag:                 o.ETag,
 		LastModified:         o.LastModified,
 		SurrogateKeys:        o.SurrogateKeys,
-		Hits:                 o.Hits,
-		CacheControl:         o.CacheControl,
-		OriginAge:            o.OriginAge,
-		HasConnectionList:    o.HasConnectionList,
-		HasNoCacheFields:     o.HasNoCacheFields,
-		HasDate:              o.HasDate,
-		VaryValue:            o.VaryValue,
-		RespNoCache:          o.RespNoCache,
-		RespMustRevalidate:   o.RespMustRevalidate,
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		Hits:               atomic.LoadUint64(&o.Hits),
+		CacheControl:       o.CacheControl,
+		OriginAge:          o.OriginAge,
+		HasConnectionList:  o.HasConnectionList,
+		HasNoCacheFields:   o.HasNoCacheFields,
+		HasDate:            o.HasDate,
+		VaryValue:          o.VaryValue,
+		RespNoCache:        o.RespNoCache,
+		RespMustRevalidate: o.RespMustRevalidate,
+		KeepGrace:          o.KeepGrace,
+		Pool:               o.Pool,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -277,15 +298,25 @@ func (o *Object) CloneForRefresh() *Object {
 		ETag:                 o.ETag,
 		LastModified:         o.LastModified,
 		SurrogateKeys:        o.SurrogateKeys,
-		Hits:                 o.Hits,
-		CacheControl:         o.CacheControl,
-		OriginAge:            o.OriginAge,
-		HasConnectionList:    o.HasConnectionList,
-		HasNoCacheFields:     o.HasNoCacheFields,
-		HasDate:              o.HasDate,
-		VaryValue:            o.VaryValue,
-		RespNoCache:          o.RespNoCache,
-		RespMustRevalidate:   o.RespMustRevalidate,
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		Hits:               atomic.LoadUint64(&o.Hits),
+		CacheControl:       o.CacheControl,
+		OriginAge:          o.OriginAge,
+		HasConnectionList:  o.HasConnectionList,
+		HasNoCacheFields:   o.HasNoCacheFields,
+		HasDate:            o.HasDate,
+		VaryValue:          o.VaryValue,
+		RespNoCache:        o.RespNoCache,
+		RespMustRevalidate: o.RespMustRevalidate,
+		KeepGrace:          o.KeepGrace,
+		Pool:               o.Pool,
 	}
 }
 
@@ -386,4 +417,8 @@ type Stats struct {
 	Misses int64 `json:"misses"`
 	// Evictions is the total number of evictions since boot.
 	Evictions int64 `json:"evictions"`
+	// ReaperGraceHolds is the number of times the TTL reaper skipped
+	// an expired KeepGrace entry because the MayReap gate withheld it
+	// (origin pool unable to refill) since boot.
+	ReaperGraceHolds int64 `json:"reaper_grace_holds"`
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -35,7 +36,11 @@ import (
 // increment over-budget, eviction, and compaction counters inline.
 // walMetrics, when non-nil, is injected into the WAL log so it can
 // record write duration, queue depth, and write count metrics.
-func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) (storage.Store, error) {
+// pools, when non-empty, arms the TTL reaper's stayin_alive grace gate
+// (ADR-0051): graced entries are reaped only while their origin pool
+// still has a healthy target. An empty map leaves the gate unset —
+// the store reaps every expired entry (historical behavior).
+func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics, pools map[string]*origin.Pool) (storage.Store, error) {
 	hotAlgo := e.cfg.Storage.HotEvictionAlgorithm
 	if hotAlgo == "" {
 		hotAlgo = e.cfg.Storage.EvictionAlgorithm
@@ -48,6 +53,10 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 		MaxBytes:             e.cfg.Storage.HotMaxBytes.Bytes(),
 		Slab:                 e.cfg.Storage.HotMmapSlab,
 		HotEvictionAlgorithm: hotAlgo,
+		BanTTL:               e.cfg.Cluster.BanTTL,
+	}
+	if len(pools) > 0 {
+		hotCfg.MayReap = mayReapDecider(pools)
 	}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
@@ -70,6 +79,26 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 		WarmMetrics:            warmMetrics,
 		WALMetrics:             walMetrics,
 	})
+}
+
+// mayReapDecider builds the HotStore's TTL-reaper grace gate
+// (ADR-0051). An expired KeepGrace entry may be reaped only while the
+// route's origin pool can still refill a miss; when every target is
+// ejected the entry is held so the stayin_alive route keeps serving
+// stale through the outage. Ungraced entries, unknown pools (and
+// pool-less routes, whose Pool stamp is empty) always reap — grace
+// cannot engage without a resolvable health signal.
+func mayReapDecider(pools map[string]*origin.Pool) func(obj *api.Object) bool {
+	return func(obj *api.Object) bool {
+		if !obj.KeepGrace {
+			return true
+		}
+		p, ok := pools[obj.Pool]
+		if !ok {
+			return true
+		}
+		return p.HasHealthyTarget()
+	}
 }
 
 // buildCluster initialises the gossip cluster node from the Listen and Cluster
@@ -175,8 +204,50 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 	}
 }
 
+// pathRewriteFastHTTP rewrites the request path with the compiled
+// path_rewrite before forwarding to next. The regex sibling of
+// stripPrefixFastHTTP: same surface (static routes without cache),
+// same boundary semantics via cache.PathRewrite.RewriteURI.
+func pathRewriteFastHTTP(rw *cache.PathRewrite, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		rw.Apply(&ctx.Request)
+		next(ctx)
+	}
+}
+
+// buildPathRewrite compiles the route's request.path_rewrite into a
+// cache.PathRewrite. The pattern was validated and compiled once by
+// config.validatePathRewrite; the second compile here is the one the
+// handler keeps. Returns nil when path_rewrite is not configured.
+func buildPathRewrite(rc config.Route) *cache.PathRewrite {
+	pw := rc.Request.PathRewrite
+	if pw.Match == "" || pw.Replace == "" {
+		return nil
+	}
+	return cache.NewPathRewrite(pw.Match, pw.Replace)
+}
+
+// buildForwardedPolicy compiles the route's request.forwarded block into
+// a cache.ForwardedPolicy (issue #769). Validation rejects forwarded on
+// static routes and any header_set overlap, and defaults max_append, so
+// this only maps the validated fields. Returns the zero (disabled)
+// policy when the block is unset.
+func buildForwardedPolicy(rc config.Route) cache.ForwardedPolicy {
+	f := rc.Request.Forwarded
+	return cache.ForwardedPolicy{
+		ClientIP:  f.ClientIP,
+		Proto:     f.Proto,
+		Host:      f.Host,
+		Via:       f.Via,
+		MaxAppend: f.MaxAppend,
+	}
+}
+
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
+	// Retain the router: startListeners wraps it into the routed H1
+	// fast path (issue #696). Must be set before listeners start.
+	rs.router = router
 	// The metrics middleware attributes by upstream pool: the label set
 	// stays bounded by the pool configuration, unlike route names.
 	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
@@ -184,6 +255,10 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 		poolNames = append(poolNames, pc.Name)
 	}
 	rs.dpMetrics.PreResolveRoutes(poolNames)
+	// The traffic-class slot table comes from the same config slice the
+	// classifier was compiled from, so classifier outputs always hit
+	// pre-resolved slots.
+	rs.dpMetrics.PreResolveTrafficClasses(rs.trafficClassify.ClassNames())
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
 	// Native fasthttp middleware chain: tracing → metrics → router.
@@ -192,6 +267,20 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	// after the handler returns is race-free.
 	metricsWrapped := rs.dpMetrics.FastHTTPMiddleware(router.ServeRequest)
 	return tracing.FastHTTPMiddleware("bouine.pipeline", metricsWrapped)
+}
+
+// trafficClassSpecs maps the config tree's traffic classes onto the
+// server layer's spec type so the server layer keeps its dependency
+// diet.
+func trafficClassSpecs(classes []config.TrafficClass) []server.TrafficClassSpec {
+	if len(classes) == 0 {
+		return nil
+	}
+	specs := make([]server.TrafficClassSpec, len(classes))
+	for i := range classes {
+		specs[i] = server.TrafficClassSpec{Name: classes[i].Name, Hosts: classes[i].Hosts}
+	}
+	return specs
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.
@@ -221,6 +310,9 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 		Targets:               pc.Targets,
 		Logger:                logger,
 		Consecutive5xx:        pc.Health.Passive.Consecutive5xx,
+		EjectFor:              pc.Health.Passive.EjectFor,
+		HedgeTimeout:          buildHedgeTimeout(pc),
+		PreserveHost:          pc.Connect.PreserveHost,
 		Metrics:               metrics,
 		DialTimeout:           pc.Connect.Timeout,
 		KeepAlive:             pc.Connect.KeepAlive,
@@ -228,6 +320,25 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 		MaxIdleConnDuration:   pc.Connect.MaxIdleConnDuration,
 		ResponseHeaderTimeout: pc.Connect.ResponseHeaderTimeout,
 	}
+}
+
+// resolveRouteFetchTimeout applies the per-route origin-fetch timeout
+// resolution order: an explicit cache.fetch_timeout wins; otherwise the
+// route inherits the pool's connect.response_header_timeout (resolved
+// with its built-in default by origin.NewPool), so a route without its
+// own knob keeps today's effective origin-wait bound. With the pool
+// client no longer carrying a client-level ReadTimeout cap (see
+// newOriginClient), this is the only defaulting site — an unset value
+// must never fall through to cache.defaultFetchTimeout (60s), which
+// would silently double the historical origin wait.
+func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
+	if rc.Cache.FetchTimeout > 0 {
+		return rc.Cache.FetchTimeout
+	}
+	if p != nil {
+		return p.ResolvedClientConfig().ResponseHeaderTimeout
+	}
+	return 0
 }
 
 // buildRouter constructs the server.Router by iterating over the route table
@@ -246,10 +357,11 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 // All cache handlers are collected into rs.handlers; the engine
 // filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
-	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
+	router := server.NewRouter(server.RouterConfig{Logger: e.logger, TrafficClassify: e.buildTrafficClassifier(rs)})
+	buildRouteFP := e.routeFPBuilder(rs)
 	for _, rc := range e.cfg.Routes {
 		if rc.Static.Root != "" {
-			e.buildStaticRoute(router, rs, rc)
+			e.buildStaticRoute(router, rs, rc, buildRouteFP)
 			continue
 		}
 		p := rs.pools[rc.Pool]
@@ -260,9 +372,15 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			Upstream:                p.FastHandler(0),
 			FastClient:              p.FastClient(),
 			StripPrefix:             rc.Request.StripPrefix,
+			PathRewrite:             buildPathRewrite(rc),
+			RequestHeaderSet:        rc.Request.HeaderSet,
+			RequestHeaderRemove:     rc.Request.HeaderRemove,
+			Forwarded:               buildForwardedPolicy(rc),
+			ResponseHeaderSet:       rc.Response.HeaderSet,
+			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			NegativeTTL:             rc.Cache.NegativeTTL,
+			Negative:                rc.Cache.NegativeTTL.Policy(),
 			JitterPercent:           rc.Cache.JitterPercent,
 			StayinAlive:             rc.Cache.StayinAlive,
 			LogCacheKeys:            true,
@@ -271,10 +389,14 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:              rc.Cache.StaleIfError,
 			AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+			BypassOnCookie:          rc.Cache.BypassOnCookie != nil && *rc.Cache.BypassOnCookie,
+			BypassOnUserAgent:       rc.Cache.BypassOnUserAgent,
+			BypassOnCookieNames:     rc.Cache.BypassOnCookieNames,
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
-			FetchTimeout:            rc.Cache.FetchTimeout,
+			FetchTimeout:            resolveRouteFetchTimeout(rc, p),
+			MaxVariants:             rc.Cache.MaxVariants,
 			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
@@ -282,22 +404,19 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
+			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
 			PoolName:                rc.Pool,
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
-			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
-				owner := rs.clusterNode.Owner(key)
-				if owner.Name == "" {
-					return api.PeerInfo{}, true
-				}
-				return owner, rs.clusterNode.IsLocal(key)
-			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
+			cfg.OwnerFn = ownerFn
+			cfg.PeerFetch = peerFetchFn
+			cfg.OnPeerVariantMismatch = func() {
+				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
@@ -314,11 +433,71 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				}()
 			}
 		}
+		// Data-plane invalidation fan-out (issue #753).
+		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest)
+		e.addRoute(router, rc, cached.ServeRequest, buildRouteFP(cached))
+	}
+	// Route shadow detection is boot-only, mirroring the traffic-class
+	// report above: a fully-shadowed later route can never be selected,
+	// so the dead config is surfaced at Error level while boot proceeds
+	// with declaration-order precedence (issue #772).
+	for _, msg := range router.ShadowedRoutes() {
+		e.logger.Error(msg)
 	}
 	return router
+}
+
+// addRoute lowers one configured route onto the router with the full
+// match predicate (issue #772): wildcard host and anchored RE2 path
+// included. A regex that fails to compile here cannot happen for a
+// config that passed config.Validate; it is still log-and-skip (the
+// static-route failure mode) rather than panic so a hand-built route
+// table degrades the same way a bad static root does.
+func (e *engine) addRoute(router *server.Router, rc config.Route, handler fasthttp.RequestHandler, fastPath api.FastPathHandler) {
+	err := router.AddRouteSpec(server.RouteSpec{
+		Host:       rc.Match.Host,
+		PathPrefix: rc.Match.PathPrefix,
+		Path:       rc.Match.Path,
+		Label:      rc.Name,
+		Pool:       rc.Pool,
+		Methods:    rc.Match.Methods,
+		Handler:    handler,
+		FastPath:   fastPath,
+	})
+	if err != nil {
+		e.logger.Error("route init failed, skipping", "route", rc.Name, "error", err)
+	}
+}
+
+// routeFPBuilder produces the per-route H1 fast-path constructor: each
+// cache-enabled route registers the FastPathHandler built from its own
+// Handler, so hits carry the route's pool attribution and run under the
+// route's KeyPolicy (issue #696). A single store-level handler cannot —
+// the store is shared across routes and knows nothing about them. Every
+// built handler joins rs.fastPathHandlers for shutdown drain.
+func (e *engine) routeFPBuilder(rs *runState) func(*cache.Handler) *cache.FastPathHandler {
+	return func(cached *cache.Handler) *cache.FastPathHandler {
+		fp := cache.NewFastPathHandler(cached)
+		rs.fastPathHandlers = append(rs.fastPathHandlers, fp)
+		return fp
+	}
+}
+
+// buildTrafficClassifier compiles the configured traffic classes once
+// and reports boot-only shadow findings: a fully-shadowed later
+// pattern can never select its class, so the dead config is surfaced
+// at Error level while boot proceeds with declaration-order
+// precedence. The classifier is shared by the router (slow path) and
+// the routed fast path — both run the same classify over the same
+// Host.
+func (e *engine) buildTrafficClassifier(rs *runState) *server.TrafficClassifier {
+	rs.trafficClassify = server.NewTrafficClassifier(trafficClassSpecs(e.cfg.Metrics.TrafficClasses))
+	for _, msg := range rs.trafficClassify.ShadowedPatterns() {
+		e.logger.Error(msg)
+	}
+	return rs.trafficClassify
 }
 
 // buildStaticRoute wires a route that serves files from a local directory
@@ -328,7 +507,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 // replication as proxied responses. When cache is not explicitly enabled
 // (default for static routes), the static handler serves directly from disk
 // and the OS page cache provides the hot caching layer.
-func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route) {
+//
+//nolint:funlen // 84: the cached-static-route wiring mirrors the proxied-route block by design; splitting it would hide the symmetry
+func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route, buildRouteFP func(*cache.Handler) *cache.FastPathHandler) {
 	sh, err := staticfile.New(staticfile.Config{
 		Root:       rc.Static.Root,
 		IndexFiles: rc.Static.Index,
@@ -341,22 +522,44 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		return
 	}
 
+	// strip_prefix / path_rewrite wrappers are wired ONLY on the
+	// non-cached path: the router dispatches straight into this chain,
+	// so the wrappers are the single application point there. When cache
+	// is enabled the cache.Handler owns the origin-bound URI — its
+	// originURI applies strip/rewrite on every miss, revalidate, and
+	// bypass — so the upstream handed to it must be the bare static
+	// handler. Wrapping both double-applies on every miss: a
+	// non-idempotent pattern (/x/ -> /y/ on /x/x/f) silently resolved to
+	// /y/y/f. The same restructure fixes strip_prefix, which carried the
+	// identical double-strip on cached static routes (a /api prefix
+	// stripped /api/api/f down to /f).
 	var handler fasthttp.RequestHandler = sh.ServeRequest
+	// cacheFP holds the route's fast-path handler when the static route
+	// is cache-enabled; nil (no fast path) otherwise.
+	var cacheFP *cache.FastPathHandler
 
-	// Apply strip_prefix if configured (reuses the same mechanism as
-	// proxied routes — one place, one behavior).
-	if rc.Request.StripPrefix != "" {
-		handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
+	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
+	if !cacheEnabled {
+		if rc.Request.StripPrefix != "" {
+			handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
+		}
+		if rw := buildPathRewrite(rc); rw != nil {
+			handler = pathRewriteFastHTTP(rw, handler)
+		}
 	}
 
-	// Wrap in cache handler only when cache is explicitly enabled.
-	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
 	if cacheEnabled {
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,
+			StripPrefix:             rc.Request.StripPrefix,
+			PathRewrite:             buildPathRewrite(rc),
+			RequestHeaderSet:        rc.Request.HeaderSet,
+			RequestHeaderRemove:     rc.Request.HeaderRemove,
+			ResponseHeaderSet:       rc.Response.HeaderSet,
+			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
-			NegativeTTL:             rc.Cache.NegativeTTL,
+			Negative:                rc.Cache.NegativeTTL.Policy(),
 			JitterPercent:           rc.Cache.JitterPercent,
 			StayinAlive:             rc.Cache.StayinAlive,
 			LogCacheKeys:            true,
@@ -368,6 +571,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
 			FetchTimeout:            rc.Cache.FetchTimeout,
+			MaxVariants:             rc.Cache.MaxVariants,
 			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
@@ -375,18 +579,15 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
+			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
-			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
-				owner := rs.clusterNode.Owner(key)
-				if owner.Name == "" {
-					return api.PeerInfo{}, true
-				}
-				return owner, rs.clusterNode.IsLocal(key)
-			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
+			cfg.OwnerFn = ownerFn
+			cfg.PeerFetch = peerFetchFn
+			cfg.OnPeerVariantMismatch = func() {
+				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
@@ -403,36 +604,153 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 				}()
 			}
 		}
+		// Data-plane invalidation fan-out for cache-enabled static routes;
+		// same rationale as the proxied-route wiring (issue #753).
+		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		handler = cached.ServeRequest
+		// Cache-enabled static routes register the per-route fast path
+		// like proxied ones. Pool-less routes leave resp.Pool empty and
+		// the metrics hook attributes them to "_default" — matching the
+		// slow path's middleware behavior for pool-less routes.
+		cacheFP = buildRouteFP(cached)
 	}
 
 	// When cache is not enabled, wire the staticfile handler's native
-	// fasthttp ServeRequest method directly — no adaptor needed.
+	// fasthttp ServeRequest method directly — no adaptor needed. Header
+	// rewrites still apply: they wrap the handler the same way. Path
+	// rewrites already landed in the handler chain above.
 	if !cacheEnabled {
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, sh.ServeRequest)
+		e.addRoute(router, rc, wrapStaticRewrites(rc, handler), nil)
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler)
+	e.addRoute(router, rc, handler, cacheFP)
+}
+
+// clusterFastPathClosures builds the ownerFn/peerFetch closures shared
+// by the slow-path HandlerConfig and the fast-path handler (strong mode
+// only). Reused so both paths hit the same ring and fetcher; nil when
+// clustering is not in strong mode.
+func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner api.PeerInfo, isLocal bool), func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) {
+	if rs.clusterNode == nil || rs.peerFetcher == nil || e.cfg.Cluster.Mode != config.ClusterModeStrong {
+		return nil, nil
+	}
+	ownerFn := func(key api.Key) (api.PeerInfo, bool) {
+		owner := rs.clusterNode.Owner(key)
+		if owner.Name == "" {
+			return api.PeerInfo{}, true
+		}
+		return owner, rs.clusterNode.IsLocal(key)
+	}
+	peerFetch := func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+		return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
+	}
+	return ownerFn, peerFetch
+}
+
+// staticHeaderRewriter applies a route's header rewrite directives around
+// a non-cached static handler. The cache.Handler implements the same
+// semantics for cached routes; this keeps the two surfaces honest.
+type staticHeaderRewriter struct {
+	reqSet     map[string]string
+	reqRemove  map[string]bool // lower-cased names
+	respSet    map[string]string
+	respRemove map[string]bool // canonical names
+}
+
+// wrapStaticRewrites wraps a non-cached static handler with the route's
+// header rewrite directives when any are configured; otherwise it
+// returns the handler unwrapped. The cache.Handler implements the same
+// semantics for cached routes.
+func wrapStaticRewrites(rc config.Route, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	if len(rc.Request.HeaderSet) == 0 && len(rc.Request.HeaderRemove) == 0 &&
+		len(rc.Response.HeaderSet) == 0 && len(rc.Response.HeaderRemove) == 0 {
+		return next
+	}
+	rew := &staticHeaderRewriter{
+		reqSet:     rc.Request.HeaderSet,
+		reqRemove:  lowerRemoveList(rc.Request.HeaderRemove),
+		respSet:    rc.Response.HeaderSet,
+		respRemove: canonicalizeRemoveList(rc.Response.HeaderRemove),
+	}
+	return rew.wrap(next)
+}
+
+// canonicalizeRemoveList interns the response-side remove names so
+// fasthttp's ResponseHeader.Del does canonical comparisons with
+// pre-canonicalized keys.
+func canonicalizeRemoveList(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[header.InternKey(n)] = true
+	}
+	return m
+}
+
+// lowerRemoveList lower-cases the request-side remove names for
+// case-insensitive RequestHeader.Del matching.
+func lowerRemoveList(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[strings.ToLower(n)] = true
+	}
+	return m
+}
+
+func (r *staticHeaderRewriter) wrap(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		for name := range r.reqRemove {
+			ctx.Request.Header.Del(name)
+		}
+		for k, v := range r.reqSet {
+			ctx.Request.Header.Set(k, v)
+		}
+		next(ctx)
+		for name := range r.respRemove {
+			ctx.Response.Header.Del(name)
+		}
+		for k, v := range r.respSet {
+			ctx.Response.Header.Set(k, v)
+		}
+	}
 }
 
 // buildKeyPolicy compiles the route's cache key config into a
-// pre-compiled KeyPolicy. Returns nil when no query/header policy
-// is active (no allocation).
+// pre-compiled KeyPolicy. Returns nil when no query/header/host policy
+// is active (no allocation). A verbatim encoding_policy constructs a
+// policy on its own: bucketing is the KeyPolicy zero value.
 func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	if !hasKeyPolicy(rk) {
 		return nil
 	}
-	return cache.NewKeyPolicy(
+	p := cache.NewKeyPolicy(
 		buildStripSet(rk.StripQueryParams),
 		buildKeepSet(rk.KeepQueryParams),
 		buildExcludeHeaderSet(rk.ExcludeHeaders),
 		rk.StripQueryPrefix,
 		rk.StripEmptyParams,
 		rk.DedupQueryParams,
+		rk.IncludeHeaders,
+		excludeHost(rk),
 	)
+	p.SetVerbatimAE(rk.VerbatimEncoding)
+	p.WithCookiePresence(rk.CookiePresence)
+	return p
+}
+
+// excludeHost resolves cache.key.include_host's tri-state: nil/true
+// keep host in the key (the default since the field was added); only an
+// explicit false produces a host-agnostic key.
+func excludeHost(rk config.RouteKey) bool {
+	return rk.IncludeHost != nil && !*rk.IncludeHost
 }
 
 func buildKeepSet(params []string) map[string]bool {
@@ -446,12 +764,15 @@ func buildKeepSet(params []string) map[string]bool {
 	return m
 }
 
-// hasKeyPolicy checks query/header fields only. canonicalize_path
-// is handled at the parser level, not in KeyPolicy.
+// hasKeyPolicy checks the query/header/host fields only.
 func hasKeyPolicy(rk config.RouteKey) bool {
 	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
+		len(rk.IncludeHeaders) > 0 ||
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
-		rk.StripEmptyParams || rk.DedupQueryParams
+		rk.StripEmptyParams || rk.DedupQueryParams ||
+		excludeHost(rk) ||
+		rk.VerbatimEncoding ||
+		len(rk.CookiePresence) > 0
 }
 
 // buildStripSet converts a config []string into a map for O(1) lookup.

@@ -1,18 +1,10 @@
-// Package admin is the L7 control plane. It serves the admin API,
-// health/readiness probes, metrics, and the dashboard SPA. The admin
-// surface MUST stay on its own listener; it is never bound on the
-// data-plane port (see AGENTS.md §2).
-//
-// The admin server uses fasthttp.Server. pprof handlers are wrapped via
-// the pprofwrapper package, which isolates the net/http dependency.
-// ADR-0034 documents the decision.
 package admin
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
+	"fmt"
 	"net"
 	"regexp"
 	"runtime"
@@ -24,6 +16,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/buildinfo"
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -34,12 +27,16 @@ import (
 //
 // Stable.
 type Config struct {
-	Logger             observability.Logger
-	PeerPutHandler     fasthttp.RequestHandler
-	PeerPurgeHandler   fasthttp.RequestHandler
-	Metrics            *observability.Metrics
-	PeersFn            func() []api.PeerInfo
-	PurgeFn            func(key api.Key) error
+	Logger           observability.Logger
+	PeerPutHandler   fasthttp.RequestHandler
+	PeerPurgeHandler fasthttp.RequestHandler
+	Metrics          *observability.Metrics
+	PeersFn          func() []api.PeerInfo
+	PurgeFn          func(key api.Key) error
+	// PurgeBatchFn applies a whole batch of purge URLs in one call:
+	// one local pass and one cluster broadcast (ADR-0044). Falls back
+	// to PurgeFn per key when unset.
+	PurgeBatchFn       func(urls []string) (purged int, failed int)
 	BanFn              func(expr api.BanExpr) (int, error)
 	CacheCheckFn       func(ctx context.Context, rawURL string) CacheCheckResult
 	ConfigFn           func() any
@@ -49,18 +46,26 @@ type Config struct {
 	ConditionsFn       func() []Condition
 	PeerBanHandler     fasthttp.RequestHandler
 	PeerRefreshHandler fasthttp.RequestHandler
-	ReadyFn            func() bool
-	CFStatusFn         func() CloudflareStatus
-	DashboardHandler   fasthttp.RequestHandler
-	OnRefreshed        func(ctx context.Context, url string)
-	OnBanned           func(ctx context.Context, expr api.BanExpr)
-	PeerFetchHandler   fasthttp.RequestHandler
-	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler fasthttp.RequestHandler
-	OnPurged           func(ctx context.Context, url string)
-	FaviconHandler     fasthttp.RequestHandler
-	Addr               string
-	Token              string
+	// PeerPurgeBatchHandler serves POST /v1/peer/purge/batch (ADR-0044).
+	PeerPurgeBatchHandler fasthttp.RequestHandler
+	// PeerRefreshBatchHandler serves POST /v1/peer/refresh/batch (ADR-0044).
+	PeerRefreshBatchHandler fasthttp.RequestHandler
+	ReadyFn                 func() bool
+	CFStatusFn              func() CloudflareStatus
+	DashboardHandler        fasthttp.RequestHandler
+	OnRefreshed             func(ctx context.Context, url string)
+	OnBanned                func(ctx context.Context, expr api.BanExpr)
+	PeerFetchHandler        fasthttp.RequestHandler
+	CFPropagateFn           func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler      fasthttp.RequestHandler
+	OnPurged                func(ctx context.Context, url string)
+	FaviconHandler          fasthttp.RequestHandler
+	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
+	// the ops history shown on the dashboard invalidation page. nil
+	// disables history recording. Set to OpsLogRing.Record by the engine.
+	OpsLogFn func(op, arg, result string)
+	Addr     string
+	Token    string
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
 	// this server, so peer clients must keep their idle timeout strictly
@@ -142,6 +147,9 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 		WriteTimeout:          5 * time.Second,
 		IdleTimeout:           DefaultAdminIdleTimeout,
 		NoDefaultServerHeader: true,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(logger, "admin"),
 	}
 	return s
 }
@@ -167,6 +175,9 @@ func New(cfg Config) *Server {
 		WriteTimeout:          5 * time.Second,
 		IdleTimeout:           resolveAdminIdleTimeout(cfg.IdleTimeout),
 		NoDefaultServerHeader: true,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "admin"),
 	}
 	if cfg.PprofEnabled {
 		s.inner.WriteTimeout = 0
@@ -203,6 +214,11 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 	if s.cfg.RateLimitPerSecond > 0 {
 		top = s.rateLimitMiddleware(limited, s.cfg.RateLimitPerSecond)
 	}
+	// Outermost: OTel server span. Extracts the W3C traceparent the
+	// invalidation caller propagates on /v1/ban and
+	// /v1/refresh, joining the platform trace into bouine. Skipped for the
+	// dashboard subtree, which has its own handler below.
+	traced := tracing.FastHTTPMiddleware("bouine.admin", top)
 	if s.cfg.DashboardHandler != nil {
 		dashHandler := s.cfg.DashboardHandler
 		faviconHandler := s.cfg.FaviconHandler
@@ -233,10 +249,10 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 					return
 				}
 			}
-			top(ctx)
+			traced(ctx)
 		}
 	}
-	return top
+	return traced
 }
 
 func (s *Server) routeHandler() fasthttp.RequestHandler {
@@ -371,6 +387,8 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 			peerPurge(ctx)
 			return true
 		}
+	case "/v1/peer/purge/batch":
+		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/ban":
 		if peerBan != nil {
 			peerBan(ctx)
@@ -381,6 +399,8 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 			peerRefresh(ctx)
 			return true
 		}
+	case "/v1/peer/refresh/batch":
+		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/fetch":
 		if peerFetch != nil {
 			peerFetch(ctx)
@@ -394,6 +414,25 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 	case "/v1/peer/metrics":
 		if peerMetrics != nil {
 			peerMetrics(ctx)
+			return true
+		}
+	}
+	return false
+}
+
+// handlePeerBatchRoute dispatches the ADR-0044 batch endpoints, which
+// live on Server.Config directly rather than the positional
+// buildPeerHandlers returns (which predate them).
+func (s *Server) handlePeerBatchRoute(ctx *fasthttp.RequestCtx, p string) bool {
+	switch p {
+	case "/v1/peer/purge/batch":
+		if s.cfg.PeerPurgeBatchHandler != nil {
+			s.cfg.PeerPurgeBatchHandler(ctx)
+			return true
+		}
+	case "/v1/peer/refresh/batch":
+		if s.cfg.PeerRefreshBatchHandler != nil {
+			s.cfg.PeerRefreshBatchHandler(ctx)
 			return true
 		}
 	}
@@ -490,9 +529,11 @@ func (s *Server) purge(ctx *fasthttp.RequestCtx) {
 	}
 	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.PurgeFn(key); err != nil {
+		s.recordOp("purge", req.URL, err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.recordOp("purge", req.URL, "ok")
 	if s.cfg.OnPurged != nil {
 		s.cfg.OnPurged(context.Background(), req.URL)
 	}
@@ -527,15 +568,28 @@ func (s *Server) purgeBatch(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	purged, failed := 0, 0
-	for _, u := range req.URLs {
-		key := cache.BuildKeyFromURL(u, nil)
-		if err := s.cfg.PurgeFn(key); err != nil {
-			failed++
-			continue
+	if s.cfg.PurgeBatchFn != nil {
+		purged, failed = s.cfg.PurgeBatchFn(req.URLs)
+		// The batch callback reports counts only, so the history gets a
+		// single batch entry; per-URL outcomes are not visible here.
+		res := fmt.Sprintf("ok, %d/%d purged", purged, len(req.URLs))
+		if failed > 0 {
+			res = fmt.Sprintf("partial, %d/%d purged, %d failed", purged, len(req.URLs), failed)
 		}
-		purged++
-		if s.cfg.OnPurged != nil {
-			s.cfg.OnPurged(context.Background(), u)
+		s.recordOp("purge", fmt.Sprintf("batch of %d urls", len(req.URLs)), res)
+	} else {
+		for _, u := range req.URLs {
+			key := cache.BuildKeyFromURL(u, nil)
+			if err := s.cfg.PurgeFn(key); err != nil {
+				failed++
+				s.recordOp("purge", u, err.Error())
+				continue
+			}
+			purged++
+			s.recordOp("purge", u, "ok")
+			if s.cfg.OnPurged != nil {
+				s.cfg.OnPurged(context.Background(), u)
+			}
 		}
 	}
 	writeJSON(ctx, fasthttp.StatusOK, map[string]any{"status": "purged", "count": purged, "failed": failed})
@@ -568,9 +622,15 @@ func (s *Server) ban(ctx *fasthttp.RequestCtx) {
 	}
 	count, err := s.cfg.BanFn(expr)
 	if err != nil {
+		s.recordOp("ban", banArg(expr), err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	res := "ok"
+	if count > 0 {
+		res = fmt.Sprintf("ok, %d evicted", count)
+	}
+	s.recordOp("ban", banArg(expr), res)
 	if s.cfg.OnBanned != nil {
 		s.cfg.OnBanned(context.Background(), expr)
 	}
@@ -590,13 +650,28 @@ func (s *Server) refresh(ctx *fasthttp.RequestCtx) {
 	}
 	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.RefreshFn(key); err != nil {
+		s.recordOp("refresh", req.URL, err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.recordOp("refresh", req.URL, "ok")
 	if s.cfg.OnRefreshed != nil {
 		s.cfg.OnRefreshed(context.Background(), req.URL)
 	}
 	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// recordOp appends an invalidation outcome to the ops history shown on
+// the dashboard invalidation page, when recording is wired.
+func (s *Server) recordOp(op, arg, result string) {
+	if s.cfg.OpsLogFn != nil {
+		s.cfg.OpsLogFn(op, arg, result)
+	}
+}
+
+// banArg renders a ban expression as a compact history label.
+func banArg(expr api.BanExpr) string {
+	return strings.TrimSpace(expr.HostRegex + " " + expr.PathRegex)
 }
 
 // Serve starts the admin server on the configured address.
@@ -683,7 +758,8 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/healthz": true, "/readyz": true, "/drain": true,
 		"/metrics": true, "/version": true, "/v1/cluster/peers": true,
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
-		"/v1/peer/ban": true, "/v1/peer/refresh": true, "/v1/peer/metrics": true,
+		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
+		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
@@ -722,13 +798,12 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 func writeJSON(ctx *fasthttp.RequestCtx, code int, v any) {
 	ctx.Response.Header.Set(header.ContentType, "application/json")
 	ctx.SetStatusCode(code)
-	_ = json.NewEncoder(ctx).Encode(v)
+	b, _ := jsonv2.Marshal(v)
+	_, _ = ctx.Write(b)
 }
 
 func decodeJSON(ctx *fasthttp.RequestCtx, v any) bool {
-	dec := json.NewDecoder(bytes.NewReader(ctx.PostBody()))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	if err := jsonv2.Unmarshal(ctx.PostBody(), v, jsonv2.RejectUnknownMembers(true)); err != nil {
 		ctx.Error("bad request: invalid or malformed JSON", fasthttp.StatusBadRequest)
 		return false
 	}

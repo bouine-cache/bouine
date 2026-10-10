@@ -80,7 +80,6 @@ func buildCFPropagator(
 		p.circuit.OnReject(func() {
 			metrics.CFCircuitRejected.Inc()
 		})
-		// Set initial state metric.
 		metrics.CFCircuitState.Set(float64(bouinecf.CircuitClosed))
 	}
 
@@ -294,7 +293,7 @@ func (p *cfPropagator) Status() admin.CloudflareStatus {
 }
 
 // PropagateExternal handles a purge request from an external service
-// (e.g. cache-lifecycle) via POST /v1/cloudflare/propagate. It routes
+// (e.g. an external invalidation service) via POST /v1/cloudflare/propagate. It routes
 // the request through the same batching/circuit-breaker/DLQ pipeline as
 // internal propagation requests.
 func (p *cfPropagator) PropagateExternal(ctx context.Context, req admin.CFPropagateRequest) error {

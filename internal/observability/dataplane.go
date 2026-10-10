@@ -26,12 +26,23 @@ type DataPlaneMetrics struct {
 	// waiting fetch_wait_timeout for a fetch-semaphore slot (issue #562).
 	// A non-zero rate means miss demand exceeds max_fetch_concurrency.
 	FetchShedTotal prometheus.Counter
+	// RewarmFillTotal counts shed misses that scheduled a bounded
+	// background store refill (the post-ban re-warm allowance). Read
+	// next to FetchShedTotal: sheds are no longer lost refills, so a
+	// rising shed rate during a purge storm no longer implies the hit
+	// ratio is pinned at the shed equilibrium.
+	RewarmFillTotal prometheus.Counter
 	// Streaming miss buffer metrics. The gauge tracks total bytes held
 	// in live SetBodyStreamWriter tee buffers; the counter tracks how
 	// many cacheable misses fell back to the synchronous buffered path
 	// because the streaming memory cap was exceeded.
 	StreamingBufferBytes prometheus.Gauge
 	VaryCapHits          prometheus.Counter // incremented when MaxVariants cap is hit
+	// VaryDriftTotal counts detected Vary-declaration drifts (ADR-0058),
+	// where the stale resolver and its variants were purged. Non-zero
+	// means an origin changed its Vary under a live cache; expect a
+	// one-cycle hit-ratio dip per drifted key.
+	VaryDriftTotal prometheus.Counter
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
@@ -76,6 +87,10 @@ type DataPlaneMetrics struct {
 	// at startup from config. Enables fill ratio computation:
 	// hot_store_bytes / hot_store_max_bytes.
 	HotStoreMaxBytes prometheus.Gauge
+	// HotStoreReaperGraceHolds counts TTL-reaper passes that withheld
+	// an expired stayin_alive entry because its origin pool had no
+	// healthy target (ADR-0051).
+	HotStoreReaperGraceHolds prometheus.Counter
 	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
 	WarmStoreBytes     prometheus.Gauge
 	WarmStoreEntries   prometheus.Gauge
@@ -102,6 +117,10 @@ type DataPlaneMetrics struct {
 	CFDLQRetried  *prometheus.CounterVec // labels: kind
 	Rings         *Rings                 // nil when dashboard is disabled
 	poolIDs       map[string]int
+	// classTable holds the traffic-class slot index; nil when
+	// PreResolveTrafficClasses has not run — record paths then fall
+	// back to WithLabelValues.
+	classTable *classSlotTable
 	// Refresh-before-expiry metrics. Nil when no route enables the feature.
 	RefreshTotal        *prometheus.CounterVec // labels: route, result
 	RefreshErrorsTotal  *prometheus.CounterVec // labels: route, error_type
@@ -146,24 +165,24 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		RequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "requests_total",
-			Help:      "Total number of requests processed by the data plane. Carries the exact status code; the duration histogram carries only the response class, so exact error codes stay queryable without extra series.",
-		}, []string{"status", "cache_result", "source", "upstream_pool"}),
+			Help:      "Total number of requests processed by the data plane. Carries the exact status code; the duration histogram carries only the response class, so exact error codes stay queryable without extra series. traffic_class is the request's configured host-class; unclassified covers requests matching no configured class.",
+		}, []string{"status", "cache_result", "source", "upstream_pool", "traffic_class"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
 			Name:      "request_duration_seconds",
-			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. The top bucket is 1s: a cache should never be slow, so hung-fetch tails are tracked as 5xx counts on bouine_requests_total, not as sub-second histogram resolution. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
-			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
+			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. The tail buckets (2.5/5/10s) distinguish slow misses from hung-fetches; the overflow +Inf bucket captures anything beyond 10s. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 			// Native: 1.1 growth factor, capped at 80 sparse buckets;
 			// warm Observe measured 0 allocs/op (client_golang v1.24.1).
 			NativeHistogramBucketFactor:     1.1,
 			NativeHistogramMaxBucketNumber:  80,
 			NativeHistogramMinResetDuration: time.Hour,
-		}, []string{"status", "cache_result", "upstream_pool"}),
+		}, []string{"status", "cache_result", "upstream_pool", "traffic_class"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "response_bytes_total",
 			Help:      "Total bytes written in responses.",
-		}, []string{"cache_result", "source", "upstream_pool"}),
+		}, []string{"cache_result", "source", "upstream_pool", "traffic_class"}),
 		VaryCapHits: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "vary_cap_hits_total",
@@ -171,21 +190,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		}),
 	}
 	m.initCFPurgeMetrics()
-	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_bytes",
-		Help:      "Estimated bytes used by the hot in-memory cache tier for eviction budgeting (body + headers + struct + map overhead). Not a runtime memory metric; for heap usage see go_memstats_heap_alloc_bytes.",
-	})
-	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_entries",
-		Help:      "Current number of objects stored in the hot in-memory cache tier.",
-	})
-	m.HotStoreEvictions = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_evictions_total",
-		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
-	})
+	m.initHotStoreMetrics()
 	m.WarmStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "warm_store_bytes",
@@ -201,11 +206,6 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "warm_store_self_heals_total",
 		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
 	})
-	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "hot_store_max_bytes",
-		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
-	})
 	m.WarmStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "warm_store_max_bytes",
@@ -216,16 +216,8 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "metrics_reset_total",
 		Help:      "Metrics re-initialization events. Non-zero indicates the process restarted or metrics were re-registered, explaining histogram count discontinuities.",
 	})
-	m.FetchShedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "fetch_shed_total",
-		Help:      "Foreground origin fetches shed after waiting fetch_wait_timeout for a fetch-semaphore slot. Non-zero rate means miss demand exceeds max_fetch_concurrency; shed requests serve stale when possible, else 503 + Retry-After.",
-	})
-	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "request_queue_depth",
-		Help:      "Current number of in-flight HTTP requests being processed by the data plane. A rising value indicates CPU starvation before timeouts appear.",
-	})
+	m.initShedMetrics()
+	m.initVaryDriftMetrics()
 	m.initRefreshMetrics()
 	m.initWALMetrics()
 	m.initStreamingMetrics()
@@ -250,6 +242,7 @@ func (m *DataPlaneMetrics) registerMetrics(reg *prometheus.Registry) {
 		m.CFCircuitRejected, m.CFCircuitState,
 		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions, m.HotStoreMaxBytes,
+		m.HotStoreReaperGraceHolds,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals, m.WarmStoreMaxBytes,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
@@ -257,7 +250,8 @@ func (m *DataPlaneMetrics) registerMetrics(reg *prometheus.Registry) {
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
 		m.ReactorConnsRegistered, m.ReactorHits, m.ReactorHandoffs, m.ReactorReturns, m.ReactorDrops,
-		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal)
+		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
+		m.RewarmFillTotal, m.VaryDriftTotal)
 }
 
 // initReactorMetrics creates the H1 reactor telemetry counters (see
@@ -305,6 +299,60 @@ func (m *DataPlaneMetrics) initReactorMetrics() {
 	}
 }
 
+// initHotStoreMetrics creates the hot-tier gauges, the eviction
+// counter, and the TTL-reaper grace-hold counter (ADR-0051). Called by
+// NewDataPlaneMetrics; extracted like initShedMetrics to keep
+// NewDataPlaneMetrics under the funlen limit.
+func (m *DataPlaneMetrics) initHotStoreMetrics() {
+	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_bytes",
+		Help:      "Estimated bytes used by the hot in-memory cache tier for eviction budgeting (body + headers + struct + map overhead). Not a runtime memory metric; for heap usage see go_memstats_heap_alloc_bytes.",
+	})
+	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_entries",
+		Help:      "Current number of objects stored in the hot in-memory cache tier.",
+	})
+	m.HotStoreEvictions = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_evictions_total",
+		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
+	})
+	m.HotStoreReaperGraceHolds = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_reaper_grace_holds_total",
+		Help:      "Total number of TTL-reaper passes that withheld an expired stayin_alive (KeepGrace) entry because its origin pool had no healthy target (ADR-0051). A persistently non-zero rate during an outage is the grace retention working; non-zero while all pools report healthy indicates a stale ejection — check the origin pool health state.",
+	})
+	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_max_bytes",
+		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
+	})
+}
+
+// initShedMetrics creates the fetch-shed and re-warm-fill counters
+// (the shed/re-warm pair: ADR-0045) plus the request-queue-depth gauge.
+// Called by NewDataPlaneMetrics; extracted to keep NewDataPlaneMetrics
+// under the funlen limit.
+func (m *DataPlaneMetrics) initShedMetrics() {
+	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "request_queue_depth",
+		Help:      "Current number of in-flight HTTP requests being processed by the data plane. A rising value indicates CPU starvation before timeouts appear.",
+	})
+	m.FetchShedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "fetch_shed_total",
+		Help:      "Foreground origin fetches shed after waiting fetch_wait_timeout for a fetch-semaphore slot. Non-zero rate means miss demand exceeds max_fetch_concurrency; shed requests serve stale when possible, else 503 + Retry-After.",
+	})
+	m.RewarmFillTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "rewarm_fill_total",
+		Help:      "Shed misses that scheduled a bounded background store refill. Compare with fetch_shed_total: sheds re-warm the store instead of being lost refills.",
+	})
+}
+
 // initStreamingMetrics creates the streaming buffer gauge and fallback
 // counter. Called by NewDataPlaneMetrics; extracted to keep
 // NewDataPlaneMetrics under the funlen limit.
@@ -318,6 +366,14 @@ func (m *DataPlaneMetrics) initStreamingMetrics() {
 		Namespace: "bouine",
 		Name:      "streaming_fallback_total",
 		Help:      "Cacheable misses that fell back to synchronous buffering because the streaming memory cap was exceeded.",
+	})
+}
+
+func (m *DataPlaneMetrics) initVaryDriftMetrics() {
+	m.VaryDriftTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "vary_drift_total",
+		Help:      "Revalidations that observed the origin declaring a different variation surface (Vary) than the stored resolver carried; the stale resolver and its variants were purged.",
 	})
 }
 
@@ -340,18 +396,29 @@ const (
 	// code costs one series instead of a histogram's bucket series.
 	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
 	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
-	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
+	// metricSourceSlots bounds the source axis: HOT=0,WARM=1,PEER=2,
+	// ORIGIN=3,BOUINE=4. The set is declared once, as data, in
+	// TestSourceLabelSetClosed, which fails when any encoding of it
+	// (this bound, sourceIndex, sourceIndexBytes, normaliseSource, the
+	// middleware index switch) drifts out of sync.
+	metricSourceSlots = 5
+	// metricClassSlots bounds the traffic_class axis: "unclassified"
+	// (index 0) + the config cap of 8 classes. Static array bound so
+	// the per-pool tables stay one allocation; unused slots cost
+	// nothing (lazy fill, same as pools).
+	metricClassSlots = 9
 )
 
 // poolMetrics holds per-pool collectors indexed by
-// [status][cacheResult][source] (the histogram drops the source axis and
-// collapses status to the class axis). Slots fill lazily on first
-// observation; concurrent first-touch of one slot is benign, since
-// WithLabelValues returns the same child for the same label tuple.
+// [status][cacheResult][source][trafficClass] (the histogram drops
+// the source axis and collapses status to the class axis). Slots fill
+// lazily on first observation; concurrent first-touch of one slot is
+// benign, since WithLabelValues returns the same child for the same
+// label tuple.
 type poolMetrics struct {
-	requestsTotal   [metricStatusSlots][metricResultSlots][metricSourceSlots]atomic.Pointer[prometheus.Counter]
-	requestDuration [metricStatusClassSlots][metricResultSlots]atomic.Pointer[prometheus.Observer]
-	responseBytes   [metricResultSlots][metricSourceSlots]atomic.Pointer[prometheus.Counter]
+	requestsTotal   [metricStatusSlots][metricResultSlots][metricSourceSlots][metricClassSlots]atomic.Pointer[prometheus.Counter]
+	requestDuration [metricStatusClassSlots][metricResultSlots][metricClassSlots]atomic.Pointer[prometheus.Observer]
+	responseBytes   [metricResultSlots][metricSourceSlots][metricClassSlots]atomic.Pointer[prometheus.Counter]
 }
 
 // statusClassStrings maps statusClassIndex to the histogram status label.
@@ -445,6 +512,9 @@ func cacheResultIndexBytes(s []byte) int {
 }
 
 // sourceIndex maps source strings to array indices. Returns -1 for unknown.
+// Both the empty string (bouine-synthesized responses on the wire) and
+// "bouine" (the metrics label for that default slot) resolve to slot 4,
+// so a normalised label string always finds its pre-resolved slot.
 func sourceIndex(s string) int {
 	switch s {
 	case string(api.SourceHot):
@@ -455,6 +525,8 @@ func sourceIndex(s string) int {
 		return 2
 	case string(api.SourceOrigin):
 		return 3
+	case string(api.SourceBouine):
+		return 4
 	case "":
 		return 4
 	default:
@@ -463,7 +535,9 @@ func sourceIndex(s string) int {
 }
 
 // sourceIndexBytes is sourceIndex over a []byte, zero-alloc: the switch
-// form lets the compiler elide the string([]byte) conversion.
+// form lets the compiler elide the string([]byte) conversion. Kept in
+// lockstep with sourceIndex — TestSourceLabelSetClosed fails the build
+// if the two encodings drift.
 func sourceIndexBytes(s []byte) int {
 	switch string(s) {
 	case string(api.SourceHot):
@@ -474,6 +548,8 @@ func sourceIndexBytes(s []byte) int {
 		return 2
 	case string(api.SourceOrigin):
 		return 3
+	case string(api.SourceBouine):
+		return 4
 	case "":
 		return 4
 	default:
@@ -503,9 +579,54 @@ func (m *DataPlaneMetrics) PreResolveRoutes(poolNames []string) {
 	}
 }
 
+// classSlotTable maps a traffic-class name to its slot index (0 is
+// "unclassified"). Written once at boot, read on every record; nil
+// when PreResolveTrafficClasses has not run — record paths then fall
+// back to WithLabelValues.
+type classSlotTable struct {
+	ids   map[string]int
+	names [metricClassSlots]string // slot index -> label value, for slot fill
+}
+
+// PreResolveTrafficClasses builds the traffic-class slot table from
+// the configured class names — the same slice the classifier was
+// compiled from, so their outputs cannot diverge. Lazy like
+// PreResolveRoutes: it allocates only the index, no series.
+func (m *DataPlaneMetrics) PreResolveTrafficClasses(classNames []string) {
+	t := &classSlotTable{ids: make(map[string]int, len(classNames)+1)}
+	t.names[0] = api.TrafficClassUnclassified
+	t.ids[api.TrafficClassUnclassified] = 0
+	for i, name := range classNames {
+		if name == "" || name == api.TrafficClassUnclassified || i+1 >= metricClassSlots {
+			continue
+		}
+		t.names[i+1] = name
+		t.ids[name] = i + 1
+	}
+	m.classTable = t
+}
+
+// classIndex maps a traffic-class name to its slot. Unknown names map
+// to the "unclassified" slot 0, mirroring the _default pool fallback:
+// both structures come from the same config slice, so divergence
+// "cannot happen" — the fallback exists because that assumption is
+// what a bug would violate. The -1 return happens only for a nil
+// table; a non-nil table always yields a usable slot (0 for an unknown
+// name, i+1 otherwise), never a negative index.
+func (t *classSlotTable) classIndex(name string) (int, string) {
+	if t == nil {
+		return -1, ""
+	}
+	if id, ok := t.ids[name]; ok {
+		return id, t.names[id]
+	}
+	return 0, api.TrafficClassUnclassified
+}
+
 // SetAccessLog configures the access logger and sampling rate for the
-// merged middleware. logger receives Warn for non-200 responses (always)
-// and Info for 200 responses (sampled 1-in-sampleRate by cache key).
+// merged middleware. logger receives Info for all responses: non-200
+// responses are always logged, 200 responses are sampled
+// 1-in-sampleRate by cache key.
 // sampleRate=0 disables sampling (every request is logged).
 func (m *DataPlaneMetrics) SetAccessLog(logger Logger, sampleRate uint64) {
 	m.accessLog = logger
@@ -522,10 +643,13 @@ func (m *DataPlaneMetrics) initCFPurgeMetrics() {
 		Help:      "Cloudflare cache invalidation API calls by operation and status.",
 	}, []string{"operation", "status"})
 	m.CFPurgeDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "bouine",
-		Name:      "cloudflare_purge_duration_seconds",
-		Help:      "Latency of Cloudflare cache invalidation API calls.",
-		Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+		Namespace:                       "bouine",
+		Name:                            "cloudflare_purge_duration_seconds",
+		Help:                            "Latency of Cloudflare cache invalidation API calls. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+		Buckets:                         []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
 	}, []string{"operation"})
 	m.CFPurgeSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bouine",
@@ -654,6 +778,19 @@ func (m *DataPlaneMetrics) VaryCapHitsCount() int64 {
 	}
 	var d dto.Metric
 	_ = m.VaryCapHits.(prometheus.Metric).Write(&d)
+	return int64(d.GetCounter().GetValue())
+}
+
+// FetchShedCount returns the total foreground origin fetches shed after
+// waiting fetch_wait_timeout for a fetch-semaphore slot. Used by the
+// dashboard insights engine to detect demand exceeding
+// max_fetch_concurrency.
+func (m *DataPlaneMetrics) FetchShedCount() int64 {
+	if m == nil || m.FetchShedTotal == nil {
+		return 0
+	}
+	var d dto.Metric
+	_ = m.FetchShedTotal.(prometheus.Metric).Write(&d)
 	return int64(d.GetCounter().GetValue())
 }
 
@@ -795,7 +932,7 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 			statusCode = 200
 		}
 		status := statusString(statusCode)
-		pool, route := attribution(ctx)
+		pool, route, class := attribution(ctx)
 		// Classify X-Cache and X-Cache-Source from the raw header bytes.
 		// The byte switches are zero-alloc (the compiler elides string([]byte)
 		// in switch positions); the label strings for the metrics paths are
@@ -836,22 +973,25 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		case 3:
 			source = string(api.SourceOrigin)
 		default:
-			source = ""
+			// Empty (bouine-synthesized: only-if-cached 504, shed 503) and
+			// unknown or spoofed header values both collapse into the
+			// closed set's default "bouine" slot.
+			source = string(api.SourceBouine)
 		}
 
 		elapsed := time.Since(start)
 		dur := elapsed.Seconds()
 		bytesOut := float64(len(ctx.Response.Body()))
 
-		m.recordFastHTTPMetrics(statusCode, status, pool, cacheResult, source, dur, bytesOut)
+		m.recordFastHTTPMetrics(statusCode, status, pool, class, cacheResult, source, dur, bytesOut)
 
-		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header)
+		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header, len(ctx.Request.Header.Peek(header.Cookie)) > 0)
 
 		if m.accessLog != nil {
 			msg := accessLogMessage(cacheResult, statusCode)
+			attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, class, elapsed, statusCode)
 			if statusCode != fasthttp.StatusOK {
-				attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
-				m.accessLog.Warn(msg, attrs...)
+				m.accessLog.Info(msg, attrs...)
 			} else {
 				keyVal := ctx.UserValue("cacheKey")
 				var key api.Key
@@ -859,7 +999,6 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 					key = k
 				}
 				if m.shouldLogAccess(key) {
-					attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
 					m.accessLog.Info(msg, attrs...)
 				}
 			}
@@ -868,14 +1007,13 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 }
 
 // attribution resolves the metric/ring labels from the UserValues the
-// router sets. The two axes are independent and never fall back to
-// each other: pool feeds the upstream_pool Prometheus label from the
-// route's configured pool only (plus the _default fallback), so the
-// label set stays bounded by the pool configuration no matter how many
-// routes exist; route feeds the dashboard rings only.
-func attribution(ctx *fasthttp.RequestCtx) (pool, route string) {
+// router sets. Each axis is independent and bounded by its own
+// configuration, never by request input, so client input cannot mint
+// a label value (same guarantee as upstream_pool).
+func attribution(ctx *fasthttp.RequestCtx) (pool, route, class string) {
 	pool = "_default"
 	route = "_default"
+	class = api.TrafficClassUnclassified
 	if rv := ctx.UserValue(header.XBouineRoute); rv != nil {
 		if rs, ok := rv.(string); ok && rs != "" {
 			route = rs
@@ -886,69 +1024,81 @@ func attribution(ctx *fasthttp.RequestCtx) (pool, route string) {
 			pool = ps
 		}
 	}
-	return pool, route
+	if rv := ctx.UserValue(header.XBouineTrafficClass); rv != nil {
+		if cs, ok := rv.(string); ok && cs != "" {
+			class = cs
+		}
+	}
+	return pool, route, class
 }
 
-// slotCounter resolves the requests_total slot at [si][ri][src],
+// slotCounter resolves the requests_total slot at [si][ri][src][ci],
 // creating the child on first touch via WithLabelValues. Concurrent
 // first-touches of one slot are benign (see poolMetrics).
-func (m *DataPlaneMetrics) slotCounter(pm *poolMetrics, si, ri, src int, status, cacheResult, source, pool string) prometheus.Counter {
-	slot := &pm.requestsTotal[si][ri][src]
+func (m *DataPlaneMetrics) slotCounter(pm *poolMetrics, si, ri, src, ci int, status, cacheResult, source, pool, class string) prometheus.Counter {
+	slot := &pm.requestsTotal[si][ri][src][ci]
 	if c := slot.Load(); c != nil {
 		return *c
 	}
-	c := m.RequestsTotal.WithLabelValues(status, cacheResult, source, pool)
+	c := m.RequestsTotal.WithLabelValues(status, cacheResult, source, pool, class)
 	slot.Store(&c)
 	return c
 }
 
-// slotObserver resolves the request_duration slot at [sci][ri]. The
-// histogram's status axis carries the response class and its source
-// axis is absent, per the label contract in NewDataPlaneMetrics.
-func (m *DataPlaneMetrics) slotObserver(pm *poolMetrics, sci, ri int, statusClass, cacheResult, pool string) prometheus.Observer {
-	slot := &pm.requestDuration[sci][ri]
+// slotObserver resolves the request_duration slot at [sci][ri][ci].
+// The histogram's status axis carries the response class and its
+// source axis is absent, per the label contract in NewDataPlaneMetrics.
+func (m *DataPlaneMetrics) slotObserver(pm *poolMetrics, sci, ri, ci int, statusClass, cacheResult, pool, class string) prometheus.Observer {
+	slot := &pm.requestDuration[sci][ri][ci]
 	if o := slot.Load(); o != nil {
 		return *o
 	}
-	o := m.RequestDuration.WithLabelValues(statusClass, cacheResult, pool)
+	o := m.RequestDuration.WithLabelValues(statusClass, cacheResult, pool, class)
 	slot.Store(&o)
 	return o
 }
 
-// slotBytesCounter resolves the response_bytes slot at [ri][src].
-func (m *DataPlaneMetrics) slotBytesCounter(pm *poolMetrics, ri, src int, cacheResult, source, pool string) prometheus.Counter {
-	slot := &pm.responseBytes[ri][src]
+// slotBytesCounter resolves the response_bytes slot at [ri][src][ci].
+func (m *DataPlaneMetrics) slotBytesCounter(pm *poolMetrics, ri, src, ci int, cacheResult, source, pool, class string) prometheus.Counter {
+	slot := &pm.responseBytes[ri][src][ci]
 	if c := slot.Load(); c != nil {
 		return *c
 	}
-	c := m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool)
+	c := m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool, class)
 	slot.Store(&c)
 	return c
 }
 
-// recordFastHTTPMetrics increments the RED counters. The pool argument
-// must be a configured pool name or "_default" (see attribution).
-func (m *DataPlaneMetrics) recordFastHTTPMetrics(code int, status, pool, cacheResult, source string, dur, bytesOut float64) {
+// recordFastHTTPMetrics records the RED counters for one
+// middleware-attributed request. The pool and class arguments must be
+// configured names or their fallbacks (see attribution).
+func (m *DataPlaneMetrics) recordFastHTTPMetrics(code int, status, pool, class, cacheResult, source string, dur, bytesOut float64) {
 	if pm, ok := m.lookupPoolMetrics(pool); ok {
 		si := statusIndex(code)
 		ri := cacheResultIndex(cacheResult)
 		src := sourceIndex(source)
-		if si >= 0 && ri >= 0 && src >= 0 {
-			m.slotCounter(pm, si, ri, src, status, cacheResult, source, pool).Inc()
-			m.slotObserver(pm, statusClassIndex(code), ri,
-				statusClassString(code), cacheResult, pool).Observe(dur)
-			m.slotBytesCounter(pm, ri, src, cacheResult, source, pool).Add(bytesOut)
+		ci, classLabel := m.classTable.classIndex(class)
+		if si >= 0 && ri >= 0 && src >= 0 && ci >= 0 {
+			m.slotCounter(pm, si, ri, src, ci, status, cacheResult, source, pool, classLabel).Inc()
+			m.slotObserver(pm, statusClassIndex(code), ri, ci,
+				statusClassString(code), cacheResult, pool, classLabel).Observe(dur)
+			m.slotBytesCounter(pm, ri, src, ci, cacheResult, source, pool, classLabel).Add(bytesOut)
 			return
 		}
 	}
-	m.RequestsTotal.WithLabelValues(status, cacheResult, source, pool).Inc()
-	m.RequestDuration.WithLabelValues(statusClassString(code), cacheResult, pool).Observe(dur)
-	m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool).Add(bytesOut)
+	if class == "" {
+		class = api.TrafficClassUnclassified
+	}
+	m.RequestsTotal.WithLabelValues(status, cacheResult, source, pool, class).Inc()
+	m.RequestDuration.WithLabelValues(statusClassString(code), cacheResult, pool, class).Observe(dur)
+	m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool, class).Add(bytesOut)
 }
 
 // buildFastHTTPAccessLogAttrs constructs the structured-log attribute
-// slice for a fasthttp access log entry.
-func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx, cacheResult string, elapsed time.Duration, status int) []any {
+// slice for a fasthttp access log entry; traffic_class rides with
+// cache_status so per-class log queries stay possible at zero
+// Prometheus cost.
+func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx, cacheResult, trafficClass string, elapsed time.Duration, status int) []any {
 	attrs := []any{
 		"method", string(ctx.Method()),
 		"host", string(ctx.Host()),
@@ -959,37 +1109,47 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 		"dur_ms", elapsed.Milliseconds(),
 		"remote", ctx.RemoteAddr().String(),
 		"cache_status", cacheResult,
+		"traffic_class", trafficClass,
 	}
 	return attrs
 }
 
-// RecordHit implements api.FastPathMetrics. It increments the RED
-// counters for a fast-path hit without going through the middleware
-// chain. Called by the h1parser after serving a cache hit.
-func (m *DataPlaneMetrics) RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+// RecordHit implements api.FastPathMetrics. It records a fast-path hit
+// without going through the middleware chain (called by the h1parser
+// after serving a cache hit). trafficClass is the response's
+// config-sourced class ("" = unclassified).
+func (m *DataPlaneMetrics) RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 	if pool == "" {
-		// The engine-level fast path carries no pool attribution (the
-		// store is shared across routes), and pool-less routes (static,
-		// catch-all) must not leak their route names into the
-		// upstream_pool label; "_default" covers both.
+		// Pool-less fast paths (cache-enabled static routes with no
+		// upstream pool) must not leak their route names into the
+		// upstream_pool label; "_default" covers them, matching the
+		// slow path's middleware fallback. Proxied routes carry their
+		// configured pool on the response (issue #696).
 		pool = "_default"
 	}
+	if trafficClass == "" {
+		trafficClass = api.TrafficClassUnclassified
+	}
+	// Close the source label set: empty and unknown values collapse into
+	// the "bouine" default slot, never a minted label.
+	source = normaliseSource(source)
 	dur := duration.Seconds()
 	if pm, ok := m.lookupPoolMetrics(pool); ok {
 		si := statusIndex(status)
 		ri := cacheResultIndex(cacheResult)
 		src := sourceIndex(source)
-		if si >= 0 && ri >= 0 && src >= 0 {
-			m.slotCounter(pm, si, ri, src, statusString(status), cacheResult, source, pool).Inc()
-			m.slotObserver(pm, statusClassIndex(status), ri,
-				statusClassString(status), cacheResult, pool).Observe(dur)
-			m.slotBytesCounter(pm, ri, src, cacheResult, source, pool).Add(float64(bytesOut))
+		ci, classLabel := m.classTable.classIndex(trafficClass)
+		if si >= 0 && ri >= 0 && src >= 0 && ci >= 0 {
+			m.slotCounter(pm, si, ri, src, ci, statusString(status), cacheResult, source, pool, classLabel).Inc()
+			m.slotObserver(pm, statusClassIndex(status), ri, ci,
+				statusClassString(status), cacheResult, pool, classLabel).Observe(dur)
+			m.slotBytesCounter(pm, ri, src, ci, cacheResult, source, pool, classLabel).Add(float64(bytesOut))
 			return
 		}
 	}
-	m.RequestsTotal.WithLabelValues(statusString(status), cacheResult, source, pool).Inc()
-	m.RequestDuration.WithLabelValues(statusClassString(status), cacheResult, pool).Observe(dur)
-	m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool).Add(float64(bytesOut))
+	m.RequestsTotal.WithLabelValues(statusString(status), cacheResult, source, pool, trafficClass).Inc()
+	m.RequestDuration.WithLabelValues(statusClassString(status), cacheResult, pool, trafficClass).Observe(dur)
+	m.ResponseBytesOut.WithLabelValues(cacheResult, source, pool, trafficClass).Add(float64(bytesOut))
 }
 
 // IncrementSmugglingRejected increments the HTTP smuggling rejection
@@ -1048,14 +1208,14 @@ func (m *DataPlaneMetrics) IncrementReactorDrop() {
 // can early-return on HIT without the caller materializing header strings;
 // path is passed as []byte and converted only when the URL ring actually
 // records (sampling gate first).
-func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultIdx int, status int, route string, path []byte, elapsed time.Duration, hdr *fasthttp.ResponseHeader) {
+func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultIdx int, status int, route string, path []byte, elapsed time.Duration, hdr *fasthttp.ResponseHeader, cookied bool) {
 	if m.Rings == nil || cacheResultIdx == 0 { // 0 == HIT
 		return
 	}
 	durMs := elapsed.Milliseconds()
 	m.Rings.Request.RecordRequest(cacheResult, status, durMs)
 	if route != "_default" {
-		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs)
+		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs, cookied)
 	}
 	m.Rings.URL.RecordURL(string(path), route, cacheResult)
 	if m.Rings.HeaderRing != nil && (cacheResultIdx == 1 || cacheResultIdx == 4) { // MISS or BYPASS
@@ -1131,13 +1291,17 @@ func normaliseCacheResult(xCache string) string {
 }
 
 // normaliseSource maps X-Cache-Source header values to a stable Prometheus
-// label. Empty string is preserved (BYPASS, only-if-cached 504). Unknown
-// values default to empty for forward-compatibility.
+// label. Empty (bouine-synthesized responses: only-if-cached 504, shed
+// 503) and unknown values both default to the "bouine" label — the closed
+// source set is hot/warm/peer/origin/bouine, so a spoofed or
+// misconfigured X-Cache-Source response header can never mint a label
+// outside it (the same named-fallback pattern as upstream_pool
+// "_default" and traffic_class "unclassified").
 func normaliseSource(xCacheSource string) string {
 	switch xCacheSource {
-	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin):
+	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin), string(api.SourceBouine):
 		return xCacheSource
 	default:
-		return ""
+		return string(api.SourceBouine)
 	}
 }

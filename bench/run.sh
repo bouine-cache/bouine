@@ -45,7 +45,19 @@
 #   Cachaner_AccessSlowPath:           0
 #   Cachaner_EvictBounded:             0
 #   FastPath_Hit:                     0
-#   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
+#   FastPath_HitWithWrite:            0  (includes WriteTo consumption)
+#   RoutedFastPath_Hit:               0  (issue #696 routed wrapper: route
+#                                      resolution before every fast-path hit;
+#                                      index-loop walk, no maps, no state)
+#   RoutedFastPath_Hit_WildcardHost:  0  (issue #772 "*.suffix" host routes:
+#                                      length-bounded EqualFold, no ToLower)
+#   FastPath_PeerHit:                 0  (owner-first peer branch, plain key;
+#                                      peer decode excluded — production decodes
+#                                      before the branch; object rotation defeats
+#                                      per-object head caches)
+#   FastPath_PeerHitVary:             7  (variant gate: reqHeaderMapFromRaw +
+#                                      BuildVaryKey; branch amortizes a network
+#                                      round-trip)
 #   H1Parse_Get:                      0
 #   H1Parse_Get_Headers8:              0  (production-shaped head: long
 #                                      request line + 8 canonical headers;
@@ -75,6 +87,7 @@ OUTFILE="$RESULTS_DIR/current.txt"
 PACKAGES=(
     ./internal/cache/...
     ./internal/storage/...
+    ./internal/server/...
     ./internal/server/h1parser/...
     ./internal/observability/...
 )
@@ -86,6 +99,8 @@ GATE_BENCH='^BenchmarkGate_'
 declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
+    [HotStore_Get_Hit_Bans]=0
+    [HotStore_Get_Hit_BanSnapshotRead]=0
     [Handler_CacheHit_ReusableWriter]=0
     [Handler_CacheMiss_Cacheable]=18
     [SIEVE_Access]=0
@@ -94,13 +109,32 @@ declare -A BUDGETS=(
     [Cachaner_EvictBounded]=0
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
+    [RoutedFastPath_Hit]=0
+    [RoutedFastPath_Hit_WildcardHost]=0
+    [FastPath_PeerHit]=0
+    [FastPath_PeerHitVary]=7
+    [VaryKey_AcceptEncodingBucket]=2
+    [VaryKey_AcceptEncodingBucketVerbatim]=4
+    [VaryKey_AcceptLanguageBucket]=3
+    [VaryKey_CookiePresence]=1
+    [VaryKey_CookiePresenceFast]=2
+    [VaryKey_CookiePresenceRaw]=4
+    [VaryKey_NoPresenceZeroCost]=2
     [H1Parse_Get]=0
     [H1Parse_Get_Headers8]=0
     [Reactor_Hit]=0
     [Reactor_Hit_Headers8]=0
     [Reactor_Hit_Metrics]=0
-    [Middleware_Miss]=11
+    # Middleware_Miss: 12 — the traffic_class access-log attribute
+    # grows the attrs slice past the small-array threshold: +1 alloc,
+    # time-neutral. The metrics record path itself stays at 0.
+    [Middleware_Miss]=12
     [Middleware_Miss_NoLog]=0
+    [Middleware_Miss_TrafficClass]=12
+    [Middleware_Miss_TrafficClass_MixedCaseHost]=12
+    [RecordHit_TrafficClass]=0
+    [RoutedFastPath_Hit_TrafficClass]=0
+    [RoutedFastPath_Hit_TrafficClass_MixedCase]=0
     [HistogramObserve_Native]=0
     [HistogramObserve_Native_Distinct]=0
 )

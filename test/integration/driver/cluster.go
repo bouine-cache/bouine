@@ -76,6 +76,26 @@ type ClusterStack struct {
 	// hotMaxBytes retains the per-node hot-tier budget so RestartNode
 	// rebuilds the same config BootCluster originally wrote.
 	hotMaxBytes string
+	// experimentalYAML lines are appended to every node config under
+	// the experimental: section (nil = no section).
+	experimentalYAML []string
+	// preserveHost retains the pool's connect.preserve_host setting so
+	// RestartNode rebuilds the same config BootCluster originally wrote.
+	preserveHost bool
+}
+
+// OriginRequests returns the total number of requests the stack's
+// shared origin has handled. Snapshot it before a request and compare
+// after to prove the request was served without an origin fetch.
+func (s *ClusterStack) OriginRequests() int64 {
+	return s.originCtl.Requests()
+}
+
+// OriginHost returns the bare host:port of the stack's shared origin,
+// which is the pool-target Host a default (non-preserve_host) pool
+// presents to the origin. Integration tests assert against it.
+func (s *ClusterStack) OriginHost() string {
+	return s.origin.addr
 }
 
 // ClusterOptions configures BootCluster.
@@ -87,6 +107,15 @@ type ClusterOptions struct {
 	// to force constant SIEVE eviction in eviction-pressure scenarios).
 	// Empty keeps the driver default (128MiB).
 	HotMaxBytes string
+	// ExperimentalH1FastPath and ExperimentalH1FastPeerPath flip the
+	// matching keys under the config's experimental: section on every
+	// node. Both default off; the peer flag requires the fast path.
+	ExperimentalH1FastPath     bool
+	ExperimentalH1FastPeerPath bool
+	// PreserveHost sets connect.preserve_host on the origin pool of
+	// every node, so integration tests can cover the origin-bound Host
+	// header behaviour (the origin echoes its Host on /host-echo).
+	PreserveHost bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -109,7 +138,14 @@ type TLSCertEntry struct {
 	SNI      []string
 }
 
-// freePort returns an available TCP port on localhost.
+// freePort returns an available TCP port on localhost. The reservation
+// is advisory: it releases the port before returning, so a concurrent
+// listener may still race for it. The gossip bind is UDP, and TCP and
+// UDP port numberspaces are independent — a freed TCP port does NOT
+// guarantee the same number is free on UDP, and a memberlist node
+// bound to a number already in use by another stack's gossip socket
+// would receive that stack's frames (observed as a data race between
+// the booting node's buildRouter and a foreign purge frame).
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -118,6 +154,17 @@ func freePort(t *testing.T) int {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
+	// Reserve the UDP number too: memberlist's gossip and the node's
+	// TCP servers must not collide with another live stack's sockets.
+	// Held open for the caller's process lifetime — released by the OS
+	// at stack teardown since these sockets outlive the function.
+	udpln, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		// The UDP number is taken by a live stack's gossip socket:
+		// pick another port rather than sharing gossip traffic.
+		return freePort(t)
+	}
+	_ = udpln.Close()
 	return port
 }
 
@@ -148,6 +195,11 @@ type nodeConfigParams struct {
 	originAddr  string
 	hotMaxBytes string
 	tls         *TLSOptions // nil when TLS is not configured
+	// experimental lines rendered verbatim under the experimental:
+	// section (nil = omit the section entirely).
+	experimental []string
+	// preserveHost renders connect.preserve_host on the origin pool.
+	preserveHost bool
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -174,6 +226,8 @@ cluster:
 upstream_pools:
   - name: origin
     targets: [%q]
+    connect:
+      preserve_host: %t
 routes:
   - match:
       path_prefix: /api/v1/
@@ -182,13 +236,26 @@ routes:
       ttl_default: 60s
     request:
       strip_prefix: /api/v1
+  - match:
+      path_prefix: /public/webhook/
+    pool: origin
+    cache:
+      ttl_default: 60s
+    request:
+      path_rewrite:
+        # Rewrites the public callback prefix onto the origin's /echo
+        # endpoint so integration tests can assert on the exact URI
+        # the origin received (it echoes "uri <path>"). e.g.
+        # /public/webhook/echo?x=1 -> /echo?x=1.
+        match: ^/public/webhook/(.*)$
+        replace: /$1
   - match: {}
     pool: origin
     cache:
       ttl_default: 60s
 `,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
-		p.originAddr)
+		p.originAddr, p.preserveHost)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -199,6 +266,13 @@ routes:
 		b.WriteString(formatCertEntry(p.tls.CertFile, p.tls.KeyFile, p.tls.SNI))
 		for _, ec := range p.tls.ExtraCerts {
 			b.WriteString(formatCertEntry(ec.CertFile, ec.KeyFile, ec.SNI))
+		}
+	}
+	if len(p.experimental) > 0 {
+		b.WriteString("experimental:\n")
+		for _, line := range p.experimental {
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 	}
 	return b.String()
@@ -257,6 +331,15 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		configDir:   configDir,
 		hotMaxBytes: opts.HotMaxBytes,
 	}
+	if opts.ExperimentalH1FastPath || opts.ExperimentalH1FastPeerPath {
+		if opts.ExperimentalH1FastPath {
+			s.experimentalYAML = append(s.experimentalYAML, "  h1_fast_path: true")
+		}
+		if opts.ExperimentalH1FastPeerPath {
+			s.experimentalYAML = append(s.experimentalYAML, "  h1_fast_peer_path: true")
+		}
+	}
+	s.preserveHost = opts.PreserveHost
 
 	// Write configs and start each node.
 	for i := range 3 {
@@ -268,16 +351,18 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			tlsOpts = &opts.TLS
 		}
 		cfg := buildNodeConfig(nodeConfigParams{
-			name:        name,
-			mode:        opts.Mode,
-			httpPort:    p.http,
-			httpsPort:   p.https,
-			adminPort:   p.admin,
-			gossipPort:  p.gossip,
-			seedList:    seedList,
-			originAddr:  origin.addr,
-			hotMaxBytes: opts.HotMaxBytes,
-			tls:         tlsOpts,
+			name:         name,
+			mode:         opts.Mode,
+			httpPort:     p.http,
+			httpsPort:    p.https,
+			adminPort:    p.admin,
+			gossipPort:   p.gossip,
+			seedList:     seedList,
+			originAddr:   origin.addr,
+			hotMaxBytes:  opts.HotMaxBytes,
+			tls:          tlsOpts,
+			experimental: s.experimentalYAML,
+			preserveHost: opts.PreserveHost,
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
@@ -427,16 +512,18 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	}
 
 	cfg := buildNodeConfig(nodeConfigParams{
-		name:        name,
-		mode:        s.Mode,
-		httpPort:    httpPort,
-		httpsPort:   httpsPort,
-		adminPort:   adminPort,
-		gossipPort:  gossipPort,
-		seedList:    seedList,
-		originAddr:  s.origin.addr,
-		hotMaxBytes: s.hotMaxBytes,
-		tls:         tlsOpts,
+		name:         name,
+		mode:         s.Mode,
+		httpPort:     httpPort,
+		httpsPort:    httpsPort,
+		adminPort:    adminPort,
+		gossipPort:   gossipPort,
+		seedList:     seedList,
+		originAddr:   s.origin.addr,
+		hotMaxBytes:  s.hotMaxBytes,
+		tls:          tlsOpts,
+		experimental: s.experimentalYAML,
+		preserveHost: s.preserveHost,
 	})
 
 	suffix := "-restart"
@@ -569,6 +656,50 @@ func doGet(url, host string) (*Response, error) {
 	return responseFromFastHTTP(resp), nil
 }
 
+// GetWithHeaders performs a GET with extra request headers.
+func (s *ClusterStack) GetWithHeaders(t *testing.T, n int, path string, headers map[string]string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	resp, err := doGetWithHeaders(url, "", headers)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// GetWithHostAndHeaders performs a GET with a specific Host header and
+// extra request headers. Use with CrossNodeHost so every node derives
+// the same cache key from the same request (see PurgeBatch).
+func (s *ClusterStack) GetWithHostAndHeaders(t *testing.T, n int, path, host string, headers map[string]string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	resp, err := doGetWithHeaders(url, host, headers)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// doGetWithHeaders performs a GET with extra request headers.
+func doGetWithHeaders(url, host string, headers map[string]string) (*Response, error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if host != "" {
+		req.UseHostHeader = true
+		req.Header.SetHost(host)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		return nil, err
+	}
+	return responseFromFastHTTP(resp), nil
+}
+
 // doGetWithClient performs a GET using a pre-allocated client.
 func doGetWithClient(client *fasthttp.Client, url, host string) (*Response, error) {
 	req := fasthttp.AcquireRequest()
@@ -635,6 +766,29 @@ func (s *ClusterStack) Purge(t *testing.T, n int, targetURL string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"url": targetURL})
 	s.adminPost(t, n, "/v1/purge", body)
+}
+
+// PostWithHost performs a data-plane POST against node n's /hit path,
+// optionally overriding the Host header (use driver.CrossNodeHost so
+// every node derives the same cache key). The origin echoes
+// "post <timestamp>" on /hit.
+func (s *ClusterStack) PostWithHost(t *testing.T, n int, path, host string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	if host != "" {
+		req.UseHostHeader = true
+		req.Header.SetHost(host)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return responseFromFastHTTP(resp)
 }
 
 // Ban sends POST /v1/ban to node n.
@@ -827,4 +981,11 @@ func (s *ClusterStack) TLSServerCerts(t *testing.T, n int, serverName string) []
 	}
 	defer conn.Close()
 	return conn.ConnectionState().PeerCertificates
+}
+
+// PurgeBatch sends POST /v1/purge/batch to node n with the given URLs.
+func (s *ClusterStack) PurgeBatch(t *testing.T, n int, urls []string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string][]string{"urls": urls})
+	s.adminPost(t, n, "/v1/purge/batch", body)
 }

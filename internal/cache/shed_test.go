@@ -191,7 +191,23 @@ func TestShedBypassReturns503(t *testing.T) {
 // instead of stalling behind the leader.
 func TestShedInflightFollowersUnpark(t *testing.T) {
 	t.Parallel()
-	h, counter := shedTestHandler(t, origin200("body"))
+	// Same-dimension cold misses on a declared route share one flight
+	// under the dimension-extended key (ADR-0057), so the inflight-table
+	// follower mechanics still apply: the leader sheds at the semaphore
+	// and the followers unpark with the leader's error, never reaching
+	// the semaphore themselves.
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
+	c := &shedCounter{}
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin200("body"),
+		FastClient: &testFastClient{handler: origin200("body")},
+		Store:      store,
+		Policy:     policy,
+	})
+	h.FetchShedInc = c
+	h.fetchWaitTimeout = 50 * time.Millisecond
+	h.fetchSem = make(chan struct{}, 1)
 
 	h.fetchSem <- struct{}{}
 	defer func() { <-h.fetchSem }()
@@ -206,6 +222,7 @@ func TestShedInflightFollowersUnpark(t *testing.T) {
 			defer wg.Done()
 			<-start
 			rr := testCtx("GET", "http://example.com/concurrent")
+			rr.Request.Header.Set("X-Tenant-Id", "14")
 			h.ServeRequest(rr)
 			results <- respCode(rr)
 		}()
@@ -228,7 +245,7 @@ func TestShedInflightFollowersUnpark(t *testing.T) {
 	// deleted would become a new leader and shed again; that is correct
 	// behavior, so this asserts the steady state after all followers
 	// completed.)
-	require.Equal(t, int64(1), counter.n.Load())
+	require.Equal(t, int64(1), c.n.Load())
 }
 
 // TestShedSingleflightFollowerServesStale covers the collapsedFetch
@@ -313,6 +330,82 @@ func TestShedStreamErrorPathMapsDistinctly(t *testing.T) {
 	<-h.fetchSem
 	require.Equal(t, 503, respCode(rr2))
 	require.Equal(t, "1", respHeader(rr2, header.RetryAfter))
+}
+
+// TestStayinAliveSingleflightResultIsOwned pins the pooled-response
+// lifetime contract of collapsedFetch: the fetchResult shared with every
+// singleflight caller must own its header data, never alias a pooled
+// *fasthttp.Response. The old behavior returned a live pointer into the
+// pooled response and released it once per caller, corrupting fasthttp's
+// response pool: two requests could then hold the same response, one
+// parsing origin headers into it while the other iterated Header.All()
+// in FromFastHTTP — a real production panic ("index out of range [1]
+// with length 1" on the miss path). Run with -race: aliasing between
+// concurrent callers (or with the pool) is caught as a data race.
+func TestStayinAliveSingleflightResultIsOwned(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set("X-Test-Origin", "present")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("fresh-body"))
+	}
+	h, _ := shedTestHandler(t, upstream)
+	h.stayinAlive = true
+
+	url := "http://example.com/sf-owned"
+	staleNoValidator(t, h, url, "fresh-body")
+
+	const requests = 16
+	var wg sync.WaitGroup
+	wg.Add(requests)
+	start := make(chan struct{})
+	for range requests {
+		go func() {
+			defer wg.Done()
+			<-start
+			rr := testCtx("GET", url)
+			h.ServeRequest(rr)
+			require.Equal(t, 200, respCode(rr))
+			require.Equal(t, "fresh-body", string(rr.Response.Body()))
+			require.Equal(t, "present", respHeader(rr, "X-Test-Origin"))
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// TestCollapsedFetchResultNeverAliasesPooledResponse pins the two
+// singleflight ownership contracts directly:
+//
+//  1. A flight-produced fetchResult must never carry a fastHdr-backed
+//     lookup — a live pointer into a pooled *fasthttp.Response that each
+//     caller would release (corrupting the pool) and read after release
+//     (racing with the next request's header parse).
+//  2. Callers detaching a shared result must get independent Maps, since
+//     buildObject mutates its resMap.
+func TestCollapsedFetchResultNeverAliasesPooledResponse(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("owned-body"))
+	key := BuildKeyFromURL("http://example.com/owned", nil)
+
+	res := h.collapsedFetch(testCtx("GET", "http://example.com/owned"), key, key, nil, requestInfoFromCtx(testCtx("GET", "http://example.com/owned")))
+	require.NoError(t, res.Err)
+	require.Nil(t, res.Header.fastHdr, "flight results must not alias the pooled response")
+	require.Equal(t, "owned-body", string(res.Body))
+	require.NotEmpty(t, res.Header.hdr.Get(header.ContentType))
+
+	// Simulate two callers of one shared flight result: each detach must
+	// yield an independent Map — a write through one must not leak into
+	// the other (buildObject adds attribution headers via Map.Set).
+	shared := fetchResult{Header: fromHeaderMap(res.Header.hdr)}
+	a := shared
+	a.Header = shared.Header.ownedClone()
+	b := shared
+	b.Header = shared.Header.ownedClone()
+	a.Header.hdr.Set("X-Caller", "a")
+	require.Empty(t, b.Header.hdr.Get("X-Caller"))
+	require.Empty(t, shared.Header.hdr.Get("X-Caller"))
 }
 
 // errorFastClient always fails, simulating origin errors.

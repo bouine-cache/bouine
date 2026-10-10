@@ -129,7 +129,7 @@ func TestRuleCacheLowHitRateEvidenceUsesWorstRoute(t *testing.T) {
 func TestRuleCacheNoNegTTL(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
-	cfg.Routes[0].Cache.NegativeTTL = 0
+	cfg.Routes[0].Cache.NegativeTTL = config.NegTTLScalar(0)
 	data := InsightData{
 		Config: cfg,
 		RouteStats: []observability.RouteStat{
@@ -143,6 +143,28 @@ func TestRuleCacheNoNegTTL(t *testing.T) {
 	data.RouteStats[0].Errors = 0
 	ins = ruleCacheNoNegTTL(data)
 	require.Nil(t, ins)
+}
+
+func TestRuleCacheNoNegTTL_Map(t *testing.T) {
+	t.Parallel()
+	stats := func() []observability.RouteStat {
+		return []observability.RouteStat{routeStats("api", 100, 80, 10, 80)}
+	}
+	// A positive per-status entry counts as negative caching.
+	cfg := baseConfig()
+	neg, err := config.NegTTLMap(map[string]time.Duration{"404": time.Minute})
+	require.NoError(t, err)
+	cfg.Routes[0].Cache.NegativeTTL = neg
+	ins := ruleCacheNoNegTTL(InsightData{Config: cfg, RouteStats: stats()})
+	require.Nil(t, ins)
+
+	// An all-zero map caches nothing → the advisory fires.
+	cfg = baseConfig()
+	neg, err = config.NegTTLMap(map[string]time.Duration{"404": 0})
+	require.NoError(t, err)
+	cfg.Routes[0].Cache.NegativeTTL = neg
+	ins = ruleCacheNoNegTTL(InsightData{Config: cfg, RouteStats: stats()})
+	require.NotNil(t, ins)
 }
 
 func TestRuleUpstreamUnhealthyTarget(t *testing.T) {
@@ -455,6 +477,65 @@ func TestRuleConfigRouteStripsCacheHeaders(t *testing.T) {
 	require.Nil(t, ins)
 }
 
+func TestRuleConfigCookieBypassMissing(t *testing.T) {
+	t.Parallel()
+	// The firing shape: a storing route (ttl_default) whose measured
+	// traffic carries cookies, with no bypass_on_cookie.
+	cfg := baseConfig()
+	cfg.Routes[0].Cache.TTLDefault = 30 * time.Second
+	data := InsightData{
+		Config: cfg,
+		RouteStats: []observability.RouteStat{
+			{Route: "api", Requests: 500, Cookied: 200}, // 40% cookied
+		},
+	}
+	ins := ruleConfigCookieBypassMissing(data)
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
+	assert.Equal(t, []string{"api"}, ins.Routes)
+	assert.Contains(t, ins.Detail, "bypass_on_cookie")
+
+	// Fix applied: the flag is on — rule must not fire.
+	on := true
+	cfg.Routes[0].Cache.BypassOnCookie = &on
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Not storing: ttl_default unset (origin directives govern storage
+	// and the Set-Cookie block still applies) — no insight.
+	off := false
+	cfg.Routes[0].Cache.BypassOnCookie = &off
+	cfg.Routes[0].Cache.TTLDefault = 0
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Storing but cookie share below threshold — analytics noise must
+	// not fire it.
+	cfg.Routes[0].Cache.TTLDefault = 30 * time.Second
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 500, Cookied: 10}, // 2%
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// Storing with a real cookied share but too few samples — small
+	// routes must not fire it.
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 50, Cookied: 40}, // 80% but n=50
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.Nil(t, ins)
+
+	// ttl_override is also a storing knob: same firing shape.
+	cfg.Routes[0].Cache.TTLDefault = 0
+	cfg.Routes[0].Cache.TTLOverride = time.Minute
+	data.RouteStats = []observability.RouteStat{
+		{Route: "api", Requests: 500, Cookied: 200},
+	}
+	ins = ruleConfigCookieBypassMissing(data)
+	require.NotNil(t, ins)
+}
+
 // ── Tier 2 tests ─────────────────────────────────────────────────────
 
 func TestRuleCacheHighEvictionRate(t *testing.T) {
@@ -660,6 +741,20 @@ func TestRuleCDNPurgeSkipped(t *testing.T) {
 
 	data.CFPurgeSkipped = 0
 	ins = ruleCDNPurgeSkipped(data)
+	require.Nil(t, ins)
+}
+
+func TestRuleAnomalyFetchShed(t *testing.T) {
+	t.Parallel()
+	data := InsightData{Config: baseConfig(), FetchShed: 5}
+	ins := ruleAnomalyFetchShed(data)
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity, "shed fetches serve 503s — high severity")
+	assert.Contains(t, ins.Evidence, "fetch_shed_total: 5")
+	assert.NotEmpty(t, ins.Action)
+
+	data.FetchShed = 0
+	ins = ruleAnomalyFetchShed(data)
 	require.Nil(t, ins)
 }
 

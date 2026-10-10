@@ -2,16 +2,18 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // maxFetchTimeout is the upper bound for fetch_timeout. It must stay
@@ -37,6 +39,11 @@ const maxFetchWaitTimeout = 1 * time.Second
 // internal/admin. If you change one, change the other.
 const defaultAdminIdleTimeout = 300 * time.Second
 
+// MaxPeerFetchConcurrency mirrors cluster.MaxPeerFetchConcurrency (128).
+// Duplicated because config is a leaf package and cannot import
+// internal/cluster. If you change one, change the other.
+const MaxPeerFetchConcurrency = 128
+
 // maxReadTimeout is the upper bound for listen.read_timeout. It must
 // stay strictly below internal/server.safetyNetWriteTimeout so the
 // safety net, not the read deadline, bounds a request's total lifetime.
@@ -53,7 +60,7 @@ func Defaults() Config {
 			Admin: ":9000",
 		},
 		TLS: TLS{
-			MinVersion: "1.2",
+			MinVersion: TLSVersion1_2,
 		},
 		Cluster: Cluster{
 			Mode:     ClusterModeStrong,
@@ -110,7 +117,11 @@ func Load(path string) (*Config, error) {
 // Environment variable interpolation is applied before YAML decoding:
 // ${VAR} is replaced with the value of VAR from the process environment.
 // ${VAR:-default} provides a fallback when VAR is unset or empty.
-// Literal dollar signs can be escaped as $$.
+// Interpolation applies only to ${NAME} where NAME is shaped like an
+// environment variable name (a letter or underscore, then letters,
+// digits, or underscores); other braced sequences (e.g. ${1}, a
+// path_rewrite capture-group reference) are left untouched. Literal
+// dollar signs can be escaped as $$.
 func Parse(b []byte) (*Config, error) {
 	expanded := expandEnvVars(b)
 	cfg := Defaults()
@@ -139,65 +150,64 @@ func Parse(b []byte) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate runs cross-field checks. It is called by Load/Parse but is
-// also useful from tests.
+// Validate runs cross-field checks, reporting every invalid field at
+// once (each failure is a *FieldError; multiple failures are joined
+// with errors.Join). It is called by Load/Parse but is also useful
+// from tests.
 //
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
 func (c *Config) Validate() error {
+	ec := &errCollector{}
+
 	// At least one listener must be enabled. Admin is OK as a sole
 	// listener when no TLS is configured.
 	if c.Listen.HTTP == "" && c.Listen.HTTPS == "" &&
 		c.Listen.Admin == "" {
-		return errors.New("config: at least one listener must be configured")
+		ec.addf("listen", "at least one listener must be configured")
 	}
 
 	// Upstream pool names must be unique.
 	seen := make(map[string]struct{}, len(c.UpstreamPools))
 	for i := range c.UpstreamPools {
 		p := &c.UpstreamPools[i]
+		path := fmt.Sprintf("upstream_pools[%d]", i)
 		if p.Name == "" {
-			return errors.New("config: upstream pool with empty name")
+			ec.addf(path+".name", "must be non-empty")
+		} else if _, dup := seen[p.Name]; dup {
+			ec.addf(path+".name", "is a duplicate (pool %q is declared twice)", p.Name)
+		} else {
+			seen[p.Name] = struct{}{}
 		}
-		if _, dup := seen[p.Name]; dup {
-			return fmt.Errorf("config: duplicate upstream pool %q", p.Name)
-		}
-		seen[p.Name] = struct{}{}
 		if len(p.Targets) == 0 {
-			return fmt.Errorf("config: upstream pool %q has no targets", p.Name)
+			ec.addf(path+".targets", "must list at least one target (pool %q)", p.Name)
 		}
-		if err := validatePoolDurations(p); err != nil {
-			return err
-		}
+		validatePoolDurations(ec, i, p)
 	}
 
-	// Every route must reference a declared pool.
+	c.validateRouteDefaults(ec)
+	c.mergeRouteDefaults()
 	for i := range c.Routes {
-		if err := c.validateRoute(i, seen); err != nil {
-			return err
-		}
+		c.validateRoute(ec, i, seen)
 	}
 
-	// Cluster mode validation.
-	if err := c.validateCluster(); err != nil {
-		return err
-	}
+	c.validateCluster(ec)
 
 	// SO_REUSEPORT is only supported on Linux. The config package is a
 	// leaf and cannot import internal/platform, so we check GOOS directly.
 	// platform.ReusePortSupported mirrors this check.
 	if c.Listen.ReusePort != nil && *c.Listen.ReusePort && runtime.GOOS != "linux" {
-		return errors.New("config: listen.reuse_port is only supported on Linux")
+		ec.addf("listen.reuse_port", "is only supported on Linux")
 	}
 
 	if c.Listen.IdleTimeout < 0 {
-		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
+		ec.addf("listen.idle_timeout", "must be >= 0, got %v", c.Listen.IdleTimeout)
 	}
 
 	if c.Listen.ReadTimeout < 0 {
-		return fmt.Errorf("config: listen.read_timeout must be >= 0, got %v", c.Listen.ReadTimeout)
+		ec.addf("listen.read_timeout", "must be >= 0, got %v", c.Listen.ReadTimeout)
 	}
 	if c.Listen.ReadTimeout >= maxReadTimeout {
-		return fmt.Errorf("config: listen.read_timeout must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
+		ec.addf("listen.read_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
 	}
 
 	// The reactor multiplexes fast-path hit serving; without the fast
@@ -206,17 +216,137 @@ func (c *Config) Validate() error {
 	// combination early at load time instead of logging a warning at
 	// startup.
 	if c.Experimental.H1Reactor && !c.Experimental.H1FastPath {
-		return errors.New("config: experimental.h1_reactor requires experimental.h1_fast_path")
+		ec.addf("experimental.h1_reactor", "requires experimental.h1_fast_path")
+	}
+
+	// The peer branch only runs inside the fast path's TryHit; without
+	// h1_fast_path the flag would silently no-op. Reject early at load
+	// time instead of logging a warning at startup.
+	if c.Experimental.H1FastPeerPath && !c.Experimental.H1FastPath {
+		ec.addf("experimental.h1_fast_peer_path", "requires experimental.h1_fast_path")
 	}
 
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.
 	if c.GOGC != nil && *c.GOGC != -1 && *c.GOGC <= 0 {
-		return errors.New("config: gogc must be -1 (off) or a positive percentage")
+		ec.addf("gogc", "must be -1 (off) or a positive percentage")
 	}
 
-	return nil
+	c.validateTrafficClasses(ec)
+
+	return ec.err()
+}
+
+// Traffic-class validation caps (ADR-0047): the closed label set is
+// bounded by construction — the classifier and the metrics slot table
+// are sized from these caps.
+const (
+	MaxTrafficClasses      = 8
+	MaxTrafficClassHosts   = 64
+	maxTrafficClassNameLen = 32 // ^[a-z][a-z0-9_]{0,31}$
+)
+
+// validateTrafficClasses checks the metrics.traffic_classes section:
+// the name must be a valid Prometheus label value shape and unique, the
+// reserved "unclassified" is rejected (it is the fallback, not a
+// configurable class), and host patterns must be the exact / leading
+// "*." / trailing ".*"|"*" glob forms — anything else is a typo today
+// and a dead class tomorrow. Findings append to ec like every other
+// section: one bad class reports alongside (not instead of) the rest.
+func (c *Config) validateTrafficClasses(ec *errCollector) {
+	if len(c.Metrics.TrafficClasses) > MaxTrafficClasses {
+		ec.addf("metrics.traffic_classes", "at most %d classes, got %d",
+			MaxTrafficClasses, len(c.Metrics.TrafficClasses))
+	}
+	seen := make(map[string]struct{}, len(c.Metrics.TrafficClasses))
+	for i := range c.Metrics.TrafficClasses {
+		tc := &c.Metrics.TrafficClasses[i]
+		base := fmt.Sprintf("metrics.traffic_classes[%d]", i)
+		// One name finding per class (the upstream_pools pattern):
+		// the shape check gates the reserved/duplicate checks so an
+		// invalid name does not also pile a duplicate finding onto
+		// every later class declared with it.
+		if !validTrafficClassName(tc.Name) {
+			ec.addf(base+".name", "name %q must match ^[a-z][a-z0-9_]{0,31}$", tc.Name)
+		} else if tc.Name == "unclassified" {
+			ec.addf(base+".name", "name %q is reserved (the no-match fallback)", tc.Name)
+		} else if _, dup := seen[tc.Name]; dup {
+			ec.addf(base+".name", "duplicate class name %q", tc.Name)
+		} else {
+			seen[tc.Name] = struct{}{}
+		}
+		if len(tc.Hosts) == 0 {
+			ec.addf(base+".hosts", "class %q has no hosts", tc.Name)
+		}
+		if len(tc.Hosts) > MaxTrafficClassHosts {
+			ec.addf(base+".hosts", "class %q has more than %d hosts", tc.Name, MaxTrafficClassHosts)
+		}
+		for j, h := range tc.Hosts {
+			if !validTrafficClassHostPattern(h) {
+				ec.addf(fmt.Sprintf("%s.hosts[%d]", base, j),
+					"invalid host pattern %q (exact host, leading \"*.\", or trailing \".*\"/\"*\" only)", h)
+			}
+		}
+	}
+}
+
+// validTrafficClassName enforces ^[a-z][a-z0-9_]{0,31}$: a valid
+// Prometheus label value shape that keeps class names stable in
+// queries and safe to embed in slot-table indexes.
+func validTrafficClassName(name string) bool {
+	if name == "" || len(name) > maxTrafficClassNameLen {
+		return false
+	}
+	if name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		b := name[i]
+		if ('a' <= b && b <= 'z') || ('0' <= b && b <= '9') || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// validTrafficClassHostPattern accepts three glob forms: an exact
+// host, a single leading "*." (suffix match), or a single trailing
+// ".*" / "*" (prefix match). A bare "*" is rejected — it matches every
+// host and would silently dead-config every class declared after it
+// under first-match precedence. So are anchors without a single
+// alphanumeric byte (e.g. ".*" or "*."): they compile to a
+// prefix/suffix of "." that no real host matches, a dead class the
+// shadow detector can never report because nothing shadows it.
+func validTrafficClassHostPattern(pattern string) bool {
+	switch {
+	case pattern == "" || pattern == "*":
+		return false
+	case strings.HasPrefix(pattern, "*."):
+		return hasHostAnchor(pattern[2:]) && !strings.Contains(pattern[2:], "*")
+	case strings.HasSuffix(pattern, ".*"):
+		return hasHostAnchor(pattern[:len(pattern)-2]) && !strings.Contains(pattern[:len(pattern)-2], "*")
+	case strings.HasSuffix(pattern, "*"):
+		return len(pattern) > 1 && hasHostAnchor(pattern[:len(pattern)-1]) && !strings.Contains(pattern[:len(pattern)-1], "*")
+	default:
+		return hasHostAnchor(pattern) && !strings.Contains(pattern, "*")
+	}
+}
+
+// hasHostAnchor requires the pattern's fixed (non-glob) part to keep
+// at least one alphanumeric byte. Anchors reduced to "." (from ".*" or
+// "*.") compile to a prefix/suffix that no real host matches, so they
+// are dead config that survives both this validation and the boot-time
+// shadow report.
+func hasHostAnchor(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9') {
+			return true
+		}
+	}
+	return false
 }
 
 // expandEnvVars replaces ${VAR} and ${VAR:-default} patterns in the
@@ -247,6 +377,19 @@ func expandEnvVars(b []byte) []byte {
 				name = expr[:idx]
 				defVal = expr[idx+2:]
 			}
+			// Only env-var-shaped names interpolate. A braced run that
+			// starts with a digit ($1, ${1}, ${01}) or is otherwise not a
+			// plausible environment variable name is a path_rewrite
+			// capture-group reference or a typo, not an env lookup: POSIX
+			// env names never start with a digit. Leaving it verbatim keeps
+			// the documented `${1}x` template syntax intact through the
+			// loader; before this gate it was silently replaced with the
+			// (usually empty) value of an env var that cannot exist.
+			if !isEnvName(name) {
+				sb.WriteString(s[i : i+2+end+1])
+				i += 2 + end + 1
+				continue
+			}
 			val := os.Getenv(name)
 			if val == "" {
 				val = defVal
@@ -259,6 +402,28 @@ func expandEnvVars(b []byte) []byte {
 		i++
 	}
 	return []byte(sb.String())
+}
+
+// isEnvName reports whether s is shaped like a POSIX environment
+// variable name: a letter or underscore, then letters, digits, or
+// underscores. Environment-variable interpolation is restricted to
+// these names so braced capture-group references (`${1}`, `${01}`) and
+// other non-name runs survive the loader verbatim (see expandEnvVars).
+func isEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == '_' || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') {
+			continue
+		}
+		if i > 0 && '0' <= b && b <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ResolveHotMaxBytes derives the hot store memory budget from the
@@ -343,27 +508,24 @@ func (c *RouteCache) ResolveMaxStreamingBufferBytes(goMemLimit string) {
 
 // validateRoute checks a single route entry and normalises its fields.
 // A route must specify exactly one of Pool or Static.Root.
-//
-//nolint:gocyclo // 16: flat checklist + name derivation, no sub-functions to extract
-func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
+func (c *Config) validateRoute(ec *errCollector, i int, pools map[string]struct{}) {
 	r := &c.Routes[i]
+	prefix := fmt.Sprintf("routes[%d]", i)
 	hasPool := r.Pool != ""
 	hasStatic := r.Static.Root != ""
 	if hasPool && hasStatic {
-		return fmt.Errorf("config: route %d has both pool and static.root — specify exactly one", i)
+		ec.addf(prefix, "has both pool and static.root — specify exactly one")
 	}
 	if !hasPool && !hasStatic {
-		return fmt.Errorf("config: route %d has no pool or static.root", i)
+		ec.addf(prefix, "has no pool or static.root")
 	}
 	if hasPool {
 		if _, ok := pools[r.Pool]; !ok {
-			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+			ec.addf(prefix+".pool", "references unknown pool %q", r.Pool)
 		}
 	}
 	if hasStatic {
-		if err := validateStatic(i, r.Static); err != nil {
-			return err
-		}
+		validateStatic(ec, prefix+".static", r.Static)
 	}
 	// Auto-derive Route.Name when empty so Prometheus metrics and the
 	// dashboard have consistent route labels without requiring operators
@@ -371,263 +533,1093 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if r.Name == "" {
 		switch {
 		case r.Match.Host != "":
-			r.Name = r.Match.Host + ":" + r.Match.PathPrefix
-		case r.Match.PathPrefix != "":
-			r.Name = r.Match.PathPrefix
+			r.Name = r.Match.Host + ":" + r.Match.PathLabel()
+		case r.Match.PathLabel() != "":
+			r.Name = r.Match.PathLabel()
 		default:
 			r.Name = "_catch-all"
 		}
 	}
+	validateRouteMatch(ec, prefix, &r.Match)
 	for j, m := range r.Match.Methods {
 		up := strings.ToUpper(strings.TrimSpace(m))
 		if !isKnownHTTPMethod(up) {
-			return fmt.Errorf("config: route %d methods[%d] unknown HTTP method %q", i, j, m)
+			ec.addf(fmt.Sprintf("%s.match.methods[%d]", prefix, j), "unknown HTTP method %q", m)
+			continue
 		}
 		r.Match.Methods[j] = up
 	}
+	validateRouteKeyHostSelector(ec, prefix, r)
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
-		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
+		ec.addf(prefix+".request.strip_prefix", "must start with '/', got %q", sp)
 	}
-	return validateRouteCache(i, r.Cache)
+	validatePathRewrite(ec, prefix+".request", r.Request)
+	validateForwarded(ec, prefix, r)
+	validateRouteCache(ec, prefix+".cache", &r.Cache)
 }
 
-// validateStatic validates a StaticConfig block.
-func validateStatic(i int, sc StaticConfig) error {
-	if !filepath.IsAbs(sc.Root) {
-		return fmt.Errorf("config: route %d static.root must be an absolute path, got %q", i, sc.Root)
+// validateRouteMatch checks the extended route predicate surface
+// (issue #772): match.path (RE2, anchored, compiled here so a bad
+// pattern fails startup instead of the first request) is mutually
+// exclusive with match.path_prefix, and match.host accepts an exact
+// host or a single leading "*." wildcard — suffix matching anchored on
+// the label boundary. Anything else containing "*" (mid-string or
+// trailing) is a typo today and a dead route tomorrow.
+func validateRouteMatch(ec *errCollector, prefix string, m *RouteMatch) {
+	if m.PathPrefix != "" && m.Path != "" {
+		ec.addf(prefix+".match", "path_prefix and path are mutually exclusive — specify exactly one")
 	}
-	if sc.MaxFileSize < 0 {
-		return fmt.Errorf("config: route %d static.max_file_size must be >= 0, got %s", i, sc.MaxFileSize)
+	if m.Path != "" {
+		validateRoutePathPattern(ec, prefix+".match.path", m.Path)
 	}
-	for j, idx := range sc.Index {
-		if strings.Contains(idx, "/") {
-			return fmt.Errorf("config: route %d static.index[%d] must not contain '/', got %q", i, j, idx)
+	if !validRouteHostPattern(m.Host) {
+		ec.addf(prefix+".match.host",
+			"invalid host pattern %q (exact host or leading \"*.\" wildcard only)", m.Host)
+	}
+}
+
+// validateRoutePathPattern gates one match.path RE2 pattern: anchored
+// at both ends (an unanchored pattern silently matches suffixes the
+// operator did not intend, and a `^`-only one matches far too much),
+// size-capped like path_rewrite patterns, free of raw control bytes
+// (they can never appear in a parsed request path, so the pattern is
+// dead config), and compiled now — RE2 is linear-time, so an
+// operator-supplied pattern cannot ReDoS the data plane (the same
+// choice request.path_rewrite already made).
+func validateRoutePathPattern(ec *errCollector, path, pattern string) {
+	if !strings.HasPrefix(pattern, "^") || !strings.HasSuffix(pattern, "$") {
+		ec.addf(path, "must be anchored: start with '^' and end with '$', got %q", pattern)
+	}
+	if len(pattern) > MaxRoutePathPatternBytes {
+		ec.addf(path, "exceeds %d bytes", MaxRoutePathPatternBytes)
+	}
+	rejectControlBytes(ec, path, pattern)
+	if _, err := regexp.Compile(pattern); err != nil {
+		ec.addf(path, "is not a valid regular expression: %v", err)
+	}
+}
+
+// validRouteHostPattern accepts an exact host or a single leading "*."
+// wildcard whose remainder is star-free and keeps at least one
+// alphanumeric byte (reuses the traffic-class notion of a host anchor:
+// "*." alone compiles to a suffix no real host matches). A bare "*"
+// matches every host and would silently dead-config every later route
+// under first-match precedence, so it is rejected too.
+func validRouteHostPattern(host string) bool {
+	switch {
+	case host == "":
+		return true
+	case strings.HasPrefix(host, "*."):
+		return hasHostAnchor(host[2:]) && !strings.Contains(host[2:], "*")
+	default:
+		return !strings.Contains(host, "*")
+	}
+}
+
+// validateForwarded validates the request.forwarded block (issue #769):
+// forwarded headers only apply to origin-proxy routes, header_set wins
+// over forwarded injection for the same header (the conflict is rejected
+// so the effective value is never an accident of application order), and
+// max_append is bounded. Zero (unset) max_append is normalised to
+// DefaultForwardedMaxAppend when any flag is on, mirroring how route
+// methods are normalised above. Runs after mergeRouteDefaults, so an
+// inherited block that landed on a route is validated exactly like a
+// route-authored one.
+func validateForwarded(ec *errCollector, prefix string, r *Route) {
+	f := &r.Request.Forwarded
+	if !f.ClientIP && !f.Proto && !f.Host && !f.Via {
+		return
+	}
+	if r.Pool == "" {
+		ec.addf(prefix+".request.forwarded",
+			"requires a pool — a static route forwards to no origin")
+		return
+	}
+	if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
+		ec.addf(prefix+".request.forwarded.max_append",
+			"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
+		return
+	}
+	if f.MaxAppend == 0 {
+		f.MaxAppend = DefaultForwardedMaxAppend
+	}
+	// header_set and forwarded both write the same headers; whichever
+	// applied second would silently mask the other. Reject instead of
+	// picking a winner the operator did not choose. Names are listed
+	// literally (not via pkg/header) to keep this leaf package's import
+	// set minimal; they match the pkg/header constants for the same
+	// headers.
+	targets := map[string]string{
+		"x-forwarded-for":   "X-Forwarded-For",
+		"x-forwarded-proto": "X-Forwarded-Proto",
+		"x-forwarded-host":  "X-Forwarded-Host",
+		"via":               "Via",
+	}
+	for name := range r.Request.HeaderSet {
+		if canonical, ok := targets[strings.ToLower(name)]; ok {
+			ec.addf(prefix+".request.forwarded",
+				"is mutually exclusive with header_set entry %q — specify exactly one", canonical)
 		}
 	}
+}
+
+// ---- forwarded YAML unmarshalling ----
+
+// UnmarshalYAML implements yaml.Unmarshaler for ForwardedConfig, which
+// accepts four shapes under one name (see ForwardedConfig): a scalar
+// preset (`standard` / `none`, plus the bool spellings true/false), a
+// token list (`[client_ip, proto]`), or the full mapping. Every shape
+// normalizes to the one struct at decode time, so the merge,
+// validation, and builder only ever see a single representation — the
+// negative_ttl dual-form precedent.
+func (f *ForwardedConfig) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag == "!!null" {
+			return nil
+		}
+		var v any
+		if err := value.Decode(&v); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		switch t := v.(type) {
+		case bool:
+			if t {
+				*f = ForwardedStandard()
+			} else {
+				f.form = forwardedFormOff
+			}
+			return nil
+		case string:
+			return f.applyPreset(t)
+		default:
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping, got %T", v)
+		}
+	case yaml.SequenceNode:
+		var tokens []string
+		if err := value.Decode(&tokens); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		return f.applyTokens(tokens)
+	case yaml.MappingNode:
+		// A distinct field-only type: decoding into ForwardedConfig
+		// directly would recurse into this method forever.
+		type forwardedFields struct {
+			ClientIP  bool `yaml:"client_ip"`
+			Proto     bool `yaml:"proto"`
+			Host      bool `yaml:"host"`
+			Via       bool `yaml:"via"`
+			MaxAppend int  `yaml:"max_append"`
+		}
+		var raw forwardedFields
+		if err := value.Decode(&raw); err != nil {
+			return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping: %w", err)
+		}
+		f.ClientIP, f.Proto, f.Host, f.Via, f.MaxAppend =
+			raw.ClientIP, raw.Proto, raw.Host, raw.Via, raw.MaxAppend
+		f.form = forwardedFormMerge
+		return nil
+	default:
+		return fmt.Errorf("config: forwarded must be a preset, bool, token list, or mapping, got YAML kind %d", value.Kind)
+	}
+}
+
+// applyPreset resolves the scalar spellings. The string forms of the
+// booleans are accepted so quoting in generated YAML (Helm templating)
+// cannot flip the meaning.
+func (f *ForwardedConfig) applyPreset(s string) error {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case ForwardedPresetStandard, "true":
+		*f = ForwardedStandard()
+		return nil
+	case ForwardedPresetNone, "false":
+		f.form = forwardedFormOff
+		return nil
+	default:
+		return fmt.Errorf("config: forwarded preset must be %q or %q (or a token list like [client_ip, proto]), got %q",
+			ForwardedPresetStandard, ForwardedPresetNone, s)
+	}
+}
+
+// applyTokens resolves the list form: exactly the named headers, no
+// implicit extras, so dropping a single route_defaults flag is expressible.
+func (f *ForwardedConfig) applyTokens(tokens []string) error {
+	if len(tokens) == 0 {
+		return fmt.Errorf("config: forwarded token list must not be empty — use %q to disable the block", ForwardedPresetNone)
+	}
+	for _, tok := range tokens {
+		switch strings.ToLower(strings.TrimSpace(tok)) {
+		case ForwardedTokenClientIP:
+			f.ClientIP = true
+		case ForwardedTokenProto:
+			f.Proto = true
+		case ForwardedTokenHost:
+			f.Host = true
+		case ForwardedTokenVia:
+			f.Via = true
+		default:
+			return fmt.Errorf("config: unknown forwarded token %q (valid: %s, %s, %s, %s)",
+				tok, ForwardedTokenClientIP, ForwardedTokenProto, ForwardedTokenHost, ForwardedTokenVia)
+		}
+	}
+	f.form = forwardedFormExact
 	return nil
 }
 
-func validateRouteCache(i int, rc RouteCache) error {
+// validateRouteDefaults bounds-checks the route_defaults block itself,
+// before any merge, so an invalid default is reported once at its own
+// path instead of surfacing as a confusing error on every route.
+func (c *Config) validateRouteDefaults(ec *errCollector) {
+	f := c.RouteDefaults.Request.Forwarded
+	if f.ClientIP || f.Proto || f.Host || f.Via {
+		if f.MaxAppend < 0 || f.MaxAppend > MaxForwardedAppend {
+			ec.addf("route_defaults.request.forwarded.max_append",
+				"must be between 1 and %d, got %d", MaxForwardedAppend, f.MaxAppend)
+		}
+	}
+	validateBypassOnUserAgent(ec, "route_defaults.cache.bypass_on_user_agent",
+		c.RouteDefaults.Cache.BypassOnUserAgent)
+}
+
+// mergeRouteDefaults folds route_defaults into every route before
+// per-route validation. Each half (request.forwarded,
+// cache.bypass_on_user_agent) merges independently — an empty or
+// opted-out default in one half never blocks the other. Both halves
+// are idempotent (Validate may be called more than once) and skipped
+// when their own default is invalid, so the route_defaults error
+// stands alone.
+func (c *Config) mergeRouteDefaults() {
+	c.mergeForwardedDefaults()
+	c.mergeBypassOnUserAgentDefaults()
+}
+
+// mergeForwardedDefaults folds route_defaults.request.forwarded into
+// every route before per-route validation. Precedence, by the form the
+// route's block was written in:
+//
+//   - unset route: inherits the default wholesale (marked inherited).
+//   - `forwarded: false` / `none`: the explicit opt-out — nothing is
+//     inherited, nothing is injected.
+//   - preset / token list: the flags are the complete set (they replace
+//     the default's); max_append falls back to the default's when unset.
+//   - mapping: flags OR with the default's per field — a false field
+//     means "not set here" — so dropping a single default flag requires
+//     the token-list form; max_append falls back to the default's.
+//
+// A programmatically built non-zero ForwardedConfig (form unset but
+// fields populated) is treated as the exact form so the merge never
+// clobbers explicit values. Static routes (no pool) inherit nothing:
+// the block is vacuous without an origin-bound request, and an
+// explicit block on a static route stays a validation error
+// (validateForwarded). Skipped entirely when the forwarded default
+// itself is invalid, so the route_defaults error stands alone.
+func (c *Config) mergeForwardedDefaults() {
+	d := c.RouteDefaults.Request.Forwarded
+	if d.form == forwardedFormOff {
+		return
+	}
+	if !d.ClientIP && !d.Proto && !d.Host && !d.Via && d.MaxAppend == 0 {
+		return
+	}
+	if d.MaxAppend < 0 || d.MaxAppend > MaxForwardedAppend {
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Pool != "" {
+			applyForwardedDefault(&r.Request.Forwarded, d)
+		}
+	}
+}
+
+// applyForwardedDefault folds the route_defaults forwarded block into
+// one route's block, by the route block's form (see
+// mergeForwardedDefaults for the precedence contract). Mutates f in
+// place; idempotent.
+func applyForwardedDefault(f *ForwardedConfig, d ForwardedConfig) {
+	switch f.form {
+	case forwardedFormUnset:
+		// Unset: a fully zero block inherits wholesale; a
+		// programmatically populated one is treated as exact so the
+		// merge never clobbers explicit values.
+		if f.ClientIP || f.Proto || f.Host || f.Via || f.MaxAppend != 0 {
+			f.form = forwardedFormExact
+			inheritDefaultMaxAppend(f, d)
+			return
+		}
+		inherited := d
+		inherited.inherited = true
+		*f = inherited
+	case forwardedFormOff:
+		// Explicit opt-out: the zero value stands.
+	case forwardedFormExact:
+		inheritDefaultMaxAppend(f, d)
+	case forwardedFormMerge:
+		f.ClientIP = f.ClientIP || d.ClientIP
+		f.Proto = f.Proto || d.Proto
+		f.Host = f.Host || d.Host
+		f.Via = f.Via || d.Via
+		inheritDefaultMaxAppend(f, d)
+	}
+}
+
+// mergeBypassOnUserAgentDefaults folds
+// route_defaults.cache.bypass_on_user_agent (issue #771, ADR-0055)
+// into every pool route before per-route validation, so a layered
+// deployment declares its verified-bot bypass patterns once instead of
+// repeating them on every route. Precedence:
+//
+//   - unset route list (nil): inherits the default wholesale. The
+//     route's slice aliases the default's — config is read-only after
+//     load, and aliasing keeps the merge allocation-free.
+//   - route's own list: replaces the default wholesale (never a
+//     union) — a route's list is the complete pattern set, mirroring
+//     the forwarded token-list form.
+//   - explicit empty list (`bypass_on_user_agent: []`, non-nil):
+//     opts out — the route keeps normal cache semantics.
+//
+// Static routes (no pool) inherit nothing: the knob is wired on pool
+// routes only. Skipped when the default list is invalid
+// (validateBypassOnUserAgent already reported it at route_defaults'
+// own path), so the route_defaults error stands alone.
+func (c *Config) mergeBypassOnUserAgentDefaults() {
+	d := c.RouteDefaults.Cache.BypassOnUserAgent
+	if len(d) == 0 {
+		return
+	}
+	if !bypassOnUserAgentValid(d) {
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Pool != "" && r.Cache.BypassOnUserAgent == nil {
+			r.Cache.BypassOnUserAgent = d
+		}
+	}
+}
+
+// bypassOnUserAgentValid reports whether a pattern list passes
+// validateBypassOnUserAgent's checks. Merge-side gate only — the
+// authoritative errors are reported by validateBypassOnUserAgent at
+// the list's own path.
+func bypassOnUserAgentValid(patterns []string) bool {
+	var ec errCollector
+	return validateBypassOnUserAgent(&ec, "", patterns)
+}
+
+// inheritDefaultMaxAppend fills an unset route max_append from the
+// default — the one field both override forms still inherit.
+func inheritDefaultMaxAppend(f *ForwardedConfig, d ForwardedConfig) {
+	if f.MaxAppend == 0 {
+		f.MaxAppend = d.MaxAppend
+	}
+}
+
+// validateRouteKeyHostSelector rejects include_host: false on a route
+// that sets match.host: the host selector no longer separates what the
+// key just merged, and a second route with the same prefix but no host
+// selector would shadow it for the host-agnostic key space.
+func validateRouteKeyHostSelector(ec *errCollector, prefix string, r *Route) {
+	if r.Cache.Key.IncludeHost == nil || *r.Cache.Key.IncludeHost || r.Match.Host == "" {
+		return
+	}
+	ec.addf(prefix+".cache.key.include_host",
+		"cannot be false on a route that sets match.host — the host selector and a host-agnostic key disagree")
+}
+
+// validatePathRewrite validates the request.path_rewrite block: both
+// fields required together (a half-configured rewrite is an operator
+// mistake, not a no-op), mutually exclusive with strip_prefix (two
+// mechanisms rewriting the same origin path cannot be reasoned about),
+// compiled here so a bad pattern fails startup instead of the first
+// request, size-capped, free of raw control bytes, and every template
+// reference resolvable against the pattern's capture groups.
+func validatePathRewrite(ec *errCollector, reqPath string, req RouteRequest) {
+	pw := req.PathRewrite
+	if pw.Match == "" && pw.Replace == "" {
+		return
+	}
+	basePath := reqPath + ".path_rewrite"
+	if pw.Match == "" || pw.Replace == "" {
+		ec.addf(basePath, "requires both match and replace")
+		return
+	}
+	if req.StripPrefix != "" {
+		ec.addf(basePath, "is mutually exclusive with strip_prefix — specify exactly one")
+	}
+	if len(pw.Match) > MaxPathRewritePatternBytes {
+		ec.addf(basePath+".match", "exceeds %d bytes", MaxPathRewritePatternBytes)
+	}
+	if len(pw.Replace) > MaxPathRewritePatternBytes {
+		ec.addf(basePath+".replace", "exceeds %d bytes", MaxPathRewritePatternBytes)
+	}
+	// Raw control bytes can never appear in a request path (the data
+	// plane rejects them at parse time), so a template carrying them
+	// can only produce a corrupted origin request. Escaped forms in
+	// the pattern (`\x0d`) stay legal — they simply never match.
+	rejectControlBytes(ec, basePath+".match", pw.Match)
+	rejectControlBytes(ec, basePath+".replace", pw.Replace)
+	// The replace template is a literal, not a regex: bytes that cannot
+	// appear in an origin-form request-target can only corrupt the
+	// origin-bound request. A raw space breaks the request line
+	// (fasthttp writes it verbatim); a raw '?' splices a second query
+	// delimiter in front of the preserved original query; a raw '#' is
+	// a fragment marker. In the match pattern these stay legal (space
+	// and '?' are regex syntax there — a literal '?' in match simply
+	// never matches, since the query is split off first).
+	rejectNonTargetBytes(ec, basePath+".replace", pw.Replace)
+	// Compile now (RE2 — linear time, no backtracking, so an
+	// operator-supplied pattern cannot ReDoS the data plane). This is
+	// a correctness gate, not a compile-cache: cache.NewPathRewrite
+	// recompiles for the handler.
+	re, err := regexp.Compile(pw.Match)
+	if err != nil {
+		ec.addf(basePath+".match", "is not a valid regular expression: %v", err)
+		return
+	}
+	// Every $reference in the template must resolve to a group of the
+	// pattern. Go's Expand silently expands an unknown reference to
+	// the empty string — the classic `$1x` typo (reference to a group
+	// named "1x") would corrupt every rewritten path with no error
+	// anywhere. Reject it here, at config load.
+	validateTemplateRefs(ec, basePath+".replace", re, pw.Replace)
+}
+
+// rejectControlBytes rejects raw C0 control bytes in a path_rewrite
+// string. Escaped regex syntax is untouched: only literal bytes < 0x20
+// (plus DEL) are checked, which is exactly the set a request path
+// cannot carry.
+func rejectControlBytes(ec *errCollector, path, s string) {
+	for j := 0; j < len(s); j++ {
+		if s[j] < 0x20 || s[j] == 0x7f {
+			ec.addf(path, "contains a raw control byte (0x%02x) at offset %d — escape it or remove it", s[j], j)
+			return
+		}
+	}
+}
+
+// rejectNonTargetBytes rejects raw bytes that cannot appear in an
+// origin-form request-target and are therefore always a mistake in the
+// literal replace template: space (breaks the origin request line),
+// '?' (the engine re-appends the original query itself, so a template
+// '?' splices a second delimiter into it), and '#' (fragment marker:
+// fasthttp drops it from the parsed path while sending it raw).
+func rejectNonTargetBytes(ec *errCollector, path, s string) {
+	for j := 0; j < len(s); j++ {
+		if s[j] == ' ' || s[j] == '?' || s[j] == '#' {
+			ec.addf(path, "contains %q at offset %d — a request-target cannot carry it raw (write %%20 for a space; the query string is never modified by the template)", s[j], j)
+			return
+		}
+	}
+}
+
+// validateTemplateRefs checks every $-reference in the replace template
+// against the compiled pattern's capture groups. References:
+//
+//	$$       literal dollar
+//	$1, $2…  index (0 = whole match)
+//	$name    named group (?P<name>…)
+//	${name}  braces disambiguate from following word bytes
+//
+// Go's Expand takes the longest word-run after $ as the group name, so
+// `$1x` is a lookup of group "1x" — an unknown reference that expands
+// to the empty string. Fail loudly at load instead.
+func validateTemplateRefs(ec *errCollector, path string, re *regexp.Regexp, template string) {
+	numGroups := re.NumSubexp()
+	names := re.SubexpNames() // index 0 = "", names for (?P<name>…) groups
+	for j := 0; j < len(template); j++ {
+		if template[j] != '$' {
+			continue
+		}
+		if j+1 < len(template) && template[j+1] == '$' {
+			j++ // $$ literal dollar — skip both
+			continue
+		}
+		// Collect the reference: optional '{' … '}', else the longest
+		// word-run ([A-Za-z0-9_]).
+		ref, next := "", j+1
+		if next < len(template) && template[next] == '{' {
+			end := strings.IndexByte(template[next:], '}')
+			if end < 0 {
+				ec.addf(path, "has unterminated '${' reference at offset %d", j)
+				return
+			}
+			ref, next = template[next+1:next+end], next+end+1
+		} else {
+			for next < len(template) && isWordByte(template[next]) {
+				next++
+			}
+			ref = template[j+1 : next]
+		}
+		if ref == "" {
+			ec.addf(path, "has a lone '$' at offset %d — use $$ for a literal dollar", j)
+			return
+		}
+		resolveTemplateRef(ec, path, ref, numGroups, names)
+		j = next - 1
+	}
+}
+
+// resolveTemplateRef checks one parsed reference against the pattern.
+func resolveTemplateRef(ec *errCollector, path, ref string, numGroups int, names []string) {
+	if allDigits(ref) {
+		// Go's Expand disallows leading-zero indexes: extract() marks
+		// them as names ("01" is a group name, not group 1), and an
+		// unknown name expands to the empty string. Reject the padded
+		// form rather than silently dropping text from every rewritten
+		// path — the same failure class as an out-of-range index.
+		if len(ref) > 1 && ref[0] == '0' {
+			ec.addf(path, "references $%s — leading-zero group indexes are not valid (Go expands them to the empty string); write the index without padding", ref)
+			return
+		}
+		n, err := strconv.Atoi(ref)
+		if err != nil || n > numGroups {
+			ec.addf(path, "references group $%s but the pattern has only %d capture group(s)", ref, numGroups)
+		}
+		return
+	}
+	for _, name := range names {
+		if name == ref {
+			return
+		}
+	}
+	ec.addf(path, "references unknown group %q — the pattern defines no (?P<%s>...) group", ref, ref)
+}
+
+// isWordByte reports whether b is a byte that Go's Expand treats as
+// part of a reference name ([A-Za-z0-9_]).
+func isWordByte(b byte) bool {
+	return b == '_' || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
+}
+
+// allDigits reports whether s is non-empty and all decimal digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for j := 0; j < len(s); j++ {
+		if s[j] < '0' || s[j] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// validateStatic validates a StaticConfig block.
+func validateStatic(ec *errCollector, path string, sc StaticConfig) {
+	if !filepath.IsAbs(sc.Root) {
+		ec.addf(path+".root", "must be an absolute path, got %q", sc.Root)
+	}
+	if sc.MaxFileSize < 0 {
+		ec.addf(path+".max_file_size", "must be >= 0, got %s", sc.MaxFileSize)
+	}
+	for j, idx := range sc.Index {
+		if strings.Contains(idx, "/") {
+			ec.addf(fmt.Sprintf("%s.index[%d]", path, j), "must not contain '/', got %q", idx)
+		}
+	}
+}
+
+func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	if rc.TTLOverride < 0 {
-		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, rc.TTLOverride)
+		ec.addf(path+".ttl_override", "must be >= 0, got %v", rc.TTLOverride)
 	}
 	if rc.TTLDefault < 0 {
-		return fmt.Errorf("config: route %d ttl_default must be >= 0, got %v", i, rc.TTLDefault)
+		ec.addf(path+".ttl_default", "must be >= 0, got %v", rc.TTLDefault)
 	}
 	if rc.StaleWhileRevalidate < 0 {
-		return fmt.Errorf("config: route %d stale_while_revalidate must be >= 0, got %v", i, rc.StaleWhileRevalidate)
+		ec.addf(path+".stale_while_revalidate", "must be >= 0, got %v", rc.StaleWhileRevalidate)
 	}
 	if rc.StaleIfError < 0 {
-		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, rc.StaleIfError)
+		ec.addf(path+".stale_if_error", "must be >= 0, got %v", rc.StaleIfError)
 	}
-	if rc.NegativeTTL < 0 {
-		return fmt.Errorf("config: route %d negative_ttl must be >= 0, got %v", i, rc.NegativeTTL)
-	}
+	validateStatusTTL(ec, path+".negative_ttl", &rc.NegativeTTL)
 	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
-		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, rc.JitterPercent)
+		ec.addf(path+".jitter_percent", "must be 0–50, got %d", rc.JitterPercent)
 	}
 	if rc.MaxResponseBytes < 0 {
-		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, rc.MaxResponseBytes)
+		ec.addf(path+".max_response_bytes", "must be >= 0, got %s", rc.MaxResponseBytes)
 	}
 	if rc.MaxStreamingBufferBytes < 0 {
-		return fmt.Errorf("config: route %d max_streaming_buffer_bytes must be >= 0, got %s", i, rc.MaxStreamingBufferBytes)
+		ec.addf(path+".max_streaming_buffer_bytes", "must be >= 0, got %s", rc.MaxStreamingBufferBytes)
 	}
 	if rc.MaxFetchConcurrency < 0 {
-		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)
+		ec.addf(path+".max_fetch_concurrency", "must be >= 0, got %d", rc.MaxFetchConcurrency)
+	}
+	if rc.MaxVariants < 0 {
+		ec.addf(path+".max_variants", "must be >= 0, got %d", rc.MaxVariants)
 	}
 	if rc.FetchTimeout < 0 {
-		return fmt.Errorf("config: route %d fetch_timeout must be >= 0, got %v", i, rc.FetchTimeout)
+		ec.addf(path+".fetch_timeout", "must be >= 0, got %v", rc.FetchTimeout)
 	}
 	if rc.FetchTimeout >= maxFetchTimeout {
-		return fmt.Errorf("config: route %d fetch_timeout must be < %v (data plane safety-net WriteTimeout), got %v", i, maxFetchTimeout, rc.FetchTimeout)
+		ec.addf(path+".fetch_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxFetchTimeout, rc.FetchTimeout)
 	}
 	if rc.FetchWaitTimeout < 0 {
-		return fmt.Errorf("config: route %d fetch_wait_timeout must be >= 0, got %v", i, rc.FetchWaitTimeout)
+		ec.addf(path+".fetch_wait_timeout", "must be >= 0, got %v", rc.FetchWaitTimeout)
 	}
 	// An unbounded wait recreates the goroutine pileup this knob exists
 	// to prevent (issue #562): every handler parks holding a connection.
 	if rc.FetchWaitTimeout > maxFetchWaitTimeout {
-		return fmt.Errorf("config: route %d fetch_wait_timeout must be <= %v, got %v", i, maxFetchWaitTimeout, rc.FetchWaitTimeout)
+		ec.addf(path+".fetch_wait_timeout", "must be <= %v, got %v", maxFetchWaitTimeout, rc.FetchWaitTimeout)
 	}
-	if err := validateRouteKey(i, rc.Key); err != nil {
-		return err
+	validateRouteKey(ec, path+".key", rc.Key)
+	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
+	validateCookieNames(ec, path, *rc)
+	validateCookiePresenceConflicts(ec, path, *rc)
+	validateRefreshConfig(ec, path, *rc)
+}
+
+// maxBypassUAEntries caps the bypass_on_user_agent pattern list: the
+// per-request match walks every pattern, so an unbounded list would
+// turn a cold-route opt-in into a CPU budget knob. Mirrors the
+// include_headers cap (16).
+const maxBypassUAEntries = 16
+
+// maxBypassUAPatternBytes caps a single pattern. User-Agent values are
+// bounded by the 8 KiB per-header budget (threat-model T37); a pattern
+// anywhere near that size is a paste error, not an operator intent.
+const maxBypassUAPatternBytes = 256
+
+// validateBypassOnUserAgent validates a bypass_on_user_agent pattern
+// list (issue #771, ADR-0055): capped count, capped length, printable
+// ASCII with `*` as the only wildcard, no lone `*`, no adjacent `*`,
+// no duplicates (case-insensitive). Matching semantics are pinned by
+// internal/cache's ua_bypass_test.go; this gate exists so a malformed
+// pattern fails at load time instead of silently never-matching (or
+// matching everything) in production. Returns whether the whole list
+// passed — the merge side (mergeBypassOnUserAgentDefaults) uses the
+// boolean to skip inheriting an invalid default.
+func validateBypassOnUserAgent(ec *errCollector, path string, patterns []string) bool {
+	valid := true
+	if len(patterns) > maxBypassUAEntries {
+		ec.addf(path, "capped at %d entries, got %d", maxBypassUAEntries, len(patterns))
+		valid = false
 	}
-	return validateRefreshConfig(i, rc)
+	seen := make(map[string]bool, len(patterns))
+	for j, raw := range patterns {
+		entryPath := fmt.Sprintf("%s[%d]", path, j)
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			ec.addf(entryPath, "must be a non-empty pattern")
+			valid = false
+			continue
+		}
+		if len(p) > maxBypassUAPatternBytes {
+			ec.addf(entryPath, "capped at %d bytes, got %d", maxBypassUAPatternBytes, len(p))
+			valid = false
+			continue
+		}
+		if p == "*" {
+			ec.addf(entryPath, `a lone "*" matches every request and disables the route's cache; set cache.enabled: false instead`)
+			valid = false
+			continue
+		}
+		if strings.Contains(p, "**") {
+			ec.addf(entryPath, "(%q) contains an empty wildcard (**); use a single *", p)
+			valid = false
+			continue
+		}
+		if msg := uaPatternCharError(p); msg != "" {
+			ec.addf(entryPath, "(%q) %s", p, msg)
+			valid = false
+			continue
+		}
+		lower := strings.ToLower(p)
+		if seen[lower] {
+			ec.addf(entryPath, "(%s) is a duplicate (comparison is case-insensitive)", p)
+			valid = false
+			continue
+		}
+		seen[lower] = true
+	}
+	return valid
+}
+
+// uaPatternCharError reports why p is not a valid
+// bypass_on_user_agent pattern on the character level, or "" when
+// valid. Only graphic ASCII (0x21-0x7E, space excluded) is accepted,
+// and the glob metacharacters `?`, `[`, `]`, `\` are rejected — `*` is
+// the only wildcard the matcher supports (ADR-0055), so a pattern
+// using another one would read as a literal and silently never match.
+// Space is rejected on purpose: real User-Agent strings contain
+// spaces ("Mozilla/5.0 (…)" et al.), so an exact pattern containing
+// one could never match a real UA; rejecting it fails loudly at load
+// instead of silently never-matching in production. Operators match
+// spaced UAs with the `*Bot*` substring form.
+func uaPatternCharError(p string) string {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c < 0x21 || c > 0x7E {
+			return "must contain only graphic ASCII bytes 0x21-0x7E (space is not allowed; match a spaced User-Agent with a *Pattern* substring glob)"
+		}
+		switch c {
+		case '?', '[', ']', '\\':
+			return fmt.Sprintf("must not contain %q: '*' is the only supported wildcard", c)
+		}
+	}
+	return ""
+}
+
+// validateCookiePresenceConflicts rejects cache.key.cookie_presence
+// combined with either bypass knob (issue #768): a bypassed request
+// never reaches the cache, so keying the variant dimension it selects
+// is dead config whose cost — presence bits multiplying the variant
+// space against max_variants — buys nothing. Rejected at load so the
+// conflict surfaces before a warm cache, not after.
+func validateCookiePresenceConflicts(ec *errCollector, path string, rc RouteCache) {
+	if len(rc.Key.CookiePresence) == 0 {
+		return
+	}
+	if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+		ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie: bypassed requests never reach the cache, so presence keying is dead config")
+	}
+	if len(rc.BypassOnCookieNames) > 0 {
+		ec.addf(path+".key.cookie_presence", "is mutually exclusive with bypass_on_cookie_names: bypassed requests never reach the cache, so presence keying is dead config")
+	}
+}
+
+// validateCookieNames validates cache.bypass_on_cookie_names (issue
+// #768): capped at 16 entries (mirrors include_headers), every entry
+// must be a valid RFC 6265 §4.1.1 cookie-name — an RFC 9110 §5.6.2
+// token (the cookie grammar is stricter than header tokens: the
+// name-value pair also excludes ";" and "=" as separators, which
+// isHTTPToken already forbids) — no case-insensitive duplicates, and
+// mutually exclusive with bypass_on_cookie: the presence trigger fires
+// on any cookie, so a name list under it is dead config whose
+// apparent scope would mislead operators reviewing a warm cache.
+func validateCookieNames(ec *errCollector, path string, rc RouteCache) {
+	if len(rc.BypassOnCookieNames) == 0 {
+		return
+	}
+	if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+		ec.addf(path+".bypass_on_cookie_names", "is mutually exclusive with bypass_on_cookie: the presence trigger already bypasses every cookied request")
+		return
+	}
+	validateCookieNameList(ec, path+".bypass_on_cookie_names", rc.BypassOnCookieNames)
+}
+
+// validateCookieNameList is the shared entry-format check for
+// cookie-name lists: RFC 6265 §4.1.1 cookie-name tokens (via
+// isHTTPToken — the cookie grammar excludes header-token separators
+// already), a 16-entry cap (mirrors include_headers), and
+// case-insensitive uniqueness. Trimmed entries are compared: the cache
+// layer trims before storing, so " a " and "a" must be rejected here
+// or validation and the stored policy disagree.
+func validateCookieNameList(ec *errCollector, path string, names []string) {
+	if len(names) > 16 {
+		ec.addf(path, "capped at 16 entries, got %d", len(names))
+	}
+	seen := make(map[string]bool, len(names))
+	for j, raw := range names {
+		entryPath := fmt.Sprintf("%s[%d]", path, j)
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			ec.addf(entryPath, "must be a non-empty cookie name")
+			continue
+		}
+		lower := strings.ToLower(name)
+		if !isHTTPToken(lower) {
+			ec.addf(entryPath, "(%q) must be a valid RFC 6265 §4.1.1 cookie name: one token, no separators, whitespace, ';', '=', or commas", name)
+			continue
+		}
+		if seen[lower] {
+			ec.addf(entryPath, "(%s) is a duplicate (cookie names are case-insensitive)", name)
+			continue
+		}
+		seen[lower] = true
+	}
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
-func validateRefreshConfig(i int, rc RouteCache) error {
+func validateRefreshConfig(ec *errCollector, path string, rc RouteCache) {
 	if rc.RefreshBeforeExpiry {
 		if rc.TTLDefault <= 0 && rc.TTLOverride <= 0 {
-			return fmt.Errorf("config: route %d refresh_before_expiry requires ttl_default or ttl_override > 0", i)
+			ec.addf(path+".refresh_before_expiry", "requires ttl_default or ttl_override > 0")
 		}
 	}
 	if rc.RefreshMarginPercent < 0 || rc.RefreshMarginPercent > 50 {
-		return fmt.Errorf("config: route %d refresh_margin_percent must be 0-50, got %d", i, rc.RefreshMarginPercent)
+		ec.addf(path+".refresh_margin_percent", "must be 0-50, got %d", rc.RefreshMarginPercent)
 	}
 	if rc.RefreshConcurrency < 0 || rc.RefreshConcurrency > 64 {
-		return fmt.Errorf("config: route %d refresh_concurrency must be 0-64, got %d", i, rc.RefreshConcurrency)
+		ec.addf(path+".refresh_concurrency", "must be 0-64, got %d", rc.RefreshConcurrency)
 	}
 	if rc.RefreshTimeout < 0 || rc.RefreshTimeout > 120*time.Second {
-		return fmt.Errorf("config: route %d refresh_timeout must be 0-120s, got %v", i, rc.RefreshTimeout)
+		ec.addf(path+".refresh_timeout", "must be 0-120s, got %v", rc.RefreshTimeout)
 	}
 	if rc.RefreshMinHits < 0 {
-		return fmt.Errorf("config: route %d refresh_min_hits must be >= 0, got %d", i, rc.RefreshMinHits)
+		ec.addf(path+".refresh_min_hits", "must be >= 0, got %d", rc.RefreshMinHits)
 	}
 	if rc.RefreshPersistCycles < 0 {
-		return fmt.Errorf("config: route %d refresh_persist_cycles must be >= 0, got %d", i, rc.RefreshPersistCycles)
+		ec.addf(path+".refresh_persist_cycles", "must be >= 0, got %d", rc.RefreshPersistCycles)
 	}
 	if rc.RefreshPersistCycles > 0 && rc.RefreshMinHits <= 0 {
-		return fmt.Errorf("config: route %d refresh_persist_cycles requires refresh_min_hits > 0", i)
+		ec.addf(path+".refresh_persist_cycles", "requires refresh_min_hits > 0")
 	}
 	if rc.RefreshMinScore < 0 {
-		return fmt.Errorf("config: route %d refresh_min_score must be >= 0, got %d", i, rc.RefreshMinScore)
+		ec.addf(path+".refresh_min_score", "must be >= 0, got %d", rc.RefreshMinScore)
 	}
 	if rc.RefreshMinScore > 0 && rc.RefreshMinHits <= 0 {
-		return fmt.Errorf("config: route %d refresh_min_score requires refresh_min_hits > 0", i)
+		ec.addf(path+".refresh_min_score", "requires refresh_min_hits > 0")
 	}
 	if rc.RefreshMaxRPS < 0 || rc.RefreshMaxRPS > 10000 {
-		return fmt.Errorf("config: route %d refresh_max_rps must be 0 or 1-10000, got %d", i, rc.RefreshMaxRPS)
+		ec.addf(path+".refresh_max_rps", "must be 0 or 1-10000, got %d", rc.RefreshMaxRPS)
 	}
 	if rc.RefreshReactiveFirst {
 		if rc.StaleWhileRevalidate <= 0 {
-			return fmt.Errorf("config: route %d refresh_reactive_first requires stale_while_revalidate > 0", i)
+			ec.addf(path+".refresh_reactive_first", "requires stale_while_revalidate > 0")
 		}
 		if rc.RefreshMinHits <= 0 {
-			return fmt.Errorf("config: route %d refresh_reactive_first requires refresh_min_hits > 0", i)
+			ec.addf(path+".refresh_reactive_first", "requires refresh_min_hits > 0")
 		}
 	}
-	return nil
 }
 
 // validateRouteKey validates cache key construction fields on a route.
-func validateRouteKey(i int, rk RouteKey) error {
+func validateRouteKey(ec *errCollector, path string, rk RouteKey) {
 	if len(rk.KeepQueryParams) > 0 {
 		if len(rk.StripQueryParams) > 0 {
-			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_params", i)
+			ec.addf(path+".keep_query_params", "is mutually exclusive with strip_query_params")
 		}
 		if len(rk.StripQueryPrefix) > 0 {
-			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_prefix", i)
+			ec.addf(path+".keep_query_params", "is mutually exclusive with strip_query_prefix")
 		}
 	}
 	if len(rk.StripQueryPrefix) > 16 {
-		return fmt.Errorf("config: route %d strip_query_prefix capped at 16 entries, got %d", i, len(rk.StripQueryPrefix))
+		ec.addf(path+".strip_query_prefix", "capped at 16 entries, got %d", len(rk.StripQueryPrefix))
 	}
 	for j, p := range rk.StripQueryPrefix {
 		if p == "" {
-			return fmt.Errorf("config: route %d strip_query_prefix[%d] must be non-empty", i, j)
+			ec.addf(fmt.Sprintf("%s.strip_query_prefix[%d]", path, j), "must be non-empty")
 		}
 	}
-	return nil
+	validateIncludeHeaders(ec, path, rk)
+	validateCookiePresence(ec, path, rk)
 }
 
-func validatePoolDurations(p *UpstreamPool) error {
+// validateCookiePresence validates cache.key.cookie_presence (issue
+// #768): RFC 6265 §4.1.1 cookie-name tokens, 16-entry cap,
+// case-insensitive uniqueness (validateCookieNameList). The bypass
+// conflicts are checked in validateRouteCache, where both the key and
+// the cache block are visible.
+func validateCookiePresence(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.CookiePresence) == 0 {
+		return
+	}
+	validateCookieNameList(ec, path+".cookie_presence", rk.CookiePresence)
+}
+
+// validateIncludeHeaders validates cache.key.include_headers: capped at
+// 16 entries (mirrors strip_query_prefix), every entry must be a single
+// RFC 9110 token (§5.6.2: tchar only, so one comma-free header name — "x,y"
+// would be one union field to effectiveVary but two Vary fields to the
+// variant-key builders, i.e. a knob whose meaning depends on the
+// reader), no "*" (a wildcard Vary is unkeyable and would explode the
+// variant space), no case-insensitive duplicates, and no overlap with
+// exclude_headers — the overlap check is load-bearing, not cosmetic: an
+// excluded header force-included into the key would silently collapse
+// variants. Every comparison runs on the trimmed entry: NewKeyPolicy
+// trims before storing, so " *", "x ", or " x,y" must be rejected here
+// or validation and the stored policy disagree (issue #632 review).
+func validateIncludeHeaders(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.IncludeHeaders) > 16 {
+		ec.addf(path+".include_headers", "capped at 16 entries, got %d", len(rk.IncludeHeaders))
+	}
+	seen := make(map[string]bool, len(rk.IncludeHeaders))
+	for j, raw := range rk.IncludeHeaders {
+		h := strings.TrimSpace(raw)
+		entryPath := fmt.Sprintf("%s.include_headers[%d]", path, j)
+		if h == "" {
+			ec.addf(entryPath, "must be a non-empty header name")
+			continue
+		}
+		lower := strings.ToLower(h)
+		if lower == "*" {
+			ec.addf(entryPath, `must not be "*": a wildcard Vary is unkeyable (RFC 9111 §4.1)`)
+			continue
+		}
+		if !isHTTPToken(lower) {
+			ec.addf(entryPath, "(%q) must be a single RFC 9110 §5.1 header name: one comma-free token, no whitespace or separators", h)
+			continue
+		}
+		if seen[lower] {
+			ec.addf(entryPath, "(%s) is a duplicate (comparison is case-insensitive)", h)
+			continue
+		}
+		seen[lower] = true
+	}
+	for j, raw := range rk.ExcludeHeaders {
+		if seen[strings.ToLower(strings.TrimSpace(raw))] {
+			ec.addf(fmt.Sprintf("%s.exclude_headers[%d]", path, j), "(%s) is also listed in include_headers: an excluded header must not participate in the key", raw)
+		}
+	}
+}
+
+// isHTTPToken reports whether s is a valid RFC 9110 §5.6.2 token:
+// one or more tchar (visible ASCII excluding separators) — the shape
+// of a single header field name.
+func isHTTPToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isTchar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isTchar reports whether c is an RFC 9110 §5.6.2 tchar: ALPHA, DIGIT,
+// or one of "!#$%&'*+-.^_`|~". Everything else (space, comma, colon,
+// separators, non-ASCII) fails the token check.
+func isTchar(c byte) bool {
+	return tcharTable[c]
+}
+
+// tcharTable is the RFC 9110 §5.6.2 tchar bit set, indexed by byte.
+var tcharTable = [256]bool{
+	'0': true, '1': true, '2': true, '3': true, '4': true,
+	'5': true, '6': true, '7': true, '8': true, '9': true,
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
+	'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
+	'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
+	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
+	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
+	'Z': true,
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true,
+	'f': true, 'g': true, 'h': true, 'i': true, 'j': true,
+	'k': true, 'l': true, 'm': true, 'n': true, 'o': true,
+	'p': true, 'q': true, 'r': true, 's': true, 't': true,
+	'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
+	'z': true,
+	'!': true, '#': true, '$': true, '%': true, '&': true,
+	'\'': true, '*': true, '+': true, '-': true, '.': true,
+	'^': true, '_': true, '`': true, '|': true, '~': true,
+}
+
+func validatePoolDurations(ec *errCollector, i int, p *UpstreamPool) {
+	base := fmt.Sprintf("upstream_pools[%d]", i)
 	if p.Health.Active.Interval < 0 {
-		return fmt.Errorf("config: upstream pool %q health.active.interval must be >= 0, got %v", p.Name, p.Health.Active.Interval)
+		ec.addf(base+".health.active.interval", "pool %q: must be >= 0, got %v", p.Name, p.Health.Active.Interval)
 	}
 	if p.Health.Active.Timeout < 0 {
-		return fmt.Errorf("config: upstream pool %q health.active.timeout must be >= 0, got %v", p.Name, p.Health.Active.Timeout)
+		ec.addf(base+".health.active.timeout", "pool %q: must be >= 0, got %v", p.Name, p.Health.Active.Timeout)
 	}
 	if p.Health.Passive.EjectFor < 0 {
-		return fmt.Errorf("config: upstream pool %q health.passive.eject_for must be >= 0, got %v", p.Name, p.Health.Passive.EjectFor)
+		ec.addf(base+".health.passive.eject_for", "pool %q: must be >= 0, got %v", p.Name, p.Health.Passive.EjectFor)
 	}
 	if p.Connect.Timeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.timeout must be >= 0, got %v", p.Name, p.Connect.Timeout)
+		ec.addf(base+".connect.timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.Timeout)
 	}
 	if p.Connect.KeepAlive < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.keep_alive must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
+		ec.addf(base+".connect.keep_alive", "pool %q: must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
 	}
 	if p.Connect.MaxIdleConnDuration < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.max_idle_conn_duration must be >= 0, got %v", p.Name, p.Connect.MaxIdleConnDuration)
+		ec.addf(base+".connect.max_idle_conn_duration", "pool %q: must be >= 0, got %v", p.Name, p.Connect.MaxIdleConnDuration)
 	}
 	if p.Connect.ResponseHeaderTimeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
+		ec.addf(base+".connect.response_header_timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
+	}
+	// This knob is the fallback origin-fetch bound for every route on the
+	// pool that does not set its own cache.fetch_timeout. The same
+	// safety-net ordering that applies to route fetch_timeout (the data
+	// plane's 5-minute WriteTimeout must be able to outlive the fetch)
+	// must hold here, or an inherited default aborts the client
+	// connection before the origin wait gives up.
+	if p.Connect.ResponseHeaderTimeout >= maxFetchTimeout {
+		ec.addf(base+".connect.response_header_timeout", "pool %q: must be < %v (data plane safety-net WriteTimeout), got %v", p.Name, maxFetchTimeout, p.Connect.ResponseHeaderTimeout)
 	}
 	if p.Connect.MaxConnections < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.max_connections must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
+		ec.addf(base+".connect.max_connections", "pool %q: must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
 	}
 	if p.Connect.HedgeTimeout < 0 {
-		return fmt.Errorf("config: upstream pool %q connect.hedge_timeout must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)
+		ec.addf(base+".connect.hedge_timeout", "pool %q: must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)
 	}
-	return nil
 }
 
 // validateCluster checks and normalises cluster configuration. The
 // cluster is considered enabled when Listen.Cluster is non-empty.
-func (c *Config) validateCluster() error {
+func (c *Config) validateCluster(ec *errCollector) {
 	if c.Listen.Cluster != "" {
-		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
+		c.Cluster.Mode = ClusterMode(strings.TrimSpace(string(c.Cluster.Mode)))
 		switch c.Cluster.Mode {
 		case ClusterModeStrong, ClusterModeEventual:
 			// valid
 		case "":
 			c.Cluster.Mode = ClusterModeStrong
 		default:
-			return fmt.Errorf("config: cluster.mode must be %q or %q, got %q",
+			ec.addf("cluster.mode", "must be %q or %q, got %q",
 				ClusterModeStrong, ClusterModeEventual, c.Cluster.Mode)
 		}
 	} else if c.Cluster.Mode != "" && c.Cluster.Mode != ClusterModeStrong {
-		return fmt.Errorf("config: cluster.mode %q requires listen.cluster to be set", c.Cluster.Mode)
+		ec.addf("cluster.mode", "%q requires listen.cluster to be set", c.Cluster.Mode)
 	}
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
 	}
 	if c.Cluster.HandoffQueueDepth < 0 {
-		return fmt.Errorf("config: cluster.handoff_queue_depth must be >= 0 (0 = default), got %d",
+		ec.addf("cluster.handoff_queue_depth", "must be >= 0 (0 = default), got %d",
 			c.Cluster.HandoffQueueDepth)
 	}
 	if c.Cluster.HandoffQueueDepth > maxHandoffQueueDepth {
-		return fmt.Errorf("config: cluster.handoff_queue_depth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
+		ec.addf("cluster.handoff_queue_depth", "must be <= %d, got %d (each slot costs a pointer + message header per peer)",
 			maxHandoffQueueDepth, c.Cluster.HandoffQueueDepth)
 	}
-	if err := c.validatePeerFetchConfig(); err != nil {
-		return err
-	}
-	if err := c.validateClusterStorage(); err != nil {
-		return err
-	}
-	if err := validateEvictionAlgorithm(&c.Storage); err != nil {
-		return err
-	}
-	return nil
+	c.validatePeerFetchConfig(ec)
+	c.validateClusterStorage(ec)
+	validateEvictionAlgorithm(ec, &c.Storage)
 }
 
 // validateClusterStorage checks the cluster storage sync settings.
 // Extracted from validateCluster to keep cyclomatic complexity under
 // the gocyclo limit.
-func (c *Config) validateClusterStorage() error {
+func (c *Config) validateClusterStorage(ec *errCollector) {
 	if c.Storage.WarmSyncInterval < -1 {
-		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
+		ec.addf("storage.warm_sync_interval", "must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}
 	if c.Storage.WarmSyncBatchSize < 0 {
-		return fmt.Errorf("config: storage.warm_sync_batch_size must be >= 0, got %v", c.Storage.WarmSyncBatchSize)
+		ec.addf("storage.warm_sync_batch_size", "must be >= 0, got %v", c.Storage.WarmSyncBatchSize)
 	}
 	if c.Storage.WALSyncInterval < -1 {
-		return fmt.Errorf("config: storage.wal_sync_interval must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
+		ec.addf("storage.wal_sync_interval", "must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
 	}
 	if c.Storage.TombstoneQueueSize < 0 {
-		return fmt.Errorf("config: storage.tombstone_queue_size must be >= 0 (0 = default 65536), got %v", c.Storage.TombstoneQueueSize)
+		ec.addf("storage.tombstone_queue_size", "must be >= 0 (0 = default 65536), got %v", c.Storage.TombstoneQueueSize)
 	}
 	if c.Storage.TombstoneDrainInterval < -1 {
-		return fmt.Errorf("config: storage.tombstone_drain_interval must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
+		ec.addf("storage.tombstone_drain_interval", "must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
 	}
-	return nil
 }
 
 // validatePeerFetchConfig checks the peer fetch pipelining settings
 // (ADR-0039). Extracted from validateCluster to keep cyclomatic
 // complexity under the gocyclo limit.
-func (c *Config) validatePeerFetchConfig() error {
+func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 	if c.Cluster.PeerMaxConnsPerHost < 0 {
-		return fmt.Errorf("config: cluster.peer_max_conns_per_host must be >= 0 (0 = default 8), got %d",
+		ec.addf("cluster.peer_max_conns_per_host", "must be >= 0 (0 = default 8), got %d",
 			c.Cluster.PeerMaxConnsPerHost)
 	}
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {
-		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
+		ec.addf("cluster.peer_max_idle_conn_duration", "must be >= 0 (0 = default 120s), got %v",
 			c.Cluster.PeerMaxIdleConnDuration)
 	}
+	if c.Cluster.PeerFetchConcurrency < 0 {
+		ec.addf("cluster.peer_fetch_concurrency", "must be >= 0 (0 = default 4), got %d",
+			c.Cluster.PeerFetchConcurrency)
+	}
+	if c.Cluster.PeerFetchConcurrency > MaxPeerFetchConcurrency {
+		ec.addf("cluster.peer_fetch_concurrency", "must be <= %d, got %d",
+			MaxPeerFetchConcurrency, c.Cluster.PeerFetchConcurrency)
+	}
+	if c.Cluster.BanTTL < 0 {
+		ec.addf("cluster.ban_ttl", "must be >= 0 (0 = default 24h), got %v",
+			c.Cluster.BanTTL)
+	}
+	if c.Cluster.BanTTL > 0 && c.Cluster.BanTTL < time.Second {
+		ec.addf("cluster.ban_ttl", "must be >= 1s when set, got %v",
+			c.Cluster.BanTTL)
+	}
 	if c.Admin.IdleTimeout < 0 {
-		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 300s), got %v",
+		ec.addf("admin.idle_timeout", "must be >= 0 (0 = default 300s), got %v",
 			c.Admin.IdleTimeout)
 	}
 	// The peer client must close idle connections before the admin
@@ -642,30 +1634,36 @@ func (c *Config) validatePeerFetchConfig() error {
 			adminIdle = defaultAdminIdleTimeout
 		}
 		if id >= adminIdle {
-			return fmt.Errorf(
-				"config: cluster.peer_max_idle_conn_duration (%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
+			ec.addf("cluster.peer_max_idle_conn_duration",
+				"(%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
 				id, adminIdle)
 		}
 	}
-	return nil
 }
 
 // validateEvictionAlgorithm checks the eviction policy selection for
 // both tiers. The shared EvictionAlgorithm sets the default for both
 // tiers; HotEvictionAlgorithm and WarmEvictionAlgorithm override it
-// per-tier. All three accept "", "sieve", or "cachaner".
+// per-tier. All three accept the zero value, EvictionSieve, or
+// EvictionCachaner.
 //
 // This function is a pure check — it does not mutate s.
-func validateEvictionAlgorithm(s *Storage) error {
-	for _, algo := range []string{s.EvictionAlgorithm, s.HotEvictionAlgorithm, s.WarmEvictionAlgorithm} {
-		switch algo {
-		case "", "sieve", "cachaner":
+func validateEvictionAlgorithm(ec *errCollector, s *Storage) {
+	for _, algo := range []struct {
+		path  string
+		value EvictionAlgorithm
+	}{
+		{"storage.eviction_algorithm", s.EvictionAlgorithm},
+		{"storage.hot_eviction_algorithm", s.HotEvictionAlgorithm},
+		{"storage.warm_eviction_algorithm", s.WarmEvictionAlgorithm},
+	} {
+		switch algo.value {
+		case "", EvictionSieve, EvictionCachaner:
 			// valid
 		default:
-			return fmt.Errorf("config: storage eviction_algorithm must be \"sieve\" or \"cachaner\", got %q", algo)
+			ec.addf(algo.path, `must be %q or %q, got %q`, EvictionSieve, EvictionCachaner, algo.value)
 		}
 	}
-	return nil
 }
 
 // isKnownHTTPMethod returns true for standard HTTP methods accepted in
@@ -774,7 +1772,6 @@ func parseByteSize(s string) (int64, error) {
 		return n, nil
 	}
 
-	// Find the split between number and unit.
 	i := 0
 	for i < len(s) && (s[i] == '-' || s[i] == '.' || (s[i] >= '0' && s[i] <= '9')) {
 		i++
@@ -793,4 +1790,172 @@ func parseByteSize(s string) (int64, error) {
 		return 0, fmt.Errorf("unknown unit %q", unit)
 	}
 	return int64(val * mult), nil
+}
+
+// validateStatusTTL resolves the route's negative-caching policy via
+// api.NewStatusTTLMap — the single parser and overlap checker — and
+// stores the built policy on the config, consuming the raw map the
+// decoder left behind. A nil raw map means the policy is already
+// resolved (programmatic construction) or absent (no negative caching);
+// rebuilding would clobber it. After Validate, the policy is the only
+// stored form: consumers (cache handler, builder, dashboard) read it
+// via Policy() and its enumeration methods; the raw map never escapes
+// the config layer.
+func validateStatusTTL(ec *errCollector, path string, n *NegativeTTLConfig) {
+	if n.raw == nil {
+		return
+	}
+	p, err := api.NewStatusTTLMap(n.raw)
+	if err != nil {
+		ec.addf(path, "%v", err)
+		return
+	}
+	n.policy = p
+	n.raw = nil
+}
+
+// ---- negative_ttl YAML unmarshalling ----
+
+// NegativeTTLConfig is the decoded form of the negative_ttl config
+// key, which accepts two shapes under one name so operators keep a
+// single mental slot for negative caching:
+//
+//	negative_ttl: 30s                           # default-set shorthand
+//	negative_ttl: {404: 1m, 5xx: 10s, 410: 0} # per-status map
+//
+// Both forms normalize to one map at decode time: the scalar expands
+// to the default set (404/405/410/501) via api.DefaultNegTTLMap, the
+// map is the complete policy (no implicit fallback statuses). Validate
+// then builds the *api.StatusTTLPolicy from that map and drops the
+// map: the policy is the single stored representation, and its
+// enumeration methods (Entries, CoversAnything) are how consumers see
+// the policy — no second shape to drift against. Key format, bounds,
+// and overlaps are validated by Validate via api.NewStatusTTLMap;
+// only the shape is decided here.
+type NegativeTTLConfig struct {
+	// raw holds the decoded map between UnmarshalYAML and Validate;
+	// nil afterwards. It never leaves the config layer.
+	raw map[string]time.Duration
+	// policy is the resolved *api.StatusTTLPolicy, built once by
+	// Validate. Nil when the route has no negative caching.
+	policy *api.StatusTTLPolicy
+}
+
+// Policy returns the resolved negative-caching policy, built once by
+// Validate via api.NewStatusTTLMap. Nil when the route has no
+// negative caching. Consumers must not construct the policy
+// themselves: a config that passed Validate already has it.
+func (n NegativeTTLConfig) Policy() *api.StatusTTLPolicy {
+	return n.policy
+}
+
+// IsZero reports whether any negative-caching policy is configured, so
+// yaml.v3 omitempty drops the key when empty. A policy resolved by
+// Validate also counts as configured.
+func (n NegativeTTLConfig) IsZero() bool {
+	return len(n.raw) == 0 && n.policy == nil
+}
+
+// durationValue decodes one TTL scalar. yaml.v3's native
+// time.Duration decoding rejects bare numbers like `0` or `30` (a
+// plain int, not "30s"), so entries decode through the same
+// scalar-or-parse path the ByteSize type uses: numbers are treated as
+// seconds, strings as duration literals ("30s", "1m"). Both
+// negative_ttl forms share it, so `negative_ttl: 30` and
+// `negative_ttl: {404: 30}` mean the same 30 seconds.
+type durationValue time.Duration
+
+func (d *durationValue) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("invalid duration %q: must be a scalar", value.Value)
+	}
+	var dur time.Duration
+	if err := value.Decode(&dur); err != nil {
+		// Not a duration literal; a bare number means seconds
+		// (mirrors "0" disabling a status in the map example).
+		var secs float64
+		if ferr := value.Decode(&secs); ferr != nil || secs < 0 {
+			return fmt.Errorf("invalid duration %q", value.Value)
+		}
+		dur = time.Duration(secs * float64(time.Second))
+	}
+	*d = durationValue(dur)
+	return nil
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for the negative_ttl key:
+// a duration scalar (shorthand for the default error statuses), or a
+// map of status codes/classes to durations (complete policy).
+func (n *NegativeTTLConfig) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var d durationValue
+		if err := value.Decode(&d); err != nil {
+			return fmt.Errorf("config: negative_ttl must be a duration or a status map: %w", err)
+		}
+		n.raw = api.DefaultNegTTLMap(time.Duration(d))
+		return nil
+	case yaml.MappingNode:
+		var raw map[string]durationValue
+		if err := value.Decode(&raw); err != nil {
+			return fmt.Errorf("config: negative_ttl must be a duration or a status map: %w", err)
+		}
+		n.raw = make(map[string]time.Duration, len(raw))
+		for k, v := range raw {
+			n.raw[k] = time.Duration(v)
+		}
+		return nil
+	default:
+		return fmt.Errorf("config: negative_ttl must be a duration or a status map, got YAML kind %d", value.Kind)
+	}
+}
+
+// NegTTLScalar builds the scalar shorthand's policy programmatically
+// (tests, SDK): d applies to the default error set. Non-positive d
+// yields no negative caching. Delegates to NegTTLMap over the default
+// expansion — one construction path for both forms, so they can never
+// disagree about what a scalar expands to.
+func NegTTLScalar(d time.Duration) NegativeTTLConfig {
+	// An error here is impossible: DefaultNegTTLMap emits only keys
+	// this parser accepts (exact codes of the default set, d > 0).
+	// Swallowing rather than panicking keeps the constructor total,
+	// matching the config-file path where d <= 0 means "no policy".
+	neg, _ := NegTTLMap(api.DefaultNegTTLMap(d))
+	return neg
+}
+
+// NegTTLMap builds a per-status policy programmatically. Keys use
+// the same "404" / "5xx" format as YAML. An invalid map is rejected
+// here, not deferred to Validate — an unrepresentable policy is a
+// programming error, and returning an error keeps the caller from
+// storing a config that could never load.
+func NegTTLMap(m map[string]time.Duration) (NegativeTTLConfig, error) {
+	p, err := api.NewStatusTTLMap(m)
+	if err != nil {
+		return NegativeTTLConfig{}, err
+	}
+	return NegativeTTLConfig{policy: p}, nil
+}
+
+// MarshalYAML emits the map form, rebuilt from the policy's entries:
+// it round-trips through UnmarshalYAML with the same semantics (the
+// scalar shorthand is canonical only at input).
+func (n NegativeTTLConfig) MarshalYAML() (any, error) {
+	m := make(map[string]time.Duration, len(n.policy.Entries()))
+	for _, e := range n.policy.Entries() {
+		m[e.Key] = e.TTL
+	}
+	return m, nil
+}
+
+// MarshalJSON emits the map form for the dashboard's JSON surfaces,
+// rebuilt from the policy's entries. json.Marshal renders an empty
+// map as {} and omits it via omitempty; the policy — not a stored
+// raw map — is the single representation.
+func (n NegativeTTLConfig) MarshalJSON() ([]byte, error) {
+	m := make(map[string]time.Duration, len(n.policy.Entries()))
+	for _, e := range n.policy.Entries() {
+		m[e.Key] = e.TTL
+	}
+	return json.Marshal(m)
 }

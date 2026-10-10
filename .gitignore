@@ -54,6 +54,9 @@ testdata/fuzz/*/
 # Python bytecode (prek / helper scripts)
 scripts/__pycache__/
 
+# kubeconform schema cache (populated by scripts/helm-kubeconform.sh)
+.kubeconform-cache/
+
 # Local-only plan — followed but never committed or pushed
 /docs/plans/open-sourcing.md
 

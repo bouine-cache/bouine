@@ -58,6 +58,30 @@ curl -X POST http://127.0.0.1:9000/v1/purge \
 - Purge does **not** propagate to warm (disk) tier in the current
   implementation — warm entries expire naturally via TTL.
 
+### Variant keys and `cache.key.include_headers`
+
+A variant key (secondary key) is selected by the request headers named
+in the response's `Vary` **plus** the route's `cache.key.include_headers`
+allow-list: the two are unioned at object-build time, so an
+include-listed header behaves exactly like an origin-declared `Vary`
+field (issue #632). A request missing a listed header hashes its
+absence as an empty value (one distinct variant).
+
+Operational rules:
+
+- Purging the URL purges **all** variants (Vary- and include-keyed) of
+  that URL.
+- The include list must be identical on **every** cluster node serving
+  the route. A node with a different include list stores and resolves
+  variants under different keys — a peer answering a variant fetch
+  computes a different VaryKey and the variant gates reject it (miss),
+  so the damage is failed hits, not wrong bodies. This is the same
+  pre-existing hazard class as `exclude_headers`; rolling the config
+  out uniformly (then restarting pods) avoids it.
+- Changing (or removing) the include list does not invalidate
+  already-stored variants: entries stored under the old union stay
+  cached until their TTL expires or the URL is purged.
+
 ---
 
 ## Ban (predicate-based)

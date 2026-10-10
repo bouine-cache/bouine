@@ -1,0 +1,32 @@
+# CodeQL models-as-data: request-forgery false-positive barriers.
+#
+# go/request-forgery fires on every site where the client's request
+# path flows into an origin-bound request URI (fasthttp's
+# Request.SetRequestURI* is a modeled request-forgery sink, and
+# RequestCtx.RequestURI / RequestInfo URIs are modeled remote sources).
+# In bouine those flows are the product working as designed: the URL
+# PATH of every origin-bound request is derived from the client's
+# request-target, while the connection target is always the
+# operator-configured upstream pool (docs/security/threat-model.md
+# §A10). The same alerts were manually dismissed as false positives on
+# the default branch, but dismissals do not survive line changes, so
+# any pull request touching these call sites resurrects them as "new"
+# alerts and fails the CodeQL check.
+#
+# These kind-scoped barriers encode the §A10 decision durably, at the
+# two functions every origin-bound URI passes through:
+#   - Handler.originURI: strip_prefix / path_rewrite transformation of
+#     the origin-bound URI (all fetch, revalidate, refill, and bypass
+#     paths).
+#   - PathRewrite.RewriteURI: the regex rewrite used by the
+#     builder-lowered static-route wrapper.
+# The barrier is scoped to the request-forgery taint kind only; all
+# other queries (path-injection, log-injection, ...) keep full
+# visibility through these functions.
+extensions:
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      - ["github.com/bouine-cache/bouine/internal/cache", "Handler", true, "originURI", "", "", "ReturnValue", "request-forgery", "manual"]
+      - ["github.com/bouine-cache/bouine/internal/cache", "PathRewrite", true, "RewriteURI", "", "", "ReturnValue", "request-forgery", "manual"]

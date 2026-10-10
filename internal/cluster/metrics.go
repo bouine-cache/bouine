@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/bouine-cache/bouine/internal/config"
 )
 
 // Metrics holds Prometheus counters for cluster-level events.
@@ -36,11 +38,34 @@ type Metrics struct {
 	// correctness regression: the node is failing open to single-node
 	// ownership. See issue #305.
 	RingEmpty prometheus.Counter
+	// BroadcastOverflows counts batcher queue overflows. Non-zero
+	// means invalidation events bypass batching and fall back to
+	// unbatched delivery (delivery preserved, batching win lost).
+	// See ADR-0044.
+	BroadcastOverflows prometheus.Counter
+	// GossipOversizedDrops counts gossip frames dropped because they
+	// cannot fit memberlist's UDP gossip window even in an empty
+	// round. Non-zero indicates a bug or a pathological single event:
+	// batches are split at enqueue time, so this guard should stay at
+	// zero. See issue #754.
+	GossipOversizedDrops prometheus.Counter
+	// PeerFetchVariantMismatch counts peer-fetch RPCs rejected by the
+	// RFC 9111 §4.1 variant-assertion gate, labelled by side:
+	// "server" (the owner answered a requested variant with another
+	// variant's body or the primary-key Vary resolver) or "consumer"
+	// (the fetched object's stored variant does not select the local
+	// request). A sustained non-zero rate indicates a mixed-version
+	// fleet or a peer serving wrong-variant content. See issue #633.
+	PeerFetchVariantMismatch *prometheus.CounterVec
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
 	// to read Prometheus dto.Metric from the cluster package.
 	broadcastFailuresTotal atomic.Int64
+	// peerFetchVariantMismatchTotal is a lock-free total across both
+	// sides, exposed via PeerFetchVariantMismatchCount for the
+	// insights engine.
+	peerFetchVariantMismatchTotal atomic.Int64
 }
 
 // RegisterMetrics creates and registers the cluster metrics on
@@ -80,6 +105,21 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_ring_empty_total",
 			Help:      "Number of times Owner was called with an empty consistent-hash ring. Non-zero indicates a silent correctness regression.",
 		}),
+		BroadcastOverflows: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_broadcast_overflows_total",
+			Help:      "Invalidation batcher queue overflows. Events fall back to unbatched delivery; delivery is preserved.",
+		}),
+		GossipOversizedDrops: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_gossip_oversized_drops_total",
+			Help:      "Gossip frames dropped because they cannot fit the UDP gossip window. Non-zero indicates a bug or a pathological event; see issue #754.",
+		}),
+		PeerFetchVariantMismatch: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "peer_fetch_variant_mismatch_total",
+			Help:      "Peer-fetch RPCs rejected by the RFC 9111 variant-assertion gate, by side (server, consumer). Sustained non-zero rate indicates a mixed-version fleet or a peer serving wrong-variant content.",
+		}, []string{"side"}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -88,6 +128,9 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.BroadcastFailures,
 		m.GossipDrops,
 		m.RingEmpty,
+		m.BroadcastOverflows,
+		m.GossipOversizedDrops,
+		m.PeerFetchVariantMismatch,
 	)
 	return m
 }
@@ -98,7 +141,7 @@ func (m *Metrics) SetMode(mode string) {
 	if m == nil || m.ModeInfo == nil {
 		return
 	}
-	for _, label := range []string{"strong", "eventual"} {
+	for _, label := range []string{string(config.ClusterModeStrong), string(config.ClusterModeEventual)} {
 		if label == mode {
 			m.ModeInfo.WithLabelValues(label).Set(1)
 		} else {
@@ -143,6 +186,42 @@ func (m *Metrics) IncGossipDrop() {
 		return
 	}
 	m.GossipDrops.Inc()
+}
+
+// IncBroadcastOverflow increments the batcher-overflow counter.
+func (m *Metrics) IncBroadcastOverflow() {
+	if m == nil || m.BroadcastOverflows == nil {
+		return
+	}
+	m.BroadcastOverflows.Inc()
+}
+
+// IncGossipOversizedDrop increments the oversized-frame drop counter.
+func (m *Metrics) IncGossipOversizedDrop() {
+	if m == nil || m.GossipOversizedDrops == nil {
+		return
+	}
+	m.GossipOversizedDrops.Inc()
+}
+
+// IncPeerFetchVariantMismatch increments the variant-mismatch counter
+// for the given side ("server" or "consumer"). Nil-safe: single-node
+// mode never registers the vec.
+func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
+	if m == nil || m.PeerFetchVariantMismatch == nil {
+		return
+	}
+	m.PeerFetchVariantMismatch.WithLabelValues(side).Inc()
+	m.peerFetchVariantMismatchTotal.Add(1)
+}
+
+// PeerFetchVariantMismatchCount returns the total number of variant
+// mismatches across both sides. Used by the dashboard insights engine.
+func (m *Metrics) PeerFetchVariantMismatchCount() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.peerFetchVariantMismatchTotal.Load()
 }
 
 // IncRingEmpty increments the ring-empty counter. Called when Owner

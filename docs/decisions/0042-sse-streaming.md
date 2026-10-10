@@ -19,7 +19,10 @@ independent ways:
    sub-4 KiB events accumulated and were delivered in multi-kilobyte
    batches or only at stream end.
 2. **Origin deadline**: fasthttp arms one absolute read deadline —
-   `min(fetch_timeout, response_header_timeout)` (default 60s/30s) —
+   `min(fetch_timeout, response_header_timeout)` (default 60s/30s; the
+   composition is the historical client-level cap, removed by
+   ADR-0043 — today only the per-request `fetch_timeout` deadline
+   applies) —
    before the response headers, and that deadline persists into the
    streamed body (fasthttp `client.go` transport). Every event stream was
    cut after at most 30 seconds.

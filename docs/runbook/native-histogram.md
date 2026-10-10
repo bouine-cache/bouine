@@ -1,9 +1,19 @@
-# Native histogram for bouine_request_duration_seconds
+# Native histograms for bouine duration metrics
 
 ## What changed
 
-The request-duration histogram is now registered with
+All bouine duration histograms are now registered with
 `NativeHistogramBucketFactor: 1.1` and `NativeHistogramMaxBucketNumber: 80`.
+The affected metrics are:
+
+- `bouine_request_duration_seconds` (data-plane RED)
+- `bouine_cloudflare_purge_duration_seconds` (Cloudflare purge API latency)
+- `bouine_startup_duration_seconds` (process startup)
+- `bouine_peer_fetch_duration_seconds` (cluster peer-fetch RPCs)
+- `bouine_warm_compaction_duration_seconds` (warm-tier compaction)
+- `bouine_wal_write_duration_seconds` (WAL drain-and-sync)
+- `bouine_origin_request_duration_seconds` (origin response time)
+
 Prometheus exposition contains BOTH:
 
 - the classic `_bucket`/`_sum`/`_count` series (unchanged, all existing
@@ -22,14 +32,43 @@ config for bouine pods:
 ```yaml
 metric_relabel_configs:
   - action: drop
-    regex: bouine_request_duration_seconds_bucket
+    regex: bouine_(request_duration_seconds|cloudflare_purge_duration_seconds|startup_duration_seconds|peer_fetch_duration_seconds|warm_compaction_duration_seconds|wal_write_duration_seconds|origin_request_duration_seconds)_bucket
     source_labels: [__name__]
 ```
 
 Keep `_sum`/`_count` (average latency) and the native histogram (all
 quantiles). After the relabel is in place, each active label tuple costs
 `_sum` + `_count` + sparse buckets (~1-45 depending on traffic spread,
-capped at 80) instead of 11 classic bucket series per tuple.
+capped at 80) instead of 16 classic bucket series per tuple.
+
+## Series arithmetic with the traffic_class axis (ADR-0047)
+
+With `traffic_class` (ADR-0047) each family's per-tuple ceiling is
+multiplied by `1 + #configured classes` (config cap 8, so max 9); with
+no classes configured the multiplier is 1.
+
+| Family | Per (pool, class) | At 33 pools × 9 classSlots |
+|---|---|---|
+| `bouine_requests_total` | 7 status × 5 results × 5 sources = 175 | 51 975 |
+| `bouine_request_duration_seconds` (classic `_bucket`) | 6 status classes × 5 results = 30 tuples | 8 910 tuples → 142 560 classic series |
+| `bouine_response_bytes_total` | 5 results × 5 sources = 25 | 7 425 |
+
+- Keep `pools × (1 + #classes) ≤ 57` to stay under the AGENTS.md §9
+  10 000-series line for `bouine_requests_total`; above it, reduce
+  classes, split fleets, or extend the drop pattern above
+  (`metric_relabel_configs` can drop whole classes on this family
+  too). The overage is a documented exception (ADR-0047): opt-in, and
+  the label set is closed.
+- The histogram's classic `_bucket` series dominate; the existing
+  `metric_relabel_configs` drop rule removes them. The native sparse
+  form costs `_sum` + `_count` + ≤80 sparse buckets per tuple.
+
+## Upgrade note: series identity reset
+
+Adding the `traffic_class` label changes every data-plane series'
+identity: `rate()` over these families shows a one-window gap at the
+deploy boundary, self-healing after one scrape interval. Recording
+rules and alerts need no change.
 
 ## Cost
 
@@ -39,12 +78,13 @@ capped at 80) instead of 11 classic bucket series per tuple.
 - Sparse buckets self-compact when the cap would be exceeded (resolution
   halves). Under adversarial spread (10k distinct latencies over
   0.5 ms-1.5 s) the compaction settled at 44 buckets.
-- The 2.5/5/10s classic buckets were dropped earlier in this PR; hung
-  fetches are tracked as 5xx counts on `bouine_requests_total`.
+- The 2.5/5/10s classic tail buckets are retained so slow misses and
+  hung-fetch tails are distinguishable in `histogram_quantile` queries;
+  anything beyond 10s lands in the `+Inf` overflow bucket.
 
 ## Rollback
 
 Native support is a field on the histogram constructor. To revert,
-delete the three `NativeHistogram*` fields in
-`internal/observability/dataplane.go` (`NewDataPlaneMetrics`); the
-classic representation is unaffected and no query changes.
+delete the three `NativeHistogram*` fields from any of the affected
+histogram constructors (listed above); the classic representation is
+unaffected and no query changes.

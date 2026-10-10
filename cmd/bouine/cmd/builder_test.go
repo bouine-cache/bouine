@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/admin"
 	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/cluster"
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
@@ -24,6 +26,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func newTestLogger() observability.Logger {
@@ -123,6 +126,34 @@ func TestHasKeyPolicy(t *testing.T) {
 	assert.True(t, hasKeyPolicy(config.RouteKey{DedupQueryParams: true}))
 }
 
+func TestBuildKeyPolicy_IncludeHost(t *testing.T) {
+	t.Parallel()
+	// Absent (nil) and true keep today's nil-policy fast path: a route
+	// with no other key fields must not allocate a policy just because
+	// the field exists.
+	assert.Nil(t, buildKeyPolicy(config.RouteKey{}))
+	yes := true
+	assert.Nil(t, buildKeyPolicy(config.RouteKey{IncludeHost: &yes}))
+
+	// Explicit false compiles a policy that collapses hosts in the
+	// key — the observable behaviour NewKeyPolicy's excludeHost flag
+	// produces.
+	no := false
+	p := buildKeyPolicy(config.RouteKey{IncludeHost: &no})
+	require.NotNil(t, p)
+	assert.Equal(t,
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "a.example.com", Path: "/x"}, p),
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "b.example.com", Path: "/x"}, p))
+	assert.True(t, hasKeyPolicy(config.RouteKey{IncludeHost: &no}))
+
+	// Combined with query policy both flags survive in one policy.
+	p2 := buildKeyPolicy(config.RouteKey{IncludeHost: &no, StripQueryParams: []string{"utm"}})
+	require.NotNil(t, p2)
+	assert.Equal(t,
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "a.example.com", Path: "/x", URI: "/x?utm=1"}, p2),
+		cache.BuildKey(cache.RequestInfo{Method: "GET", Host: "b.example.com", Path: "/x", URI: "/x?utm=1"}, p2))
+}
+
 func TestBoolDefault(t *testing.T) {
 	t.Parallel()
 	assert.True(t, boolDefault(nil, true))
@@ -194,6 +225,62 @@ func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
 	require.Equal(t, 500*time.Millisecond, rt)
 }
 
+// newTestPool builds an origin pool from an UpstreamPool config so the
+// resolveRouteFetchTimeout tests exercise the same resolution path
+// (buildPoolConfig → origin.NewPool → defaults) as the engine.
+func newTestPool(t *testing.T, pc config.UpstreamPool) *origin.Pool {
+	t.Helper()
+	p, err := origin.NewPool(buildPoolConfig(pc, newTestLogger(), nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close(t.Context()) })
+	return p
+}
+
+// TestResolveRouteFetchTimeout pins the per-route origin timeout
+// resolution order: an explicit route fetch_timeout wins; otherwise the
+// route inherits the pool's connect.response_header_timeout (with its
+// built-in default applied). The inheritance must not fall through to
+// cache.defaultFetchTimeout (60s), which would silently double the
+// historical 30s origin wait.
+func TestResolveRouteFetchTimeout(t *testing.T) {
+	t.Parallel()
+
+	newPool := func(t *testing.T, headerTimeout time.Duration) *origin.Pool {
+		return newTestPool(t, config.UpstreamPool{
+			Name:    "app",
+			Targets: []string{"127.0.0.1:1"},
+			Connect: config.ConnectPolicy{ResponseHeaderTimeout: headerTimeout},
+		})
+	}
+
+	t.Run("explicit route timeout overrides the pool", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 20*time.Second)
+		rc := config.Route{Cache: config.RouteCache{FetchTimeout: 90 * time.Second}}
+		require.Equal(t, 90*time.Second, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("unset route inherits configured pool timeout", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 45*time.Second)
+		rc := config.Route{}
+		require.Equal(t, 45*time.Second, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("unset route inherits pool default when pool unset too", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 0)
+		rc := config.Route{}
+		require.Equal(t, origin.DefaultResponseHeaderTimeout, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("nil pool leaves the timeout unset", func(t *testing.T) {
+		t.Parallel()
+		rc := config.Route{}
+		require.Zero(t, resolveRouteFetchTimeout(rc, nil))
+	})
+}
+
 func TestSanitizedConfig(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{
@@ -261,7 +348,7 @@ func TestBuildTLSConfig_ValidMinVersions(t *testing.T) {
 			cfg := &config.Config{
 				TLS: config.TLS{
 					Certs:      []config.TLSCert{{CertFile: certPath, KeyFile: keyPath}},
-					MinVersion: version,
+					MinVersion: config.TLSVersion(version),
 				},
 			}
 			tlsCfg, err := buildTLSConfig(cfg)
@@ -607,6 +694,23 @@ func TestBuildClusterMeta_SingleNode(t *testing.T) {
 	rs := &runState{}
 	meta := e.buildClusterMeta(rs)
 	assert.Equal(t, "single-node", meta.Mode)
+	// Derived defaults must match what the runtime actually uses, not
+	// stale hardcoded strings: 120s join budget stepped at 2s, and the
+	// 500ms peer-fetch RPC timeout from the cluster package.
+	assert.Equal(t, "2m0s · 2s step", meta.JoinRetryBudget)
+	assert.Equal(t, "500ms", meta.PeerFetchTimeout)
+}
+
+// A configured join timeout must be reflected in the budget label.
+func TestBuildClusterMeta_ConfiguredJoinTimeout(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg:    &config.Config{Cluster: config.Cluster{JoinTimeout: 45 * time.Second}},
+		logger: newTestLogger(),
+	}
+	rs := &runState{}
+	meta := e.buildClusterMeta(rs)
+	assert.Equal(t, "45s · 2s step", meta.JoinRetryBudget)
 }
 
 func TestBuildClusterMeta_WithHopLimit(t *testing.T) {
@@ -618,6 +722,20 @@ func TestBuildClusterMeta_WithHopLimit(t *testing.T) {
 	rs := &runState{}
 	meta := e.buildClusterMeta(rs)
 	assert.Equal(t, 3, meta.HopLimit)
+}
+
+// An unset hop_limit falls back to the peer fetcher's MaxHops default,
+// so the cluster page must show the effective value, not 0.
+func TestBuildClusterMeta_DefaultHopLimit(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg:    &config.Config{},
+		logger: newTestLogger(),
+	}
+	rs := &runState{}
+	meta := e.buildClusterMeta(rs)
+	assert.Equal(t, cluster.MaxHops, meta.HopLimit)
+	assert.NotZero(t, meta.HopLimit)
 }
 
 func TestInsightsPoolHealth_Nil(t *testing.T) {
@@ -812,7 +930,7 @@ func TestBuildStore_HotOnly(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -826,7 +944,7 @@ func TestBuildStore_WithWarmDir(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -961,7 +1079,7 @@ func TestCacheCheck_WithStore(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{store: store}
 	result := cacheCheck(context.Background(), "https://example.com/page", rs)
@@ -1004,13 +1122,58 @@ func TestStartHealthChecks_WithActivePath(t *testing.T) {
 	_ = g.Wait()
 }
 
+// TestMayReapDecider pins the ADR-0051 wiring logic: the grace gate
+// holds a graced entry only while its origin pool has no healthy
+// target; unknown pools, pool-less routes, and ungraced objects always
+// reap.
+func TestMayReapDecider(t *testing.T) {
+	t.Parallel()
+	// A pool with one live target and a pool whose only target gets
+	// ejected by consecutive fetch failures (Consecutive5xx: 1).
+	live := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	alive, err := origin.NewPool(origin.PoolConfig{Name: "alive", Targets: []string{live.Addr}, Logger: newTestLogger()})
+	require.NoError(t, err, "NewPool alive")
+
+	deadSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	deadAddr := deadSrv.Addr
+	deadSrv.Close()
+	dead, err := origin.NewPool(origin.PoolConfig{
+		Name:           "dead",
+		Targets:        []string{deadAddr},
+		Consecutive5xx: 1,
+		Logger:         newTestLogger(),
+	})
+	require.NoError(t, err, "NewPool dead")
+	// One failed fetch ejects the only target (threshold 1).
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.Header.SetMethod("GET")
+	req.SetRequestURI("/x")
+	_ = dead.FastClient().Do(context.Background(), req, resp)
+	fasthttp.ReleaseRequest(req)
+	fasthttp.ReleaseResponse(resp)
+	require.False(t, dead.HasHealthyTarget(), "dead pool must have no healthy target")
+
+	mayReap := mayReapDecider(map[string]*origin.Pool{"alive": alive, "dead": dead})
+
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: "alive"}), "healthy pool: graced entry must be reaped")
+	require.False(t, mayReap(&api.Object{KeepGrace: true, Pool: "dead"}), "unhealthy pool: graced entry must be held")
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: "missing"}), "unknown pool: grace cannot resolve, must reap")
+	require.True(t, mayReap(&api.Object{KeepGrace: true, Pool: ""}), "pool-less route: must reap")
+	require.True(t, mayReap(&api.Object{KeepGrace: false, Pool: "dead"}), "ungraced entry: must reap regardless")
+}
+
 func TestBuildInvalidationOps_Purge(t *testing.T) {
 	t.Parallel()
 	e := &engine{
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1027,7 +1190,7 @@ func TestBuildInvalidationOps_Ban(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1045,7 +1208,7 @@ func TestBuildInvalidationOps_Refresh(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1062,7 +1225,7 @@ func TestPurgeKey_WithHandler(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	handler := cache.NewHandler(cache.HandlerConfig{
 		Upstream: func(ctx *fasthttp.RequestCtx) {},
@@ -1085,7 +1248,7 @@ func TestBuildStore_WithEvictionAlgo(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -1108,7 +1271,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1116,7 +1279,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		Name:   "static",
 		Static: config.StaticConfig{Root: dir},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1129,7 +1292,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{
@@ -1142,7 +1305,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		Static: config.StaticConfig{Root: dir},
 		Cache:  config.RouteCache{Enabled: &cacheEnabled, TTLDefault: 60 * time.Second},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Len(t, rs.handlers, 1)
 }
 
@@ -1152,7 +1315,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1160,7 +1323,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		Name:   "bad",
 		Static: config.StaticConfig{Root: "/nonexistent/path/that/does/not/exist"},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 	assert.Empty(t, rs.handlers)
 }
 
@@ -1171,7 +1334,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1180,7 +1343,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		Static:  config.StaticConfig{Root: dir},
 		Request: config.RouteRequest{StripPrefix: "/assets"},
 	}
-	e.buildStaticRoute(router, rs, rc)
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
 }
 
 func TestBuildRouter_WithStaticRoute(t *testing.T) {
@@ -1197,7 +1360,7 @@ func TestBuildRouter_WithStaticRoute(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	metrics := origin.RegisterMetrics(observability.NewMetrics().Registry)
 	rs := &runState{
@@ -1220,7 +1383,7 @@ func TestBuildRouter_WithMissingPool(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:     store,
@@ -1250,7 +1413,7 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1265,7 +1428,209 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 	assert.Len(t, rs.handlers, 1)
 }
 
-// TestBuildRouter_StripPrefixWired is the regression test for issue
+// TestBuildRouter_BypassOnCookieWired verifies the config flag
+// cache.bypass_on_cookie reaches the route's cache handler (issue
+// #762): a cookied request is proxied as BYPASS. The full
+// miss/hit/bypass semantics are pinned by internal/cache's
+// cookie_bypass_test.go; this test proves only the config plumbing
+// (config.RouteCache.BypassOnCookie → cache.HandlerConfig), which is
+// why it avoids HIT assertions against the real-origin streaming
+// path (the tee store is asynchronous; MISS→HIT is deterministic only
+// under the buffered test client).
+func TestBuildRouter_BypassOnCookieWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	bypass := true
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{BypassOnCookie: &bypass}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Anonymous request: normal cache path (MISS, fetches from origin).
+	anon := &fasthttp.RequestCtx{}
+	anon.Request.Header.SetMethod("GET")
+	anon.Request.SetRequestURI("/page")
+	router.ServeRequest(anon)
+	require.Equal(t, fasthttp.StatusOK, anon.Response.StatusCode())
+	require.Equal(t, "MISS", string(anon.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(anon.Response.Body()))
+
+	// Cookied request bypasses the cache entirely: its own origin
+	// fetch, X-Cache: BYPASS — the flag reached the handler.
+	cookied := &fasthttp.RequestCtx{}
+	cookied.Request.Header.SetMethod("GET")
+	cookied.Request.SetRequestURI("/page")
+	cookied.Request.Header.Set(header.Cookie, "sid=u")
+	router.ServeRequest(cookied)
+	require.Equal(t, fasthttp.StatusOK, cookied.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(cookied.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(cookied.Response.Body()))
+}
+
+// TestBuildRouter_BypassOnUserAgentWired verifies the config knob
+// cache.bypass_on_user_agent reaches the route's cache handler (issue
+// #771): a matching-UA request is proxied as BYPASS while a
+// non-matching UA uses the cache. The full bypass semantics are pinned
+// by internal/cache's ua_bypass_test.go; this test proves only the
+// config plumbing (config.RouteCache.BypassOnUserAgent →
+// cache.HandlerConfig).
+func TestBuildRouter_BypassOnUserAgentWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{
+					BypassOnUserAgent: []string{"*ShoppingFeedBot*"},
+				}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Non-matching UA: normal cache path (MISS, fetches from origin).
+	normal := &fasthttp.RequestCtx{}
+	normal.Request.Header.SetMethod("GET")
+	normal.Request.SetRequestURI("/feed")
+	normal.Request.Header.Set(header.UserAgent, "Mozilla/5.0")
+	router.ServeRequest(normal)
+	require.Equal(t, fasthttp.StatusOK, normal.Response.StatusCode())
+	require.Equal(t, "MISS", string(normal.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(normal.Response.Body()))
+
+	// Matching UA bypasses the cache entirely: its own origin fetch,
+	// X-Cache: BYPASS — the knob reached the handler.
+	crawler := &fasthttp.RequestCtx{}
+	crawler.Request.Header.SetMethod("GET")
+	crawler.Request.SetRequestURI("/feed")
+	crawler.Request.Header.Set(header.UserAgent, "ShoppingFeedBot/1.0")
+	router.ServeRequest(crawler)
+	require.Equal(t, fasthttp.StatusOK, crawler.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(crawler.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(crawler.Response.Body()))
+}
+
+// TestBuildRouter_BypassOnUserAgentRouteDefaultsWired proves the
+// route_defaults.cache.bypass_on_user_agent inheritance end to end:
+// a route that declares no list of its own bypasses matching requests
+// because the merged default reached its cache handler. The merge
+// precedence rules are pinned by internal/config's
+// ua_bypass_test.go; this test covers only merge → handler wiring.
+func TestBuildRouter_BypassOnUserAgentRouteDefaultsWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+listen:
+  admin: :9000
+upstream_pools:
+  - name: ssr
+    targets: ["%s"]
+route_defaults:
+  cache:
+    bypass_on_user_agent: ["*ShoppingFeedBot*"]
+routes:
+  - name: ssr
+    pool: ssr
+    cache: {ttl_default: 60s}
+`, originSrv.Addr)))
+	require.NoError(t, err)
+	require.Equal(t, []string{"*ShoppingFeedBot*"}, cfg.Routes[0].Cache.BypassOnUserAgent,
+		"the route must inherit the route_defaults pattern list")
+
+	e := &engine{
+		cfg:     cfg,
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+
+	// Non-matching UA: normal cache path (MISS).
+	normal := &fasthttp.RequestCtx{}
+	normal.Request.Header.SetMethod("GET")
+	normal.Request.SetRequestURI("/feed")
+	normal.Request.Header.Set(header.UserAgent, "Mozilla/5.0")
+	router.ServeRequest(normal)
+	require.Equal(t, fasthttp.StatusOK, normal.Response.StatusCode())
+	require.Equal(t, "MISS", string(normal.Response.Header.Peek(header.XCache)))
+
+	// Matching UA: BYPASS — the inherited default reached the handler.
+	crawler := &fasthttp.RequestCtx{}
+	crawler.Request.Header.SetMethod("GET")
+	crawler.Request.SetRequestURI("/feed")
+	crawler.Request.Header.Set(header.UserAgent, "ShoppingFeedBot/1.0")
+	router.ServeRequest(crawler)
+	require.Equal(t, fasthttp.StatusOK, crawler.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(crawler.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(crawler.Response.Body()))
+}
+
 // #595: request.strip_prefix on a proxied route must reach the cache
 // handler, so the origin sees the stripped path while cache keys keep
 // the original path.
@@ -1294,7 +1659,7 @@ func TestBuildRouter_StripPrefixWired(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1314,6 +1679,260 @@ func TestBuildRouter_StripPrefixWired(t *testing.T) {
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	assert.Equal(t, "/users", string(ctx.Response.Body()),
 		"origin must receive the stripped path")
+}
+
+// TestBuildRouter_PathRewriteWired mirrors
+// TestBuildRouter_StripPrefixWired: request.path_rewrite on a proxied
+// route must reach the cache handler, so the origin sees the rewritten
+// path while cache keys keep the original path.
+func TestBuildRouter_PathRewriteWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write(ctx.RequestURI())
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "echo", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{
+					Name: "webhook-callback",
+					Pool: "echo",
+					Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+						Match:   `^/public/webhook/(.*)$`,
+						Replace: "/internal/webhook/$1",
+					}},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/public/webhook/payin123?sig=1")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, "/internal/webhook/payin123?sig=1", string(ctx.Response.Body()),
+		"origin must receive the rewritten path with query preserved")
+
+	// The cache-key contract (keys keep the ORIGINAL public path) is
+	// pinned by internal/cache/path_rewrite_route_test.go and the
+	// test/integration/path_rewrite_test.go cluster regression; this
+	// builder test only proves the wiring reaches the handler.
+}
+
+// TestPolicyForURL wires a real router and proves the admin plane's
+// URL→policy resolution: a route with include_host: false must be
+// found for URLs under its prefix (any host — that is the point), and
+// the policy it reports is the one its handler serves with. Unmatched
+// URLs and a nil router fall back to nil (host-ful default key).
+func TestPolicyForURL(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
+	defer originSrv.Close()
+
+	no := false
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "echo", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{
+					Name:  "pp",
+					Pool:  "echo",
+					Match: config.RouteMatch{PathPrefix: "/pages/"},
+					Cache: config.RouteCache{Key: config.RouteKey{IncludeHost: &no}},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	rs.router = router
+	require.Len(t, rs.handlers, 1)
+
+	// Any host under the route prefix resolves to the host-agnostic
+	// policy: the admin purge path builds the key the data plane does.
+	pol := policyForURL(rs, "http://internal.example.com/pages/p?x=1")
+	require.NotNil(t, pol)
+	k1 := cache.BuildKeyFromURL("http://internal.example.com/pages/p?x=1", pol)
+	k2 := cache.BuildKeyFromURL("http://www.example.com/pages/p?x=1", pol)
+	require.Equal(t, k1, k2, "the resolved policy must be host-agnostic")
+	pol2 := policyForURL(rs, "http://www.example.com/pages/p")
+	require.NotNil(t, pol2)
+
+	// Same policy instance the handler serves with — not a recompile.
+	require.Same(t, rs.handlers[0].KeyPolicy(), pol)
+
+	// Unmatched URL, no-host URL, invalid URL, and nil router all fall
+	// back to nil (the default host-ful key).
+	assert.Nil(t, policyForURL(rs, "http://example.com/other"))
+	assert.Nil(t, policyForURL(rs, "/relative"))
+	assert.Nil(t, policyForURL(rs, "ht\x00tp://bad"))
+	assert.Nil(t, policyForURL(nil, "http://example.com/pages/p"))
+
+	// The resolved policy produces the shared key the data plane uses:
+	// two hosts, one key — the property admin purges rely on.
+	k3 := cache.BuildKeyFromURL("http://internal.example.com/pages/p?x=1", pol)
+	k4 := cache.BuildKeyFromURL("http://public.example.com/pages/p?x=1", pol)
+	assert.Equal(t, k3, k4)
+}
+
+// TestBuildStaticRoute_WithPathRewrite covers the non-cached static
+// route surface: the builder-lowered wrapper rewrites before the
+// static handler runs.
+func TestBuildStaticRoute_WithPathRewrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index.html"), []byte("static"), 0o600))
+	e := &engine{
+		cfg:    &config.Config{},
+		logger: newTestLogger(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store}
+	rc := config.Route{
+		Name:   "static-rewrite",
+		Static: config.StaticConfig{Root: dir},
+		Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+			Match:   `^/assets/(.*)$`,
+			Replace: "/$1",
+		}},
+	}
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/assets/index.html")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"rewritten path must reach the file")
+	assert.Equal(t, "static", string(ctx.Response.Body()))
+}
+
+// TestBuildStaticRoute_CachedPathRewriteAppliedOnce pins the cached
+// static wiring against double application: the cache.Handler's
+// originURI is the single rewrite point, and the Upstream handed to it
+// must be the bare static handler. A non-idempotent pattern
+// (/x/ -> /y/ on /x/x/f) applied twice resolves /y/y/f; applied once it
+// resolves /y/x/f. The bypass request (Cache-Control: no-cache) covers
+// the in-process upstream fallback, which applies originURI in place.
+func TestBuildStaticRoute_CachedPathRewriteAppliedOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "y", "x"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y", "x", "f"), []byte("once"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "y", "y"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y", "y", "f"), []byte("twice"), 0o600))
+
+	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
+	enabled := true
+	rc := config.Route{
+		Name:   "static-cached-rewrite",
+		Static: config.StaticConfig{Root: dir},
+		Cache:  config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
+		Request: config.RouteRequest{PathRewrite: config.PathRewriteConfig{
+			Match:   `/x/`,
+			Replace: "/y/",
+		}},
+	}
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/x/x/f")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "miss must serve the once-rewritten file")
+	assert.Equal(t, "once", string(ctx.Response.Body()),
+		"a double application would resolve /y/y/f (\"twice\")")
+
+	ctx2 := &fasthttp.RequestCtx{}
+	ctx2.Request.SetRequestURI("/x/x/f")
+	ctx2.Request.Header.Set("Cache-Control", "no-cache")
+	router.ServeRequest(ctx2)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode())
+	assert.Equal(t, "once", string(ctx2.Response.Body()),
+		"the bypass upstream fallback must also apply the rewrite exactly once")
+}
+
+// TestBuildStaticRoute_CachedStripPrefixAppliedOnce pins the same
+// single-application contract for strip_prefix on cached static routes:
+// /api/api/f strips one /api prefix (serving api/f), not two.
+func TestBuildStaticRoute_CachedStripPrefixAppliedOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "api"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "api", "f"), []byte("once"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("twice"), 0o600))
+
+	e := &engine{cfg: &config.Config{}, logger: newTestLogger()}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
+	rs := &runState{store: store, dpMetrics: observability.NewDataPlaneMetrics(observability.NewMetrics().Registry)}
+	enabled := true
+	rc := config.Route{
+		Name:    "static-cached-strip",
+		Static:  config.StaticConfig{Root: dir},
+		Cache:   config.RouteCache{Enabled: &enabled, TTLDefault: time.Minute},
+		Request: config.RouteRequest{StripPrefix: "/api"},
+	}
+	e.buildStaticRoute(router, rs, rc, func(*cache.Handler) *cache.FastPathHandler { return nil })
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/api/f")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "miss must serve the once-stripped file")
+	assert.Equal(t, "once", string(ctx.Response.Body()),
+		"a double strip would resolve /f (\"twice\")")
+}
+
+// TestBuildPathRewrite_NilWhenUnset pins the zero-config behaviour:
+// no path_rewrite means no compiled rewrite (zero cost).
+func TestBuildPathRewrite_NilWhenUnset(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, buildPathRewrite(config.Route{}))
+	require.NotNil(t, buildPathRewrite(config.Route{Request: config.RouteRequest{
+		PathRewrite: config.PathRewriteConfig{Match: `^/a/`, Replace: "/b/"},
+	}}))
 }
 
 func TestUpdateStartupMetrics(t *testing.T) {
@@ -1383,7 +2002,7 @@ func TestStartBackgroundTasks(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rings, snap := e.initRings()
 	rs := &runState{
@@ -1639,7 +2258,7 @@ func TestCacheCheck_WithStoredObject(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	rawURL := "https://example.com/page"
 	key := cache.BuildKeyFromURL(rawURL, nil)
@@ -1691,7 +2310,7 @@ func TestPurgeKey_WithMatchingHandler(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil, nil)
+	store, err := e.buildStore(nil, nil, nil)
 	require.NoError(t, err)
 	key := cache.BuildKeyFromURL("https://example.com/test", nil)
 	obj := &api.Object{
@@ -1843,4 +2462,222 @@ func TestStartClusterJoin_WithJoinTimeout(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	_ = g.Wait()
+}
+
+// testFastClientStub is a cache.FastClient that serves fetches via an
+// in-process handler, letting engine-level tests exercise full miss-path
+// storage (Vary variants, resolvers) without a network origin.
+type testFastClientStub struct {
+	handler fasthttp.RequestHandler
+}
+
+func (c *testFastClientStub) Do(_ context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	rctx := &fasthttp.RequestCtx{}
+	req.CopyTo(&rctx.Request)
+	c.handler(rctx)
+	rctx.Response.CopyTo(resp)
+	return nil
+}
+
+func (c *testFastClientStub) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	if !time.Now().Before(deadline) {
+		return fasthttp.ErrTimeout
+	}
+	return c.Do(context.Background(), req, resp)
+}
+
+// TestPurgeKey_IgnoresPurgeEventVaryKey pins ADR-0045: the cluster
+// receive path applies a PurgeEvent to evt.Key and every locally tracked
+// variant, regardless of evt.VaryKey (metadata only, not a purge
+// target). Pinning the behavior prevents a future contributor from
+// "honoring" the field and silently no-oping the delete: the
+// BuildVaryKey assertion hex the field carries cannot be composed into
+// a variant store key (different canonicalization).
+func TestPurgeKey_IgnoresPurgeEventVaryKey(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Storage.ResolveHotMaxBytes("64MiB")
+	e := &engine{
+		cfg:     cfg,
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "X-Test-Variant")
+		_, _ = ctx.Write([]byte(string(ctx.Request.Header.Peek("X-Test-Variant"))))
+	}
+	handler := cache.NewHandler(cache.HandlerConfig{
+		Upstream:   orig,
+		FastClient: &testFastClientStub{handler: orig},
+		Store:      store,
+		Logger:     newTestLogger(),
+	})
+	rs := &runState{store: store, handlers: []*cache.Handler{handler}}
+
+	// Populate two variants plus the primary (Vary resolver) through the
+	// handler, mirroring a real cluster-receive scenario.
+	reqA := &fasthttp.RequestCtx{}
+	reqA.Request.SetRequestURI("http://example.com/vary")
+	reqA.Request.Header.Set("X-Test-Variant", "a")
+	handler.ServeRequest(reqA)
+	reqB := &fasthttp.RequestCtx{}
+	reqB.Request.SetRequestURI("http://example.com/vary")
+	reqB.Request.Header.Set("X-Test-Variant", "b")
+	handler.ServeRequest(reqB)
+
+	// Recompute the variant store keys exactly as the handler's miss
+	// path does (VariantKeyFast over the request selecting headers).
+	primaryKey := cache.BuildKeyFromURL("http://example.com/vary", nil)
+	keyA := cache.VariantKeyFast(primaryKey, "X-Test-Variant", &reqA.Request.Header, nil)
+	keyB := cache.VariantKeyFast(primaryKey, "X-Test-Variant", &reqB.Request.Header, nil)
+	require.NotEqual(t, primaryKey, keyA)
+	require.NotEqual(t, keyA, keyB)
+	objA, _, _ := store.Get(context.Background(), keyA)
+	require.NotNil(t, objA, "variant A must be stored")
+	objB, _, _ := store.Get(context.Background(), keyB)
+	require.NotNil(t, objB, "variant B must be stored")
+	objPK, _, _ := store.Get(context.Background(), primaryKey)
+	require.NotNil(t, objPK, "primary (Vary resolver) must be stored")
+
+	// The receive path applies a PurgeEvent that carries a non-empty
+	// VaryKey. It must purge primary + all variants (not no-op).
+	evt := api.PurgeEvent{
+		Key:      primaryKey,
+		VaryKey:  "a6d6c5e0efc6882f",
+		Issuer:   "peer-1",
+		Seq:      1,
+		IssuedAt: time.Now(),
+	}
+	require.NoError(t, rs.purgeKey(context.Background(), evt.Key))
+
+	for _, probe := range []struct {
+		name string
+		key  api.Key
+	}{
+		{"primary", primaryKey},
+		{"variant A", keyA},
+		{"variant B", keyB},
+	} {
+		obj, _, _ := store.Get(context.Background(), probe.key)
+		require.Nil(t, obj, probe.name+" must be gone after purge")
+	}
+}
+
+func TestBuildKeyPolicy_IncludeHeaders(t *testing.T) {
+	t.Parallel()
+	// The include list must flow through to the policy: the cmd-level
+	// contract is hasKeyPolicy wiring (non-nil policy) and the
+	// NewKeyPolicy pass-through. The lowercase/sort normalization and
+	// the stored Vary union it produces are covered in internal/cache
+	// (TestEffectiveVary_*).
+	p := buildKeyPolicy(config.RouteKey{
+		IncludeHeaders:   []string{"Accept-Language", "X-Geo-Region"},
+		StripQueryParams: []string{"utm"},
+	})
+	require.NotNil(t, p)
+}
+
+func TestBuildKeyPolicy_IncludeOnly(t *testing.T) {
+	t.Parallel()
+	// An include-only route (no other key knobs) must still build a
+	// policy, or the include list would silently vanish.
+	p := buildKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}})
+	require.NotNil(t, p)
+}
+
+func TestHasKeyPolicy_IncludeHeaders(t *testing.T) {
+	t.Parallel()
+	assert.True(t, hasKeyPolicy(config.RouteKey{IncludeHeaders: []string{"Accept-Language"}}))
+}
+
+// TestBuildRouter_BypassOnCookieNamesWired verifies the config knob
+// cache.bypass_on_cookie_names reaches the route's cache handler
+// (issue #768): a request carrying a listed cookie name proxies as
+// BYPASS while an unlisted cookie keeps the cache path. The matching
+// semantics are pinned by internal/cache's cookie_name_bypass_test.go;
+// this test proves only the config plumbing (config.RouteCache.
+// BypassOnCookieNames → cache.HandlerConfig).
+func TestBuildRouter_BypassOnCookieNamesWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "ssr", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{Name: "ssr", Pool: "ssr", Cache: config.RouteCache{
+					BypassOnCookieNames: []string{"session_id"},
+				}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	// Anonymous request: normal cache path.
+	anon := &fasthttp.RequestCtx{}
+	anon.Request.Header.SetMethod("GET")
+	anon.Request.SetRequestURI("/page")
+	router.ServeRequest(anon)
+	require.Equal(t, fasthttp.StatusOK, anon.Response.StatusCode())
+	require.Equal(t, "MISS", string(anon.Response.Header.Peek(header.XCache)))
+
+	// Listed cookie name: the knob reached the handler — BYPASS.
+	listed := &fasthttp.RequestCtx{}
+	listed.Request.Header.SetMethod("GET")
+	listed.Request.SetRequestURI("/page")
+	listed.Request.Header.Set(header.Cookie, "session_id=u; theme=dark")
+	router.ServeRequest(listed)
+	require.Equal(t, fasthttp.StatusOK, listed.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(listed.Response.Header.Peek(header.XCache)))
+	require.Equal(t, "origin-body", string(listed.Response.Body()))
+
+	// Unlisted cookie only: the cache path is kept — the whole point
+	// of the named knob. The store may serve the anonymous fill
+	// asynchronously, so assert only that it is not BYPASS.
+	unlisted := &fasthttp.RequestCtx{}
+	unlisted.Request.Header.SetMethod("GET")
+	unlisted.Request.SetRequestURI("/page")
+	unlisted.Request.Header.Set(header.Cookie, "analytics=abc")
+	router.ServeRequest(unlisted)
+	require.Equal(t, fasthttp.StatusOK, unlisted.Response.StatusCode())
+	assert.NotEqual(t, "BYPASS", string(unlisted.Response.Header.Peek(header.XCache)))
+}
+
+// TestBuildKeyPolicy_CookiePresenceWired verifies cache.key.cookie_presence
+// reaches the route's KeyPolicy (issue #768): the built policy carries
+// the normalized presence list and emits the synthetic Vary field the
+// variant-key machinery keys on. The full variant semantics (store/
+// lookup pairing, peer-gate parity, refresh replay) are pinned by
+// internal/cache's cookie_presence_test.go; this test proves only the
+// config plumbing (config.RouteKey.CookiePresence → KeyPolicy).
+func TestBuildKeyPolicy_CookiePresenceWired(t *testing.T) {
+	t.Parallel()
+	p := buildKeyPolicy(config.RouteKey{CookiePresence: []string{"consent", "Session_ID"}})
+	require.NotNil(t, p, "cookie_presence must construct a policy")
+	require.NotEmpty(t, p.CookiePresenceVary(), "the policy must emit the synthetic Vary field")
 }

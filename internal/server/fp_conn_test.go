@@ -71,45 +71,35 @@ func TestListener_Shutdown(t *testing.T) {
 	<-errCh
 }
 
-// --- reportFastPathError ---
-
-func TestReportFastPathError_NoPanic(t *testing.T) {
-	t.Parallel()
-	errCh := make(chan<- error, 1)
-	// Should not send anything to errCh and should not panic.
-	reportFastPathError(nil, errCh)
-	reportFastPathError(nil, errCh)
-}
-
 // --- Router additional tests ---
 
 func TestRouter_MatchByHostPath(t *testing.T) {
 	t.Parallel()
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("api.example.com", "/v1", "api-v1", "", nil, ok200("api"))
-	rt.AddRoute("", "/", "root", "", nil, ok200("root"))
+	rt.AddRoute("api.example.com", "/v1", "api-v1", "", nil, ok200("api"), nil)
+	rt.AddRoute("", "/", "root", "", nil, ok200("root"), nil)
 
 	assert.Equal(t, "api-v1", rt.MatchByHostPath("api.example.com", "/v1/users"))
 	assert.Equal(t, "root", rt.MatchByHostPath("other.com", "/anything"))
 	// No route matches a non-existent host with no catch-all.
 	rt2 := NewRouter(RouterConfig{})
-	rt.AddRoute("only.example.com", "/", "only", "", nil, ok200("only"))
+	rt.AddRoute("only.example.com", "/", "only", "", nil, ok200("only"), nil)
 	assert.Equal(t, "", rt2.MatchByHostPath("nomatch.com", "/nomatch"))
 }
 
 func TestRouter_MatchByHostPath_StripsPort(t *testing.T) {
 	t.Parallel()
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("api.example.com", "", "api", "", nil, ok200("api"))
+	rt.AddRoute("api.example.com", "", "api", "", nil, ok200("api"), nil)
 	assert.Equal(t, "api", rt.MatchByHostPath("api.example.com:443", "/"))
 }
 
 func TestRouter_RouteLabelAuto(t *testing.T) {
 	t.Parallel()
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("api.example.com", "/v1", "", "", nil, ok200("api"))
-	rt.AddRoute("", "/static", "", "", nil, ok200("static"))
-	rt.AddRoute("", "", "", "", nil, ok200("catchall"))
+	rt.AddRoute("api.example.com", "/v1", "", "", nil, ok200("api"), nil)
+	rt.AddRoute("", "/static", "", "", nil, ok200("static"), nil)
+	rt.AddRoute("", "", "", "", nil, ok200("catchall"), nil)
 
 	// Labels should be auto-generated.
 	assert.Equal(t, "api.example.com:/v1", rt.routes[0].label)
@@ -126,7 +116,7 @@ func TestRouter_MetricsIncrement(t *testing.T) {
 			NoRouteTotal:  &counterFunc{f: func() { noRoute++ }},
 		},
 	})
-	rt.AddRoute("", "/api", "api", "", nil, ok200("api"))
+	rt.AddRoute("", "/api", "api", "", nil, ok200("api"), nil)
 
 	// Matching route should increment RequestsTotal.
 	ctx1 := serveRoute(t, rt, "GET", "example.com", "/api/v1")
@@ -343,6 +333,6 @@ func (m *mockFastPathHandler) Release(resp *api.FastPathResponse) {}
 
 type mockFastPathMetrics struct{}
 
-func (m *mockFastPathMetrics) RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+func (m *mockFastPathMetrics) RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 }
 func (m *mockFastPathMetrics) IncrementSmugglingRejected() {}

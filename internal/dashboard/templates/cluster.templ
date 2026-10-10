@@ -92,8 +92,8 @@ templ Cluster(d ClusterData) {
 				</div>
 				<div class="bc">
 					<div class="bc-t">Peer fetch stats</div>
-					<div class="stat-row"><span class="stat-k" title="Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
-					<div class="stat-row"><span class="stat-k" title="Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Cache hits served from a peer node since this pod started (cumulative). The requesting pod found the key in another pod's hot tier instead of fetching from origin.">peer hits (total)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HitsTotal, 10) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Peer fetch attempts since this pod started that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.">peer misses (total)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.MissesTotal, 10) }</span></div>
 					<div class="stat-row">
 						<span class="stat-k" title="Average round-trip time for peer-to-peer cache lookup RPCs. High values indicate network congestion or overloaded peers.">avg peer latency</span>
 						<span class="stat-v">

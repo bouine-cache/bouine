@@ -1,6 +1,6 @@
-// sse.go — Server-Sent Events request handling. A request that announces
-// SSE intent (Accept: text/event-stream, the WHATWG §9.2.2 client contract)
-// is served as a live stream: never cached, never singleflight-collapsed,
+// sse.go handles requests that announce SSE intent (Accept:
+// text/event-stream, the WHATWG §9.2.2 client contract). Such requests are
+// served as a live stream: never cached, never singleflight-collapsed,
 // and never buffered, because an event stream is per-connection by design —
 // two clients cannot share one origin stream.
 //
@@ -10,6 +10,7 @@
 // fallback. Those streams remain bounded by fetch_timeout because the
 // origin connection's read deadline was armed before the response headers
 // arrived (see ADR-0042); the Accept hint is the supported configuration.
+
 package cache
 
 import (
@@ -17,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -34,14 +36,27 @@ import (
 //     a few dozen concurrent streams starve every other request on the
 //     route.
 //
+// BYPASS responses carry X-Cache-Source: origin on every branch that
+// dispatched a fetch (success or fetch-error 502). The no-client 502
+// below, like the shed 503, keeps the empty source — the origin was
+// never reached — which the metrics layer labels "bouine".
+//
 // Cache-invalidation semantics for POST/PUT/DELETE are preserved: on a
 // 2xx/3xx response the affected keys are purged as soon as the status is
 // known (at header time — waiting for an endless body would delay
 // invalidation indefinitely).
 func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		// ctx.Error resets the response (fasthttp RequestCtx.Error),
+		// wiping every header written before it, so it must run first
+		// and the attribution headers after — the same order as the
+		// sibling 50x branches (handleBypassFast, streamBypass,
+		// handleCacheMiss). No X-Cache-Source: no fetch was ever
+		// dispatched, so the metrics layer labels this response
+		// "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 
@@ -53,6 +68,8 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 
@@ -66,7 +83,9 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	// Preserve POST/PUT/DELETE invalidation semantics: purge the affected
 	// keys as soon as success is known from the status code, instead of
@@ -117,12 +136,12 @@ func (h *Handler) purgeAfterSSEProxy(ctx *fasthttp.RequestCtx, sf *streamFetchRe
 	getRI := requestInfoFromCtx(ctx)
 	getRI.Method = "GET"
 	key := BuildKey(getRI, h.policy)
-	_, _ = h.Purge(ctx, key)
+	h.purgeAndBroadcast(ctx, key)
 
 	for _, hdr := range []string{header.ContentLocation, header.Location} {
 		if loc := string(sf.resp.Header.Peek(hdr)); loc != "" {
 			if locKey := h.buildLocationKey(ctx, loc); !locKey.IsZero() {
-				_, _ = h.Purge(ctx, locKey)
+				h.purgeAndBroadcast(ctx, locKey)
 			}
 		}
 	}

@@ -292,27 +292,27 @@ func Cluster(d ClusterData) templ.Component {
 						return templ_7745c5c3_Err
 					}
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "</div><div class=\"bc\"><div class=\"bc-t\">Peer fetch stats</div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.\">peer hits (6h)</span><span class=\"stat-v\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "</div><div class=\"bc\"><div class=\"bc-t\">Peer fetch stats</div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Cache hits served from a peer node since this pod started (cumulative). The requesting pod found the key in another pod's hot tier instead of fetching from origin.\">peer hits (total)</span><span class=\"stat-v\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var15 string
-				templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.Hits6h, 10))
+				templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.HitsTotal, 10))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/cluster.templ`, Line: 95, Col: 292}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/cluster.templ`, Line: 95, Col: 312}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.\">peer misses (6h)</span><span class=\"stat-v\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Peer fetch attempts since this pod started that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.\">peer misses (total)</span><span class=\"stat-v\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var16 string
-				templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.Misses6h, 10))
+				templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.MissesTotal, 10))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/cluster.templ`, Line: 96, Col: 293}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/cluster.templ`, Line: 96, Col: 322}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 				if templ_7745c5c3_Err != nil {

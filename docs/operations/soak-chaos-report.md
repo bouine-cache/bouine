@@ -28,7 +28,7 @@ to clear the Phase 4.5 exit criteria before Phase 5 begins.
 
 ```bash
 # Start the 3-node cluster (Docker required)
-make integration-cluster-strong   # or eventual / full
+make test-integration-cluster-strong   # or test-integration-cluster-eventual
 
 # Run chaos tests
 make chaos

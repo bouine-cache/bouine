@@ -1,9 +1,8 @@
 package bouineapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"strings"
 	"time"
@@ -199,7 +198,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	req.SetRequestURI(c.BaseURL + path)
 	req.Header.SetMethod("POST")
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := jsonv2.Marshal(body)
 		if err != nil {
 			return err
 		}
@@ -250,7 +249,7 @@ func (c *Client) doJSON(ctx context.Context, req *fasthttp.Request, resp *fastht
 
 	respBody := resp.Body()
 	if out != nil && len(respBody) > 0 {
-		return json.Unmarshal(respBody, out)
+		return jsonv2.Unmarshal(respBody, out)
 	}
 	return nil
 }
@@ -274,5 +273,3 @@ func sanitizeErrorBody(body []byte) string {
 	}
 	return s
 }
-
-var _ = bytes.NewReader

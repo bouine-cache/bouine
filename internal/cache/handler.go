@@ -4,17 +4,10 @@
 //
 //	client → listener → accesslog → metrics → router → CacheHandler → origin
 //
-// For every request the handler:
-//  1. Computes the cache key.
-//  2. Looks up the store.
-//  3. Runs Evaluate() to get a Decision.
-//  4. On Hit/StaleHit → serve from cache (with Age header).
-//  5. On Miss → fetch from origin via the upstream handler, store if
-//     cacheable.
-//  6. On Revalidate → conditional fetch; on 304, refresh TTL; on 200,
-//     replace.
-//  7. On Bypass → pass through to upstream.
-//  8. On POST/PUT/DELETE → invalidate matching key, pass through.
+// For every request the handler computes the cache key, looks up the
+// store, and serves, revalidates, fetches, or passes through according
+// to the Decision returned by Evaluate. POST/PUT/DELETE invalidate
+// matching keys and pass through.
 package cache
 
 import (
@@ -67,13 +60,11 @@ var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 // buffer that does not exist (ADR-0042).
 var ErrStreamUnshareable = errors.New("streaming response not shareable")
 
-// StripRequestURI removes prefix from the start of uri on a path boundary:
-// an exact-prefix match ("/api/v1") yields "/", a remainder starting with
-// "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
-// mid-segment match ("/api/v1x" vs "/api/v1") passes through unchanged
-// rather than producing a non-absolute request-line. A nil or empty prefix
-// returns uri unchanged. Allocation-free for the common (trimmed or
-// unchanged) cases.
+// StripRequestURI removes prefix from the start of uri on a path
+// boundary, passing a mid-segment match ("/api/v1x" vs "/api/v1")
+// through unchanged rather than producing a non-absolute request-line.
+// A nil or empty prefix returns uri unchanged. Allocation-free for the
+// common (trimmed or unchanged) cases.
 //
 // This is the single definition of strip-prefix boundary semantics for the
 // whole binary: the cache handler applies it to origin-bound request URIs
@@ -211,15 +202,27 @@ const defaultFetchTimeout = 60 * time.Second
 // re-trigger if still stale.
 const defaultRevalConcurrency = 256
 
+// defaultRewarmConcurrency bounds concurrent shed-refill (re-warm)
+// goroutines per Handler. This is the post-purge recovery allowance: a
+// bounded side pool that refills the store while foreground misses shed,
+// so a surrogate-ban miss storm converges back to hits instead of
+// pinning at the shed equilibrium. Deliberately much smaller than
+// revalSem: each refill is a full origin GET, and the pool only exists
+// under saturation — its whole point is to add a little extra origin
+// load, bounded, exactly then.
+const defaultRewarmConcurrency = 32
+
 // ageHeader returns the Age header value string for a duration.
 func ageHeader(d time.Duration) string {
 	return strconv.Itoa(int(d.Seconds()))
 }
 
-// fetchResult is the outcome of an origin fetch, shared across collapsed requests.
+// fetchResult is the outcome of an origin fetch, shared across collapsed
+// requests. It must own its data: singleflight may hand it to several
+// concurrent callers, so a live pointer into a pooled *fasthttp.Response
+// would race with the pool reusing that response for another request.
 type fetchResult struct {
 	Err        error
-	fastResp   *fasthttp.Response // non-nil when the response is kept alive for CopyTo
 	Header     headerLookup
 	Body       []byte
 	StatusCode int
@@ -240,10 +243,27 @@ type Handler struct {
 	// FetchShedInc is incremented when a foreground origin fetch sheds
 	// after waiting fetchWaitTimeout for a fetch-semaphore slot; nil-safe.
 	FetchShedInc interface{ Inc() }
+	// RewarmFillInc is incremented when a shed foreground miss schedules
+	// a bounded background refill of the store (the post-ban re-warm
+	// allowance); nil-safe. Paired with FetchShedInc: sheds are no longer
+	// lost refills, so a rising shed rate during a purge storm no longer
+	// implies the hit ratio is pinned at the shed equilibrium.
+	RewarmFillInc interface{ Inc() }
+	// VaryDriftInc counts detected Vary-declaration drifts (ADR-0058),
+	// where the stale resolver and its variants were purged; nil-safe.
+	VaryDriftInc varyDriftInc
 	store        storage.Store
 	flight       singleflight.Group
 	logger       observability.Logger
 	fastClient   FastClient
+	neg          *StatusTTL
+	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
+	// is deliberately NOT the foreground fetchSem: the refill exists to
+	// clear the post-ban miss backlog, and sharing the foreground budget
+	// would keep the re-warm starved by the very demand it is recovering
+	// from. Bounded like revalSem so a storm cannot explode goroutines;
+	// tracked by revalWg for shutdown draining.
+	rewarmSem chan struct{}
 	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
 	// nil-safe. Polled by the engine's background metrics loop.
 	StreamingBufferBytesSet interface{ Set(float64) }
@@ -254,7 +274,13 @@ type Handler struct {
 	revalSem    chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
-	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// purgeBroadcast fans a data-plane invalidation out to peers; one
+	// call per purged key. Nil in single-node mode.
+	purgeBroadcast func(key api.Key)
+	// onPeerVariantMismatch is called when servePeerHit rejects a
+	// foreign-variant object. Nil in single-node mode.
+	onPeerVariantMismatch func()
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -280,8 +306,30 @@ type Handler struct {
 	// and all client-facing surfaces keep the original path. Nil means
 	// no stripping (zero cost on routes without strip_prefix).
 	stripPrefix []byte
-	routeName   string
-	poolName    string
+	// pathRewrite applies the request.path_rewrite regex to every
+	// origin-bound request URI after strip_prefix. Nil on routes without
+	// path_rewrite (zero cost). See PathRewrite for the hardening rules.
+	pathRewrite *PathRewrite
+	// uaBypass holds the compiled cache.bypass_on_user_agent patterns
+	// (issue #771, ADR-0055); nil on pattern-less routes, making both
+	// request-path gates (ServeRequest, FastPathHandler.TryHit) a
+	// single nil check.
+	uaBypass *uaBypass
+	// reqHeaderSet sets (overrides) request headers on every origin-bound
+	// fetch (request.header_set). nil = no-op.
+	reqHeaderSet map[string]string
+	// reqHeaderRemove skips the listed (lower-cased) request headers on
+	// every origin-bound fetch (request.header_remove). nil = no-op.
+	reqHeaderRemove map[string]bool
+	// respHeaderSet sets response headers on every client-facing
+	// response, after the stored headers are written (response.header_set).
+	// nil = no-op.
+	respHeaderSet map[string]string
+	// respHeaderRemove deletes the listed response headers from every
+	// client-facing response (response.header_remove). nil = no-op.
+	respHeaderRemove map[string]bool // canonical name set for Del
+	routeName        string
+	poolName         string
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
@@ -291,12 +339,20 @@ type Handler struct {
 	// goroutines through its internal locks; sharded maps do a direct
 	// map insert under a per-shard mutex (0 allocs) with far less
 	// contention.
+	// bypassCookieNames is the compiled matcher for
+	// cache.bypass_on_cookie_names (issue #768): routes a request
+	// carrying any listed cookie name around the cache, same contract
+	// as bypassOnCookie, while requests with only unlisted cookies
+	// participate normally. Empty scanner (no names configured) pays
+	// a single bool read per request.
 	inflightStreams         inflightTable
+	bypassCookieNames       cookieNameScanner
 	refreshWg               sync.WaitGroup
 	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
 	defaultTTL              time.Duration  // operator fallback when origin sends no freshness
 	defaultSIE              time.Duration  // operator-level stale-if-error floor
 	maxObjectSize           int64          // skip storage for responses larger than this; 0 = no limit
+	maxVariants             int            // cap on stored variants per primary key; DefaultMaxVariants when unset
 	maxStreamingBufferBytes int64
 	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
 	// defaultMaxStreamingBufferBytes.
@@ -317,7 +373,6 @@ type Handler struct {
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
-	negativeTTL          time.Duration
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
 	stayinAlive          bool
@@ -325,11 +380,21 @@ type Handler struct {
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
 	allowSetCookie bool // when false (default), Set-Cookie blocks caching
+	// bypassOnCookie routes cookied requests entirely around the cache
+	// (ADR-0054, cache.bypass_on_cookie): no lookup, no storage, no
+	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
+	// cache-tests other-cookie optimal case.
+	bypassOnCookie bool
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
 	refreshBeforeExpiry  bool
 	refreshReactiveFirst bool
+	// forwarded is the compiled request.forwarded policy (issue #769):
+	// client-identity header injection on origin-bound fetches only.
+	// Zero value = disabled (single bool read per fetch). Lives in the
+	// value region with the other non-pointer fields (fieldalignment).
+	forwarded ForwardedPolicy
 }
 
 // HandlerConfig configures a cache Handler.
@@ -341,8 +406,15 @@ type HandlerConfig struct {
 	// FetchShed, if non-nil, is incremented when a foreground origin fetch
 	// sheds after waiting fetch_wait_timeout for a fetch-semaphore slot.
 	FetchShed interface{ Inc() }
-	Store     storage.Store
-	Logger    observability.Logger
+	// RewarmFill, if non-nil, is incremented when a shed miss schedules a
+	// bounded background store refill (the post-ban re-warm allowance).
+	RewarmFill interface{ Inc() }
+	Store      storage.Store
+	Logger     observability.Logger
+	// Negative resolves per-status negative-caching TTLs from the
+	// route's negative_ttl policy (both forms normalized to one map by
+	// the config layer). Nil disables negative caching.
+	Negative *StatusTTL
 	// FastClient is used by doFetch to fetch from the origin via
 	// fasthttp. The response is captured directly in a pooled
 	// *fasthttp.Response, eliminating intermediate header.Map and
@@ -353,9 +425,26 @@ type HandlerConfig struct {
 	// every client-facing surface keep the original path (see
 	// config.RouteRequest.StripPrefix). Empty means no stripping.
 	StripPrefix string
+	// PathRewrite, when non-nil, applies the route's request.path_rewrite
+	// regex to every origin-bound request URI after StripPrefix. Nil
+	// means no rewrite. Mutually exclusive with StripPrefix at the
+	// config layer; validated and compiled by config.validatePathRewrite.
+	PathRewrite *PathRewrite
+	// BypassOnUserAgent routes requests whose User-Agent matches one
+	// of the glob patterns entirely around the cache (issue #771,
+	// ADR-0055): the same contract as BypassOnCookie, triggered by a
+	// User-Agent match instead of Cookie presence. Patterns are
+	// validated by config.validateBypassOnUserAgent (capped count and
+	// length, `*` as the only wildcard, no lone `*`, no duplicates) and
+	// compiled once at handler build. Default (nil): no UA-conditioned
+	// behavior, RFC 9111 semantics unchanged.
+	BypassOnUserAgent []string
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
-	// because MaxVariants is exceeded.
+	// because the variant cap is exceeded.
 	VaryCapHits interface{ Inc() }
+	// VaryDrift, if non-nil, counts detected Vary-declaration drifts
+	// (ADR-0058); wired to bouine_vary_drift_total.
+	VaryDrift varyDriftInc
 	// StreamingBufferBytes, if non-nil, is set to the current total
 	// bytes held in live streaming tee buffers. Polled by the engine's
 	// background metrics loop.
@@ -368,10 +457,32 @@ type HandlerConfig struct {
 	// and eventual modes.
 	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
 	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
-	// the key is owned by a remote peer. Returns nil, nil on peer miss;
+	// the key is owned by a remote peer. RequestKey carries the cache key
+	// (primary or variant) and varyKey the computed Vary assertion: a
+	// peer MUST NOT return an object whose Vary dimension set differs
+	// from the one asserted (RFC 9111 §4.1 — variants are keyed per
+	// selecting header set). Implementations assert this via the
+	// PeerFetchRequest.VaryKey field; the handler re-verifies on receipt
+	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
-	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
-	Upstream  fasthttp.RequestHandler
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// PurgeBroadcast, if non-nil, fans a data-plane purge out to cluster
+	// peers. Called once per key invalidated by an unsafe method
+	// (POST/PUT/DELETE, RFC 9111 §4.4) — including Location/
+	// Content-Location-derived keys — after the local purge, regardless
+	// of the local owned result: in strong mode the owner holds the
+	// object while the invalidating request may land on a non-owner, so
+	// owned=false never means "nobody has it". Nil in single-node mode.
+	// Implementations coalesce bursts (the cluster broadcaster batches
+	// behind a 10 ms flush window), so per-request cost is one enqueue.
+	PurgeBroadcast func(key api.Key)
+	// OnPeerVariantMismatch, if non-nil, is called when the handler
+	// rejects a peer-fetched object because its stored variant does
+	// not select this request (RFC 9111 §4.1 assertion re-verified on
+	// receipt). Wired to the peer-fetch variant-mismatch metric
+	// (consumer side) by the engine; nil in single-node mode.
+	OnPeerVariantMismatch func()
+	Upstream              fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -389,6 +500,43 @@ type HandlerConfig struct {
 	// hit responses for the metrics middleware's upstream_pool label.
 	// Empty for routes without a pool (static-file routes).
 	PoolName string
+
+	// RequestHeaderSet sets the listed request headers (name → value)
+	// on every origin-bound fetch, overriding client values. Applied
+	// before the fetch, bypass, revalidation, and the Vary variant
+	// computation, so the rewritten value is what every downstream
+	// surface sees (config.RouteRequest.HeaderSet contract). Header
+	// names are canonicalized by fasthttp's setters at application.
+	RequestHeaderSet map[string]string
+	// RequestHeaderRemove removes the listed request headers from the
+	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
+	// Names are lower-cased at construction for O(1) skip checks.
+	RequestHeaderRemove []string
+	// BypassOnCookieNames routes requests carrying any cookie whose
+	// name is in the list entirely around the cache — the same
+	// contract as BypassOnCookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Cookie names are matched case-insensitively on the name token
+	// only, never on values or substrings. Requests carrying only
+	// unlisted cookies participate in the cache per RFC 9111 — the
+	// knob exists so ubiquitous analytics/consent cookies do not
+	// force the blunt presence trigger.
+	//
+	// In-flight sharing is refused unconditionally for every cookied
+	// request by collapseDenied (ADR-0054) regardless of this list:
+	// a listed-cookie request can never receive another user's
+	// in-flight body, and an unlisted-cookie request cannot either.
+	BypassOnCookieNames []string
+	// ResponseHeaderSet sets the listed response headers (name → value)
+	// on every response this handler emits — hit, stale, revalidated,
+	// miss, and bypass — after the stored headers are written
+	// (config.RouteResponse.HeaderSet contract). Set replaces any
+	// origin value for the same name.
+	ResponseHeaderSet map[string]string
+	// ResponseHeaderRemove removes the listed response headers from
+	// every response this handler emits, after the stored headers are
+	// written (config.RouteResponse.HeaderRemove contract).
+	ResponseHeaderRemove []string
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
@@ -406,6 +554,10 @@ type HandlerConfig struct {
 	// or stale content when a stale object exists).
 	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int
+	// MaxVariants is the cap on stored variants per primary key
+	// (cache.max_variants). Zero (default) applies DefaultMaxVariants.
+	// RFC 9110 §12.5.5 — unbounded variants are a DoS vector, hence the cap.
+	MaxVariants int
 	// MaxResponseBytes is a hard limit on the amount of response body
 	// data buffered in memory during an upstream fetch. When exceeded the
 	// fetch is aborted and the client receives a 502. This is distinct
@@ -417,8 +569,6 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
-	// NegativeTTL enables caching of 404/405/410/501 responses.
-	NegativeTTL time.Duration
 	// DefaultSIE is applied to every stored object when the origin does not
 	// send stale-if-error. Zero disables SIE fallback for this route.
 	DefaultSIE time.Duration
@@ -470,6 +620,13 @@ type HandlerConfig struct {
 	// RefreshMaxRPS caps background refresh fetches per second per route.
 	// Zero means no limit.
 	RefreshMaxRPS int
+	// Forwarded injects client-identity headers (X-Forwarded-For/Proto/
+	// Host, Via) on every origin-bound fetch (config.ForwardedConfig
+	// contract, issue #769). Injection is append/set at outbound request
+	// construction only — never the hit path, never the cache key, never
+	// the stored RequestInfo headers. Zero value = no-op. Lives in the
+	// value region with the other non-pointer fields (fieldalignment).
+	Forwarded ForwardedPolicy
 	// RefreshReactiveFirst skips proactive refresh for new objects, relying
 	// on SWR to promote popular objects. Requires StaleWhileRevalidate > 0
 	// and RefreshMinHits > 0.
@@ -493,6 +650,26 @@ type HandlerConfig struct {
 	// stored object so subsequent HITs do not replay another user's
 	// cookies.
 	AllowSetCookie bool
+	// BypassOnCookie routes requests carrying a non-empty Cookie
+	// header entirely around the cache (ADR-0054): no lookup, no
+	// storage, no in-flight sharing. Designed for personalized SSR
+	// routes where the origin renders per-user content from the
+	// request cookie. Default (false): cookied requests participate in
+	// the cache per RFC 9111.
+	BypassOnCookie bool
+	// BypassOnCookieNames routes requests carrying any cookie whose
+	// name is in the list entirely around the cache — the same
+	// contract as BypassOnCookie (no lookup, no storage, no
+	// in-flight sharing), scoped to the listed names (issue #768).
+	// Cookie names are matched case-insensitively on the name token
+	// only, never on values or substrings. Requests carrying only
+	// unlisted cookies participate in the cache per RFC 9111 — the
+	// knob exists so ubiquitous analytics/consent cookies do not
+	// force the blunt presence trigger.
+	// In-flight sharing is refused unconditionally for every cookied
+	// request by collapseDenied (ADR-0054) regardless of this list:
+	// a listed-cookie request can never receive another user's
+	// in-flight body, and an unlisted-cookie request cannot either.
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
@@ -555,27 +732,113 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 	return h.fastClient.Do(context.Background(), req, resp)
 }
 
-// strippedURI returns uri with the route's strip prefix removed from the
-// start. Used for origin-bound request URIs only: the cache key, ban
-// matching, and Location resolution all keep the original path (config
-// contract in config.RouteRequest.StripPrefix). Boundary semantics live
-// in StripRequestURI.
-func (h *Handler) strippedURI(uri []byte) []byte {
-	return StripRequestURI(h.stripPrefix, uri)
+// originURI returns the origin-bound form of uri: the route's strip
+// prefix removed (when configured) and the path_rewrite regex applied
+// (when configured). This is the single choke point every origin-bound
+// URI passes through — miss, invalidating proxy, revalidate, background
+// revalidate, background refresh, shed refill, stream, the in-process
+// upstream fetches, and the upstream bypass fallbacks
+// (handleBypassFast / streamBypass), which apply it in place on the
+// live request before invoking the in-process upstream. Cache keys, ban
+// matching, purges, Location resolution, and every client-facing surface
+// keep the original uri (config contract in RouteRequest.StripPrefix and
+// RouteRequest.PathRewrite).
+func (h *Handler) originURI(uri []byte) []byte {
+	uri = StripRequestURI(h.stripPrefix, uri)
+	if h.pathRewrite != nil {
+		return h.pathRewrite.RewriteURI(uri)
+	}
+	return uri
+}
+
+// rewriteRequestCtx applies the request-side rewrite directives directly
+// to the client's RequestCtx headers before they are copied to the
+// origin-bound request. Used by the foreground paths, which copy headers
+// out of the ctx one by one: rewriting the source is simpler and covers
+// the Vary variant computation, which reads ctx.Request.Header.
+// No-op for routes without directives.
+func (h *Handler) rewriteRequestCtx(ctx *fasthttp.RequestCtx) {
+	if h.reqHeaderRemove != nil {
+		for name := range h.reqHeaderRemove {
+			ctx.Request.Header.Del(name)
+		}
+	}
+	if h.reqHeaderSet != nil {
+		for k, v := range h.reqHeaderSet {
+			ctx.Request.Header.Set(k, v)
+		}
+	}
+}
+
+// rewriteOutboundAE normalizes Accept-Encoding on an origin-bound
+// request to the canonical token for its bucket: "zstd", "br", "gzip",
+// or removed for "identity". This is the pairing half of AE bucketing
+// (docs/plans/accept-encoding-bucketing.md §2.1): the variant key
+// claims a bucket, so the origin must be asked for exactly that coding,
+// otherwise a deflate-only origin could store `Content-Encoding:
+// deflate` bytes under the `gzip` bucket and a later gzip-only client
+// would receive bytes it cannot decode. An origin that cannot produce
+// the coding falls back to identity for the whole bucket.
+//
+// Called only on miss/revalidate/refill paths, never the hit path, and
+// only when the route buckets (encoding_policy: bucket, the default).
+// identity: the header is removed rather than set to "identity" — some
+// origins treat a bare identity token as "client explicitly refuses
+// compression" and add Vary noise; removal is the absence signal.
+//
+// Accept-Language gets the same pairing treatment (plan §10.4): the
+// bucket claims one variant, so the origin must see one spelling per
+// bucket — the winner tag — or a chain-echoing origin stores
+// chain-dependent bodies under a single bucket. Unbucketable chains
+// (absent, "*", malformed, all q=0) are left untouched: they key via
+// the legacy normalization and their origin spelling is what the
+// legacy keying already saw.
+func (h *Handler) rewriteOutboundAE(hdr *fasthttp.RequestHeader) {
+	if h.policy.verbatimEncoding() {
+		return
+	}
+	bucket := encodingBucket(string(hdr.Peek(header.AcceptEncoding)))
+	if bucket == "identity" {
+		hdr.Del(header.AcceptEncoding)
+	} else {
+		hdr.Set(header.AcceptEncoding, bucket)
+	}
+	if lang, ok := langBucket(string(hdr.Peek(header.AcceptLanguage))); ok {
+		hdr.Set(header.AcceptLanguage, lang)
+	}
+}
+
+// applyResponseRewrites mutates a client-facing response in place with
+// the route's response header rewrite directives: remove first (Del is a
+// no-op for absent headers), then set (Set replaces any origin value).
+// Called on every response the handler emits; no-op for routes without
+// directives.
+func (h *Handler) applyResponseRewrites(dst *fasthttp.ResponseHeader) {
+	if h.respHeaderRemove != nil {
+		for name := range h.respHeaderRemove {
+			dst.Del(name)
+		}
+	}
+	if h.respHeaderSet != nil {
+		for k, v := range h.respHeaderSet {
+			dst.Set(k, v)
+		}
+	}
 }
 
 // NewHandler creates a caching handler.
 //
-//nolint:funlen // 81 lines: initialization is inherently sequential
+//nolint:funlen,gocyclo // 81 lines: initialization is inherently sequential; the rewrite-directive blocks add four flat branches
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
 		upstream:                cfg.Upstream,
 		fastClient:              cfg.FastClient,
 		stripPrefix:             []byte(cfg.StripPrefix),
+		pathRewrite:             cfg.PathRewrite,
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
-		negativeTTL:             cfg.NegativeTTL,
+		neg:                     cfg.Negative,
 		jitterPercent:           cfg.JitterPercent,
 		stayinAlive:             cfg.StayinAlive,
 		logCacheKeys:            cfg.LogCacheKeys,
@@ -585,14 +848,22 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		defaultSIE:              cfg.DefaultSIE,
 		variantSets:             make(map[api.Key]map[api.Key]struct{}),
 		VaryCapHits:             cfg.VaryCapHits,
+		VaryDriftInc:            cfg.VaryDrift,
 		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
 		StreamingFallbackInc:    cfg.StreamingFallback,
 		FetchShedInc:            cfg.FetchShed,
+		RewarmFillInc:           cfg.RewarmFill,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
+		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,
+		purgeBroadcast:          cfg.PurgeBroadcast,
 		allowSetCookie:          cfg.AllowSetCookie,
+		bypassOnCookie:          cfg.BypassOnCookie,
+		uaBypass:                compileUABypass(cfg.BypassOnUserAgent),
+		bypassCookieNames:       newCookieNameScanner(cfg.BypassOnCookieNames),
 		maxObjectSize:           cfg.MaxObjectSize,
+		maxVariants:             cfg.MaxVariants,
 		maxResponseBytes:        cfg.MaxResponseBytes,
 		policy:                  cfg.Policy,
 		refreshBeforeExpiry:     cfg.RefreshBeforeExpiry,
@@ -608,6 +879,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
+	}
+	if h.maxVariants <= 0 {
+		h.maxVariants = DefaultMaxVariants
 	}
 	h.maxStreamingBufferBytes = cfg.MaxStreamingBufferBytes
 	if h.maxStreamingBufferBytes <= 0 {
@@ -662,7 +936,42 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 
 	h.revalSem = make(chan struct{}, defaultRevalConcurrency)
+	h.rewarmSem = make(chan struct{}, defaultRewarmConcurrency)
 	h.inflightStreams = newInflightTable()
+
+	// Header rewrite policy (request/response header_set/header_remove).
+	// Pre-canonicalized at construction so the per-request work is map
+	// lookups and fasthttp setter calls only, and the nil checks cost
+	// nothing on routes without rewrite directives.
+	if len(cfg.RequestHeaderSet) > 0 {
+		h.reqHeaderSet = cfg.RequestHeaderSet
+	}
+	if len(cfg.RequestHeaderRemove) > 0 {
+		m := make(map[string]bool, len(cfg.RequestHeaderRemove))
+		for _, name := range cfg.RequestHeaderRemove {
+			m[strings.ToLower(name)] = true
+		}
+		h.reqHeaderRemove = m
+	}
+	// Client-identity forwarding (request.forwarded, issue #769). The
+	// chain cap is defaulted here as well as in config.Validate so a
+	// hand-constructed HandlerConfig (tests) cannot bypass the bound.
+	if cfg.Forwarded.Enabled() {
+		h.forwarded = cfg.Forwarded
+		if h.forwarded.MaxAppend <= 0 {
+			h.forwarded.MaxAppend = defaultForwardedMaxAppend
+		}
+	}
+	if len(cfg.ResponseHeaderSet) > 0 {
+		h.respHeaderSet = cfg.ResponseHeaderSet
+	}
+	if len(cfg.ResponseHeaderRemove) > 0 {
+		m := make(map[string]bool, len(cfg.ResponseHeaderRemove))
+		for _, name := range cfg.ResponseHeaderRemove {
+			m[header.InternKey(name)] = true
+		}
+		h.respHeaderRemove = m
+	}
 
 	return h
 }
@@ -679,9 +988,10 @@ func (h *Handler) Close(ctx context.Context) error {
 		h.scheduler.Stop()
 	}
 
-	// Drain both refresh-before-expiry and SWR goroutines. A zero-value
-	// WaitGroup (when refresh-before-expiry is disabled) returns immediately
-	// from Wait(), so this is safe in all configurations.
+	// Drain refresh-before-expiry, SWR, and shed-refill goroutines. A
+	// zero-value WaitGroup (when refresh-before-expiry is disabled)
+	// returns immediately from Wait(), so this is safe in all
+	// configurations.
 	done := make(chan struct{})
 	go func() {
 		h.refreshWg.Wait()
@@ -697,7 +1007,7 @@ func (h *Handler) Close(ctx context.Context) error {
 }
 
 // Purge invalidates a primary cache key and every Vary variant stored under
-// it, enforcing RFC 9111 §4.2.4: when a resource is invalidated, all stored
+// it, enforcing RFC 9111 §4.4: when a resource is invalidated, all stored
 // variants MUST be invalidated too.
 //
 // Returns owned=true when this handler had the key (tracked variants or a
@@ -729,22 +1039,13 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 	return true, nil
 }
 
-// SoftPurge marks a cached object as stale without deleting it, so the
-// next request serves the stale body via stale-while-revalidate (SWR)
-// or triggers a conditional revalidation via stale-if-error (SIE),
-// depending on which grace window the object has. This is a "refresh"
-// or "soft purge" in Varnish terminology. It is distinct from Purge,
-// which hard-deletes the object and forces a synchronous origin fetch
-// on the next request.
-//
-// The object's TTL is reduced to zero, making it immediately stale. If
-// the object has a non-zero StaleWhileRevalidate window, it remains
-// servable while a conditional revalidation fetch refreshes it in the
-// background. If the object has only a StaleIfError window, the next
-// request attempts a synchronous conditional fetch and falls back to
-// the stale body only if the origin errors. If the object has neither
-// SWR nor SIE, SoftPurge falls back to a hard delete (equivalent to
-// Purge) — there is no graceful degraded mode without a grace window.
+// SoftPurge marks a cached object as stale without deleting it — a
+// "refresh" or "soft purge" in Varnish terminology, distinct from
+// Purge's hard delete and forced synchronous origin fetch. The next
+// request serves the stale body under SWR or revalidates under SIE,
+// depending on the object's grace windows; with neither SWR nor SIE,
+// SoftPurge falls back to a hard delete — there is no graceful
+// degraded mode without a grace window.
 //
 // Returns (true, nil) when the key was found and soft-purged,
 // (false, nil) when the key was not in the store, and (true, err) when
@@ -800,7 +1101,9 @@ func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, erro
 	return owned, nil
 }
 
-// key is gone or stale. Used by the scheduler's compaction pass.
+// lookupForRefresh returns the stored object for key when it is still
+// fresh; nil when the key is gone or stale. Used by the scheduler's
+// compaction pass.
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
 	defer cancel()
@@ -916,27 +1219,34 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(ri.GetMethod())
-	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	req.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
 	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		req.Header.Set(k, v)
 		return true
 	})
+	// Normalize AE to the bucket token so the refreshed variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&req.Header, ri)
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
-	res := h.collapsedFetchBg(ctx, req, key)
+	// Detached root span: the triggering request is long gone, and its
+	// pipeline span already ended. Still attribute-bearing so slow
+	// refreshes are filterable in Tempo.
+	spanCtx, span := tracing.StartOriginSpan(
+		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
+	)
+	defer span.End()
+
+	res := h.collapsedFetchBg(spanCtx, req, key, ri)
 	if res.Err != nil {
-		h.refreshMetrics.IncTotal("error")
-		h.refreshMetrics.IncErrors(errorType(res.Err))
-		remaining := time.Until(stale.StoredAt.Add(stale.TTL))
-		if remaining <= 0 {
-			return
-		}
-		delay := min(h.refreshMargin, remaining/2)
-		if delay < time.Second {
-			delay = time.Second
-		}
-		h.scheduler.Schedule(key, time.Now().Add(delay))
+		// A failed fetch must not export as a clean span.
+		tracing.RecordError(span, res.Err)
+		h.scheduleRefreshRetry(key, stale, res.Err)
 		return
 	}
 
@@ -947,14 +1257,15 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, time.Now())
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
 
 	resMap := res.Header.ToMap()
-	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negativeTTL, h.defaultTTL) {
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -963,13 +1274,31 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
+		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
 	h.refreshMetrics.IncSkips("uncacheable")
+}
+
+// scheduleRefreshRetry records the failure metrics and re-schedules the
+// refresh with backoff: half the remaining TTL, bounded by refresh_margin
+// and floored at 1s. No retry once the object has fully expired.
+func (h *Handler) scheduleRefreshRetry(key api.Key, stale *api.Object, refreshErr error) {
+	h.refreshMetrics.IncTotal("error")
+	h.refreshMetrics.IncErrors(errorType(refreshErr))
+	remaining := time.Until(stale.StoredAt.Add(stale.TTL))
+	if remaining <= 0 {
+		return
+	}
+	delay := min(h.refreshMargin, remaining/2)
+	if delay < time.Second {
+		delay = time.Second
+	}
+	h.scheduler.Schedule(key, time.Now().Add(delay))
 }
 
 // errorType classifies a background refresh error for the
@@ -1006,6 +1335,16 @@ func (h *Handler) RefreshStats() (scheduled, registry int) {
 // when unset. Used by the engine to label refresh gauge metrics.
 func (h *Handler) RouteName() string {
 	return h.routeName
+}
+
+// KeyPolicy returns the route's compiled cache key policy, or nil when
+// the route has none. The engine uses it to rebuild keys from raw URLs
+// in the admin plane (purge/refresh/cachecheck): those surfaces must
+// compute the key the same way the data plane does, or a route whose
+// key differs from the default (e.g. include_host: false) would purge
+// and inspect keys that were never stored.
+func (h *Handler) KeyPolicy() *KeyPolicy {
+	return h.policy
 }
 
 // RefreshEnabled reports whether this handler was configured with
@@ -1046,12 +1385,84 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 	return BuildKeyFast(ctx.Method(), ctx.RequestURI(), ctx.Host(), ctx.Path(), ctx.IsTLS(), h.policy)
 }
 
+// requestBypass reports whether a request-gate knob routes this
+// request around the cache: bypass_on_cookie (ADR-0054 — any non-empty
+// Cookie header on an opted-in route), bypass_on_cookie_names
+// (issue #768 — any listed cookie name, presence trigger plus the
+// compiled name scanner), or bypass_on_user_agent (issue #771,
+// ADR-0055 — a User-Agent glob match on a route with patterns). The
+// UA matcher's purpose is mirroring edge-CDN verified-bot bypass
+// rules on inner cache layers (client → edge → bouine), so a crawler
+// the edge deliberately sends around its cache is not served
+// bouine's stored copy. Zero allocations: one header read per
+// configured gate (PeekAll for the cookie gates — fasthttp's Peek
+// does NOT join repeated Cookie lines, so a single Peek would miss a
+// listed cookie on the second line; one Peek for the UA gate),
+// byte-wise matching, no string conversion.
+func (h *Handler) requestBypass(ctx *fasthttp.RequestCtx) bool {
+	if h.cookieBypassTriggered(&ctx.Request.Header) {
+		return true
+	}
+	return h.uaBypass != nil && h.uaBypass.matchBytes(ctx.Request.Header.Peek(header.UserAgent))
+}
+
+// serveCacheBypass dispatches a gated request around the cache. SSE
+// intent wins the dispatch: handleSSE already streams live with
+// never-cache semantics, which satisfies the same "never stored,
+// never shared" contract (the SSE fetch never collapses and never
+// buffers into the store). Everything else proxies via handleBypass
+// (streamBypass), which does not write the store; the zero cacheKey
+// keeps the access-log sampler consistent with the miss/revalidate
+// bypass paths.
+func (h *Handler) serveCacheBypass(ctx *fasthttp.RequestCtx) {
+	if h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
+	ctx.SetUserValue("cacheKey", api.Key{})
+	h.handleBypass(ctx)
+}
+
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
 // cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
 // and all others to the cache lookup pipeline.
+//
+//nolint:gocyclo // 20: the dispatch switch is the RFC 9111 state machine's front door; the header-rewrite hook adds one branch by design
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if isInvalidatingBytes(ctx.Method()) {
 		h.serveInvalidating(ctx)
+		return
+	}
+
+	// Request-side header rewrite (request.header_set/header_remove).
+	// Applied to the ctx before any read — the cache key does not
+	// depend on request headers, but the Vary variant computation and
+	// every origin-bound copy do, so the rewrite must land before
+	// lookup. No-op for routes without directives.
+	h.rewriteRequestCtx(ctx)
+
+	// Cookie bypass (ADR-0054, cache.bypass_on_cookie; issue #768,
+	// cache.bypass_on_cookie_names) and User-Agent bypass (issue #771,
+	// cache.bypass_on_user_agent, ADR-0055): a request gated by any
+	// knob never touches the cache — no lookup, no storage, no
+	// in-flight sharing. requestBypass reads only already-parsed
+	// headers (PeekAll / the compiled matcher), and all flags are
+	// resolved at handler build time, so gate-less routes return
+	// before any header read (cookie flag off with no listed names is
+	// one bool read; UA patterns absent is one nil read — no Peek at
+	// all, keeping the zero-alloc hit path unchanged). Flag-on cookie
+	// routes pay one PeekAll — fasthttp's Peek does NOT join repeated
+	// Cookie lines (peekArgBytes returns the first line until
+	// collectCookies runs), so the gate must see every line or a
+	// listed cookie on the second line slips into the cache. Placed
+	// after rewriteRequestCtx so request.header_set/header_remove can
+	// strip or adjust the Cookie / User-Agent headers before the check,
+	// and before lookup so no store read is ever performed. SSE intent
+	// wins the dispatch inside serveCacheBypass: handleSSE already
+	// streams live with never-cache semantics, which satisfies the
+	// same "never stored, never shared" contract.
+	if h.requestBypass(ctx) {
+		h.serveCacheBypass(ctx)
 		return
 	}
 
@@ -1081,7 +1492,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if tryConditional304Fast(ctx, disp.Object, src) {
+		if tryConditional304Fast(ctx, disp.Object, src, h.rewriteHook()) {
 			return
 		}
 		// Range requests need the full RequestInfo for ServeRange.
@@ -1145,6 +1556,73 @@ func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
 	h.invalidateAndProxy(ctx)
 }
 
+// peerVaryAssertion derives the Vary assertion sent with a peer fetch:
+// the stale/miss-side object's stored VaryKey when lookup found one
+// (variant miss), the primary-key object's otherwise, and "" on a plain
+// miss with no stored Vary context.
+func peerVaryAssertion(obj *api.Object) string {
+	if obj == nil {
+		return ""
+	}
+	return obj.VaryKey
+}
+
+// servePeerHit validates and serves a peer-fetched object. Returns true
+// when the response was written (the caller must return), false when the
+// peer object was rejected or not fresh (the caller falls back to origin).
+// RFC 9111 §4.1: a Vary-carrying object belongs to one selecting-header
+// set. Recompute the variant dimension the fetched object must carry for
+// THIS request and compare against its stored VaryKey: a mismatch means
+// the peer answered with another variant's body or with the primary-key
+// Vary resolver (whose VaryKey is blank by protocol). Treat it as a miss
+// instead of serving cross-variant content (cross-market body served in
+// production before this gate).
+func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
+	if peerObj.VaryValue != "" &&
+		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		if h.onPeerVariantMismatch != nil {
+			h.onPeerVariantMismatch()
+		}
+		h.logger.Debug("peer fetch returned a foreign variant for this request",
+			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
+			"peer_vary_key", peerObj.VaryKey)
+		return false
+	}
+	if d := Evaluate(ri, peerObj, now); d.Decision == Hit || d.Decision == StaleHit {
+		cacheRes := cacheHit
+		if d.Decision == StaleHit {
+			cacheRes = cacheStale
+		}
+		h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
+		// Do not store or revalidate: the object came from the owner.
+		// Caching it on a non-owner would make the fleet cache redundant
+		// (issue #509). Revalidation is the owner's responsibility.
+		return true
+	}
+	return false
+}
+
+// peerHintsApply reports whether a fast-path peer-branch hint (transferred
+// by the h1parser under api.OwnerMissContextKey or
+// api.OwnerGateRejectContextKey) suppresses THIS handler's peer RPC.
+// Either hint carries the same proof — the owner was already asked for
+// exactly this nil-policy, plain-key question — so both are honored the
+// same way: skip the RPC, go to origin. The hint is trusted only when
+// the stored object is nil (otherwise the slow path's peer question
+// carries peerVaryAssertion(obj) — a different question) and the route
+// has no KeyPolicy (the hint flag does not bind to the producing
+// route's policy, so on a policied route the slow path cannot prove
+// its peer question identical to the fast path's and keeps the retry;
+// conservative, since the per-route fast path runs the route's own
+// policy — lifting the restriction needs a route-bound hint).
+func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool {
+	if obj != nil || h.policy != nil {
+		return false
+	}
+	return ctx.UserValue(api.OwnerMissContextKey) == true ||
+		ctx.UserValue(api.OwnerGateRejectContextKey) == true
+}
+
 // handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
 // falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
 // Cluster peer-fetch: if this node does not own the key, ask the owner before
@@ -1157,21 +1635,37 @@ func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
+//
+//nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	if h.ownerFn != nil && h.peerFetch != nil {
+	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
+	// OwnerGateReject), transferred by the h1parser under
+	// api.OwnerMissContextKey / api.OwnerGateRejectContextKey:
+	//   - OwnerMiss: on a plain miss the H1 fast path already asked the
+	//     owner and got a definitive miss, so the identical second peer
+	//     RPC is skipped and the fetch goes straight to origin.
+	//   - OwnerGateReject: the fast path asked and the owner's object
+	//     failed the variant gate. On a nil-policy route the two paths'
+	//     gates are byte-identical for the same wire bytes (parity
+	//     pinned by TestPeerVaryGateHeaderParity), so the retry is
+	//     deterministically rejected twice — skip it and go to origin.
+	// Both hints require obj == nil AND h.policy == nil: with a stale
+	// object or Vary resolver present (obj != nil) the slow path's peer
+	// question carries peerVaryAssertion(obj) — a different question —
+	// and with a KeyPolicy the hint flag does not bind to the producing
+	// route's policy, so the identical-question proof is unavailable
+	// and the retry is kept. The owner
+	// populating the key in the race window is missed either way;
+	// recovery is the same: the origin fetch is singleflight-collapsed
+	// and peer-put to the owner, so later requests recover through the
+	// peer path.
+	if h.peerHintsApply(obj, ctx) {
+		// Either hint proves the owner was already asked for exactly
+		// this (nil-policy, plain-key) question: skip the duplicate RPC.
+	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey); err == nil && peerObj != nil {
-				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(ri, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-					cacheRes := cacheHit
-					if d2.Decision == StaleHit {
-						cacheRes = cacheStale
-					}
-					h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
-					// Do not store or revalidate: the object came from the
-					// owner. Caching it on a non-owner would make the fleet
-					// cache redundant (issue #509). Revalidation is the
-					// owner's responsibility.
+			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
+				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 					return
 				}
 			} else if err != nil {
@@ -1191,7 +1685,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src, ri)
 	} else {
-		h.fetchAndStore(ctx, lookupKey, primaryKey, ri)
+		h.fetchAndStore(ctx, lookupKey, primaryKey, obj, ri)
 	}
 }
 
@@ -1247,20 +1741,38 @@ func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.K
 	h.triggerBgRevalidate(ri, key, stale)
 }
 
+// remapHeadToGet converts a HEAD method to GET for background origin
+// fetches that refresh a stored object (SWR revalidation, shed refill):
+// the stored object is the GET representation, and HEAD differs from
+// GET only by the omitted body (RFC 9110 §9.3.2), so fetching HEAD
+// would refresh the object with an empty body (issue #752). The fast
+// path applies the same remap (requestInfoFromRaw).
+func remapHeadToGet(method string) string {
+	if method == "HEAD" {
+		return "GET"
+	}
+	return method
+}
+
 // requestInfoFromRaw builds an owned RequestInfo from a RawRequest.
 // The RawRequest's string fields alias the h1parser read buffer, so all
 // strings are copied into owned memory — the fast-path equivalent of
 // the materialize-before-escape rule the SWR goroutine follows in
 // triggerBgRevalidate.
+//
+// Cookie lines: the h1parser keeps every Cookie header line
+// separately, and header.Map.Set overwrites — a per-line Set would keep
+// only the LAST line's pairs, dropping a listed cookie and skewing any
+// cookie-keying (presence bits, bypass replay) computed downstream.
+// The lines are joined into one §4.2 value instead, the same shape
+// headerFromCtx produces from fasthttp's collected cookies, so both
+// paths' RequestInfos key identically.
 func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
 	uri := req.Path
 	if req.Query != "" {
 		uri += "?" + req.Query
 	}
-	method := req.Method
-	if method == "HEAD" {
-		method = "GET"
-	}
+	method := remapHeadToGet(req.Method)
 	ri := RequestInfo{
 		Method: method,
 		URI:    uri,
@@ -1270,7 +1782,13 @@ func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
 	}
 	ri.Header = header.NewMap(req.NHeaders)
 	for i := 0; i < req.NHeaders; i++ {
+		if api.EqualFold(req.Headers[i].Key, header.Cookie) {
+			continue
+		}
 		ri.Header.Set(req.Headers[i].Key, req.Headers[i].Value)
+	}
+	if cv := req.CookieValue(); cv != "" {
+		ri.Header.Set(header.Cookie, cv)
 	}
 	return ri
 }
@@ -1350,7 +1868,12 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 // the origin response via FastClient and writes it directly to the
 // *fasthttp.RequestCtx, then overwrites bouine's attribution headers
 // (X-Cache, X-Cache-Source) so an origin-supplied value cannot spoof
-// the source metric label or X-Cache result.
+// the source metric label or X-Cache result. BYPASS responses carry
+// api.SourceOrigin on every branch that dispatched something toward the
+// origin (a fetch or the in-process upstream); the shed 503
+// (writeShed503), the no-client-no-upstream 502, and the
+// only-if-cached 504 keep the empty source — the origin was never
+// reached — which the metrics layer labels "bouine".
 func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 	reqCC := ParseCacheControlBytes(ctx.Request.Header.Peek(header.CacheControl))
 	if reqCC.OnlyIfCached {
@@ -1363,8 +1886,32 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 
 func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		// Upstream fallback (issue #598): a cached-static-route handler
+		// is wired with Upstream (the staticfile handler) and no
+		// FastClient. Run the upstream handler in-process — its response
+		// is already in ctx.Response. The upstream is the bare handler,
+		// so the origin-bound URI (strip_prefix / path_rewrite) is
+		// applied here, in place, exactly once; the bypass path used to
+		// rely on rewrite wrappers baked into the upstream chain, which
+		// double-applied on every miss fetch.
+		if h.upstream != nil {
+			if u := h.originURI(ctx.RequestURI()); !bytes.Equal(u, ctx.RequestURI()) {
+				ctx.Request.SetRequestURIBytes(u)
+			}
+			h.upstream(ctx)
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			h.applyResponseRewrites(&ctx.Response.Header)
+			return
+		}
+		// RFC 9111 §5.2.2.2: no fast client configured and no upstream
+		// fallback (misconfiguration) — surface 502, not a panic. The
+		// error body resets the response, so X-Cache is written after.
+		// No X-Cache-Source: no fetch was dispatched, so the metrics
+		// layer labels this response "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 	h.streamBypass(ctx, "BYPASS")
@@ -1440,7 +1987,6 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	fh := getOrComputeFastHeader(obj)
 	fh.CopyTo(dst)
 
-	// Set dynamic headers per request.
 	var ageBuf [16]byte
 	ageSeconds := int64(ComputeAge(obj, now).Seconds())
 	ageStr := strconv.AppendInt(ageBuf[:0], ageSeconds, 10)
@@ -1462,15 +2008,37 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(obj.Body) // #nosec G705 -- obj.Body is an immutable cached origin response
 	}
+	h.applyResponseRewrites(dst)
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
-func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+// The shared fetchResult is detached per caller: buildObject mutates its
+// resMap (attribution headers), so concurrent callers must not share one
+// mutable header.Map. Authorized requests skip the dedup entirely
+// (collapseDenied, ADR-0052): an authorized response is never shareable
+// in-flight, so each authorized caller fetches its own copy. Every other
+// request parks under collapseFlightKey: the variant key on a warm
+// flight, the dimension-extended key on a cold include_headers route,
+// and no shared flight at all on a cold include-free miss (ADR-0057).
+func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) fetchResult {
+	if collapseDenied(ri) {
+		res := h.doFetch(ctx)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
+	sfKey := collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
+	if sfKey == (api.Key{}) {
+		res := h.doFetch(ctx)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
 // revalKeySuffix XORs the key with a constant to produce a singleflight
@@ -1478,21 +2046,50 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchRes
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
-func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
+// collapsedFetchBg deduplicates concurrent background origin fetches for
+// the same key. Every caller holds a stored object (a refresh or rewrite
+// of a known key), so the flight key already encodes the route's declared
+// variant dimensions and the collapse is safe without the cold-miss gate.
+// Authorized requests still skip the dedup (collapseDenied, ADR-0052).
+func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key, ri RequestInfo) fetchResult {
+	if collapseDenied(ri) {
+		res := h.doFetchBg(ctx, req)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
-func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
-	sfKey := key.SingleFlightKey(revalKeySuffix)
-	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
+// collapsedRevalidateBg deduplicates concurrent revalidations for the
+// same key. Authorized requests skip the dedup entirely (collapseDenied,
+// ADR-0052): the conditional request carries the caller's credentials,
+// so its response is never shareable in-flight — each authorized caller
+// revalidates on its own. Every revalidation holds a stored object, so
+// collapseFlightKey resolves to the lookup key and the flight always
+// shares; the refusal branch is defense-in-depth only.
+func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, lookupKey, primaryKey api.Key, stale *api.Object, ri RequestInfo) fetchResult {
+	sfKey := api.Key{}
+	if !collapseDenied(ri) {
+		sfKey = collapseFlightKey(h, primaryKey, lookupKey, stale, ri)
+	}
+	if sfKey == (api.Key{}) {
+		res := h.doFetchBg(ctx, req)
+		res.Header = res.Header.ownedClone()
+		return res
+	}
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(revalKeySuffix), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
 func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fetchResult) {
@@ -1506,17 +2103,20 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		}
 	}()
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. The caller (revalidate / background
+			// refresh) already built the complete upstream-bound request
+			// shape, so replay it verbatim into the scratch ctx.
+			return h.fetchViaUpstreamRequest(req)
+		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	spanCtx, span := tracing.StartSpan(ctx, "bouine.origin")
-	defer span.End()
-
-	select {
-	case h.fetchSem <- struct{}{}:
-		defer func() { <-h.fetchSem }()
-	default:
-	}
-
+	// The caller already started the bouine.origin span and passes only
+	// its context down; the span's owner ends it and records errors from
+	// the returned result.
+	//
 	// Deadline-based timeout: transport.Client.Do maps ctx.Deadline() to
 	// fasthttp's kernel-level connection deadlines. The previous
 	// context.WithCancel + time.AfterFunc never reached production transports
@@ -1526,17 +2126,24 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	// at all), this background path uses context.WithTimeout instead of
 	// DoDeadline because background callers hold a ctx they cancel on
 	// handler shutdown, and that cancellation must reach the transport.
+	fetchCtx := ctx
+
+	select {
+	case h.fetchSem <- struct{}{}:
+		defer func() { <-h.fetchSem }()
+	default:
+	}
+
 	if h.fetchTimeout > 0 {
 		var cancel context.CancelFunc
-		spanCtx, cancel = context.WithTimeout(spanCtx, h.fetchTimeout)
+		fetchCtx, cancel = context.WithTimeout(fetchCtx, h.fetchTimeout)
 		defer cancel()
 	}
 
 	resp := fasthttp.AcquireResponse()
 
-	if err := h.fastClient.Do(spanCtx, req, resp); err != nil {
+	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
-		tracing.RecordError(span, err)
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
 	}
 
@@ -1562,21 +2169,28 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	}
 }
 
-// releaseFetchResult releases the pooled fasthttp.Response if it was
-// kept alive in fetchResult.fastResp for CopyTo-based header copying.
-func releaseFetchResult(res fetchResult) {
-	if res.fastResp != nil {
-		fasthttp.ReleaseResponse(res.fastResp)
+func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) {
+	// Authorized requests never share an in-flight response
+	// (collapseDenied, ADR-0052). Every other request parks under
+	// collapseFlightKey (ADR-0057): lookup key on a warm flight,
+	// dimension-extended key on a cold include_headers route, no
+	// shared flight on a cold include-free miss. A refused request
+	// fetches its own copy outside the inflight table.
+	sfKey := api.Key{}
+	if !collapseDenied(ri) {
+		sfKey = collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
 	}
-}
-
-func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
+	if sfKey == (api.Key{}) {
+		h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+		return
+	}
 	// Try to become the streaming leader for this key.
 	// If another request is already streaming, wait for its buffered result.
 	inflight := &inflightStream{done: make(chan struct{})}
-	if actual, loaded := h.inflightStreams.loadOrStore(lookupKey, inflight); loaded {
+	if actual, loaded := h.inflightStreams.loadOrStore(sfKey, inflight); loaded {
 		// Follower: wait for the leader's buffered result.
 		existing := actual
+		existing.followers.Add(1)
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
@@ -1591,19 +2205,23 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			}
 			if errors.Is(res.Err, ErrFetchShed) {
 				h.writeShed503(ctx, "MISS")
+				// The leader shed without fetching: schedule the bounded
+				// background refill so this shed is not a lost re-warm.
+				h.triggerShedRefill(ri, lookupKey)
 				return
 			}
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
-		// Write the buffered result without re-storing (leader already stored).
+		// No re-store: the leader already stored.
 		h.writeBufferedResult(ctx, res, primaryKey, ri)
 		return
 	}
 	// Leader: remove from inflight map when done.
-	defer h.inflightStreams.delete(lookupKey)
+	defer h.inflightStreams.delete(sfKey)
 	h.streamMiss(ctx, primaryKey, ri, inflight)
 }
 
@@ -1618,15 +2236,6 @@ func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
 }
 
-// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
-// serving the super-stale obj if the upstream is unavailable.
-// src is the original storage-tier source from lookup (hot/warm),
-// threaded to stale-fallback serveObject calls.
-// lookupKey is the key under which the stale object was found (may be a
-// Vary variant key); it is used for singleflight dedup so that different
-// Vary variants do not collapse into a single fetch.
-// primaryKey is the canonical key used for Vary variant storage in
-// writeAndMaybeStore.
 // writeBufferedResult writes a fetchResult to the client without
 // storing (the leader already stored it). Used by singleflight
 // followers in the streaming miss path.
@@ -1648,11 +2257,20 @@ func (h *Handler) writeBufferedResult(
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
+	h.applyResponseRewrites(dst)
 }
 
+// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
+// serving the super-stale obj if the upstream is unavailable.
+// src is the original storage-tier source from lookup (hot/warm),
+// threaded to stale-fallback serveObject calls.
+// lookupKey is the key under which the stale object was found (may be a
+// Vary variant key); it is used for singleflight dedup so that different
+// Vary variants do not collapse into a single fetch.
+// primaryKey is the canonical key used for Vary variant storage in
+// writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	res := h.collapsedFetch(ctx, lookupKey)
-	defer releaseFetchResult(res)
+	res := h.collapsedFetch(ctx, lookupKey, primaryKey, stale, ri)
 	if res.Err != nil {
 		if errors.Is(res.Err, ErrFetchShed) {
 			// Shed — the fetch queue was full for fetchWaitTimeout. The
@@ -1660,6 +2278,9 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 			// signal; keep this at Debug so a shed storm cannot INFO-spam.
 			h.logger.Debug("stayin-alive: fetch wait timeout, serving stale",
 				"key", lookupKey)
+			// Stale protects this client, but the shed must not be a lost
+			// refill: schedule the bounded background re-warm.
+			h.triggerShedRefill(ri, lookupKey)
 		} else {
 			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
 				"error", res.Err, "key", lookupKey)
@@ -1673,7 +2294,7 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
+	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -1685,11 +2306,17 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethodBytes(ctx.Method())
-	revalReq.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	revalReq.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	revalReq.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token so the revalidated variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&revalReq.Header)
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — see applyForwardedCtx.
+	h.applyForwardedCtx(&revalReq.Header, ctx)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
@@ -1697,8 +2324,23 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidateBg(context.Background(), revalReq, lookupKey)
-	defer releaseFetchResult(res)
+	// Start here, not inside doFetchBg, so the span carries this
+	// request's method/path/pool/route attributes; each caller owns its
+	// span.
+	revalCtx, revalSpan := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
+	)
+	// Join the client trace like the other foreground fetches; the
+	// singleflight leader's span context is what gets injected.
+	tracing.InjectFastHTTP(revalCtx, revalReq)
+	res := h.collapsedRevalidateBg(revalCtx, revalReq, lookupKey, primaryKey, stale, ri)
+	if res.Err != nil {
+		tracing.RecordError(revalSpan, res.Err)
+	}
+	// Not deferred: a defer would extend the span over the post-fetch
+	// serve work below, which is not the origin fetch.
+	revalSpan.End()
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
 	// the 5xx path use the same staleFallbackAllowed check so the policy
@@ -1729,6 +2371,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 	if res.StatusCode >= 500 {
@@ -1739,13 +2382,21 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, now)
+		refreshed := h.refreshFrom304(stale, res, ri, now)
+		// Drift check before the store (ADR-0058): refreshed.VaryValue
+		// carries the merged 304 declaration; purging first removes the
+		// old resolver even if the refreshed variant re-lands elsewhere.
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
-	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
+	// A 200 is a full fresh response: writeAndMaybeStore compares its
+	// effectiveVary (the declaration that will be stored) against the
+	// stored one, INSIDE the cacheability gate — an uncacheable response
+	// must not purge the live surface it will not replace.
+	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1757,9 +2408,16 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 // stale.Header is cloned by CloneForRefresh before mutation: it is shared
 // with any other goroutine that looked up the same object, and
 // MergeHeaders304's writes would race with their reads.
-func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Time) *api.Object {
+func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestInfo, now time.Time) *api.Object {
 	refreshed := stale.CloneForRefresh()
 	refreshed.StoredAt = now
+	// Restamp the grace-retention pair from the route's CURRENT config
+	// (ADR-0051): the refreshed object replaces the stored one, so the
+	// flag must track the route's stayin_alive setting as of now —
+	// inheriting the stale object's value would pin (or unpin) retention
+	// based on the config at the original fill.
+	refreshed.KeepGrace = h.stayinAlive
+	refreshed.Pool = h.poolName
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
@@ -1767,7 +2425,30 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute HasDate in case the 304 response added or changed Date.
 	refreshed.HasDate = refreshed.Header.Has(header.Date)
-	refreshed.VaryValue = refreshed.Header.Get(header.Vary)
+	// effectiveVary keeps the stored VaryValue carrying the route's
+	// include_headers union across revalidation: a 304 that drops Vary
+	// (or is served by an origin that never sent it) must not collapse
+	// an include-keyed variant onto the primary key.
+	refreshed.VaryValue = effectiveVary(refreshed.Header, h.policy)
+	// Recompute VaryKey from the same union: CloneForRefresh copies the
+	// stale object's VaryKey verbatim, and a 304 that changes Vary
+	// (MergeHeaders304 replaces the stored lines wholesale) would
+	// otherwise leave the pair skewed — a mismatch the peer gates
+	// (servePeerHit, peerGateMatchesVary) reject on sight, failing
+	// every peer fetch of the object until TTL. Skew between the pair
+	// is the same bug class buildObject guards against when it hashes
+	// obj.VaryValue into obj.VaryKey from one computed value.
+	// A union containing "*" anywhere is unkeyable the same way
+	// lookup treats it: VariantKey* short-circuits to the primary key
+	// on varyContainsStar (token anywhere in the list, not just a
+	// pure-"*" value), so a "Vary: *" 304 merged over an include-keyed
+	// object ("*, accept-language") must blank VaryKey for the pair to
+	// stay consistent with what every lookup site computes.
+	if refreshed.VaryValue != "" && !varyContainsStar(refreshed.VaryValue) {
+		refreshed.VaryKey = BuildVaryKey(refreshed.VaryValue, ri.Header, h.policy)
+	} else {
+		refreshed.VaryKey = ""
+	}
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	newCC := ParseCacheControl(refreshed.CacheControl)
@@ -1811,8 +2492,13 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 	// reused by the next keep-alive request the moment our handler
 	// returns. The background goroutine must not read them after that.
 	// ri.Header is an owned header.Map (headerFromCtx copies) — safe as is.
+	// HEAD is remapped to GET: the background fetch must reproduce the
+	// stored GET representation, and HEAD differs from GET only by the
+	// omitted body (RFC 9110 §9.3.2) — fetching HEAD would refresh the
+	// stored object with an empty body (issue #752). Same remap the fast
+	// path applies (requestInfoFromRaw).
 	bgReq := RequestInfo{
-		Method: ri.GetMethod(),
+		Method: remapHeadToGet(ri.GetMethod()),
 		URI:    ri.GetURI(),
 		Host:   ri.GetHost(),
 		Path:   ri.GetPath(),
@@ -1858,23 +2544,45 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethod(ri.GetMethod())
-	revalReq.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	revalReq.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
 	revalReq.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		revalReq.Header.Set(k, v)
 		return true
 	})
+	// Normalize AE to the bucket token so the revalidated variant
+	// matches the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&revalReq.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&revalReq.Header, ri)
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
+
+	// The origin span starts here, detached from any client trace: the
+	// triggering client's response has already been served by the time
+	// this runs, and its pipeline span is ended. Detached-by-design, but
+	// still attribute-bearing (method/path/pool/route) so slow SWR
+	// fetches are filterable in Tempo.
+	spanCtx, span := tracing.StartOriginSpan(
+		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
+	)
+	defer span.End()
 
 	staleHits := h.store.WindowHits(key)
 
-	res := h.collapsedFetchBg(ctx, revalReq, key)
+	res := h.collapsedFetchBg(spanCtx, revalReq, key, ri)
 	if res.Err != nil {
+		// The owner of the span records the failure: a fetch that never
+		// succeeded must not export as a clean span (the revalidate
+		// caller records its own; errors were silently green before).
+		tracing.RecordError(span, res.Err)
 		return
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res, time.Now())
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		return
 	}
@@ -1885,14 +2593,15 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgResMap := res.Header.ToMap()
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
-	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
+	if bgParsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && bgResMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, ri, res, bgResMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
+		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -1901,6 +2610,7 @@ func (h *Handler) writeAndMaybeStore(
 	ctx *fasthttp.RequestCtx,
 	res fetchResult,
 	primaryKey api.Key,
+	stale *api.Object,
 	ri RequestInfo,
 ) {
 	dst := &ctx.Response.Header
@@ -1921,23 +2631,43 @@ func (h *Handler) writeAndMaybeStore(
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
+	h.applyResponseRewrites(dst)
+
+	// A HEAD exchange must never (re)store an object: the origin's
+	// response to the revalidation or miss carries no body, and HEAD
+	// shares the GET cache key — storing would replace a live body with
+	// an empty one served to every subsequent GET (issue #752). The
+	// streaming miss path applies the same guard (streamMissBuffered's
+	// !isHEAD). Background fetchers (doBackgroundRevalidate,
+	// doShedRefill) never reach this guard — they remap HEAD→GET when
+	// materializing their origin request (remapHeadToGet) so the
+	// refresh reproduces the stored GET representation instead.
+	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
+		return
+	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
-	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
+	if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
+		// Drift check inside the store gate (ADR-0058): only the
+		// declaration of a response that WILL be stored may purge the
+		// stored one. fetchAndStoreStayinAlive passes stale=nil on the
+		// cold-miss path, where detectVaryDrift is a no-op — a cold fill
+		// never revalidates a declaration it does not have.
+		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
-		if vary := resMap.Get(header.Vary); vary != "" {
+		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -1948,7 +2678,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -1970,6 +2700,14 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
+			// The primary-key entry is the Vary resolver, not a variant:
+			// blank its VaryKey so a peer that only holds the primary
+			// entry answers a variant fetch with a miss (the consumer
+			// gate in handleCacheMiss rejects on VaryKey mismatch)
+			// instead of another variant's body. VaryValue stays set:
+			// lookup() still needs the stored Vary list to compute the
+			// variant key for subsequent requests.
+			primaryObj.VaryKey = ""
 			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.
@@ -2013,7 +2751,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 			h.variantSets[primaryKey] = set
 		}
 	}
-	if len(set) < MaxVariants {
+	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
 		h.variantMu.Unlock()
 		return true
@@ -2044,12 +2782,12 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	for _, k := range dead {
 		delete(set, k)
 	}
-	if len(set) < MaxVariants {
+	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
 		return true
 	}
 	h.logger.Warn("vary cap exceeded, skipping variant storage",
-		"primary_key", primaryKey, "cap", MaxVariants)
+		"primary_key", primaryKey, "cap", h.maxVariants)
 	if h.VaryCapHits != nil {
 		h.VaryCapHits.Inc()
 	}
@@ -2063,11 +2801,16 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
-	bgCtx := context.Background()
-	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
+	// Linked to the client trace: the fetch is part of the triggering
+	// request.
+	fetchCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
+	)
 	defer span.End()
 
 	req := fasthttp.AcquireRequest()
@@ -2076,11 +2819,14 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseResponse(resp)
 
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — see applyForwardedCtx.
+	h.applyForwardedCtx(&req.Header, ctx)
 	if ctx.Request.Body() != nil {
 		body := ctx.Request.Body()
 		req.SetBodyRaw(body)
@@ -2091,6 +2837,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		tracing.RecordError(span, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
@@ -2104,7 +2851,6 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Write the captured response to the client.
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
 		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
@@ -2115,6 +2861,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(resp.StatusCode())
+	h.applyResponseRewrites(dst)
 	_, _ = ctx.Write(resp.Body())
 
 	// Only invalidate on 2xx/3xx success.
@@ -2130,37 +2877,50 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 	getRI := requestInfoFromCtx(ctx)
 	getRI.Method = "GET"
 	key := BuildKey(getRI, h.policy)
-	_, _ = h.Purge(ctx, key)
+	h.purgeAndBroadcast(ctx, key)
 
 	// Evict Content-Location and Location URLs (RFC 9111 §4.4).
 	for _, hdr := range []string{header.ContentLocation, header.Location} {
 		if loc := string(resp.Header.Peek(hdr)); loc != "" {
 			locKey := h.buildLocationKey(ctx, loc)
 			if !locKey.IsZero() {
-				_, _ = h.Purge(ctx, locKey)
+				h.purgeAndBroadcast(ctx, locKey)
 			}
 		}
 	}
 
-	// RFC 9111 §4.3.1: store POST response if it has explicit
-	// freshness and Content-Location matching the request URI.
+	// RFC 7234 §3: a POST response may be stored when it carries explicit
+	// freshness and its Content-Location matches the request URI. RFC 9111
+	// dropped this rule (no equivalent section), but the behavior is kept
+	// intentionally for Varnish parity.
 	h.maybeStorePostResponseFast(ctx, getRI, key, resp)
+}
+
+// purgeAndBroadcast invalidates key locally, then fans the purge out
+// to cluster peers (issue #753). The broadcast fires regardless of the
+// local purge's owned result: in strong mode the key's owner holds the
+// object while this node may be a non-owner with an empty local store,
+// and in eventual mode every node caches independently. No-op wiring
+// (single-node) reduces to the plain local purge.
+func (h *Handler) purgeAndBroadcast(ctx *fasthttp.RequestCtx, key api.Key) {
+	_, _ = h.Purge(ctx, key)
+	if h.purgeBroadcast != nil {
+		h.purgeBroadcast(key)
+	}
 }
 
 // maybeStorePostResponseFast stores a successful POST response under
 // the GET key when it has explicit freshness and a matching
-// Content-Location (RFC 9111 §4.3.1).
+// Content-Location (RFC 7234 §3; dropped by RFC 9111, kept by design).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
-	// Check for Set-Cookie — responses with Set-Cookie are not stored.
+	// Responses with Set-Cookie are client-specific and never stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return
 	}
-	// Check Content-Location matches request URI (RFC 9111 §4.3.1).
-	loc := string(resp.Header.Peek(header.ContentLocation))
+	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 7234 §3
 	if loc == "" {
 		return
 	}
-	// Build fetchResult from the fasthttp response for buildObject.
 	body := make([]byte, len(resp.Body()))
 	copy(body, resp.Body())
 	hdr := header.FromFastHTTP(&resp.Header)
@@ -2170,8 +2930,8 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getRI, res, hdr, h.negativeTTL, h.defaultTTL, h.overrideTTL,
-		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
+	obj := buildObject(key, getRI, res, hdr, h.neg, h.defaultTTL, h.overrideTTL,
+		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, now)
 	if obj == nil {
 		return
 	}
@@ -2236,7 +2996,10 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 	}
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
-		if IsNegativeCacheable(obj.StatusCode) {
+		// An error status covered by the negative-caching policy skips
+		// proactive refresh: re-fetching an origin already returning
+		// errors amplifies the outage.
+		if h.neg.Cacheable(obj.StatusCode) {
 			return
 		}
 		if !isRefresh && h.refreshReactiveFirst {
@@ -2258,8 +3021,197 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.VaryValue
 		}
-		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles)
+		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles, h.policy)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
+	}
+}
+
+// triggerShedRefill schedules a bounded background origin fetch that
+// stores the object WITHOUT serving any client: the caller already got
+// its 503 + Retry-After. This is the post-ban re-warm allowance — a shed
+// used to be a lost refill, so after a surrogate-key purge ban the miss
+// storm pinned the hit ratio at the shed equilibrium until the ban
+// expired. The refill runs on its own bounded pool (rewarmSem) instead
+// of the foreground fetchSem it was just shed from: sharing that budget
+// would keep the re-warm starved by the very demand it recovers from.
+//
+// Deduplication is the same inflight-stream collapse the foreground miss
+// path uses: concurrent sheds for one key share one refill, and a refill
+// that lands while a foreground fetch of the same key is still queued
+// collapses into it. Bounded by defaultRewarmConcurrency; a full pool
+// drops the refill (the next request re-triggers).
+func (h *Handler) triggerShedRefill(ri RequestInfo, key api.Key) {
+	// Bail out early if the handler is already shutting down.
+	select {
+	case <-h.done:
+		return
+	default:
+	}
+	if h.fastClient == nil {
+		return
+	}
+	select {
+	case h.rewarmSem <- struct{}{}:
+	default:
+		return // allowance full — the next request re-triggers
+	}
+	// Materialize the request fields now: ri's []byte fields alias the
+	// *fasthttp.RequestCtx's internal buffers (requestInfoFromCtx),
+	// which are reused by the next keep-alive request the moment the
+	// handler returns. The background goroutine must not read them after
+	// that. ri.Header is an owned header.Map (headerFromCtx copies) —
+	// safe as is. HEAD is remapped to GET for the same reason as the SWR
+	// revalidation goroutine: the refill must reproduce the stored GET
+	// representation, never an empty HEAD body (issue #752).
+	bgReq := RequestInfo{
+		Method: remapHeadToGet(ri.GetMethod()),
+		URI:    ri.GetURI(),
+		Host:   ri.GetHost(),
+		Path:   ri.GetPath(),
+		Header: ri.Header,
+		TLS:    ri.TLS,
+	}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	h.revalWg.Add(1)
+	go func() {
+		defer func() {
+			h.revalWg.Done()
+			<-h.rewarmSem
+		}()
+		defer bgCancel()
+		// Cancel the refill if the handler is shutting down so we do not
+		// call store.Put on a closed store.
+		go func() {
+			select {
+			case <-h.done:
+				bgCancel()
+			case <-bgCtx.Done():
+			}
+		}()
+		h.doShedRefill(bgCtx, bgReq, key)
+	}()
+}
+
+// doShedRefill fetches the object from origin and stores it, serving no
+// one. It collapses behind any concurrent foreground or background fetch
+// for the same key via the shared singleflight group (same key space as
+// collapsedFetch), so a refill landing while a foreground miss is queued
+// costs zero extra origin load. Deliberately unslotted on fetchSem: the
+// allowance IS this pool.
+//
+// The request URI is the client's own request line (path/query only,
+// stripped of the route prefix); the dialed host is the operator-
+// configured pool target selected by PoolFastClient.dispatch, never a
+// request parameter. Same data flow as doFetchFast/doFetchBg (suppressed
+// go/request-forgery alerts); see docs/security/threat-model.md §A10.
+func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key) {
+	// Rebuild the origin request from the materialized fields.
+	//nolint:gosec // G106/CWE-918: origin target is operator-configured; see above
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(ri.GetMethod())
+	// lgtm[go/request-forgery] — origin target is the configured pool; see docs/security/threat-model.md §A10
+	req.SetRequestURI(string(h.originURI([]byte(ri.GetURI()))))
+	req.Header.SetHost(ri.GetHost())
+	ri.Header.Range(func(k, v string) bool {
+		req.Header.Set(k, v)
+		return true
+	})
+	// Normalize AE to the bucket token so the refilled variant matches
+	// the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) from the
+	// captured request info — no XFF append on background fetches (see
+	// applyForwardedInfo).
+	h.applyForwardedInfo(&req.Header, ri)
+
+	// Deadline-based timeout, mirroring doFetchBg's transport deadline.
+	// Detached root span: no client trace to join, but attribute-bearing
+	// so slow refills are filterable in Tempo.
+	spanCtx, span := tracing.StartOriginSpan(
+		ctx, []byte(ri.GetMethod()), []byte(ri.GetPath()), h.poolName, h.routeName,
+	)
+	defer span.End()
+	fetchCtx := spanCtx
+	if h.fetchTimeout > 0 {
+		var cancel context.CancelFunc
+		fetchCtx, cancel = context.WithTimeout(spanCtx, h.fetchTimeout)
+		defer cancel()
+	}
+
+	// Collapse with concurrent foreground misses for this key. The
+	// foreground leader runs the slotted doFetch and stores on success;
+	// if it sheds, our leader slot re-runs the fetch here — unslotted,
+	// which is the point of the allowance. An authorized triggering
+	// request skips the shared flight (collapseDenied, ADR-0052): the
+	// refill carries its credentials, and an authorized response is
+	// never shareable in-flight.
+	var res fetchResult
+	if collapseDenied(ri) {
+		res = h.doRefillFetch(fetchCtx, req)
+	} else {
+		v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+			return h.doRefillFetch(fetchCtx, req), nil
+		})
+		res = v.(fetchResult)
+	}
+	// Detach the header.Map before buildObject mutates it (attribution
+	// headers, Set-Cookie strip): the flight group shares one result
+	// across all concurrent callers, and concurrent SetEntryRaw/Del on a
+	// shared Map corrupt the entries/values pairing (index-out-of-range).
+	// Same contract as collapsedFetch's ownedClone.
+	res.Header = res.Header.ownedClone()
+	if res.Err != nil {
+		return
+	}
+
+	// Cacheability gate before storage, mirroring the buffered streaming
+	// path's store gate (no client response is written here).
+	resMap := res.Header.ToMap()
+	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
+	if !parsed.isCacheableWithDefault(h.neg, h.defaultTTL) ||
+		(!h.allowSetCookie && resMap.Get(header.SetCookie) != "") ||
+		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
+		return
+	}
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+	h.storeObject(ctx, key, obj, ri, true, 0)
+	h.forwardToOwnerIfRemote(ctx, obj)
+}
+
+// doRefillFetch performs one unslotted origin fetch with the same
+// response handling as doFetchBg: bounded body copy, owned header.Map —
+// the result must be safe to share with singleflight callers.
+func (h *Handler) doRefillFetch(ctx context.Context, req *fasthttp.Request) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	resp := fasthttp.AcquireResponse()
+	if err := h.fastClient.Do(ctx, req, resp); err != nil {
+		fasthttp.ReleaseResponse(resp)
+		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+	}
+	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
+		fasthttp.ReleaseResponse(resp)
+		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
+	}
+	hdrMap := header.FromFastHTTP(&resp.Header)
+	statusCode := resp.StatusCode()
+	// Exact-size copy: the body may be stored in the cache, and the hot
+	// tier pins slice slack for the object's lifetime.
+	bodyCopy := make([]byte, len(resp.Body()))
+	copy(bodyCopy, resp.Body())
+	fasthttp.ReleaseResponse(resp)
+	return fetchResult{
+		StatusCode: statusCode,
+		Header:     fromHeaderMap(hdrMap),
+		Body:       bodyCopy,
 	}
 }
 
@@ -2296,9 +3248,23 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		}
 	}()
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. Materialize the upstream response
+			// through a scratch RequestCtx, then convert it to a
+			// fetchResult. Miss-path only: the interface check stays
+			// off the hit path.
+			return h.fetchViaUpstream(ctx)
+		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	fetchCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
+	// Span context stored by the middleware, never the RequestCtx (whose
+	// lifetime ends at handler return).
+	fetchCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
+	)
 	defer span.End()
 
 	if err := h.acquireFetchSlot(); err != nil {
@@ -2309,19 +3275,25 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
-	// resp is NOT released via defer — it's returned in fetchResult.fastResp
-	// so that Body (which references resp's internal buffer) survives.
-	// The caller (collapsedFetch) releases it after all singleflight
-	// waiters have finished.
+	// resp is released inside doFetchFast after the headers are detached
+	// into an owned header.Map and the body copied: the result is shared
+	// with singleflight followers, so it must not alias pooled state.
 
 	// Populate the request from *fasthttp.RequestCtx.
 	// Use *Bytes variants to avoid string([]byte) conversions.
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token so the stored variant matches
+	// the key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769): applied
+	// to the outbound copy only — never the ctx, so the cache key, the
+	// Vary variant key, and the stored RequestInfo stay untouched.
+	h.applyForwardedCtx(&req.Header, ctx)
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 
@@ -2331,35 +3303,173 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
 	}
 
-	// Check for max response bytes.
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		fasthttp.ReleaseResponse(resp)
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy the body into an exact-size slice. The pooled response is
-	// kept alive in fetchResult.fastResp so writeAndMaybeStore can use
-	// CopyTo for zero-normalization header copying. It is released by
-	// releaseFetchResult after all singleflight waiters have finished.
-	// The exact-size copy is load-bearing: this body is stored in the
-	// cache on cacheable revalidate/stayin-alive fills, and the hot tier
-	// pins whatever slack the slice carries for the object's lifetime.
 	statusCode := resp.StatusCode()
 	bodyCopy := make([]byte, len(resp.Body()))
 	copy(bodyCopy, resp.Body())
 
+	// Detach into an owned header.Map and release the pooled response
+	// before returning. collapsedFetch shares this result with every
+	// singleflight caller; keeping fastResp alive here meant each caller's
+	// releaseFetchResult re-released the SAME pooled response, corrupting
+	// fasthttp's response pool (the same *fasthttp.Response handed to two
+	// requests — one parsing origin headers into it while the other
+	// iterated All() in FromFastHTTP, panicking with "index out of range"
+	// on the miss path). The conversion cost is miss-path only.
+	hdrMap := header.FromFastHTTP(&resp.Header)
+	fasthttp.ReleaseResponse(resp)
+
 	return fetchResult{
 		StatusCode: statusCode,
-		Header:     fromFastHTTPHeader(&resp.Header),
+		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
-		fastResp:   resp,
 	}
 }
 
+// fetchViaUpstream materializes a fetchResult by running the configured
+// Upstream fasthttp.RequestHandler in-process (issue #598). A
+// cached-static-route handler is wired with Upstream (the staticfile
+// handler) and no FastClient, so when the cache cannot answer (MISS,
+// revalidation, BYPASS, SSE) the upstream handler is the origin. The
+// request is replayed into a scratch RequestCtx carrying the same
+// method/URI/host/headers/body as the client's, and the upstream's
+// response is converted to the shared fetchResult shape.
+func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	if h.fetchTimeout > 0 {
+		deadline := time.NewTimer(h.fetchTimeout)
+		defer deadline.Stop()
+		done := make(chan struct{}, 1)
+		var upstreamCtx *fasthttp.RequestCtx
+		var panicVal any
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicVal = r
+				}
+				done <- struct{}{}
+			}()
+			upstreamCtx = &fasthttp.RequestCtx{}
+			h.runUpstream(ctx, upstreamCtx)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			if panicVal != nil {
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstream maps ErrAbortHandler; the same convention as doFetchFast
+			}
+			defer upstreamCtx.Response.Reset()
+			return upstreamFetchResult(upstreamCtx)
+		case <-deadline.C:
+			return fetchResult{Err: fmt.Errorf("origin fetch: timeout after %s", h.fetchTimeout)}
+		}
+	}
+	upstreamCtx := &fasthttp.RequestCtx{}
+	defer upstreamCtx.Response.Reset()
+	h.runUpstream(ctx, upstreamCtx)
+	return upstreamFetchResult(upstreamCtx)
+}
+
+// runUpstream replays the client request into a scratch RequestCtx and
+// invokes the upstream handler. The request is replayed via fasthttp's
+// Request.Copy (which owns its buffers), because the scratch ctx outlives
+// the client's conn-owned buffer on streaming paths. No dialing happens
+// here: the scratch request only feeds the wired in-process handler,
+// never a network client — the same data flow the FastClient paths
+// already carry (suppressed go/request-forgery alerts on doFetchFast/
+// doFetchBg share it). See docs/security/threat-model.md §A10: origin
+// targets are operator-configured, never derived from request parameters.
+func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
+	upstreamCtx.Request.Reset()
+	ctx.Request.CopyTo(&upstreamCtx.Request)
+	upstreamCtx.Request.SetRequestURIBytes(h.originURI(ctx.Request.URI().RequestURI()))
+	h.upstream(upstreamCtx)
+}
+
+// upstreamFetchResult converts a scratch RequestCtx produced by an
+// in-process upstream handler into the shared fetchResult shape.
+// Exact-size body copy: the result is shared with singleflight
+// followers and may be stored, so it must not alias the scratch ctx.
+func upstreamFetchResult(ctx *fasthttp.RequestCtx) fetchResult {
+	hdrMap := header.FromFastHTTP(&ctx.Response.Header)
+	statusCode := ctx.Response.StatusCode()
+	bodyCopy := make([]byte, len(ctx.Response.Body()))
+	copy(bodyCopy, ctx.Response.Body())
+	return fetchResult{
+		StatusCode: statusCode,
+		Header:     fromHeaderMap(hdrMap),
+		Body:       bodyCopy,
+	}
+}
+
+// fetchViaUpstreamRequest is the request-shaped variant of fetchViaUpstream:
+// the caller (revalidate / background refresh) already built a complete
+// upstream-bound request (method, stripped URI, host, headers, body,
+// conditional headers), so it is replayed verbatim into a scratch
+// RequestCtx and handed to the in-process upstream handler. No dialing
+// happens here: the scratch request only feeds the wired handler, never a
+// network client — the same data flow the FastClient paths already have
+// (suppressed alerts on doFetchFast/doFetchBg share it). See
+// docs/security/threat-model.md §A10: origin targets are
+// operator-configured, never derived from request parameters.
+func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	upstreamCtx := &fasthttp.RequestCtx{}
+	defer upstreamCtx.Response.Reset()
+	req.CopyTo(&upstreamCtx.Request)
+	if h.fetchTimeout > 0 {
+		deadline := time.NewTimer(h.fetchTimeout)
+		defer deadline.Stop()
+		done := make(chan struct{}, 1)
+		var panicVal any
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicVal = r
+				}
+				done <- struct{}{}
+			}()
+			h.upstream(upstreamCtx)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			if panicVal != nil {
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstreamRequest maps ErrAbortHandler; the same convention as doFetchFast
+			}
+			return upstreamFetchResult(upstreamCtx)
+		case <-deadline.C:
+			return fetchResult{Err: fmt.Errorf("origin fetch: timeout after %s", h.fetchTimeout)}
+		}
+	}
+	h.upstream(upstreamCtx)
+	return upstreamFetchResult(upstreamCtx)
+}
+
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, stayinAlive bool, poolName string, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
-	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
+	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
 	//
 	// Cache the ToMap() result — it was called 5x before, each allocating a
@@ -2370,7 +3480,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		respCC = cdnCC
 		// Store CDN-Cache-Control string as the object's pre-parsed CC so
 		// Evaluate reads the CDN directives on every hit path.
-		ccHeader = mergeHeaderValues(resMap, header.CDNCacheControl)
+		ccHeader = resMap.GetAll(header.CDNCacheControl)
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
@@ -2387,7 +3497,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		}
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
-	ttl := computeTTL(resMap, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
+	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
 	// Route-level override wins over the upstream's freshness directives.
 	// Applied after computeTTL so jitter is seeded from the override value,
 	// not the origin's max-age. The stored object retains the unaltered
@@ -2402,20 +3512,33 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// pooled fasthttp.Response buffer before calling buildObject.
 	// Using res.Body directly avoids a redundant make+copy per miss.
 	obj := &api.Object{
-		Key:                key,
-		StatusCode:         res.StatusCode,
-		Header:             resMap,
-		Body:               res.Body,
-		BodySize:           int64(len(res.Body)),
-		StoredAt:           now,
-		TTL:                ttl,
-		ETag:               resMap.Get(header.ETag),
-		CacheControl:       ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
-		OriginAge:          originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
-		HasDate:            hasDate,
-		VaryValue:          resMap.Get(header.Vary),
+		Key:          key,
+		StatusCode:   res.StatusCode,
+		Header:       resMap,
+		Body:         res.Body,
+		BodySize:     int64(len(res.Body)),
+		StoredAt:     now,
+		TTL:          ttl,
+		ETag:         resMap.Get(header.ETag),
+		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
+		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
+		HasDate:      hasDate,
+		// effectiveVary, not joinedVary/Get: Vary is list-based, so field
+		// lines split across multiple headers combine per RFC 9110 §5.2, and
+		// cache.key.include_headers fields are unioned in. The union is
+		// computed once so VaryValue and VaryKey below see the identical
+		// value — skew between them breaks the peer variant gates
+		// (handler.go handleCacheMiss, fastpath.go peerGateMatchesVary).
+		VaryValue:          effectiveVary(resMap, policy),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
+		// P1b grace retention stamp (ADR-0051): the object carries the
+		// route's stayin_alive intent so the storage layer can gate
+		// time-based reaping on origin-pool health without any route
+		// knowledge. Two field assignments on the miss path; zero hit
+		// path cost.
+		KeepGrace: stayinAlive,
+		Pool:      poolName,
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
@@ -2459,7 +3582,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(obj.Header.Get(header.Vary), ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(obj.VaryValue, ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 
@@ -2501,20 +3624,32 @@ func serializeHead(obj *api.Object) []byte {
 	return buf
 }
 
-// computeTTL derives the freshness lifetime for a response, applying
-// explicit freshness, heuristic TTL, operator defaults, jitter, and
-// the origin Age adjustment.
+// computeTTL derives the freshness lifetime for a response. Precedence
+// when the origin sends no explicit freshness (max-age/s-maxage/valid
+// Expires): per-status negative TTL (negative_ttl) for the statuses it
+// covers > heuristic TTL (Last-Modified) > operator default TTL. The
+// per-status policy wins first for covered statuses: caching a 5xx for
+// hours because the origin echoes Last-Modified, or for ttl_default's
+// duration instead of the operator's 10s, is exactly what the policy
+// exists to prevent. Uncovered statuses fall through to the heuristic
+// and the operator default, in that order. Jitter and the origin Age
+// adjustment apply last.
 func computeTTL(hdr header.Map, status int, respCC Directives,
-	negativeTTL, defaultTTL time.Duration, jitterPct int,
+	neg *StatusTTL, defaultTTL time.Duration, jitterPct int,
 	originAge time.Duration, now time.Time) time.Duration {
 	ttl, explicit := FreshnessLifetimeH(respCC, hdr)
 	if !explicit {
-		ttl = HeuristicTTL(hdr, now)
-	}
-	if !explicit && ttl == 0 && defaultTTL > 0 {
-		ttl = defaultTTL
-	} else if !explicit && ttl == 0 && negativeTTL > 0 && IsNegativeCacheable(status) {
-		ttl = negativeTTL
+		// Per-status negative caching outranks every other implicit
+		// source (Cloudflare's "Cache TTL by status code" semantics),
+		// but only for the statuses it covers.
+		if negTTL := neg.TTL(status); negTTL > 0 {
+			ttl = negTTL
+		} else {
+			ttl = HeuristicTTL(hdr, now)
+			if ttl == 0 && defaultTTL > 0 {
+				ttl = defaultTTL
+			}
+		}
 	}
 	ttl = JitterTTL(ttl, jitterPct)
 	ttl -= originAge
@@ -2560,7 +3695,6 @@ func parseSurrogateKeys(h header.Map) []string {
 	return nil
 }
 
-// isInvalidating returns true for unsafe methods that should trigger
 // staleFallbackAllowed reports whether a stale object may be served as a
 // fallback when the upstream returns a 5xx or connection error. It returns
 // false when the stored response has must-revalidate, proxy-revalidate,
@@ -2586,4 +3720,15 @@ func isInvalidatingBytes(method []byte) bool {
 	return !bytes.Equal(method, []byte("GET")) &&
 		!bytes.Equal(method, []byte("HEAD")) &&
 		!bytes.Equal(method, []byte("OPTIONS"))
+}
+
+// rewriteHook returns the response-rewrite applier when the route
+// configures any response rewrite directive; nil otherwise. Used by
+// package-level response writers (write304Fast) that have no handler
+// reference.
+func (h *Handler) rewriteHook() func(*fasthttp.ResponseHeader) {
+	if h.respHeaderRemove == nil && h.respHeaderSet == nil {
+		return nil
+	}
+	return h.applyResponseRewrites
 }

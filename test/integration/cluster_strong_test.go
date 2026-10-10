@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // Strong mode: consistent hash ring, peer fetch on miss, HTTP+gossip invalidation.
@@ -108,7 +110,15 @@ func TestStrong_PurgePropagation(t *testing.T) {
 func TestStrong_BanPropagation(t *testing.T) {
 	s := sharedCluster(t, "strong")
 
-	path := "/hit?x=strong-ban"
+	// Dedicated path, served by the origin's default handler: the ban
+	// below is path-scoped, so it must not touch the shared stack's
+	// other entries. A fleet-wide ".*" host ban here previously banned
+	// every object stored for the next 24h (ban TTL) on the shared
+	// cluster — fills by later tests were permanently refused, which
+	// is what made TestStrong_PurgeBatchEndToEnd and
+	// TestStrong_MultiLineVaryVariantIsolation flake in suite runs
+	// while passing alone.
+	path := "/ban-fleet"
 
 	// Prime all alive nodes.
 	for _, i := range s.AliveNodes() {
@@ -117,10 +127,10 @@ func TestStrong_BanPropagation(t *testing.T) {
 		s.Get(t, i, path) // make sure it's a HIT before banning
 	}
 
-	// Issue ban from node 0 with a host_regex that matches the empty string
-	// stored in cached object headers (workaround: ".*" matches "").
-	// This effectively bans all currently cached objects.
-	s.Ban(t, 0, ".*", "")
+	// Issue a path-scoped ban from node 0. The ban predicate matches
+	// the stored X-Bouine-Path header (path only, no query), so this
+	// bans only objects filled from this test's path on every node.
+	s.Ban(t, 0, "", "^/ban-fleet$")
 
 	// In strong mode, HTTP fan-out is synchronous: all peers receive the ban
 	// immediately (no gossip wait needed).
@@ -143,4 +153,126 @@ func TestStrong_HopLimit(t *testing.T) {
 	// under normal conditions (no loops). Just verify no crash — metric may
 	// not be registered if no peer-fetcher was created.
 	_ = s.MetricValue(t, 0, "bouine_peer_fetch_hop_limit_hits_total")
+}
+
+// TestStrong_PurgeBatchEndToEnd verifies the batched admin purge
+// endpoint: one /v1/purge/batch request clears multiple URLs across
+// the cluster via a single batched broadcast (ADR-0044). Uses the
+// cross-node host so all nodes derive the same cache key. Success is
+// observed as the body changing (fresh origin fetch) after the purge.
+func TestStrong_PurgeBatchEndToEnd(t *testing.T) {
+	s := sharedCluster(t, "strong")
+
+	paths := []string{"/hit?x=strong-purge-batch-1", "/hit?x=strong-purge-batch-2"}
+	urls := make([]string, len(paths))
+	for i, p := range paths {
+		urls[i] = "http://" + driver.CrossNodeHost + p
+	}
+
+	// Warm every node for every path and record the cached body.
+	preBodies := make(map[string]string)
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			s.GetWithHost(t, i, p, crossNodeHost)
+			driver.RetryUntil(t, 5*time.Second, 200*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return resp.Header.Get("X-Cache") == "HIT"
+			})
+			resp := s.GetWithHost(t, i, p, crossNodeHost)
+			preBodies[p] = string(resp.Body)
+		}
+	}
+
+	// One batched purge on node 0 must clear all URLs on every node.
+	s.PurgeBatch(t, 0, urls)
+
+	// After the purge, each node must re-fetch from origin: the body
+	// differs from the pre-purge cached body. The RetryUntil GETs can
+	// re-populate the cache, so a changed body observed once is proof.
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			driver.RetryUntil(t, driver.GossipConvergence, 200*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return string(resp.Body) != preBodies[p]
+			})
+		}
+	}
+}
+
+// TestStrong_FastPathPeerFetch exercises the fast-path peer branch
+// (issue #636) end-to-end: with experimental.h1_fast_peer_path enabled
+// on every node, a plain-key miss on a NON-owner node must be served by
+// the owner through FastPathHandler.tryPeerFetch, with X-Cache-Source:
+// peer, WITHOUT the origin seeing the request (the slow-path
+// alternative would fetch from origin on the owner-miss hint, so a
+// no-origin delta around a MISS-on-this-node is proof the branch ran).
+//
+// The cache key includes the request Host, so every request uses the
+// driver.CrossNodeHost header: all three nodes compute the SAME ring
+// key, and at least two of them are non-owners (the ring has 3
+// members). Every non-owner request is therefore served either from its
+// local store or via the fast-path peer branch; a non-owner HIT must
+// never touch the origin (single-flight + peer-put guarantees the owner
+// holds the object after the first fill).
+func TestStrong_FastPathPeerFetch(t *testing.T) {
+	s := sharedFastPeerCluster(t)
+
+	path := "/hit?x=strong-fastpath-peerfetch"
+	host := driver.CrossNodeHost
+	originBefore := s.OriginRequests()
+
+	// 1. Fill via node 0 with the fixed host: exactly one origin
+	//    request (single-flight), whoever the ring owner is.
+	resp := s.GetWithHost(t, 0, path, host)
+	require.Equal(t, 200, resp.StatusCode)
+	originAfterFill := s.OriginRequests()
+	require.Equal(t, originBefore+1, originAfterFill,
+		"the fill must be a single origin request (single-flight collapsed)")
+
+	// The write-to-owner RPC after the fill is fire-and-forget
+	// (builder.go PeerPut goroutine), so the owner may not hold the
+	// object yet — a fixed sleep here raced that RPC on loaded CI
+	// runners and failed phase 2 (the flake). serveWithoutOrigin
+	// instead retries a node's GET until it is served without origin
+	// traffic: a GET that misses the owner re-fills and re-puts (both
+	// idempotent), so every node converges to local/peer serving
+	// within the poll window instead of assuming a sleep was enough.
+	serveWithoutOrigin := func(n int) *driver.Response {
+		var last *driver.Response
+		driver.RetryUntil(t, 5*time.Second, 100*time.Millisecond, func() bool {
+			before := s.OriginRequests()
+			last = s.GetWithHost(t, n, path, host)
+			return s.OriginRequests() == before
+		})
+		return last
+	}
+
+	// 2. Every alive node serves the SAME (path, host) without origin
+	//    traffic: the owner from its local store, each non-owner via
+	//    the fast-path peer branch.
+	peerHits := 0
+	for _, n := range s.AliveNodes() {
+		resp := serveWithoutOrigin(n)
+		require.Equal(t, 200, resp.StatusCode)
+		if src := resp.Header.Get("X-Cache-Source"); src == "peer" {
+			peerHits++
+			require.Equal(t, "HIT", resp.Header.Get("X-Cache"),
+				"a fast-path peer fetch is served as a HIT, source peer")
+		}
+	}
+
+	// 3. At least two of the three nodes are non-owners for this key.
+	//    Each non-owner either had the object locally (impossible
+	//    before its first request on this stack... unless peer-put
+	//    delivered it) or peer-fetched. Assert the branch actually
+	//    served: at least one peer HIT across the non-owner nodes, OR —
+	//    when both non-owner nodes got peer-put copies before asking —
+	//    the peer_fetch_hits_total counter still proves owner RPCs ran.
+	totalPeerHits := float64(0)
+	for _, n := range s.AliveNodes() {
+		totalPeerHits += s.MetricValue(t, n, "bouine_peer_fetch_hits_total")
+	}
+	if peerHits == 0 && totalPeerHits == 0 {
+		t.Fatal("no peer hit observed on any node — at least two non-owners must have peer-fetched this key")
+	}
 }

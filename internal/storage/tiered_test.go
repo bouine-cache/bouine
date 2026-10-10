@@ -100,6 +100,71 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	require.Equal(t, int64(1), st.WarmEntries)
 }
 
+// TestTiered_GraceObjectEagerlyWarmBacked pins P5 (ADR-0051): a
+// KeepGrace object is written to the warm tier — and protected there —
+// on Put, regardless of BodyThreshold, so hot SIEVE pressure on it is a
+// demotion rather than a deletion.
+func TestTiered_GraceObjectEagerlyWarmBacked(t *testing.T) {
+	t.Parallel()
+	ts := tieredStore(t, true)
+	k := testkey.Hash([]byte("graced-small"))
+	o := bigObj(k, 100) // below the 1024 B threshold — hot-only today
+	o.KeepGrace = true
+	o.Pool = "origin-main"
+
+	err := ts.Put(context.Background(), k, o)
+	require.NoError(t, err, "put")
+
+	wEnt, wBytes := ts.warm.Stats()
+	require.Equal(t, int64(1), wEnt, "graced object must be warm-backed regardless of BodyThreshold")
+	require.Greater(t, wBytes, int64(0))
+	require.Equal(t, 1, ts.warm.ProtectedCount(), "graced warm copy must be protected from warm eviction")
+	st := ts.Stats()
+	require.Equal(t, int64(1), st.WarmEntries)
+}
+
+// TestTiered_GraceObjectSurvivesHotSievePressure pins the end-to-end
+// P5 property: when hot-tier memory pressure SIEVE-evicts the graced
+// entry (backed entries are evicted first by design), the warm copy
+// still serves the next lookup via re-promotion.
+func TestTiered_GraceObjectSurvivesHotSievePressure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 16 << 10, NumShards: 1, ReaperInterval: -1},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	k := testkey.Hash([]byte("graced-pressure"))
+	o := bigObj(k, 500) // below threshold: only grace makes it warm-backed
+	o.KeepGrace = true
+	o.Pool = "origin-main"
+	require.NoError(t, ts.Put(context.Background(), k, o), "put graced")
+
+	// Flood the single shard well past MaxBytes with unbacked objects so
+	// the inline SIEVE evictions prefer the backed graced entry.
+	for i := range 200 {
+		fk := testkey.Hash([]byte(fmt.Sprintf("flood-%d", i)))
+		require.NoError(t, ts.Put(context.Background(), fk, bigObj(fk, 500)), "flood put")
+	}
+
+	got, src, err := ts.Get(context.Background(), k)
+	require.NoError(t, err, "get after pressure")
+	require.NotNil(t, got, "graced entry must survive hot SIEVE pressure via the warm copy")
+	require.NotEqual(t, api.Source(""), src)
+	// The recovery must keep the promise, not just the body: the
+	// re-promoted object decodes from the warm blob, so the grace
+	// stamps must round-trip the codec — otherwise the reaper deletes
+	// the entry one pass after recovery even mid-outage (ADR-0051).
+	require.True(t, got.KeepGrace, "re-promoted graced entry must keep KeepGrace")
+	require.Equal(t, "origin-main", got.Pool, "re-promoted graced entry must keep Pool")
+}
+
 func TestTiered_LargeObjectReadPath(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)

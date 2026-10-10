@@ -10,8 +10,8 @@ layer model, implementation decisions, and operational characteristics.
 
 ### 1.1 Goals
 
-- **Protocol coverage** — terminate HTTP/1.1 with TLS, ALPN, and
-  HTTP upgrade.
+- **Protocol coverage** — terminate HTTP/1.1 with TLS (ALPN pinned to
+  `http/1.1`; HTTP upgrade is a backlog item, not implemented).
 - **RFC 9111 compliance** — score at least on par with Varnish on
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 - **Embedded storage** — no external KV (Redis, Memcached, etcd…). Hot tier
@@ -105,7 +105,7 @@ for the full migration plan and performance analysis.
 /internal/origin             L4 — upstream pool, health, hedge, breaker
 /internal/staticfile        L4 — local file serving (alternative to upstream pool)
 /internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
-/internal/admin              L6 — net/http admin: purge, ban, refresh, config
+/internal/admin              L6 — admin API (fasthttp): purge, ban, refresh, config
 /internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
 /internal/observability      L7 — OTEL, Prom, slog, pprof
 /internal/cloudflare         Cloudflare Cache API invalidation propagation
@@ -142,8 +142,10 @@ Headline trust-boundary guarantees:
 - **TB1 — Internet ↔ data plane**: TLS terminates here. Strict RFC 9112 parser
   blocks request smuggling (T05). Header / URL / body caps always enforced
   (T37). HTTP/2 reset-flood mitigations on by default (T10).
-- **TB3 — bouine ↔ origin**: TLS verified by default; mTLS, custom CA bundles,
-  optional SPKI pinning, server-name override — all configured per pool.
+- **TB3 — bouine ↔ origin**: `https://` targets use Go's default TLS
+  verification. Per-pool mTLS, custom CA bundles, SPKI pinning, and
+  server-name override are backlog features (see §6.1) — not yet
+  configurable.
 - **TB4 — bouine ↔ peer bouine**: cluster mTLS is mandatory, on its own CA,
   with versioned wire protocol.
 - **TB5 — operator ↔ admin API**: bearer token (constant-time compare) or
@@ -191,7 +193,23 @@ simultaneously stream to the client and buffer for storage; if the body
 exceeds `maxResponseBytes`, buffering stops but the client continues
 receiving the full response. Concurrent identical misses use an
 `inflightStream` with a `done` channel for singleflight deduplication —
-the leader streams, followers serve the buffered result.
+the leader streams, followers serve the buffered result. "Identical"
+means identical cache key *and* anonymous (ADR-0052): a request
+carrying `Authorization` never shares an in-flight response with any
+other request — the in-flight counterpart of the RFC 9111 §3.5 storage
+gate, which likewise refuses to share authorized responses unless the
+origin explicitly opts in. The gate also denies every unsafe method
+(POST/PUT/DELETE, anything outside GET/HEAD/OPTIONS): unsafe methods
+normally dispatch to the invalidating proxy before the miss pipeline,
+but the flight gate keeps that invariant local — a mutation is never
+parked on another caller's flight whatever the dispatcher does.
+
+A **cold flight** is keyed on the response's declared variation
+dimensions (ADR-0057): warm flights keep the lookup key; a cold flight
+on an `include_headers` route extends the primary key with the declared
+headers; a cold flight on an include-free route is refused. The stored
+declaration is *checked* at revalidation — a field-set change purges
+the stale resolver and its variants (ADR-0058).
 
 ### 3.2 Cache key construction
 
@@ -201,29 +219,99 @@ default port stripped) → path (percent-decoded, re-encoded canonically) →
 query (parameters sorted lexicographically) → method (GET and HEAD share
 key space).
 
+A route may drop the host segment (`cache.key.include_host: false`): the key
+then resolves the same URL+query to one entry regardless of the request
+Host, emitting the empty segment (`scheme||path|...`). Requests are still
+forwarded with their original Host — only key computation changes. This is
+an operator-verified claim about the origin (it must be host-blind: no
+redirects, no absolute links, no host-keyed behaviour); collapsing two hosts
+the origin serves differently is a wrong-body bug, not a miss. Stored
+`X-Bouine-Host` metadata keeps the filling request's host, so host-regex ban
+predicates match only the fragment that filled each entry — prefer path or
+surrogate-key bans on such routes. The flag must be identical on every
+cluster node serving the route, and validation rejects combining it with
+`match.host`.
+
 The secondary key (Vary) is derived from headers listed in the response's
 `Vary`. Headers participate in the cache key **only** via `Vary` or an
 explicit per-route allow-list — never implicitly. This is the primary
 defense against cache-poisoning via unkeyed input (threat T06, T07).
 
+`Accept-Encoding` and `Accept-Language` are additionally reduced to
+their negotiation outcome before keying (ADR-0051): AE to the coding
+bouine negotiates (see §3.3), AL to the highest-weight language tag —
+subtag preserved, ties resolved lexicographically so the winner is
+order-independent, unbucketable chains (absent, `*`, malformed, all
+q=0) falling back to the sorted-string key. Origin-bound requests
+carry the bucket token / winner tag, so a stored variant always
+matches what its key claims; an origin that cannot honor the
+selection falls back consistently for the whole bucket.
+
 ### 3.3 Compression policy
 
-Store responses in the encoding the origin produced. Bucket `Accept-Encoding`
-into `br | zstd | gzip | identity` to bound variant count.
+Store responses in the encoding the origin produced. `Accept-Encoding`
+participates in the variant key as a **negotiation bucket**, not as the
+raw header value: the highest-weight coding among `br | zstd | gzip`
+wins (ties prefer br — the sharing-maximizing order, so the zstd-bearing
+and zstd-less browser spellings share one variant; `q=0` excludes), and
+an absent or no-acceptable-coding request buckets to `identity`. All
+clients that accept the same best coding share one stored variant —
+`gzip, deflate, br` and `br, gzip, deflate, zstd` are the `br` bucket.
+
+Bucketing has a pairing rule without which it would serve wrong bytes:
+origin-bound requests carry the canonical bucket token
+(`Accept-Encoding: br`), never the client's raw dialect. The stored
+variant then always matches the bucket its key claims, and an origin
+that cannot produce the coding falls back to identity for the whole
+bucket. Identity-bucket requests have the header removed rather than
+set to `identity` (some origins read a bare identity token as "client
+refuses compression"). The rewrite applies on every fill, revalidate,
+and refill path; the hit path never touches it. See ADR-0051.
 
 - `passthrough` (default) — store as-is, one variant per encoding-bucket.
-- `normalize_identity` — request `identity` from origin, recompress on egress.
+- `verbatim_encoding: true` (`cache.key`) — restore the pre-bucketing
+  key (lowercased+sorted raw value) and verbatim origin forwarding, for
+  origins that genuinely vary bodies by the full AE string. Like
+  `include_headers`, the setting must be identical across cluster nodes.
+- `normalize_identity` — request `identity` from origin, recompress on
+  egress (backlog; would break the zero-alloc egress path).
   Forbidden on routes serving secrets (mitigates BREACH-class oracles, T25).
 
 ### 3.4 Cookie & authorization policy
 
 - **Request `Cookie`** — does NOT participate in the cache key by default.
-  Per-route opt-in: `cache.cookies.key: [name1, name2]`.
+  Per-route `cache.bypass_on_cookie: true` (ADR-0054) routes cookied
+  requests entirely around the cache. Two finer-grained per-route
+  opt-ins (issue #768):
+  - `cache.key.cookie_presence: [name1, name2]` — each listed cookie
+    name contributes one presence bit (present/absent, never its value)
+    to the Vary variant key. Presence rides a synthetic Vary field
+    unioned into the stored VaryValue, so store/lookup pairing, peer
+    gates, and 304 revalidation hash the same bits everywhere. N names
+    multiply the variant space by up to 2^N (bounded by `max_variants`).
+  - `cache.bypass_on_cookie_names: [name1, name2]` — a request
+    carrying any listed cookie bypasses the cache entirely (same
+    contract as `bypass_on_cookie`, scoped to the names; ubiquitous
+    analytics/consent cookies alone do not trigger it).
+  In-flight sharing is refused for every cookied request
+  unconditionally (ADR-0054): no request ever receives another user's
+  in-flight body, on any route.
 - **Response `Set-Cookie`** — a response carrying `Set-Cookie` is NOT stored
   by default. Per-route opt-in requires explicit operator acknowledgement.
 - **`Authorization` request header** — per RFC 9111 §3.5, responses to
   authorized requests are NOT stored unless the response carries
   `must-revalidate`, `public`, or `s-maxage`. No operator override.
+- **Request `User-Agent`** — does NOT participate in the cache key, ever.
+  Per-route opt-in `cache.bypass_on_user_agent: [patterns]` (ADR-0055,
+  issue #771) routes matching requests entirely around the cache — no
+  lookup, no storage, no in-flight sharing, `X-Cache: BYPASS` — so a
+  layered deployment (client → edge → bouine) can mirror the edge's
+  verified-crawler bypass rules on its inner cache layer. Patterns are
+  `*`-globs matched case-insensitively against the full UA string; the
+  list can be declared once under
+  `route_defaults.cache.bypass_on_user_agent` (inherit wholesale,
+  replace per route, opt out with `[]`); default off, so RFC 9111
+  semantics and the cache-tests score are unchanged.
 
 ---
 
@@ -338,23 +426,30 @@ rolling-deploy compatibility.
 
 ## 6. Upstream / Origin (L4)
 
-- Connection pool per upstream, keyed by host:port + TLS profile.
+- Connection pool per upstream, keyed by host:port (single TLS profile
+  today — Go defaults for `https://` targets, see §6.1).
 - **Active health checks** — HTTP probe, expected status codes, EWMA latency,
   jittered interval.
 - **Passive health checks** — outlier ejection based on rolling error rate.
 - **Hedged requests** — fire a duplicate after p99 latency for idempotent
   methods only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`).
-- **Request collapsing** — single-flight per cache key, latches subscribers
-  while the leader fetches.
+- **Request collapsing** — single-flight per cache key for anonymous
+  safe-method requests only; requests carrying `Authorization` or an
+  unsafe method (POST/PUT/DELETE, …) never collapse (ADR-0052), and cold
+  flights are keyed on the declared variation dimensions — extended with
+  `include_headers` on declared routes, refused on undeclared ones
+  (ADR-0057).
 - **Circuit breaker** — half-open probes, exponential backoff.
 
 ### 6.1 Upstream TLS
 
-Configurable per pool: `tls.enabled`, `tls.server_name` (SNI override),
-`tls.ca_bundle`, `tls.client_cert` / `tls.client_key` (mTLS to origin),
-`tls.min_version` (default `1.2`), `tls.alpn` (default `[http/1.1]`),
-`tls.pinned_spki_sha256`. `tls.insecure_skip_verify` is accepted in config
-but refused at startup in release builds.
+Targets using the `https://` scheme are fetched over TLS with Go's
+default verification (system roots, hostname check, TLS 1.2+). There
+are no per-pool TLS knobs yet: mTLS, custom CA bundles, SNI overrides,
+SPKI pinning, and `insecure_skip_verify` are **backlog features, not
+config** — none of them parse under the strict decoder. The pool
+config surface is `name`, `targets`, `health`, and `connect`
+(`internal/config/config.go UpstreamPool`).
 
 ---
 
@@ -368,11 +463,39 @@ L1 owns sockets, TLS, and ALPN. L1 pipeline stages (configurable, ordered):
 4. Request collapsing latch acquisition.
 5. Hand-off to L3.
 
+Per-route client-identity forwarding (`request.forwarded`, issue #769)
+happens at L3, at origin-bound request construction only — miss,
+invalidating proxy, bypass, revalidate, streaming/SSE, and the
+background fetchers (background revalidate / refresh-before-expiry /
+shed refill). `X-Forwarded-For` appends the immediate peer's address
+(never rewritten, chain capped at `max_append` entries and the 8 KiB
+per-header budget), `X-Forwarded-Proto` / `X-Forwarded-Host` are set
+from what bouine received, and `Via: 1.1 bouine` is appended
+(RFC 9110 §7.6.3). The hit path never injects, and the injected
+headers never join the cache key or the stored request headers (T06).
+Background fetches do not append `X-Forwarded-For` — there is no live
+peer to attribute. Cluster peer-fetch is unaffected: peers answer from
+their local store and never fetch origin on a requester's behalf, so
+the requesting node's own origin fetch always carries the client
+context.
+
+The block's configuration is written compactly (`forwarded: standard`
+or a token list like `forwarded: [client_ip, proto]`; the full mapping
+form remains for tuning `max_append` and subsets), and a top-level
+`route_defaults.request.forwarded` declares it once for every route:
+routes inherit wholesale, override with a preset/token list, OR flags
+in via the mapping form, or opt out with `none`. `route_defaults`
+accepts only `request.forwarded` today; static routes ignore an
+inherited default (no origin-bound request exists), and all validation
+runs on the resolved value (config contract:
+`config.RouteDefaults`, `mergeRouteDefaults`).
+
 ---
 
 ## 8. Control Plane (L6)
 
-`net/http.ServeMux` on a dedicated admin port.
+`fasthttp.Server` on a dedicated admin port. Handler code uses
+`net/http` semantics via `fasthttpadaptor` (pprof, Prom metrics).
 
 | Endpoint | Description |
 |----------|-------------|
@@ -416,29 +539,20 @@ tls:
     - cert_file: /etc/bouine/tls/api.crt
       key_file:  /etc/bouine/tls/api.key
       sni:       ["api.example.com", "*.api.example.com"]
-  alpn: [h2, http/1.1]
   min_version: "1.2"
-  ocsp_stapling: auto
 
 storage:
   hot_max_bytes:  2Go
   warm_dir:       /var/lib/bouine
   warm_max_bytes: 20Go
-  eviction:       sieve
 
 cluster:
-  enabled:   true
   join:      ["bouine-headless.default.svc.cluster.local"]
-  replicas:  2
   hop_limit: 2
 
 upstream_pools:
   - name: app
     targets: [app.default.svc:8080]
-    tls:
-      enabled:    false
-      ca_bundle:  /etc/bouine/upstream-ca.pem
-      min_version: "1.2"
     health:
       active:
         path:                /healthz
@@ -458,11 +572,32 @@ routes:
       stale_if_error:        5m
       key:
         include_headers: [Accept-Language]
-      prefetch:
-        link_rel_preload: true
-        sitemap:          https://api.example.com/sitemap.xml
-        max_concurrency:  4
+  - match: { host: "*.staging.example.com" }   # leading-* wildcard: whole subdomain tree
+    name:  staging
+    pool:  app
+    cache:
+      enabled: false                          # bypass for the entire tree
+  - match:
+      host: "www.example.com"
+      path: "^/[a-z]{2}-[a-z]{2}/l/campaign-.*$"   # RE2, anchored; mutually exclusive with path_prefix
+    name:  campaign-pages
+    pool:  app
+    cache:
+      ttl_override: 60s
 ```
+
+Route matching (`RouteMatch`) is first-match-wins in **declaration
+order** — the same precedence rule the traffic-class classifier uses.
+`match.host` is an exact host or a single leading `*.` wildcard
+(suffix match anchored on the label boundary; `*.example.com` matches
+`foo.example.com` and `a.b.example.com`, never `example.com` itself).
+`match.path` is an anchored RE2 pattern; `match.path_prefix` stays the
+raw prefix form and the two are mutually exclusive. Order exact-host
+routes before wildcard-host routes and specific paths before
+catch-alls: a later route fully covered by an earlier one is dead
+config, reported (not rejected) at boot like shadowed traffic classes.
+Regexes are compiled once at startup, so route resolution never pays
+compile cost per request.
 
 ---
 
@@ -608,8 +743,9 @@ These decisions are locked in for v1.0. See also
    at startup; multiple certs via SNI rules; OCSP staples forwarded when
    present. Rotation by updating the mounted Secret/ConfigMap and rolling
    the pod.
-8. **Upstream TLS is a first-class config** — mTLS to origin, custom CA,
-   optional SPKI pinning, `insecure_skip_verify` only in dev builds.
+8. **Upstream TLS is backlog, not config** — `https://` targets verify
+   with Go defaults today; per-pool mTLS, custom CA, SPKI pinning, and
+   `insecure_skip_verify` do not exist in the schema (see §6.1).
 9. **Cluster wire protocol is versioned** — magic bytes + `uint16` version;
    N/N-1 compatibility window for rolling upgrades.
 10. **Graceful shutdown is a fixed sequence** — fail readiness → stop

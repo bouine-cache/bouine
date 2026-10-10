@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -158,7 +159,7 @@ func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 
 func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
+	for _, mode := range []ClusterMode{ClusterModeStrong, ClusterModeEventual} {
 		cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: mode}}
 		err := cfg.Validate()
 		assert.Nil(t, err)
@@ -171,7 +172,7 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "invalid"}}
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cluster.mode must be")
+	require.Contains(t, err.Error(), "cluster.mode: must be")
 }
 
 func TestClusterHandoffQueueDepth_NegativeRejected(t *testing.T) {
@@ -212,6 +213,94 @@ func TestClusterHandoffQueueDepth_AtUpperBoundAccepted(t *testing.T) {
 	cfg := Config{
 		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
 		Cluster: Cluster{HandoffQueueDepth: maxHandoffQueueDepth},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterPeerFetchConcurrency_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be >=")
+}
+
+func TestClusterPeerFetchConcurrency_ZeroAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency + 1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestClusterBanTTL_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: -time.Minute},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ban_ttl")
+	require.Contains(t, err.Error(), "must be >=")
+}
+
+func TestClusterBanTTL_TooShortRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 500 * time.Millisecond},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ban_ttl")
+	require.Contains(t, err.Error(), "must be >= 1s")
+}
+
+func TestClusterBanTTL_ZeroAcceptedUsesDefault(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterBanTTL_MinutesAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 15 * time.Minute},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterPeerFetchConcurrency_AtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency},
 	}
 	err := cfg.Validate()
 	require.NoError(t, err)
@@ -278,10 +367,10 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 		{"ttl_default", func(rc *RouteCache) { rc.TTLDefault = -1 }},
 		{"stale_while_revalidate", func(rc *RouteCache) { rc.StaleWhileRevalidate = -1 }},
 		{"stale_if_error", func(rc *RouteCache) { rc.StaleIfError = -1 }},
-		{"negative_ttl", func(rc *RouteCache) { rc.NegativeTTL = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 6 * time.Minute }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 5 * time.Minute }},
+		{"max_variants", func(rc *RouteCache) { rc.MaxVariants = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,6 +386,19 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 				t.Fatalf("error %q does not mention field %q", err, tc.name)
 			}
 		})
+	}
+}
+
+func TestValidate_MaxVariants_Accepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{MaxVariants: 4096, MaxFetchConcurrency: 1}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected max_variants=4096 to be valid, got %v", err)
 	}
 }
 
@@ -380,6 +482,39 @@ func TestValidate_ListenReadTimeout_BelowSafetyNetAccepted(t *testing.T) {
 	}
 }
 
+// TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected
+// pins the ordering constraint on the pool knob that routes inherit as
+// their default origin wait: connect.response_header_timeout must stay
+// strictly below the data plane's 5-minute safety-net WriteTimeout, the
+// same rule fetch_timeout already follows.
+func TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []time.Duration{maxFetchTimeout, maxFetchTimeout + time.Second} {
+		cfg := Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: v}}},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for connect.response_header_timeout %v", v)
+		}
+		if !strings.Contains(err.Error(), "connect.response_header_timeout") {
+			t.Fatalf("error %q does not mention connect.response_header_timeout", err)
+		}
+	}
+}
+
+func TestValidate_PoolResponseHeaderTimeout_BelowSafetyNetAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: maxFetchTimeout - time.Second}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid connect.response_header_timeout rejected: %v", err)
+	}
+}
+
 func TestParse_TTLOverride_ValidYAML(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `
@@ -397,6 +532,43 @@ routes:
 	require.NoError(t, err, "unexpected error")
 	require.Len(t, cfg.Routes, 1)
 	assert.Equal(t, time.Duration(int64(1)*60*60*1e9), cfg.Routes[0].Cache.TTLOverride)
+}
+
+func TestParse_BypassOnCookie_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.NotNil(t, cfg.Routes[0].Cache.BypassOnCookie)
+	assert.True(t, *cfg.Routes[0].Cache.BypassOnCookie)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestParse_BypassOnCookie_DefaultNil(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	assert.Nil(t, cfg.Routes[0].Cache.BypassOnCookie, "bypass_on_cookie must default to nil (off)")
+	require.NoError(t, cfg.Validate())
 }
 
 func TestValidate_TTLOverride_NegativeRejected(t *testing.T) {
@@ -436,6 +608,226 @@ routes:
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err, "unexpected error")
 	assert.Equal(t, "/api/v1", cfg.Routes[0].Request.StripPrefix)
+}
+
+func TestParse_PathRewrite_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { path_prefix: /public/webhook }
+    pool: app
+    request:
+      path_rewrite:
+        match: ^/public/webhook/(.*)$
+        replace: /internal/webhook/$1
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	assert.Equal(t, `^/public/webhook/(.*)$`, cfg.Routes[0].Request.PathRewrite.Match)
+	assert.Equal(t, "/internal/webhook/$1", cfg.Routes[0].Request.PathRewrite.Replace)
+}
+
+func TestValidate_PathRewrite_RequiresBothFields(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cases := []struct {
+		name string
+		pw   PathRewriteConfig
+	}{
+		{"match only", PathRewriteConfig{Match: `^/a/`}},
+		{"replace only", PathRewriteConfig{Replace: "/b/"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{PathRewrite: tc.pw}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "requires both match and replace") {
+				t.Fatalf("expected path_rewrite both-fields error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_PathRewrite_MutuallyExclusiveWithStripPrefix(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		StripPrefix: "/api/v1",
+		PathRewrite: PathRewriteConfig{Match: `^/api/`, Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].request.path_rewrite", "mutually exclusive with strip_prefix")
+}
+
+func TestValidate_PathRewrite_RejectsInvalidPattern(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{Match: "(", Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].request.path_rewrite.match", "not a valid regular expression")
+}
+
+func TestValidate_PathRewrite_RejectsOversizedPattern(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{
+			Match:   "^/" + strings.Repeat("a", MaxPathRewritePatternBytes) + "/$",
+			Replace: "/x/",
+		},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].request.path_rewrite.match", "exceeds")
+}
+
+func TestValidate_PathRewrite_RejectsOversizedReplace(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{
+			Match:   `^/a/`,
+			Replace: "/x/" + strings.Repeat("a", MaxPathRewritePatternBytes),
+		},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].request.path_rewrite.replace", "exceeds")
+}
+
+func TestValidate_PathRewrite_AcceptedNearBoundary(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	// A pattern within the cap (repeating 5-byte [a-z] groups) must pass
+	// validation — the cap rejects the oversized, not the large-but-
+	// legal.
+	pattern := "^/" + strings.Repeat("[a-z]", (MaxPathRewritePatternBytes-len("^/"))/5-1) + "$"
+	if len(pattern) > MaxPathRewritePatternBytes {
+		t.Fatalf("test construction: pattern %d > cap %d", len(pattern), MaxPathRewritePatternBytes)
+	}
+	route := Route{Pool: "app", Request: RouteRequest{
+		PathRewrite: PathRewriteConfig{Match: pattern, Replace: "/x/"},
+	}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("in-cap pattern must validate, got %v", err)
+	}
+}
+
+func TestValidate_PathRewrite_EmptyBlockAccepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app"}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("route without path_rewrite must validate, got %v", err)
+	}
+}
+
+// TestValidate_PathRewrite_TemplateRefs pins the template-reference
+// resolution: every $-reference must resolve against the pattern.
+// Go's Expand silently expands unknown references to "" — the `$1x`
+// typo below would corrupt every rewritten path with no error
+// anywhere if validation did not reject it.
+func TestValidate_PathRewrite_TemplateRefs(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	tests := []struct {
+		name    string
+		match   string
+		replace string
+		wantErr string
+	}{
+		{"plain index ok", `^/a/(.*)$`, "/b/$1", ""},
+		{"whole match ok", `^/a/`, "/b$0", ""},
+		{"named group ok", `^/u/(?P<name>[a-z]+)$`, "/user/$name", ""},
+		{"braced disambiguation ok", `^/a/(.*)$`, "/b/${1}x", ""},
+		{"literal dollar ok", `^/a/(.*)$`, "/b/$$$1", ""},
+		{"dollar at end is lone", `^/a/`, "/b/$", "lone '$'"},
+		{"index run past groups is a name", `^/a/(.*)$`, "/b/$1x", "unknown group \"1x\""},
+		{"out-of-range index", `^/a/(.*)$`, "/b/$2", "only 1 capture group"},
+		{"leading zero index", `^/a/(.*)$`, "/b/$01", "leading-zero group indexes"},
+		{"braced leading zero index", `^/a/(.*)$`, "/b/${01}x", "leading-zero group indexes"},
+		{"double zero index", `^/a/(.*)$`, "/b/$00", "leading-zero group indexes"},
+		{"unknown name", `^/a/(.*)$`, "/b/$user", "unknown group \"user\""},
+		{"unterminated brace", `^/a/(.*)$`, "/b/${1", "unterminated"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{
+				PathRewrite: PathRewriteConfig{Match: tc.match, Replace: tc.replace},
+			}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("template must validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestValidate_PathRewrite_ControlBytes pins the control-byte gate: raw
+// CR/LF/NUL in match or replace are rejected (paths cannot carry them,
+// so they could only produce a corrupted origin request), while the
+// equivalent escaped forms in the pattern stay legal.
+func TestValidate_PathRewrite_ControlBytes(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	tests := []struct {
+		name    string
+		match   string
+		replace string
+		wantErr string
+	}{
+		{"CR in match", "^/a\r/x/", "/b/", "raw control byte"},
+		{"LF in match", "^/a\n/x/", "/b/", "raw control byte"},
+		{"NUL in match", "^/a\x00/x/", "/b/", "raw control byte"},
+		{"CR in replace", `^/a/(.*)$`, "/b/\r$1", "raw control byte"},
+		{"LF in replace", `^/a/(.*)$`, "/b/\n$1", "raw control byte"},
+		{"DEL in replace", `^/a/(.*)$`, "/b/\x7f$1", "raw control byte"},
+		{"escaped form in match legal", `^/a/\x0d/(.*)$`, "/b/$1", ""},
+		{"escape syntax legal", `^/a/[\r\n]/(.*)$`, "/b/$1", ""},
+		{"space in replace", `^/a/(.*)$`, "/b/a b$1", "cannot carry it raw"},
+		{"question mark in replace", `^/a/(.*)$`, "/b/$1?x=1", "cannot carry it raw"},
+		{"hash in replace", `^/a/(.*)$`, "/b/$1#frag", "cannot carry it raw"},
+		{"regex quantifier in match stays legal", `^/a/(x?)$`, "/b/$1", ""},
+		{"percent-encoded space in replace legal", `^/a/(.*)$`, "/b/a%20b/$1", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := Route{Pool: "app", Request: RouteRequest{
+				PathRewrite: PathRewriteConfig{Match: tc.match, Replace: tc.replace},
+			}}
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("must validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
 }
 
 func TestParse_MethodsNormalisedToUpper(t *testing.T) {
@@ -580,7 +972,7 @@ func TestCluster_FullMode_Rejected(t *testing.T) {
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "full"}}
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cluster.mode must be")
+	require.Contains(t, err.Error(), "cluster.mode: must be")
 }
 
 func TestWALSyncInterval_NegativeRejected(t *testing.T) {
@@ -823,6 +1215,53 @@ func TestExpandEnvVars_UnclosedBrace(t *testing.T) {
 	require.Equal(t, "val: ${UNCLOSED", string(got))
 }
 
+// TestExpandEnvVars_NonNameBracesLeftLiteral pins the interpolation
+// restriction: only env-var-shaped names expand. Digit-leading and
+// otherwise non-name braced runs (path_rewrite capture-group references
+// such as ${1}) survive the loader verbatim instead of being silently
+// replaced with the value of an env var that cannot exist.
+func TestExpandEnvVars_NonNameBracesLeftLiteral(t *testing.T) {
+	t.Setenv("BOUINE_TEST_HOST", "api.example.com")
+	for _, raw := range []string{
+		"replace: /b/${1}x",
+		"replace: /b/${01}",
+		"replace: /b/${1x}",
+		"replace: /b/${a.b}",
+		"replace: /b/${}",
+	} {
+		got := string(expandEnvVars([]byte(raw)))
+		require.Equal(t, raw, got, "non-name braces must survive verbatim: %s", raw)
+	}
+	// Env-var-shaped names still expand, with and without defaults.
+	got := string(expandEnvVars([]byte("a: ${BOUINE_TEST_HOST} b: ${unset_var:-d}")))
+	require.Contains(t, got, "api.example.com")
+	require.Contains(t, got, "b: d")
+}
+
+// TestParse_PathRewrite_BracedRefSurvivesInterpolation pins the
+// documented `${1}x` disambiguation syntax end-to-end through the YAML
+// loader: the braced capture-group reference must reach validation
+// intact (the ${VAR} interpolation only applies to env-var-shaped
+// names) and resolve against the pattern's groups.
+func TestParse_PathRewrite_BracedRefSurvivesInterpolation(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { path_prefix: /a }
+    pool: app
+    request:
+      path_rewrite:
+        match: ^/a/(.*)$
+        replace: /b/${1}x
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the documented ${1}x braced syntax must load and validate")
+	assert.Equal(t, "/b/${1}x", cfg.Routes[0].Request.PathRewrite.Replace)
+}
+
 func TestParse_EnvVarInterpolation(t *testing.T) {
 	t.Setenv("BOUINE_ORIGIN", "origin.example.com")
 	yamlSrc := `
@@ -843,9 +1282,9 @@ func TestParse_HotEvictionAlgorithm_Default(t *testing.T) {
 	t.Parallel()
 	cfg, err := Parse(nil)
 	require.NoError(t, err)
-	require.Equal(t, "", cfg.Storage.HotEvictionAlgorithm)
-	require.Equal(t, "", cfg.Storage.WarmEvictionAlgorithm)
-	require.Equal(t, "", cfg.Storage.EvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.HotEvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.WarmEvictionAlgorithm)
+	require.Equal(t, EvictionAlgorithm(""), cfg.Storage.EvictionAlgorithm)
 }
 
 func TestParse_EvictionAlgorithm_Invalid(t *testing.T) {
@@ -867,7 +1306,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.HotEvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.HotEvictionAlgorithm)
 }
 
 func TestParse_SharedEvictionAlgorithm_Cachaner(t *testing.T) {
@@ -878,7 +1317,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.EvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.EvictionAlgorithm)
 }
 
 func TestParse_WarmEvictionAlgorithm_Cachaner(t *testing.T) {
@@ -889,7 +1328,7 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
-	require.Equal(t, "cachaner", cfg.Storage.WarmEvictionAlgorithm)
+	require.Equal(t, EvictionCachaner, cfg.Storage.WarmEvictionAlgorithm)
 }
 
 // TestValidate_H1ReactorRequiresFastPath asserts that
@@ -902,11 +1341,39 @@ func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
 	cfg.Experimental.H1Reactor = true
 	err := cfg.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "h1_reactor requires experimental.h1_fast_path")
+	assert.Contains(t, err.Error(), "experimental.h1_reactor: requires experimental.h1_fast_path")
 
 	// With the fast path on, the same config validates.
 	cfg.Experimental.H1FastPath = true
 	assert.NoError(t, cfg.Validate())
+}
+
+// TestValidate_H1FastPeerPathRequiresFastPath asserts that
+// experimental.h1_fast_peer_path without experimental.h1_fast_path is
+// rejected at load time instead of silently no-oping at startup, and
+// that the flag defaults to off.
+func TestValidate_H1FastPeerPathRequiresFastPath(t *testing.T) {
+	t.Parallel()
+
+	// Default config leaves the flag off.
+	require.False(t, Defaults().Experimental.H1FastPeerPath)
+
+	// Flag on without the fast path must be rejected.
+	cfg := Defaults()
+	cfg.Listen.HTTP = ":8080"
+	cfg.Experimental.H1FastPeerPath = true
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "experimental.h1_fast_peer_path: requires experimental.h1_fast_path")
+
+	// With the fast path on, the same config validates.
+	cfg.Experimental.H1FastPath = true
+	assert.NoError(t, cfg.Validate())
+
+	// YAML round-trip: the flag parses from its documented key.
+	parsed, err := Parse([]byte("experimental:\n  h1_fast_path: true\n  h1_fast_peer_path: true\n"))
+	require.NoError(t, err)
+	assert.True(t, parsed.Experimental.H1FastPeerPath)
 }
 
 // TestValidate_PeerIdleBelowAdminIdle asserts the idle-timeout ordering
@@ -969,4 +1436,678 @@ func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
+}
+
+// --- cache.key.verbatim_encoding (ADR-0051) ---
+
+func TestParse_VerbatimEncoding(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - match: { host: api.example.com }
+    pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        verbatim_encoding: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept verbatim_encoding")
+	require.True(t, cfg.Routes[0].Cache.Key.VerbatimEncoding)
+}
+
+// TestValidate_VerbatimEncoding_IsBool pins that the knob is a plain
+// bool: the enum form (encoding_policy: bucket|verbatim) from the
+// original ADR-0051 draft was dropped in review — a bool cannot be
+// misspelled, needs no enum validation, and keeps RouteKey
+// fieldalignment-clean.
+func TestValidate_VerbatimEncoding_IsBool(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes: []Route{{
+			Pool:  "app",
+			Cache: RouteCache{Key: RouteKey{VerbatimEncoding: true}, TTLDefault: 60_000_000_000},
+		}},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+// --- cache.key.include_headers (issue #632) ---
+
+func TestParse_IncludeHeaders_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - match: { host: api.example.com }
+    pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_headers: [Accept-Language, X-Geo-Region]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept include_headers")
+	require.Equal(t, []string{"Accept-Language", "X-Geo-Region"},
+		cfg.Routes[0].Cache.Key.IncludeHeaders)
+}
+
+// TestValidate_IncludeHeaders_Rejections pins every validation rule:
+// the include list participates in the cache key, so an unsound list
+// (wildcard, duplicate, overlap with exclude_headers, unbounded) is a
+// security issue (threat-model T06), not a cosmetic one.
+func TestValidate_IncludeHeaders_Rejections(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	mk := func(key RouteKey) Config {
+		return Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{pool},
+			Routes:        []Route{{Pool: "app", Cache: RouteCache{Key: key}}},
+		}
+	}
+	tests := []struct {
+		name string
+		key  RouteKey
+		want string
+	}{
+		{"star is unkeyable", RouteKey{IncludeHeaders: []string{"Accept-Language", "*"}}, `include_headers[1]: must not be "*"`},
+		{"padded star is still a star", RouteKey{IncludeHeaders: []string{" *"}}, `must not be "*"`},
+		{"empty entry", RouteKey{IncludeHeaders: []string{"Accept-Language", ""}}, "include_headers[1]: must be a non-empty header name"},
+		{"whitespace-only entry", RouteKey{IncludeHeaders: []string{" "}}, "must be a non-empty"},
+		{
+			"case-insensitive duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", "accept-language"}},
+			"is a duplicate",
+		},
+		{
+			"padded duplicate", RouteKey{IncludeHeaders: []string{"Accept-Language", " accept-language"}},
+			"is a duplicate",
+		},
+		{
+			"comma entry is two fields downstream", RouteKey{IncludeHeaders: []string{"X-Geo", "x,y"}},
+			"must be a single RFC 9110 §5.1 header name",
+		},
+		{"space inside entry", RouteKey{IncludeHeaders: []string{"X Geo"}}, "must be a single RFC 9110 §5.1 header name"},
+		{
+			"overlap with exclude_headers", RouteKey{
+				IncludeHeaders: []string{"Accept-Language"},
+				ExcludeHeaders: []string{"X-Request-ID", "accept-language"},
+			}, "is also listed in include_headers",
+		},
+		{
+			"padded overlap with exclude_headers", RouteKey{
+				IncludeHeaders: []string{"Accept-Language"},
+				ExcludeHeaders: []string{" accept-language "},
+			}, "is also listed in include_headers",
+		},
+		{
+			"more than 16 entries", RouteKey{IncludeHeaders: []string{
+				"H01", "H02", "H03", "H04", "H05", "H06", "H07", "H08",
+				"H09", "H10", "H11", "H12", "H13", "H14", "H15", "H16", "H17",
+			}}, "capped at 16 entries",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := mk(tc.key)
+			err := cfg.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestValidate_IncludeHeaders_Accepted(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes: []Route{{Pool: "app", Cache: RouteCache{Key: RouteKey{
+			// 16 entries, mixed case, distinct from exclude_headers.
+			IncludeHeaders: []string{
+				"H01", "H02", "H03", "H04", "H05", "H06", "H07", "H08",
+				"H09", "H10", "H11", "H12", "H13", "H14", "H15", "Accept-Language",
+			},
+			ExcludeHeaders: []string{"X-Request-ID"},
+		}}}},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+// --- cache.key.include_host (host-agnostic keys) ---
+
+// TestParse_IncludeHost pins the strict decoder accepting the new
+// field and the pointer's tri-state round-trip: false loads as a
+// non-nil *false, and absence leaves nil (host stays keyed — the
+// default that every existing config depends on).
+func TestParse_IncludeHost(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_host: false
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "the strict decoder must accept include_host")
+	require.NotNil(t, cfg.Routes[0].Cache.Key.IncludeHost)
+	require.False(t, *cfg.Routes[0].Cache.Key.IncludeHost)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestParse_IncludeHost_AbsentIsNil(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        strip_query_params: [utm_source]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Nil(t, cfg.Routes[0].Cache.Key.IncludeHost,
+		"absent include_host must load as nil, never a false zero value")
+}
+
+func TestParse_IncludeHost_True(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+routes:
+  - pool: app
+    cache:
+      ttl_default: 60s
+      key:
+        include_host: true
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Routes[0].Cache.Key.IncludeHost)
+	require.True(t, *cfg.Routes[0].Cache.Key.IncludeHost)
+	require.NoError(t, cfg.Validate())
+}
+
+// TestValidate_IncludeHost_HostMatchConflict pins the one validation
+// rule: a route that selects on match.host and then drops host from
+// the key merges exactly what its selector distinguishes, and a
+// same-prefix route without a host selector would shadow it in the
+// host-agnostic key space.
+func TestValidate_IncludeHost_HostMatchConflict(t *testing.T) {
+	t.Parallel()
+	no := false
+	cfg := validBase()
+	cfg.Routes[0].Match.Host = "api.example.com"
+	cfg.Routes[0].Cache.Key.IncludeHost = &no
+	err := cfg.Validate()
+	requireFieldError(t, err, "routes[0].cache.key.include_host", "match.host")
+}
+
+func TestValidate_IncludeHost_Accepted(t *testing.T) {
+	t.Parallel()
+	no := false
+	cfg := validBase()
+	cfg.Routes[0].Cache.Key.IncludeHost = &no
+	require.NoError(t, cfg.Validate())
+}
+
+// TestParse_DocsArchitectureExample pins the regression that filed
+// issue #632: the flagship config example in docs/architecture.md §9
+// uses cache.key.include_headers and must parse under the strict
+// decoder (KnownFields) and validate. The YAML block is extracted from
+// the doc at runtime so the test fails when the example and the real
+// schema drift apart again.
+func TestParse_DocsArchitectureExample(t *testing.T) {
+	t.Parallel()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	docPath := filepath.Join(wd, "..", "..", "docs", "architecture.md")
+	raw, err := os.ReadFile(docPath) //nolint:gosec // repo fixture read at test time
+	require.NoError(t, err)
+
+	re := regexp.MustCompile("(?s)```yaml\n(listen:.*?)```")
+	m := re.FindSubmatch(raw)
+	require.NotNil(t, m, "docs/architecture.md must contain the flagship ```yaml config example")
+	example := string(m[1])
+
+	cfg, err := Parse([]byte(example))
+	require.NoError(t, err,
+		"the docs/architecture.md example must parse and validate; a drift here re-files issue #632")
+	require.NotEmpty(t, cfg.Routes)
+	require.Equal(t, []string{"Accept-Language"}, cfg.Routes[0].Cache.Key.IncludeHeaders,
+		"the example exercises cache.key.include_headers")
+}
+
+// --- negative_ttl validation ---
+
+func TestValidate_NegativeTTLMap(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	valid, err := NegTTLMap(map[string]time.Duration{
+		"404": 30 * time.Second, "5xx": 10 * time.Second,
+	})
+	require.NoError(t, err)
+	validCfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{NegativeTTL: valid}}},
+	}
+	require.NoError(t, validCfg.Validate())
+
+	cases := []struct {
+		name string
+		m    map[string]time.Duration
+	}{
+		{"negative_ttl", map[string]time.Duration{"40o4": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"99": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"200": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"400-999": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"3xx": time.Second}},
+		{"negative_ttl", map[string]time.Duration{"404": -time.Second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// NegTTLMap is the programmatic path; the same parser
+			// (api.NewStatusTTLMap) gates the YAML path, so the
+			// rejection contract is proven here once.
+			_, err := NegTTLMap(tc.m)
+			require.Error(t, err, tc.name)
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("error %q does not mention field %q", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestParse_NegativeTTLOneKeyTwoForms(t *testing.T) {
+	t.Parallel()
+	// The scalar shorthand decodes to the default error set.
+	m := mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl: 30s
+`)).Routes[0].Cache.NegativeTTL.Policy()
+	entries := m.Entries()
+	require.Len(t, entries, 4)
+	for _, e := range entries {
+		require.Equal(t, 30*time.Second, e.TTL, e.Key)
+	}
+	for _, code := range []int{404, 405, 410, 501} {
+		require.True(t, m.Cacheable(code), "status %d", code)
+	}
+
+	// A bare number means seconds in both forms (durationValue shared
+	// by the scalar and the map entries), so `negative_ttl: 30` is not
+	// silently 30ns.
+	cfg := mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl: 30
+`))
+	require.True(t, cfg.Routes[0].Cache.NegativeTTL.Policy().Cacheable(404))
+	require.Equal(t, 30*time.Second, cfg.Routes[0].Cache.NegativeTTL.Policy().TTL(404), "bare scalar means seconds")
+
+	// The map form is a complete per-status policy.
+	cfg = mustParse(t, []byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      negative_ttl:
+        404: 1m
+        5xx: 10s
+        410: 0
+`))
+	p := cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.Len(t, p.Entries(), 3)
+	require.Equal(t, time.Minute, p.TTL(404))
+	require.Equal(t, 10*time.Second, p.TTL(502), "class member")
+	require.Equal(t, time.Duration(0), p.TTL(410), "explicit zero disables")
+	require.False(t, p.Cacheable(410))
+
+	// The separate status_ttl key no longer exists (strict decode).
+	_, err := Parse([]byte(`
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: api
+    pool: app
+    cache:
+      status_ttl:
+        404: 1m
+`))
+	require.Error(t, err, "status_ttl must be rejected: negative_ttl is the single key")
+	require.Contains(t, err.Error(), "status_ttl")
+}
+
+// Validate resolves the route's negative-caching policy exactly once;
+// consumers read it via Policy() instead of re-validating the raw map.
+func TestValidate_NegativeTTLPolicyResolved(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	neg, err := NegTTLMap(map[string]time.Duration{
+		"404": 30 * time.Second, "5xx": 10 * time.Second, "503": 0,
+	})
+	require.NoError(t, err)
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{pool},
+		Routes:        []Route{{Pool: "app", Cache: RouteCache{NegativeTTL: neg}}},
+	}
+	require.NoError(t, cfg.Validate())
+	p := cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.NotNil(t, p, "Validate must resolve the policy")
+	require.True(t, p.Cacheable(404))
+	require.Equal(t, 10*time.Second, p.TTL(502))
+	require.False(t, p.Cacheable(503), "exact zero shadows class")
+
+	// Empty policy: no negative caching, Policy returns nil.
+	cfg.Routes[0].Cache.NegativeTTL = NegTTLScalar(0)
+	require.NoError(t, cfg.Validate())
+	require.Nil(t, cfg.Routes[0].Cache.NegativeTTL.Policy())
+
+	// Scalar shorthand resolves to the same expanded policy.
+	cfg.Routes[0].Cache.NegativeTTL = NegTTLScalar(30 * time.Second)
+	require.NoError(t, cfg.Validate())
+	p = cfg.Routes[0].Cache.NegativeTTL.Policy()
+	require.True(t, p.Cacheable(410))
+	require.False(t, p.Cacheable(503))
+}
+
+func mustParse(t *testing.T, b []byte) *Config {
+	t.Helper()
+	cfg, err := Parse(b)
+	require.NoError(t, err)
+	return cfg
+}
+
+func TestParse_BypassOnCookieNames_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [session_id, Debug_Bypass]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, []string{"session_id", "Debug_Bypass"}, cfg.Routes[0].Cache.BypassOnCookieNames)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidate_BypassOnCookieNames_Rejections(t *testing.T) {
+	t.Parallel()
+	base := func(names string, presence string) string {
+		return `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: ` + presence + `
+      bypass_on_cookie_names: ` + names + `
+`
+	}
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name:    "empty entry rejected",
+			yaml:    base(`[""]`, "false"),
+			wantErr: "must be a non-empty cookie name",
+		},
+		{
+			name:    "cookie separator in name rejected",
+			yaml:    base(`["a;b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "whitespace in name rejected",
+			yaml:    base(`["a b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "equals in name rejected",
+			yaml:    base(`["a=b"]`, "false"),
+			wantErr: "RFC 6265",
+		},
+		{
+			name:    "case-insensitive duplicate rejected",
+			yaml:    base(`["session_id", "SESSION_ID"]`, "false"),
+			wantErr: "duplicate",
+		},
+		{
+			name:    "mutually exclusive with bypass_on_cookie",
+			yaml:    base(`["session_id"]`, "true"),
+			wantErr: "mutually exclusive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.yaml))
+			require.Error(t, err, "Parse runs Validate under the strict decoder; validation failures surface here")
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidate_BypassOnCookieNames_CapRejected(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q]
+`
+	_, err := Parse([]byte(yamlSrc))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "capped at 16 entries")
+}
+
+func TestParse_CookiePresence_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [consent, Analytics_Opt]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, []string{"consent", "Analytics_Opt"}, cfg.Routes[0].Cache.Key.CookiePresence)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidate_CookiePresence_Rejections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "invalid token rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: ["a b"]
+`,
+			wantErr: "RFC 6265",
+		},
+		{
+			name: "duplicate rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [consent, CONSENT]
+`,
+			wantErr: "duplicate",
+		},
+		{
+			name: "empty entry rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_presence: [""]
+`,
+			wantErr: "non-empty",
+		},
+		{
+			name: "conflict with bypass_on_cookie",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: true
+      key:
+        cookie_presence: [consent]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie",
+		},
+		{
+			name: "conflict with bypass_on_cookie_names",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [session_id]
+      key:
+        cookie_presence: [consent]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie_names",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.yaml))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestParse_PreserveHost(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: [app.local:8080]
+    connect:
+      preserve_host: true
+  - name: default-behaviour
+    targets: [other.local:8080]
+routes:
+  - match: { path_prefix: / }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	require.True(t, cfg.UpstreamPools[0].Connect.PreserveHost,
+		"connect.preserve_host: true must decode onto the pool")
+	require.False(t, cfg.UpstreamPools[1].Connect.PreserveHost,
+		"an unset connect.preserve_host must default to false (historical behaviour)")
+	require.NoError(t, cfg.Validate(), "a preserve_host pool with a routed path must validate")
 }

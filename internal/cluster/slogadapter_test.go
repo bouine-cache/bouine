@@ -86,9 +86,9 @@ func TestParseMemberlistLine(t *testing.T) {
 		},
 		{
 			name:    "info with prefix",
-			line:    "2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed",
+			line:    "2026/07/05 09:37:37 [INFO] memberlist: Marking node peer-b as failed",
 			wantLvl: "INFO",
-			wantMsg: "Marking node bouine-2 as failed",
+			wantMsg: "Marking node peer-b as failed",
 		},
 		{
 			name:    "no level token falls back to info",
@@ -163,7 +163,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"2026/07/05 09:37:34 [WARN] memberlist: Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured\n",
 		"2026/07/05 09:37:35 [ERR] memberlist: Failed to encode message for broadcast: eof\n",
 		"2026/07/05 09:37:36 [DEBUG] memberlist: Using dynamic bind port 42321\n",
-		"2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed\n",
+		"2026/07/05 09:37:37 [INFO] memberlist: Marking node peer-b as failed\n",
 	}
 	for _, l := range lines {
 		_, err := a.Write([]byte(l))
@@ -178,7 +178,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured",
 		"Failed to encode message for broadcast: eof",
 		"Using dynamic bind port 42321",
-		"Marking node bouine-2 as failed",
+		"Marking node peer-b as failed",
 	}
 	for i, rec := range records {
 		assert.Equal(t, wantLevels[i], rec["level"])
@@ -321,4 +321,40 @@ func TestSlogAdapter_InfoLevelDropDoesNotIncrement(t *testing.T) {
 		return
 	}
 	t.Fatal("bouine_cluster_gossip_drops_total not registered")
+}
+
+func TestSlogAdapter_ClosingDowngradesClosedConnErrors(t *testing.T) {
+	t.Parallel()
+	logger, mu, buf := captureLogger(t)
+	a := newSlogAdapter(logger)
+
+	// Before markClosing, a closed-connection error is emitted at ERROR.
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [ERR] memberlist: Failed to send gossip to 127.0.0.1:5000: " +
+			"write udp 127.0.0.1:5001->127.0.0.1:5000: use of closed network connection\n"))
+	require.NoError(t, err, "Write before closing")
+
+	records := parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 1)
+	assert.Equal(t, "ERROR", records[0]["level"])
+
+	// After markClosing, the same error is downgraded to DEBUG.
+	a.markClosing()
+	_, err = a.Write([]byte(
+		"2026/07/03 23:15:01 [ERR] memberlist: Failed to send UDP ping: " +
+			"write udp 127.0.0.1:5001->127.0.0.1:5002: use of closed network connection\n"))
+	require.NoError(t, err, "Write after closing")
+
+	records = parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 2)
+	assert.Equal(t, "DEBUG", records[1]["level"])
+
+	// A non-closed-connection error is still emitted at ERROR after closing.
+	_, err = a.Write([]byte(
+		"2026/07/03 23:15:02 [ERR] memberlist: Failed to encode message for broadcast: eof\n"))
+	require.NoError(t, err, "Write unrelated error")
+
+	records = parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 3)
+	assert.Equal(t, "ERROR", records[2]["level"])
 }

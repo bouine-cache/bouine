@@ -83,16 +83,6 @@ func parseOriginAge[H headerGetter](h H) time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
-// mergeHeaderValues joins all values of a header name into a single
-// comma-separated string. HTTP allows multiple headers with the same
-// name; Cache-Control especially may appear as multiple lines.
-//
-// This is for header.Map only — header.Map joins multi-values at store
-// time, so callers with a header.Map should use Get directly.
-func mergeHeaderValues(h header.Map, name string) string {
-	return h.GetAll(name)
-}
-
 // parseHTTPDate tries multiple date formats used in HTTP headers
 // (RFC 1123, RFC 850, ANSI C asctime). Also handles case-insensitive
 // timezone (e.g., "gmt" → "GMT"). Returns zero time on failure.

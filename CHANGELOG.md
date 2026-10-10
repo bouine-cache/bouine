@@ -9,15 +9,6 @@ Release notes for tagged versions are also generated from
 the curated, human-readable summary.
 
 ## [Unreleased]
-
-### Added
-- `listen.read_timeout` config option (default 30s): bounds how long
-  reading a single request's header and body may take on data-plane
-  connections. Previously hard-coded. It is the slowloris defense —
-  raise it for slow mobile clients or large uploads. Validated to stay
-  below the 5-minute data-plane safety-net WriteTimeout, and exposed in
-  the Helm chart values (`config.listen.read_timeout`).
-
 ### Changed
 - **Coalesced pipelined-hit writev on the H1 reactor** (requires
   `experimental.h1_reactor`): a pipelined batch of cache hits now
@@ -51,7 +42,7 @@ the curated, human-readable summary.
   1 ms (Go's writer-preferring RWMutex made every reader queue behind
   the full budget — a 10 ms hit-latency spike generator on the
   reaped-shard fast path).
-- **Miss round-trip cost on the H1 reactor** (ADR-0043; requires
+- **Miss round-trip cost on the H1 reactor** (ADR-0059; requires
   `experimental.h1_reactor`): the spawn-per-miss handoff model is
   replaced by a bounded worker pool (dispatcher + up to 1024 workers
   over a 128-slot queue), so a miss under load queues for a worker
@@ -108,6 +99,1442 @@ the curated, human-readable summary.
   keep the production-shaped parse cost visible and allocation-free
   — the toy-request gates hid it entirely.
 
+## [0.5.28] - 2026-10-09
+
+### Performance
+
+- **`bouine-cache/xxhash` bumped v3.0.0 → v3.0.1 — XXH3-128 hot loops
+  unrolled for register allocation** — the upstream fork's scalar unroll
+  keeps the eight hash accumulators in registers instead of spilling
+  them every lane (the same unroll the official C reference uses).
+  Output is bit-for-bit identical, so cache keys and stored objects stay
+  valid across rolling deploys. Hit-path benchmarks (`benchstat`, n=10,
+  Apple M5): `FastPath_Hit` −7.8%, `Evaluate_Hit` −7.5%,
+  `H1Parse_Get` −4.6%, `Reactor_Hit` −3.7%, `BuildKey` family −4–6.5%,
+  `BuildKey_LongURL` −8.1%; upstream microbench: XXH3-128 +68% geomean
+  throughput. Zero B/op and allocs/op change on every gated benchmark;
+  all 35 `make bench-gate` budgets pass unchanged. v3.0.1 also adds a
+  permanent differential test with 2028 C-reference vectors from
+  `xxhsum 0.8.4`, hardening the fork against future hash drift.
+
+### Added
+
+- **`connect.preserve_host` keeps the request's own Host header on
+  origin-bound fetches.** The origin pool's fetch paths
+  (`PoolFastClient.doSingleFetch`, the hedged duplicate, and the
+  `FastHandler` bypass) rewrite the request URI to absolute form
+  (`http://pool-target/...`), and fasthttp's `Request.Write` then
+  replaces the outbound Host header with the URI's host — the pool
+  target — whatever Host the request carried. Origins that derive
+  behaviour from the request Host (market/country selection,
+  virtual-host routing) therefore saw the pool target instead of the
+  public hostname. A `preserve_host: true` pool sets fasthttp's
+  `UseHostHeader` flag on every origin-bound fetch, so the request's
+  own Host header (which the cache handler sets to the client's
+  Host) reaches the origin. The dial target is always the configured
+  pool target — only the wire-level Host header changes — and the
+  cache key, `Vary` variant key, `X-Bouine-Host` attribution,
+  ban/purge matching, and `request.forwarded` are untouched (the flag
+  lives on the outbound copy only). Default `false`: host-blind
+  origins keep the historical behaviour exactly, and
+  `request.forwarded: forwarded.host` remains the telling mechanism
+  for origins that read `X-Forwarded-Host`. Pinned by wire-level unit
+  tests (default keeps the pool target as Host, preserve_host
+  forwards the request Host, the hedge duplicate keeps it too, the
+  `FastHandler` proxy path keeps it) and by integration tests on a
+  `preserve_host` cluster against an origin that echoes its received
+  Host.
+
+### Security
+
+- **Toolchain and `golang.org/x/net` upgraded for GO-2026-6605…GO-2026-6617**
+  — the pinned Go toolchain (`go 1.27.1 → 1.27.2`) fixes the stdlib
+  advisories (`crypto/tls`, `mime/multipart`, the `net/http` HPACK
+  encoder race); `golang.org/x/net v0.59.0 → v0.60.0` fixes the
+  `golang.org/x/net` halves. The same PR syncs every pin of the old
+  version: `GO_VERSION_STAMP` (`.pre-commit-config.yaml` — it keys the
+  CI prek cache), `GO_VERSION` in `ci.yml`/`nightly.yml`/`release.yml`,
+  and the `golang:1.27.2-bookworm` build-stage image (digest-pinned) in
+  the `Dockerfile`. `govulncheck ./...` is clean on 1.27.2 + v0.60.0.
+
+### Fixed
+
+- **The SSE no-client 502 lost its `X-Cache: BYPASS` header to the response
+  reset** — in `handleSSE`'s no-`FastClient` branch, the attribution
+  headers were written *before* `ctx.Error`, whose `Response.Reset()` wipes
+  every response header, so the 502 shipped with neither `X-Cache` nor
+  `X-Cache-Source` and the metrics layer classified it as `MISS` (not
+  BYPASS). The reset now runs before the headers are written, matching the
+  sibling 50x branches. A duplicated `X-Cache` set in the same branch was
+  removed.
+- **The no-client-no-upstream 502 is back on the `bouine` source slot
+  (was briefly `origin`)** — the preceding BYPASS-attribution change had
+  labelled the "no fast client configured and no upstream" 502 with
+  `X-Cache-Source: origin`, but no fetch was ever dispatched toward an
+  origin; by the same predicate as the shed 503 and the only-if-cached 504
+  (nothing dispatched → empty wire source, metrics label `bouine`) the
+  misconfiguration 502 now keeps the empty source. Fetch-error 502s — where
+  an origin fetch was attempted and failed — keep the `origin` attribution.
+  Series-identity note: the `BYPASS`/`origin` series for this population
+  (misconfigured deployments only) moves to `bouine`.
+- **The closed `source` label set is now pinned by a cross-invariant test**
+  — `metricSourceSlots`, `sourceIndex`, `sourceIndexBytes`,
+  `normaliseSource`, and the middleware index switch were four hand-synced
+  encodings of one set (`sourceIndexBytes` had already drifted: no
+  `bouine` case). `TestSourceLabelSetClosed` declares the set once, as
+  data, and fails the build when any encoding drifts again.
+- **BYPASS traffic is attributed to `origin` on the data-plane metrics** —
+  BYPASS responses are proxied uncached from the upstream, but no bypass
+  path ever set `X-Cache-Source`, so the whole BYPASS population landed on
+  the `source` axis's default slot (rendered as the unnamed/"Value" series
+  in dashboards). Every bypass branch — streamed origin fetch, SSE, the
+  upstream-in-process fallback, and their 502 dispatch-error variants —
+  now carries `X-Cache-Source: origin`, matching the miss paths' origin
+  attribution; the shed 503 keeps the empty source (the origin was never
+  reached).
+- **The `source` label's default slot is named `bouine` instead of the
+  empty string** — responses bouine synthesized itself (the only-if-cached
+  504, the shed 503) previously carried `source=""` on
+  `bouine_requests_total`/`bouine_response_bytes_total`, which dashboards
+  rendered as an unnamed "Value" series. The label now reads
+  `source="bouine"` — the same named-fallback pattern as `upstream_pool
+  "_default"` and `traffic_class "unclassified"` — while the wire
+  `X-Cache-Source` value stays empty for those responses. This is a
+  series-identity reset: the former `source=""` series and the BYPASS
+  series move to their new labels, so `rate()` queries show one gap window
+  at the deploy boundary.
+
+## [0.5.27] - 2026-10-07
+
+### Fixed
+
+- **Collapsing flights are keyed on the response's declared variation
+  dimensions instead of the primary cache key (ADR-0057)**: on a cold
+  miss, two requests differing only in a selector header could
+  collapse onto one leader and every follower received the leader's
+  variant body. Warm flights keep the lookup key; cold flights on a
+  declared route extend the key with the declared headers; cold
+  flights on an include-free route are refused (one extra origin
+  fetch per concurrent caller, first fill only).
+- **`bouine_peer_fetch_duration_seconds` no longer truncates sub-millisecond
+  peer fetches to 0**. `PeerFetcher.Fetch` observed
+  `time.Since(start).Milliseconds()/1000`, flooring sub-ms RPCs to 0;
+  since ~95% of production peer fetches complete under 1 ms, the
+  `bouine_peer_fetch_duration_seconds` histogram collapsed p50/p95 into
+  the zero bucket and the "Peer fetch latency p99 by pod" panel rendered
+  them flat at 0. The histogram now observes the untruncated
+  `lat.Seconds()`. `PeerFetchStats`' `AvgLatMs` readout and the
+  `dur_ms` log field keep integer-ms resolution.
+- **`metrics.traffic_classes` validation reports every invalid field
+  at once** — aligned with the errCollector behaviour the other config
+  sections already use: findings append (no early return), each
+  anchored to its own FieldError path
+  (`metrics.traffic_classes[i].name` / `.hosts[j]`), instead of the
+  first invalid class aborting startup with an unprefixed error.
+
+### Added
+
+- **Vary-declaration drift detection at revalidation (ADR-0058)**.
+  An origin that changes its `Vary` under a live cache previously left
+  variant keys computed under the abandoned surface until TTL —
+  serving wrong-variant HITs. Every revalidation now compares the
+  stored declaration against the fresh response's as field sets and,
+  on a change, purges the primary key (resolver and variants).
+  `bouine_vary_drift_total` is the operator signal (expect a
+  one-cycle hit-ratio dip per drifted key).
+- **Wildcard-host and regex-path route matching (issue #772,
+  ADR-0056)**. `routes[].match.host` now accepts a leading `*.`
+  wildcard (suffix match anchored on the label boundary —
+  `*.staging.example.com` covers the whole per-PR subdomain tree,
+  never the bare suffix host), and a new `routes[].match.path` accepts
+  an anchored RE2 pattern (`^/[a-z]{2}-[a-z]{2}/l/campaign-.*$`) for
+  path classes a prefix cannot express. `path` and `path_prefix` are
+  mutually exclusive; `config.Validate` rejects invalid regexes,
+  unanchored patterns, oversized patterns (> 512 B), control bytes,
+  and any host wildcard that is not the single leading `*.` form.
+  Regexes compile once at startup, so route resolution never pays
+  compile cost; prefix-only route tables keep their zero-alloc
+  hit-path gates unchanged (the new
+  `BenchmarkGate_RoutedFastPath_Hit_WildcardHost` gate pins the
+  wildcard form at 0 allocs/op; the regex form is measured by an
+  ungated benchmark — 0 allocs/op steady state, not budget-guaranteed
+  for arbitrary operator patterns). A later route fully covered by an
+  earlier one (host, path, and methods all covered) is dead config and
+  is reported at Error level at boot while boot proceeds, mirroring the
+  traffic-class shadow report (ADR-0047); detection is conservative and
+  stays silent on undecidable regex-vs-prefix pairs. Admin purge/refresh
+  key building (`MatchByHostPath`), the H1 fast path, the dashboard
+  route tables, and the config insights all resolve through the same
+  matcher, and route names auto-derive with the regex shown verbatim.
+  Regex and wildcard routes reduce `route`-label and config cardinality
+  versus the per-host/per-page route explosion they replace.
+- **`request.forwarded` per-route client-identity injection (issue
+  #769)**. Opt-in per-route block that injects `X-Forwarded-For`
+  (appends the address of bouine's immediate peer — the edge — to the
+  carried chain, never rewriting existing entries),
+  `X-Forwarded-Proto` (the scheme bouine received the request on, not
+  the scheme to origin), `X-Forwarded-Host` (the received Host, for
+  multi-host origins and `include_host: false` deployments), and `Via:
+  1.1 bouine` (RFC 9110 §7.6.3) onto origin-bound requests: miss,
+  invalidating proxy (POST/PUT/DELETE), bypass, revalidate,
+  streaming/SSE, and the background fetchers. The hit path is
+  untouched, the headers never join the cache key or the stored
+  request headers (threat-model T06), client-supplied chains are
+  append-only untrusted input (T04), and the XFF/Via chains are capped
+  at `max_append` entries (default 5, range 1..64) and the 8 KiB
+  per-header budget (T37). Background fetches (SWR revalidate,
+  refresh-before-expiry, shed refill) inject proto/host/Via from the
+  captured request but deliberately do not append
+  `X-Forwarded-For`: there is no live peer, and replaying the
+  original requester's address would attribute one user's identity to
+  an anonymous refresh. Mutually exclusive with `header_set` entries
+  targeting the same header; requires a pool (rejected on static
+  routes).
+- **Compact `request.forwarded` forms and `route_defaults`**. The
+  forwarded block accepts four YAML shapes: the `standard` preset
+  (all four headers, one line), a token list
+  (`forwarded: [client_ip, proto]` — exactly these headers), the
+  explicit opt-out (`forwarded: false` / `none`), and the original
+  mapping. A new top-level `route_defaults` block
+  (`route_defaults.request.forwarded`) declares the default once for
+  every route instead of repeating it per route; routes inherit it
+  wholesale, override it with a preset/token list, combine with it
+  field-by-field via the mapping form (OR; only `max_append` falls
+  back), or opt out with `none`. `route_defaults` accepts only
+  `request.forwarded` today — other route fields are rejected at
+  decode so their merge semantics get designed when needed. Static
+  routes ignore an inherited default (no origin-bound request exists);
+  validation (pool requirement, `header_set` conflict, `max_append`
+  bounds) runs on the resolved value.
+- **`traffic_class` metric label (issue #707, ADR-0047)** — a new
+  `metrics.traffic_classes` config section declares up to 8 named
+  traffic populations matched by host patterns (exact, leading `*.`,
+  or trailing `.*`/`*`; declaration order is precedence). The label is
+  added — always present, values exclusively from the configured set
+  plus the `unclassified` fallback — to `bouine_requests_total`,
+  `bouine_request_duration_seconds`, and
+  `bouine_response_bytes_total`, enabling per-population hit-ratio,
+  latency, and saved-bandwidth queries inside one instance. Access
+  logs gain a matching `traffic_class` attribute. Zero allocations on
+  the hit path; the label set is closed and spoof-proof by
+  construction.
+- **Boot-time traffic-class shadow detection (ADR-0047)** — a host
+  pattern in a later class that an earlier class fully shadows (it can
+  never match under declaration-order precedence) is reported at Error
+  level at startup; boot proceeds and first-match precedence is kept.
+- **Cardinality exception (ADR-0047)** — `bouine_requests_total`
+  crosses the AGENTS.md §9 10 000-series line whenever
+  `pools × (1 + #classes) > 57`; the overage is opt-in (no configured
+  classes ⇒ no multiplication) and documented with the
+  `metric_relabel_configs` mitigation in the native-histogram runbook.
+- **`cache.bypass_on_user_agent` per-route pattern list and
+  `route_defaults.cache.bypass_on_user_agent` inheritance (ADR-0055,
+  issue #771)**. When configured, a request whose `User-Agent` matches
+  one of the `*`-glob patterns never touches the cache on that route:
+  no lookup, no storage, no in-flight sharing — the request proxies to
+  origin with headers preserved, attributed `X-Cache: BYPASS` /
+  `cache_result="BYPASS"` (the `cache.bypass_on_cookie` contract,
+  ADR-0054, triggered by the UA instead of a cookie). Built for
+  layered deployments (client → edge → bouine) where the edge already
+  bypasses its own cache for a verified crawler (e.g. a shopping-feed
+  bot that must see current product data): without mirroring the rule,
+  bouine would serve its own stored copy and silently defeat the edge
+  rule's freshness intent. Patterns are matched case-insensitively
+  against the full UA string — an exact pattern matches the whole
+  string (`*Bot*` for substring semantics); `*` matches any run of
+  bytes including `/`; validation caps the list at 16 entries / 256
+  bytes each and rejects lone `*`, `**`, `?`/`[`/`]`/`\`, bytes outside
+  graphic ASCII 0x21-0x7E (spaces included — real UA strings contain
+  spaces, so an exact pattern could never match one; use the `*Bot*`
+  substring form), and duplicates. The pattern list can be declared once under
+  `route_defaults.cache.bypass_on_user_agent` instead of repeated per
+  route: a route without its own list inherits the default wholesale,
+  a route's own list replaces it (never a union), an explicit empty
+  list (`[]`) opts the route out, and static routes inherit nothing;
+  an invalid default is reported once at `route_defaults`' own path.
+  The UA is spoofable client input (threat-model T52): a spoofed UA
+  merely costs an origin fetch (same as a `no-cache` request) — bypass
+  never invalidates, evicts, or stores anything. The H1 fast path
+  declines matching requests (falls through to the slow path's bypass
+  branch); pattern-less routes pay one nil check, so the zero-alloc
+  hit-path gates are unchanged. Default off: RFC 9111 semantics and
+  the cache-tests score are untouched; invalidating methods
+  (POST/PUT/DELETE) keep invalidating the shared key.
+- **`cache.bypass_on_cookie_names` per-route list (issue #768)**. A
+  request carrying any listed cookie name bypasses the cache
+  entirely — same contract as `bypass_on_cookie` (no lookup, no
+  storage, no in-flight sharing, `X-Cache: BYPASS`) — while requests
+  carrying only unlisted cookies participate in the cache per RFC
+  9111. On cookie-personalized SSR routes the presence trigger is
+  too blunt (ubiquitous analytics/consent cookies turn it into
+  "cache off"); this knob scopes the bypass to the session/debug
+  cookies. Matching is on the cookie-name token (case-insensitive,
+  never a substring or a value), after OWS trimming — a listed
+  cookie matches in every "; "-separated position, and on every
+  repeated Cookie field line (the slow path scans fasthttp's
+  PeekAll because Peek returns only the first line until cookie
+  collection; the H1 fast path scans each line the h1parser keeps
+  individually). Capped at 16 names, mutually exclusive with
+  `bypass_on_cookie`.
+- **`cache.key.cookie_presence` per-route list (issue #768)**. Each
+  listed cookie name contributes one presence bit (present/absent,
+  never the value) to the Vary variant key — the CDN `check_presence`
+  equivalent for origins that render different content depending on
+  whether a consent/analytics cookie exists. Presence rides a
+  synthetic Vary field unioned into the stored VaryValue, so
+  store/lookup pairing, peer-gate assertions, 304 revalidation, and
+  the refresh registry replay hash the same bits everywhere. Every
+  request representation canonicalizes repeated Cookie field lines
+  to the RFC 6265 §4.2 form before the bits are computed (the new
+  `header.Map.CookieAll`), so a presence bit never depends on which
+  line a cookie landed on. The refresh registry now saves the
+  Cookie header on presence-keyed routes so the background-refresh
+  replay cannot skew the VaryValue/VaryKey pair. Capped at 16 names,
+  mutually exclusive with both bypass knobs.
+  `docs/architecture.md` §3.4's stale `cache.cookies.key` reference
+  corrected to the implemented surface.
+
+### Fixed
+
+- Cookie-bypass and presence-keying correctness on multi-line and
+  non-first-position cookies (review of #773): the
+  `bypass_on_cookie_names` scanner rejected a listed cookie whose
+  name arrived with a leading separator space (the length gate ran
+  before OWS trimming, so `" session_id"` never matched — real
+  browsers put the session cookie last in one `"; "`-joined line,
+  meaning the knob almost never fired and the personalized response
+  was stored and served to other users); the slow-path gate saw
+  only the first Cookie field line (fasthttp's Peek pre-collection)
+  so a listed cookie on a later line was served from cache; and
+  presence bits hashed over a `", "`-joined Cookie value
+  (header.Map.GetAll), folding the second line's pairs into the
+  first line's last value — the peer gate then rejected every
+  presence-keyed exchange of a multi-line cookied request. All
+  three are pinned by new regression tests covering every position,
+  real 2-line wire shapes, the peer-gate assertion, the refresh
+  replay, and cross-representation key parity.
+
+### Changed
+
+- **Metric series identity reset** — adding the `traffic_class` label
+  changes every data-plane series' identity; expect one `rate()` gap
+  window at the upgrade boundary (see the upgrade note in
+  docs/runbook/native-histogram.md).
+
+## [0.5.26] - 2026-10-05
+
+### Added
+
+- **`cache.bypass_on_cookie` per-route flag (ADR-0054, issue #762)**.
+  When enabled, a request carrying any non-empty `Cookie` header never
+  touches the cache on that route: no lookup, no storage, no in-flight
+  sharing — the request proxies to origin (Varnish `return (pass)` on
+  `req.http.Cookie`). Designed for personalized SSR HTML: an origin
+  that renders per-user content from the request cookie must never see
+  its response stored under a shared key (served to other users) or
+  handed to a concurrent singleflight follower (another user's body
+  in-flight). Default off: cookied requests participate in the cache
+  per RFC 9111, and the cache-tests `other-cookie` optimal case keeps
+  passing. SSE-intent requests keep live-stream semantics; invalidating
+  methods (POST/PUT/DELETE) keep invalidating the shared key. Flag-on
+  routes pay one Cookie-header presence check; flag-off routes one
+  Peek.
+- **Dashboard insight `config-cookie-bypass-missing`** (ADR-0054).
+  The dashboard now counts cookie-bearing requests per route
+  (`RouteStat.Cookied`, dashboard ring only — no new Prometheus
+  label) and fires a MED insight when a route stores responses
+  (`ttl_default`/`ttl_override` > 0) while ≥5% of its measured
+  traffic carries a Cookie header and `bypass_on_cookie` is off —
+  the personalized-SSR leak shape (origin reads the cookie, so the
+  Set-Cookie storage block never fires). Surfaces the footgun
+  without changing any default.
+
+### Changed
+
+- **Requests carrying a `Cookie` header no longer share in-flight
+  origin fetches (ADR-0054)**. `collapseDenied` (the ADR-0052 gate
+  that already refuses `Authorization`) now refuses Cookie-carrying
+  requests too, unconditionally on every route: concurrent cookied
+  misses on one URL each perform their own origin fetch, so a
+  follower can never receive another user's in-flight SSR render.
+  Cookied requests keep participating in the cache per RFC 9111 —
+  stored responses are still served to them — so the cache-tests
+  `other-cookie` optimal case keeps passing (it asserts sequential
+  serving from store, never concurrent fetching). Anonymous requests
+  keep collapsing bit-for-bit. Same-URL concurrent cookied bursts now
+  cost one origin fetch per caller, bounded by the fetch semaphore
+  and shed machinery — the same trade ADR-0052 made for authorized
+  traffic.
+- **All Go dependencies bumped**. `fasthttp` moves to the released
+  `v1.75.0`, picking up the
+  upstream hot-path work: one-pass validating header parsing, 8-byte
+  scanning of header values/control bytes/target, memoized authority
+  parsing, cached Date header line, writev-based response serialization
+  for large bodies, fewer copies in header serialization, and
+  redundant-deadline-skipping on client connections; the tag also
+  carries a CL.0-style desync fix (unread streamed request bodies are
+  drained or the connection closed), a zero-length suffix range fix,
+  and a drain-vs-response ordering fix. Also bumps
+  OTel 1.46 → 1.47 (PeriodicReader data-race fix, hex-table
+  traceparent decoding), gRPC 1.83.2 → 1.84.0 (idleness-stuck RPC fix,
+  STS token-leak fix), prometheus/common 0.71 → 0.72 (OpenMetrics 2
+  encoding, faster JSON sample unmarshaling), klauspost/compress
+  1.20.0 → 1.20.1, molecule-man/go-brrr 1.0.1 → 1.2.0,
+  golang.org/x/net 0.58 → 0.59, and the genproto pins. The SSE
+  fall-through test now pins the per-Write deadline re-arm contract
+  rather than fasthttp's internal write granularity (upstream now
+  coalesces the terminal chunk with the trailer section).
+
+### Fixed
+
+- **Data-plane invalidation now propagates across the cluster.** A
+  `POST`/`PUT`/`DELETE` request (RFC 9111 §4.4 invalidation, including
+  `Location`/`Content-Location`-derived keys) previously purged only the
+  receiving node's local store. In strong mode an invalidating request
+  landing on a non-owner left the owner serving stale content until TTL;
+  in eventual mode every other node stayed stale. Invalidations from the
+  data plane now broadcast to peers through the same batching pipeline
+  (ADR-0044) as the admin purge API, in every cluster mode.
+- **A `HEAD` exchange can no longer poison the cache with an empty
+  body.** When a stale object was revalidated by a `HEAD` request and the
+  origin answered `200` (content changed), the empty HEAD response was
+  stored under the shared GET cache key, so every subsequent `GET` served
+  an empty body as a cache hit until TTL expiry. In strong cluster mode
+  the empty-body object was also forwarded to the key's owner, blanking
+  the resource fleet-wide. The same poison was reachable through the
+  background fetchers: a `HEAD` inside a stale-while-revalidate window
+  (or a shed refill) scheduled an origin refresh whose empty-body
+  response replaced the stored object. `HEAD` exchanges now never
+  replace a stored object, and background refreshes remap `HEAD` to
+  `GET` (RFC 9110 §9.3.2) so they reproduce the stored representation.
+  Revalidation answered by `304` was and remains correct.
+- **Large invalidation batches now propagate over gossip** (issue
+  #754). Batches flushed at 256 events encoded to a single gossip
+  frame of ~10 KiB — far above memberlist's ~1.4 KiB UDP gossip
+  window — so the frame never fit any gossip round and was re-queued
+  forever: eventual-mode clusters silently lost the whole batch's
+  invalidations, and every cluster mode grew the gossip queue without
+  bound. Batch frames are now split at flush time into standalone
+  sub-frames (≤ 1,300 bytes each), and the gossip drain drops — with a
+  `bouine_cluster_gossip_oversized_drops_total` metric — any frame
+  that could never fit a gossip round, so a regression can no longer
+  wedge the queue. HTTP fan-out is unaffected.
+- Helm chart StatefulSet rolling-update settings are now passed through from
+  `updateStrategy.rollingUpdate` as raw Kubernetes values. The default is an
+  empty object, so the chart no longer emits the beta `maxUnavailable` field
+  on GKE versions that silently drop it and cause permanent Argo CD drift.
+  Existing overrides move `maxUnavailable` and `partition` under
+  `updateStrategy.rollingUpdate`.
+- **Unsafe methods (POST/PUT/DELETE) can never share an in-flight
+  origin fetch** (ADR-0052, extended). They never did in practice —
+  the dispatcher routes them to the invalidating proxy, which fetches
+  directly — but that guarantee was purely structural: one dispatcher
+  refactor away from leaking a POST into the miss pipeline, where the
+  flight key is the cache key (method included) and two identical
+  POSTs would merge onto one origin mutation, silently dropping the
+  follower's body. The request-collapsing gate (`collapseDenied`) now
+  denies every method outside the safe set (GET, HEAD, OPTIONS) in
+  addition to `Authorization`-bearing requests, at every flight site.
+  Zero behavioral change for GET/HEAD/OPTIONS traffic; zero added
+  allocations on the anonymous miss path.
+- **Cached responses no longer carry a duplicate `Date` header**
+  (ADR-0053). Objects forwarded cluster-to-cluster (peer put) and
+  warm-tier blobs decoded with the pre-v6 wire codec lost the
+  pre-computed `HasDate` flag, so every fast-path hit emitted the
+  stored origin `Date` *and* a freshly synthesized one — logged by
+  downstream nginx as `upstream sent duplicate header line` at
+  ~100 warnings/hour in prod-eu. The object codec now carries
+  `HasDate` (and the other transient flags) on the wire; pre-v6
+  blobs are backfilled at decode time, and both Date-emitting sites
+  re-check the header map when the flag is false.
+- **`no-cache` and `must-revalidate` responses stored via peer put no
+  longer serve unvalidated fresh hits** (ADR-0053). The same lost-flag
+  bug zeroed `RespNoCache`/`RespMustRevalidate`, silently disabling
+  RFC 9111 §5.2.2 revalidation for such objects on the owner node;
+  `no-cache="fields"` field stripping was skipped as well. The codec
+  v6 flags byte carries both gate flags; pre-v6 blobs re-derive them
+  from the stored `Cache-Control`.
+- **Warm-tier promotion no longer clobbers merged `Cache-Control` and
+  apparent-age-adjusted `OriginAge`**: the re-derivation in
+  `TieredStore.Get` now only fills empty fields instead of
+  overwriting both with single-header approximations.
+- **The RFC 9111 §5.2 Cache-Control tokenizer moved to the
+  `pkg/header` shared kernel** (ADR-0053) so the storage layer can
+  re-derive transient flags at decode time; `internal/cache` keeps
+  API-compatible aliases (`cache.ParseCacheControl`,
+  `cache.Directives`), so no call-site changes were required.
+- **Ban snapshot reads on the hit path are lock-free** (issue #757).
+  Every cache hit — the fast path included — evaluated lazy bans
+  through a snapshot read that took a single global mutex even when
+  the ban list was empty and the snapshot clean; under a concurrent
+  ban registration, the next reader rebuilt the O(list) snapshot
+  (up to 1,024 bans) while holding the lock, parking all cores
+  behind it. The compiled snapshot is now published through an
+  atomic pointer with an atomic dirty flag: one uncontended load in
+  the clean steady state, one winner rebuilds when registrations
+  mark the state dirty, and concurrent hits keep serving the
+  previous snapshot. Measured on the gating benchmarks: hot-tier hit
+  31.0 → 22.6 ns/op (−27%), parallel hit −17%, contended hit +
+  registrations 594–776 → 178 ns/op with 0 allocs/op (the old
+  design charged 2–3 allocs/op to hits under contention). No
+  behavior change; enforcement freshness is pinned by tests.
+
+## [0.5.25] - 2026-09-30
+
+### Added
+
+- **`cache.max_variants` is now configurable per route**. The Vary
+  variant cap (the number of distinct Vary variants stored per primary
+  cache key, guarding against Vary blow-up per RFC 9110 §12.5.5) was a
+  hard-coded constant. It can now be set per route; unset (or 0) applies
+  the built-in default (1024). Negative values are rejected at config
+  validation. The cap itself cannot be disabled. When the cap is hit,
+  further variant storage is skipped and `vary_cap_hits_total`
+  increments; requests keep being proxied, only caching is affected.
+
+### Fixed
+
+- **Requests carrying `Authorization` no longer share an in-flight
+  origin response with any other request** (ADR-0052). The singleflight
+  dedup (miss, revalidate, background refresh, shed refill) was keyed
+  by the cache key alone, so concurrent requests for the same URI
+  collapsed onto one origin fetch and every follower received the
+  leader's response — including authorized callers receiving each
+  other's data. Storage was never involved (RFC 9111 §3.5 gates
+  storage, not in-flight sharing), which is exactly how a pass-through
+  route leaked one tenant's data to another in production; the leak
+  shape had *identical* credentials (a shared service JWT with the
+  tenant selected by an undeclared custom header), so no
+  credential-equality scheme can prove sharing safe. Authorized
+  requests now always fetch their own copy; anonymous traffic is
+  bit-for-bit unchanged; authorized responses the origin marks
+  shareable (`public, s-maxage`) still converge to stored HITs.
+- **Fixed a data race in the buffered miss follower path**. The
+  singleflight leader published its `header.Map` to followers and
+  then mutated the same Map while building the stored object
+  (`buildObject` stamps `X-Bouine-Path`/`X-Bouine-Host`, strips
+  `Set-Cookie`, sets `Content-Length`), racing with followers reading
+  it after `close(done)`. Followers now receive a detached clone —
+  the ownership split the singleflight contract always promised.
+- **kubeconform gate now validates the ServiceMonitor CRD**. The
+  `helm-kubeconform` prek hook (ADR-0048) renders the chart with
+  `serviceMonitor.enabled=true` and validates the rendered ServiceMonitor
+  against the `monitoring.coreos.com/v1` CRD via the datree
+  CRDs-catalog. Previously the ServiceMonitor was neither rendered (it
+  defaults to disabled) nor schema-covered (kubeconform's default
+  schema location only has Kubernetes built-ins), which let PR #738
+  ship `scrapeNativeHistograms`/`scrapeProtocols`/`scrapeClassicHistograms`
+  inside `endpoints[]` — a spec-level field — past every gate.
+
+## [0.5.24] - 2026-09-29
+
+### Fixed
+- Helm chart: the ServiceMonitor rendered `scrapeNativeHistograms`,
+  `scrapeProtocols`, and `scrapeClassicHistograms` inside `endpoints[]`,
+  but the prometheus-operator CRD defines them at the `spec` level —
+  the API server rejected the ServiceMonitor for any install with
+  `serviceMonitor.enabled: true` (since chart 0.5.23). They now render
+  on the ServiceMonitor spec where they belong, applying to every
+  endpoint.
+
+## [0.5.23] - 2026-09-29
+
+## [0.5.22] - 2026-09-28
+
+### Changed
+
+- **Accept-Encoding now keys variants by negotiation bucket**
+  (ADR-0051). The header value is reduced to the coding bouine
+  negotiates (`br | zstd | gzip`, highest q-value wins with ties
+  preferring br — the sharing-maximizing order — `q=0` excludes;
+  absent or no acceptable coding -> `identity`), and
+  origin-bound requests carry the canonical bucket token instead of
+  the client's raw dialect. A resource's variant count becomes the
+  number of distinct negotiated codings (at most four) instead of the
+  number of header spellings; in particular every br-capable
+  browser — zstd spelling or not — shares one stored variant.
+  This finally implements the behavior `docs/architecture.md` §3.3
+  has claimed since v1.0. Expect a one-TTL miss-rate step on
+  `Vary: Accept-Encoding` routes after upgrading (old variant keys
+  become unreachable); mixed-version clusters cannot share AE
+  variants until the rollout completes (peer gates fail safe — miss,
+  never a wrong body). Origins that genuinely vary bodies by the
+  full AE string can restore the old behavior with
+  `cache.key.verbatim_encoding: true`.
+
+### Fixed
+
+- **`Accept-Language` variants now key by negotiated language**
+  (ADR-0051 follow-up, plan §10). The highest-weight tag — subtag
+  preserved, ties resolved lexicographically — replaces the raw chain
+  in the variant key, and origin-bound requests carry the winner tag,
+  so q-cascade spellings that select the same language share one
+  stored variant instead of fragmenting one per spelling. Subtags
+  (en-US vs en-GB) deliberately do not collapse. Unbucketable chains
+  (absent, `*`, malformed, all q=0) keep the legacy keying. This is
+  the behavior the upstream cache-tests suite specifies in
+  `vary-normalise-lang-select` (kind: optimal); the test flipped
+  fail→pass with zero regressions (order/case/space stay green).
+  Variant-key hot path: 3 allocs vs the legacy 6. Zero new config
+  fields.
+
+- **Origin-fetch spans now join the client trace** (CCC-32). On the
+  miss, revalidate, invalidating-proxy, bypass, and streaming paths,
+  the `bouine.origin` span is parented on the request's
+  `bouine.pipeline` span instead of starting a detached root trace,
+  and carries `http.method`, `http.path`, `http.route`,
+  `upstream_pool` attributes so slow fetches are filterable by route
+  (bounded label) and pool in Tempo. The span context comes from the
+  middleware's stored value (built on `context.Background()`), never
+  the `*fasthttp.RequestCtx`, so the transport goroutine can still
+  safely outlive the request. Linked spans inherit the root sampling
+  decision, ending the 50/50 random drop of detached origin traces
+  under partial sampling. Streaming fetches now also end their span
+  (released with the body stream) instead of leaking it unended.
+  Background fetches (SWR revalidation, shed refill, background
+  refresh) are not linked to a client trace — the triggering
+  request's span is already ended by the time they run — but now
+  carry the same method/path/route/pool attributes on their detached
+  root spans.
+
+### Changed
+
+- `internal/config` is now a shared kernel (ADR-0050): every layer may
+  import it directly, and it stays a leaf. The `EvictionAlgorithm` enum
+  moved back from `pkg/api` to `internal/config`, ending the
+  alias indirection through the wire-stable `pkg/api` package; config
+  vocabulary types (`EvictionAlgorithm`, `ClusterMode`, `TLSVersion`)
+  now all live in one place.
+
+### Added
+
+- **stayin_alive grace retention** (ADR-0051). The TTL reaper no longer
+  deletes expired entries from `stayin_alive` routes while the route's
+  origin pool has no healthy target — the route's
+  serve-stale-while-outage promise now survives outages longer than
+  `TTL + stale_while_revalidate + stale_if_error` (previously the
+  reaper deleted the stale copies one reaper tick after the freshness
+  horizon, breaking the promise mid-outage). When the pool has a
+  healthy target again, the next reaper pass collects everything on
+  the normal schedule. Objects carry `keep_grace` + `pool` stamps
+  (additive wire fields); graced fills are eagerly warm-backed
+  regardless of `body_threshold`, so hot SIEVE pressure demotes them
+  to a recoverable warm copy instead of deleting them. New metric:
+  `bouine_hot_store_reaper_grace_holds_total`. Full protection
+  requires the pool to have passive
+  (`health.passive.consecutive_5xx`) or active health checks
+  configured. Related fix: the cache-path fetch client now records
+  passive health (consecutive connection errors / 5xx eject, success
+  resets) exactly like the proxy path, so pool ejection — and
+  fail-fast picks once all targets are ejected — finally works on
+  cached routes. The grace stamps round-trip the binary object codec
+  (v5, cluster protocol header "4"): the warm tier and the
+  peer-fetch/peer-put wire carry them, so a SIEVE demote →
+  re-promotion and an owner-stored peer put keep entries
+  grace-gated; pre-v5 blobs decode with the stamps unset
+  (historical reap) and are rewritten on the next Put.
+
+- `routes[].cache.negative_ttl` now accepts a per-status map, mirroring
+  Cloudflare's "Cache TTL by status code": `negative_ttl: {404: 1m,
+  5xx: 10s, 410: 0}`. Keys are a single error status ("404") or a
+  class ("4xx", "5xx"); exact codes are limited to 400-599 (2xx/3xx
+  entries are rejected as configuration errors). An exact code shadows
+  its class ("blanket + exception": `5xx: 10s, 503: 30s`). Values are
+  durations; zero explicitly disables caching for that status. The
+  policy only applies when the origin sends no explicit freshness, and
+  RFC 9111 blocking directives still win.
+- `cache.key.include_host` (issue #700) — an explicitly-false value drops
+  the host segment from the primary cache key, so the same URL+query
+  resolves to one entry regardless of the request Host. Motivated by
+  routes fronted by a router that forwards both an internal service
+  host and public site hosts to the same cache (same bytes, two
+  entries, each fed by only part of the URL's traffic). Absent and
+  `true` keep today's `scheme|host|path|query|method` key byte-for-byte
+  — the field is a `*bool` precisely so the default cannot silently
+  re-key existing deployments. Requests are still forwarded with the
+  client's original Host; only key computation changes. All three
+  primary-key builders (`BuildKey`, `BuildKeyFast`, `buildKeyFromRaw`,
+  stack and heap variants) gate the host segment identically, pinned
+  by a cross-builder parity test; scheme and method stay keyed. The
+  admin URL-key surfaces (`/v1/purge`, `/v1/purge/batch`,
+  `/v1/refresh`, `/v1/cachecheck`) now resolve the matching route's
+  compiled key policy before rebuilding keys from raw URLs — a
+  host-agnostic route would otherwise purge and inspect keys that were
+  never stored. Stored `X-Bouine-Host` metadata keeps the filling
+  request's host, so host-regex ban predicates match only the fragment
+  that filled an entry; prefer path-regex or surrogate-key bans on
+  such routes. Validation rejects `include_host: false` on a route
+  that sets `match.host`, and — like `include_headers`/`exclude_headers`
+  — the flag must be identical on every cluster node serving the
+  route or ownership of the merged keyspace splits across the ring.
+
+### Changed
+
+- **Cluster wire format dropped unversioned JSON.** memberlist node
+  metadata (peer info) and push/pull state (ring digests) are now
+  binary frames (magic + version header, fixed-width little-endian
+  payloads, same `binaryMagic` as gossip invalidation frames);
+  receivers reject unversioned or unknown-version frames. Peer-fetch
+  requests no longer accept the legacy JSON body — only the binary v2
+  format is served. Mixed-version clusters running the previous build
+  will fail to exchange meta/state during a rolling upgrade; upgrade
+  all nodes together.
+
+- **Admin API and SDK use `encoding/json/v2`.** Same wire format, but
+  parsing is stricter: request bodies with duplicate JSON keys are now
+  rejected with `400` (previously the last value silently won) and
+  member matching is case-sensitive. The in-repo SDK is unaffected;
+  hand-rolled clients sending duplicate keys or misspelled field
+  casing will start receiving `400`s.
+
+- **One negative-caching key.** The scalar `negative_ttl: 30s` and the
+  new map form are the same setting written two ways; the scalar is
+  shorthand for the default error set (404/405/410/501). There is no
+  separate `status_ttl` key and no fallback interaction: the map form
+  is the complete policy.
+- **Negative-caching TTL precedence.** A negative-caching policy now
+  outranks `ttl_default` and heuristic freshness (Last-Modified) — but
+  only for the statuses it covers. Previously, a route with both
+  `negative_ttl` and `ttl_default` cached 404s for the `ttl_default`
+  duration, and an error response echoing `Last-Modified` could be
+  heuristic-cached for far longer than the operator-configured negative
+  TTL. If you relied on the old shadowing, remove the negative-caching
+  entry for the affected statuses. Statuses the policy does not cover
+  keep the pre-existing resolution unchanged: heuristic freshness
+  (Last-Modified) still outranks `ttl_default`.
+- **Refresh exclusion is policy-driven.** Objects with an error status
+  covered by the negative-caching policy are never proactively
+  refreshed, regardless of how they were cached. Statuses outside the
+  policy (including all 2xx/3xx) refresh normally.
+- docs: condense documentation without losing knowledge — fixed stale
+  HTTP-stack facts in `README.md` and `docs/architecture.md`, removed
+  `full` cluster-mode content (removed in ADR-0025) from the
+  cluster-modes runbook, deduplicated the runbook index, replaced the
+  duplicated ADR-0016 draft in the refresh-before-expiry plan with a
+  pointer, condensed the refresh-prioritization revision history, and
+  repaired a dangling plan reference in ADR-0023.
+- docs: remove completed one-time migration plans with no inbound
+  references (`transfer-to-bouine-cache-org`,
+  `cluster-local-cache-mode`), resolve duplicate ADR numbers by
+  reassigning changelog-automation to ADR-0047, the kubeconform hook to
+  ADR-0048, and PurgeEvent.VaryKey to ADR-0049, and complete the ADR
+  index in `docs/decisions/README.md` (including marking the removed
+  0002/0003 records).
+
+## [0.5.21] - 2026-09-17
+
+### Changed
+- **Unified RFC 9111 evaluation (issue #589)** — the three hand-maintained
+  copies of the cache decision state machine (`Evaluate` on the header.Map
+  path, `evaluateFast` on the fasthttp Peek path, `evaluateFromRaw` on the
+  H1 fast path) and the three Vary variant-key computations (`VariantKey`,
+  `VariantKeyFast`, `variantKeyFromRaw`) were collapsed into one shared
+  `evaluate` core and one generic `variantKeyCore`. The H1 fast path gains
+  the stale-if-error, validator-aware no-cache, and heuristic-freshness
+  branches its mirror had drifted to lack; its variant-key overflow now
+  falls back to the allocation path instead of silently returning the
+  primary key (which could select the wrong variant).
+### Removed
+- **Dead scaffolding from completed ADR migrations (issue #593)** —
+  zero-caller leftovers of ADR-0015/0034/0036 removed: the `server`
+  package's fast-path type aliases, the `reportFastPathError` no-op stub
+  and its `errCh` plumbing, the never-implemented
+  `api.FastPathHandlerCtx` interface, the `NewPeerFetcher` /
+  `NewPeerFetcherWithLogger` convenience constructors (use
+  `NewPeerFetcherWithConfig`), the pre-ADR-0015 `Bouine-Issuer` /
+  `Bouine-Seq` / `Bouine-Issued-At` / `Bouine-Method` header constants,
+  `header.Map.SetValues`, and the `mergeHeaderValues` wrapper (callers now
+  use `header.Map.GetAll` directly). `InternKeyCanonical`/`InternValue`
+  were unexported to `internKeyCanonical`/`internValue` (used only inside
+  `pkg/header`).
+- **`experimental.fasthttp_migration` config flag** — the ADR-0034
+  migration is complete and the flag gated nothing; it is ignored if
+  still present in existing configs.
+
+### Added
+- **Regex path rewriting (`request.path_rewrite`)** — a per-route regex
+  rewrite applied to the origin-bound request path, the nginx
+  `rewrite ... break` / Varnish `regsub` equivalent. `match` (Go RE2 —
+  linear time, no ReDoS) and `replace` (`$1` index and `$name` capture
+  references, `${1}x` braced disambiguation) are compiled once at config
+  load and applied exactly once on every origin-bound fetch: miss,
+  bypass, invalidating methods (POST/PUT/DELETE), foreground
+  revalidation, SWR background revalidation, refresh-before-expiry, and
+  stream fetches. Hardening, each pinned by tests: the query string is
+  split off before matching and re-appended unchanged (the pattern can
+  never swallow `?signature=...`), only the first match is replaced
+  (nginx semantics), a relative result is discarded (the origin request
+  line is never corrupted), output is capped at 16 KiB (blocking
+  `$1$1$1` amplification), pattern and template are capped at 512 B,
+  raw control bytes and raw request-target bytes (space, `?`, `#`) are
+  rejected in the template, and every `$reference` in the template must
+  resolve against the pattern's capture groups at config load — Go's
+  Expand would otherwise silently expand an unknown reference to the
+  empty string (the `$1x` typo is a lookup of group "1x"; a padded
+  index like `$01` is a name lookup, not group 1). The `${VAR}` config
+  interpolation only applies to env-var-shaped names, so `${1}x` loads
+  exactly as written. Mutually exclusive with `request.strip_prefix`
+  (validation rejects both). The cache key, ban matching, purges, and
+  all client-facing surfaces keep the original public path, so
+  invalidation addresses the URLs clients request. The hit path is
+  untouched: zero allocs/op gates hold, and non-matching URIs pass
+  through at 4 ns / 0 allocs.
+- `cache.key.include_headers` (issue #632) — a per-route allow-list of
+  request headers that participate in the variant key exactly as if the
+  origin had listed them in `Vary`: the include list is unioned with the
+  response's `Vary` at object-build time (never a replacement), so the
+  hit path, the H1 fast path, and every peer variant gate work
+  unchanged. A request header absent from the request hashes as an
+  empty value (one variant), matching RFC 9111 Vary semantics. Use it
+  when the origin varies by a header (e.g. `Accept-Language`) but does
+  not send `Vary`. Validation (trimmed entries, compared as stored)
+  rejects `*` (padded or not), whitespace-only entries, non-token
+  entries (commas, spaces — RFC 9110 §5.1), case-insensitive
+  duplicates, entries also present in `exclude_headers`, and lists
+  longer than 16 entries. Routes without
+  an include list keep the zero-allocation passthrough, so miss-path
+  alloc budgets are unchanged (ADR-0046). The flagship config example
+  in `docs/architecture.md` now parses under the strict decoder — a
+  regression test extracts and validates it on every run. 304
+  revalidation recomputes `VaryKey` from the merged union so the
+  stored `VaryValue`/`VaryKey` pair can never skew across a Vary
+  change, and a `Vary: *` 304 blanks `VaryKey` (fail-safe: failed
+  hits, never wrong bodies).
+
+### Fixed
+- `request.strip_prefix` on cache-enabled static routes was applied
+  twice on every origin fetch: the strip/rewrite wrappers were wired
+  into the upstream handler chain that the cache handler invokes, on
+  top of the cache handler's own origin-bound URI rewriting. A public
+  path carrying the prefix twice (`/api/api/f`) was stripped down to
+  `/f` instead of `/api/f`. The upstream handed to the cache handler is
+  now the bare static handler; the cache handler's origin-bound URI
+  rewriting is the single application point, and the in-process bypass
+  fallback applies it in place. The same restructure keeps
+  `request.path_rewrite` single-application on cached static routes
+  (non-idempotent patterns were silently applied twice).
+- `${VAR}` environment-variable interpolation in config files now
+  applies only to env-var-shaped names (a letter or underscore, then
+  letters, digits, or underscores). Braced runs that are not plausible
+  environment variable names — digit-leading sequences such as `${1}`
+  (a path_rewrite capture-group reference) — were silently replaced
+  with the value of an env var that cannot exist, usually the empty
+  string. They now survive the loader verbatim.
+- H1 fast-path hits are attributed to the route's `upstream_pool`
+  (issue #696). The fast path was built from the bare store with no
+  route knowledge, so every fast-path hit — local and, with
+  `experimental.h1_fast_peer_path`, peer-fetched — was recorded with
+  `upstream_pool="_default"`; enabling `h1_fast_path` fleet-wide made
+  per-pool dashboard series vanish wholesale (a prod incident read as
+  "peer fetch stopped working" while the service was healthy). The
+  fast path is now built per route from that route's cache handler and
+  selected by a router-backed wrapper (`RoutedFastPath`), so hits
+  carry the route's configured pool and run under the route's
+  `cache.key` policy (fewer `exclude_headers`/`include_headers` Vary
+  fall-throughs). Three incidental fixes land with it: per-route
+  `onStale` wires SWR through the route's own upstream (the old
+  store-level wiring used the first refresh-enabled handler for every
+  route, and nothing when no route configured `refresh_before_expiry`);
+  the peer branch is no longer inherited by handler construction (it
+  is applied explicitly behind `h1_fast_peer_path`, never under the
+  reactor); and requests matching no route or a non-cached route fall
+  through to the slow path instead of being served store-level ghost
+  hits. Route resolution adds 0 allocs/op and ~22 ns per hit
+  (`BenchmarkGate_RoutedFastPath_Hit`).
+- The cluster's peer PipelineClient diagnostics no longer bypass the
+  structured log pipeline. Every "error in PipelineClient(...)" line
+  from fasthttp's pipeline worker — dial refusals, EOFs, broken pipes,
+  timeouts — went to fasthttp's raw stderr logger and landed in log
+  shippers as unstructured info-level lines (a production log export
+  during a single
+  rolling-restart window: 59 entries, 41 of them bouine's own retired-address
+  parking). The per-peer PipelineClient is now built with the
+  client-side FastHTTPLogger adapter: records are tagged
+  `component=cluster` and classified by transport error — routine
+  teardown (EOF, broken pipe) and retired-address drain log at Debug,
+  degraded peers (connection refused, timeouts, anything unrecognized)
+  log at Warn. Peer fetch/put on the hit path is unchanged (0 allocs/op
+  bench-gate maintained); the adapter only runs on the worker's error
+  path.
+
+## [0.5.20] - 2026-09-16
+
+### Added
+- The H1 fast path can now serve peer-fetched objects without falling
+  through to the slow path (issue #636, experimental). On a strong-cluster
+  node, a plain-key miss on the fast path asks the key's ring owner first
+  and serves the peer's object directly through `FastPathHandler` with
+  `X-Cache-Source: peer` — removing one full parser/handler round-trip
+  per peer hit — without storing (no ring placement to enforce) and
+  without allocating. The transient fields the wire codec drops
+  (CacheControl flags, HasDate) are re-derived so freshness
+  evaluation matches local hits, and on any peer error the fast path
+  falls through to the slow path's shed/origin machinery unchanged.
+  The branch requires the new `experimental.h1_fast_peer_path` flag
+  (default off, rejected at load time without `h1_fast_path`), is
+  not wired under the epoll reactor (TryHit must never block on
+  network I/O), and logs an error at startup when requested but
+  unavailable (cluster not in strong mode) instead of silently
+  no-oping. Two gating benchmarks pin the budgets:
+  `FastPath_PeerHit` at 0 allocs/op and `FastPath_PeerHitVary`
+  (the RFC 9111 §4.1 variant gate) at 7 allocs/op. An end-to-end
+  integration test (3-node ring, fixed-Host key) proves non-owner
+  requests are served with zero origin traffic. On a definitive
+  owner miss the fast path flags the request so the slow path skips
+  its identical second owner lookup + peer RPC and goes straight to
+  origin; errors and variant-gate rejections keep the slow-path
+  retry, and policied routes keep their retry too since the slow
+  path's gate computes a different VaryKey.
+- `bouine_peer_fetch_shed_total` — peer fetch/put RPCs no longer
+  park indefinitely when the concurrency semaphores are
+  saturated (see the saturation fix below): a shed is counted, and
+  the queue wait that led to it is observed in
+  `peer_fetch_queue_wait_seconds` (previously only successful
+  acquisitions landed in the histogram, so a fully-shedding queue
+  disappeared from the metrics).
+- `bouine_rewarm_fill_total` — background refills scheduled after a
+  shed foreground miss (see the saturation fix below) are counted
+  next to `bouine_fetch_shed_total`.
+
+### Fixed
+- A 3-node miss-storm stress run (surrogate-key purge of 80% of a
+  360k keyspace at T+15m, 6k req/s, fast path OFF) exposed two
+  compounding saturation behaviors and one operational trap. All
+  three are closed; rationale and alternatives in ADR-0045
+  (bounded-peer-shed-and-rewarm):
+  1. Peer-fetch/put semaphore waits are now bounded. A caller with
+     an undelined context (the fast path passes
+     context.Background to stay zero-alloc) previously parked
+     forever when all slots were busy — every keep-alive
+     connection goroutine parked in the queue (4,386 parked
+     goroutines at end of run vs 225 on the slow-path arm). Slot
+     acquisition now uses the same two-stage shape the origin
+     fetch path got in issue #562: non-blocking send, then a
+     100ms timer, then shed with `ErrPeerFetchShed`. Clients keep
+     their 503/stale protection; the fast path already falls
+     through on any peer error.
+  2. A shed miss no longer loses the refill. After a purge ban,
+     every shed foreground miss fetched and stored nothing, so
+     the miss storm pinned the hit ratio at the shed equilibrium
+     (~7% for the rest of the run, 461k sheds) — each shed was a
+     lost refill and re-warm never converged. A shed miss now
+     schedules a bounded background refill on a dedicated pool
+     (32 per handler, separate from the foreground fetchSem it
+     was just shed from), singleflight-collapsed with foreground
+     fetches and drained on Close. Clients keep their
+     503/stale protection; the store re-warms anyway.
+  3. The lazy-ban list TTL is now configurable via
+     `cluster.ban_ttl` (default 24h, validated >= 1s when set).
+     The TTL was a hard 24h constant, so a typo in a
+     surrogate-key ban poisoned the hit ratio for a full day.
+     RFC 9111 §4.4 exempts post-ban copies and the reaper reclaims
+     pre-ban ones, so external invalidation traffic is safe at
+     minutes scale.
+- The fast-path owner-miss hint is only honored on routes with no
+  KeyPolicy. The fast path builds keys without the route's
+  KeyPolicy (it is constructed per-engine from the shared store),
+  so on a policied route its miss was computed under a different
+  key and proved nothing about the slow path's key — honoring it
+  silently converted peer hits into origin fetches on routes with
+  query-param stripping. A variant-gate rejection now also flags
+  the request so a nil-policy slow path skips the deterministically
+  rejected duplicate peer RPC and goes straight to origin;
+  reqHeaderMapFromRaw right-trims OWS so both parsers provably
+  agree (parity test gained a trailing-OWS case).
+- The Helm chart again accepts an empty `config.listen.https` (and any
+  empty listen address). The 0.5.19 schema patterns and the
+  `bouine.listenPort` helper turned the app's documented "empty string
+  disables the plane" form — the shape used by `make test-k8s-setup` and
+  by every deployment that terminates TLS at an upstream proxy/LB — into
+  an install-time error, leaving rendered manifests failing with
+  "Does not match pattern" in CD pipelines. An empty address now disables
+  the derived wiring with it: the StatefulSet containerPort, the
+  data-plane Service port (its named targetPort would otherwise dangle),
+  the NetworkPolicy rule, and the NOTES port listing. Non-empty values
+  are validated exactly as before, and the kubeconform gate now renders
+  the https-disabled variant on every chart change so this cannot ship
+  silently again. Downstream consumers pinned to chart 0.5.18 for this
+  reason can unpin on the next chart release.
+- Non-200 access-log entries are emitted at Info instead of Warn.
+  Warn made every error response look like a system degradation to
+  log-based alerting. Error entries stay unsampled in the
+  middleware and now follow the sampled logger's 1-in-N Info
+  sampling like all access-log entries.
+- Flaky/failing tests: the shared fasthttptest helper bounds Close
+  with a 2s deadline so a stuck fasthttp graceful-shutdown drain
+  (a never-idle peer-fetch pipeline client connection) falls
+  through to the listener close instead of hanging the whole
+  internal/cluster package (a CI run hit the 2-minute package
+  timeout); TestDoHedged_NoGoroutineLeak now runs sequentially so
+  the process-wide goroutine baseline is not inflated by parallel
+  tests spinning up real fasthttp servers and clients.
+
+## [0.5.19] - 2026-09-16
+
+### Added
+- Peer-fetch variant-assertion rejections are now counted, not just
+  logged. PR #630 added the RFC 9111 §4.1 variant-assertion gate on
+  both peer-fetch sides, but operators could not distinguish a rare
+  foreign variant from a broken cluster.
+  `bouine_peer_fetch_variant_mismatch_total{side="server|consumer"}`
+  counts rejections in the peer-fetch handler (server side) and in
+  the cache handler (consumer side, wired via an OnPeerVariantMismatch
+  callback so the cache package keeps no cluster dependency). The
+  metric carries only the side label (§9 cardinality budget, pinned
+  by a unit test); a sustained non-zero rate indicates a mixed-version
+  fleet or a peer serving wrong-variant content. Runbook alert guidance
+  added.
+
+### Fixed
+- The origin client now uses a 64 KiB read buffer, matching the
+  data-plane and admin servers, instead of fasthttp's 4 KiB default.
+  Origin responses whose header block exceeds 4 KiB — an SSR
+  route's `/compare/` responses carry a `Cache-Tag` header with one
+  product UUID per variant (~4-5 KiB on dense comparisons) — failed
+  response header parse with `ErrSmallBuffer` on every attempt: the
+  idempotent retry replayed the same deterministic parse error five
+  times and the request surfaced as a 502 (~1 rps in one production
+  environment, exclusively on that route's `/compare/*` paths,
+  observed from the
+  routing rollout on 2026-09-16).
+- Cached static routes (cache.enabled: true) no longer return 502
+  "no fast client configured" exactly when the cache cannot answer.
+  These routes wire the staticfile handler as Upstream and no
+  FastClient, so every fetch path that only consulted the fast client
+  failed on cold MISS, no-cache/no-store BYPASS, revalidation, POST
+  invalidation, and SSE. The miss fetch, the bypass paths, and SSE now
+  fall back to the Upstream handler, replaying the request into a
+  scratch fasthttp RequestCtx bounded by fetch_timeout; the scratch
+  response is converted to the shared fetchResult shape with an
+  exact-size body copy so singleflight followers and storage never
+  alias the scratch buffer.
+- Four config surfaces that were parsed, validated, and documented
+  while having zero effect on behavior now work — or fail loudly
+  instead of silently. request/response header_set + header_remove
+  rewrite headers on every origin fetch and on every emitted response
+  (hit, stale, revalidated, miss, bypass, SSE), covering proxied and
+  static routes; health.passive.eject_for restores passively ejected
+  targets once the window elapses, with a restore counter label and
+  automatic re-ejection for still-broken targets; connect.hedge_timeout
+  fires a duplicate idempotent (non-SSE) request after the delay and
+  returns the first response, replacing the dead net/http-era
+  HedgeClient (deleted with it). In the chart, containerPorts, the
+  NetworkPolicy's post-DNAT ports, and the listen-address schema
+  patterns now derive from config.listen, so an override keeps
+  routing, probes, and policy coherent instead of blackholing traffic.
+- The documented header-rewrite contract ("every response this
+  handler emits") is now honored on the failure paths: 502s from
+  unreachable origins, no-fast-client bypasses, shed 503s, and 304
+  conditional responses previously skipped
+  response.header_set/header_remove. Every emit site routes through
+  the same rewrite path, pinned by a test on the 502 case; the
+  origin-ejection runbook documents the new eject_for restore path
+  and the origin_restores_total source label.
+- Two latent data races reported by -race are closed, each with a
+  regression test verified to fail against the pre-fix code.
+  Cluster.metrics was assigned by SetMetrics after memberlist.Create
+  had already started the gossip dispatch, reconcile, and logging
+  goroutines that read it; the field is now an atomic.Pointer[Metrics]
+  (the same pattern the package's slogAdapter already used). And
+  hot.Get's slow path incremented the stored object's Hits under
+  the shard write lock while the warm-sync cycle read the same pointer
+  with no lock held; the increment is now an atomic add and the
+  encoder reads atomically — the field stays a plain uint64 so JSON
+  shape and struct copies are unchanged, and the hit path still
+  pays zero allocs. The clone helpers (CloneForReturn,
+  CloneForRefresh) read Hits atomically too: both receive store.Get
+  pointers, and the revalidation path raced the same increment from
+  the other side.
+- The peer-fetch queue-wait histogram records the abandoned wait
+  when a queued caller cancels — exactly the case the 150ms budget
+  produces. The wait was previously observed only after the semaphore
+  slot was acquired, so the saturation signal the metric exists to
+  surface (a production postmortem on 2026-09-12) was invisible whenever the queued
+  caller gave up, and TestPeerFetcher_QueueWaitMeasuredWhenSaturated
+  flaked when the observe-vs-cancel race lost.
+- PurgeEvent.VaryKey is documented as metadata. The field's comment
+  claimed a non-empty value scoped the purge to one variant, but every
+  receive path (gossip, HTTP peer-purge, batch endpoints) purges the
+  primary key plus all locally tracked variants, and a scoped delete
+  built from the field would silently no-op — the assertion hex the
+  field carries cannot be composed into a variant store key, which
+  would leave stale variant bodies serving. Receivers stay RFC 9111
+  §4.2.4-conformant (resource-wide invalidation); the decision is
+  recorded in ADR-0045, and new unit and integration tests pin the
+  purge-all receive path.
+
+### Removed
+- cache.key.canonicalize_path, whose listener-level wiring never
+  landed: configs setting the knob now fail at parse time with the
+  strict loader instead of being silently accepted and ignored.
+
+### Security
+- The upstream-replay scratch requests no longer trip CodeQL's
+  go/request-forgery model. The three hand-rolled replay sites
+  (SetRequestURIBytes on user-derived request URIs) now replay via
+  fasthttp's Request.Copy and derive the replayed URI from the parsed
+  URI object — the same accessor shape as every other origin-bound
+  sink in the package, with the strip-prefix rewrite documented at the
+  sink. No behavior change: URI, host, headers, body, and conditional
+  headers replay identically, and doFetchBg drops a duplicate
+  request-build its caller already performed.
+
+## [0.5.18] - 2026-09-14
+
+### Added
+- All duration metrics now expose the native sparse-bucket histogram
+  representation alongside their classic `_bucket` series. Six
+  remaining classic-only histograms (cloudflare_purge, startup,
+  peer_fetch, warm_compaction, wal_write, origin_request_duration)
+  join the request_duration_seconds histogram that already had it.
+  Native series keep bucket cardinality bounded while resolving
+  latencies across the full range — no more 5-second-wide buckets
+  hiding multi-second stalls on peer-served fetches. None of the
+  converted histograms are on the cache-hit path, so the zero-alloc
+  hit-path budget is unchanged (pinned by the existing
+  BenchmarkGate_HistogramObserve_Native benchmarks at 0 allocs/op);
+  per-package tests pin the native schema on each metric, and the
+  runbook documents how to query the series in PromQL.
+
+### Fixed
+- After a rolling restart, a pod's cached fasthttp PipelineClient
+  for a peer's pre-restart address re-dialed the dead IP every ~3s
+  for the life of the process (observed in production: ~60
+  "error in PipelineClient" log lines per minute toward addresses
+  dead since the restart). The v0.5.17 breaker could not stop it: it
+  gates new Fetch/Put submissions, and none reach the healed ring.
+  The Cluster now retires an address as soon as it stops being
+  current — pruned from the ring, or the peer restarted at a new
+  address: the cached pipeline client is evicted and the stale
+  worker's dial parks until the fetcher closes. One parked goroutine
+  per retired address replaces the perpetual dial-restart loop, and
+  a later request for a returned address transparently gets a fresh
+  client.
+- Retirement is now lifted only where the address is provably
+  current again. A Fetch holding a stale owner PeerInfo captured
+  before a ring change could race RetireAddress and re-arm the
+  dial-restart loop — resurrecting the zombie the retire mechanism
+  exists to park. getPipelineClient no longer clears the retired
+  mark; the Cluster lifts it from addPeer via a new PeerFetcher
+  UnretireAddress callback (registered alongside SetOnPeerRetired),
+  so a stale-owner fetch fails fast and falls back to origin while
+  the dead address stays dead.
+- Peer fetches were submitted with the caller's context — a
+  *fasthttp.RequestCtx carrying no deadline — so hung RPCs fell
+  back to the transport's 60s DoTimeout default, and only the
+  pipeline client's 500ms ReadTimeout eventually killed them. On
+  one production fleet this pinned fetch-semaphore slots behind RPCs slow to fail
+  against dead addresses and surfaced as 1-2.5s peer-served "HIT"
+  latencies (that fleet logged ~3600 dial i/o timeouts/hour to pod IPs
+  dead since the previous day's restart, each pinning a fetch slot;
+  zero successful fetches above 500ms). All peer-fetch and peer-put
+  RPCs are now bounded by the 500ms budget regardless of the
+  caller's context — a shorter caller deadline is honoured, anything
+  looser is capped — and the peer dial timeout drops from 2s to
+  200ms: healthy intra-cluster dials complete in single-digit
+  milliseconds, so the old budget only ever fired against dead
+  addresses.
+- The fetch RPC duration histogram started after the fetch-semaphore,
+  so fetches queued behind slow-to-fail RPCs were invisible — the
+  blind spot that let the peer-stall above go undiagnosed for a day
+  (peer-served "HITs" sat in the 1-2.5s request-duration bucket while
+  every peer-fetch metric looked healthy). A new
+  bouine_peer_fetch_queue_wait_seconds histogram observes the
+  semaphore wait, with a runbook note on reading it against the RPC
+  histogram.
+- The eager ban-scan coalescing window is now anchored at scan
+  completion. It was previously recorded at the registration
+  timestamp captured before the scan, so the scan's own duration ate
+  the window — under CPU contention a slow first scan could shrink
+  the window to zero and the next registration paid a full eager
+  pass. Anchoring at completion keeps the window whole for slow
+  scans in production (large stores under load); exposed by the new
+  concurrent-registration hammer test under -race.
+
+## [0.5.17] - 2026-09-11
+
+### Changed
+- Every ban registration previously rebuilt the full compiled snapshot:
+  a fresh 1024-entry list copy plus the three host/path/surrogate maps —
+  about 624 KB of garbage per registration once the list sits at
+  banListCap, which is the production steady state (an external
+  invalidation service registers 100+ surrogate-key bans/s over a list
+  saturated at the cap;
+  bursts reach 130/s for minutes). With GOGC=200 the heap fills to 3x
+  live before GC, so these rebuild bursts showed up as periodic
+  working-set spikes to 13-16 GB on every pod of the affected fleet
+  during ban storms
+  (measured: heap_alloc 6.5 → 13.4 GB in ~4 min at the 08:05 UTC
+  storm, heap objects flat — large transient buffers, not object
+  growth). Registration now only marks the snapshot dirty and mutates
+  the list in place — re-issued patterns refresh the existing entry,
+  expired bans drop, and the cap eviction shifts in place during one
+  scan — and the compile happens on the next snapshot() read, so a
+  batch of N registrations costs one O(list) compile instead of N.
+  Enforcement is unchanged: the first lookup after registration reads
+  a fresh snapshot and sees the new ban (no staleness window).
+  Measured (darwin/arm64, list saturated at banListCap=1024): register
+  (refresh) 95 µs / 624 KB / 32 allocs → 6.8 µs / 128 B / 1 alloc;
+  register (evict+append) 88 µs / 624 KB → 6.9 µs / 128 B. The hit
+  path is untouched: BenchmarkGate_HotStore_Get_Hit_Bans stays at
+  0 allocs/op, and new bench gates pin the batching itself.
+
+### Fixed
+- Since the v0.5.16 rolling restart, a pod could keep routing
+  peer-fetch RPCs to a peer address that died with the restart: every
+  fetch paid the full RPC timeout while fasthttp's pipeline worker
+  hot-restarted the dial (2s dial timeout + 1s throttle), logging
+  "error in PipelineClient" roughly every 3 seconds for 12+ hours.
+  Two complementary fixes: a background reconcile pass (default every
+  30s, `ReconcileInterval`) now re-derives the peer set from
+  memberlist's live member view — entries absent from the live set are
+  pruned even when no push/pull merge arrives, and live members whose
+  recorded address no longer matches their memberlist metadata are
+  refreshed in place — healing both a missed NotifyLeave and a missed
+  NotifyUpdate after a peer restart; and a per-address failure breaker
+  in the peer fetcher blacklists an address after three consecutive
+  transport failures for a 30s cooldown, so Fetch and Put return
+  immediately and the handler falls back to origin instead of
+  stalling on a dead address. The cooldown expiry allows one re-probe
+  and a retained failure count re-trips the breaker; a successful
+  round trip (including a 404 miss) resets the count, and canceled
+  caller contexts never count as peer failures. A new
+  `bouine_peer_addr_blacklisted` gauge surfaces tripped addresses.
+
+## [0.5.16] - 2026-09-10
+
+### Changed
+- Pure surrogate-key bans previously walked every shard under a write
+  lock to find the few tagged entries — ~550 µs per ban at 50K entries,
+  measured — work entirely redundant with the O(1) lazy check (the ban
+  snapshot's surrogates set, landed in 0.5.15) that evicts matching
+  entries on lookup and with the TTL reaper that collects entries never
+  accessed again. Surrogate-only bans now skip the eager scan entirely:
+  enforcement is identical (a banned entry is never served) and memory
+  reclaim moves from invalidation time to the reaper's pass (bounded by
+  entry TTL + SWR + SIE). Host/path bans and multi-condition bans
+  carrying a surrogate key plus patterns keep the coalesced scan.
+  `Ban` now returns 0 for surrogate-only bans instead of the
+  eager-match count. Measured (darwin/arm64, 50K entries): surrogate
+  ban ~550 µs → ~300 ns (~1800x faster), 8 allocs; hit path, put path,
+  and alloc budgets unchanged. This targets the production invalidation
+  workload — 100% surrogate-key bans, ~110K distinct bans/day bursting
+  to ~18/s during storms over ~500K hot entries — where each scan
+  held shard write locks for an O(entries) pass, the suspected driver
+  of storm-window HIT p99 spikes (245-323 ms vs 130 ms average).
+
+## [0.5.15] - 2026-09-10
+
+### Changed
+- With many active bans, every cache hit previously walked the lazy
+  ban list and evaluated each ban predicate against the object's host,
+  path, and surrogate keys — 3.8 µs at 256 bans and 10.6 µs at the
+  1024-entry cap, measured, taxing hot and warm hits alike for the
+  full 24 h banTTL even after traffic stopped. Ban registration now
+  compiles the list into an immutable snapshot: literal hosts, paths,
+  and surrogate keys become set lookups carrying the per-ban exemption
+  time (RFC 9111 §4.4), anchored prefixes (^api\., ^/blog/) become
+  HasPrefix checks with the full predicate applied only on a prefix
+  hit, and genuinely regex or multi-condition bans keep the linear
+  predicate walk. The rejection is sound: a miss in every set rules
+  out all literal bans, and multi-condition bans never join the sets
+  because a host hit alone would be a false positive. Measured:
+  hit at 256 bans 3.8 µs → 21 ns (-99.45%), hit at 1024 bans
+  10.6 µs → 22 ns (-99.79%), flat in ban count; opaque regex bans
+  unchanged by design; zero allocations on all paths. At 30k RPS with
+  a full ban list this removes ~0.3 core of pure ban-walk CPU.
+- The TTL reaper now prunes expired lazy bans each tick (30 s default)
+  and rebuilds the ban snapshot, so a quiet period after a ban storm
+  stops taxing hits within one reaper interval instead of the full
+  24 h banTTL.
+
+### Fixed
+- Admin-API invalidations (purge/ban/refresh) are recorded in the
+  ops history ring so operators can audit recent invalidation
+  activity from the dashboard.
+- The dashboard no longer claims h2c or HTTP/3 support on the data
+  plane (HTTP/1.1 only, ADR-0034).
+- Ban feedback on the dashboard no longer implies a coalesced scan
+  was a no-op.
+- The insights page polls every 15 seconds and surfaces origin
+  fetch shedding as a high-severity insight.
+- Avg peer-fetch latency is wired and cumulative counters are
+  relabeled correctly on the cluster page.
+- Cloudflare status fields are wired into the dashboard CF card.
+- The routes TTL column shows ttl_override, the config viewer shows
+  recently added knobs, and the cluster page shows the effective hop
+  limit default.
+- The 24H range tab that displayed only 6h of data was dropped.
+
+## [0.5.14] - 2026-09-09
+
+### Changed
+- Invalidation storms no longer fan out one HTTP POST per event per
+  peer. Purge and refresh events now coalesce into count-prefixed
+  batch frames (new msgTypes 4/5) flushed by a bounded batcher on 256
+  events, a 10 ms interval, or Close. Events arriving on an idle
+  queue still flush synchronously, preserving the purge API's
+  fan-out-before-return guarantee. Receivers dedup by per-issuer
+  monotonic Seq, collapsing the double delivery and post-partition
+  replays. A 1000-key purge burst in a 3-peer cluster now produces a
+  handful of batched POSTs instead of 3000, with gossip frames
+  reduced ~256x per batch; apply-side work is halved under storms.
+  Ban events stay unbatched (rare, immediacy dominates). See ADR-0044
+  for the latency trade-offs and fallback semantics.
+- The `/v1/purge/batch` endpoint no longer purges each URL
+  independently: one store delete plus one full cluster broadcast and
+  one Cloudflare propagation per URL was replaced by a single local
+  purge pass, one batched fan-out via the broadcaster's batch frame
+  (ADR-0044), and per-URL Cloudflare propagation for successfully
+  purged entries only. A 1000-URL batch previously fired 1000
+  broadcasts (3000 peer POSTs in a 3-node cluster); now it produces a
+  single batched fan-out.
+- Ban scans now coalesce across concurrent callers and dedup
+  identical bans, reducing redundant cache walks and duplicate ban
+  entries when multiple invalidations target overlapping key ranges
+  simultaneously.
+
+## [0.5.13] - 2026-09-09
+
+### Fixed
+- Concurrent cache-miss callers could crash a pod with "index out of
+  range [1] with length 1": collapsed fetches share one fetch result
+  across all singleflight callers, but that result kept a live pointer
+  into a pooled fasthttp response that every caller released. Multiple
+  releases of the same pooled response corrupted fasthttp's response
+  pool, so two requests could hold the same response at once, one
+  parsing origin headers into it while the other iterated its headers.
+  The fetch now detaches headers into an owned map and releases the
+  pooled response exactly once; each singleflight caller also gets a
+  private header-map clone, closing a related latent race where
+  concurrent callers mutated one shared header map.
+- An HPA scale-down could leave a dead peer permanently stuck in the
+  consistent-hash ring: push/pull resurrected the node during the
+  convergence window, so every surviving peer ended up with the same
+  stale ring, whose digest matched and therefore skipped the pruning
+  path. The dead peer kept receiving peer-fetch RPCs (dial timeouts)
+  until a rolling restart broke digest symmetry. The prune now runs
+  unconditionally (only the add-missing-peers path is gated on the
+  digest comparison), and re-adding a known peer removes its existing
+  virtual nodes first, so resurrecting a peer no longer accumulates
+  duplicate ring entries across scale-up/down cycles.
+
+### Added
+- 2.5 s, 5 s, and 10 s tail buckets on the `request_duration_seconds`
+  and `peer_fetch_duration_seconds` Prometheus histograms (and the
+  matching in-process latency bounds): both previously capped at 1 s,
+  collapsing all slow misses and hung fetches into a single +Inf
+  bucket, making a 1.01 s miss indistinguishable from a 30 s miss via
+  PromQL. Series count per tuple grows 13 → 16 and stays well under
+  the cardinality budget.
+- The admin API now emits an OpenTelemetry server span for
+  invalidation calls (`POST /v1/ban`, `/v1/refresh`): the admin server
+  previously ran uninstrumented, so a distributed trace initiated by
+  an external invalidation service ended at the caller's client span. The admin handler
+  chain joins the caller's trace via the propagated W3C traceparent
+  (`bouine.admin` span), and a test-only tracing helper lets other
+  packages' tests assert on exported spans (PR #653, 06eb7be).
+
+### Dependencies
+- fasthttp v1.73.0 → v1.74.0 (replaces the indirect Brotli dependency
+  with a pure-Go RFC 7932 implementation), golang.org/x/sync →
+  v0.23.0, golang.org/x/sys → v0.48.0, and the genproto api/rpc pins
+  to their 2026-09-08 revisions. All gate benchmarks stay within
+  their allocs/op budgets.
+
+## [0.5.12] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve the Vary resolver body as a peer HIT: the
+  follow-up to the cross-variant fix (#630) left a second hole in strong
+  cluster mode. A non-owner that misses locally peer-fetches the key
+  owner for the PRIMARY key with a blank variant assertion (it cannot
+  know the Vary list yet); the owner's only stored entry is the
+  primary-key Vary resolver, whose body belongs to whichever variant
+  filled first. Both of the prior gates skip in this flow: the
+  requester's assertion is blank and the storage codec never serialized
+  `VaryValue` (always empty over the wire), so `servePeerHit`'s
+  recompute could not run. Observed in a staging environment on a
+  per-locale `/content/` route: an `it-IT` request filled from origin, then an
+  `fr-FR` request on another pod got `Content-Language: it-IT` as a
+  peer HIT. Two complementary fixes: the owner never serves a Vary
+  resolver body from a peer fetch (blank `VaryKey`, non-empty
+  `VaryValue` is answered with a miss), and the storage codec now
+  serializes `VaryValue` (version 4) so the cross-variant recompute
+  gate works on peer-delivered objects; v3 blobs decode unchanged
+  (warm-tier entries survive the rolling upgrade). New 3-node
+  integration test sweeps fill-node × request-node crossings and fails
+  on main (PR #641, fa0c1e7).
+
+## [0.5.11] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve another variant's cached body as a HIT: in
+  strong cluster mode a non-owner that misses locally peer-fetches the
+  key's owner, which could return the primary-key Vary resolver (the
+  first fill's body) for a request selecting a different variant — the
+  handler re-checked only freshness, never the Vary dimension. Observed
+  in production on a per-locale route, where per-market content differs
+  only in request headers. Two complementary gates close the hole: the
+  requesting node stamps its variant assertion on the peer-fetch RPC
+  (the previously ignored `VaryKey` field) and, on receipt, recomputes
+  the variant dimension for the actual request, rejecting a foreign
+  body as a miss (origin fallback); the peer honors the assertion,
+  missing with 404 when the only stored entry under the key is another
+  variant's or the resolver's, and the resolver entry is stored with a
+  blank `VaryKey` so protocol-strict peers classify it correctly.
+  Regression tests replay the cross-market incident end to end and pin
+  the protocol semantics in both directions; miss-path alloc budget
+  unchanged (PR #630, e98b7da).
+
+### Added
+- `cluster.peer_fetch_concurrency` (default 4, capped at 128): bounds
+  the peer-fetch/peer-put semaphore, previously hardcoded to 4. In
+  strong-mode clusters most cache hits are peer hits (non-owner pods
+  fetch from the key owner), so the semaphore sits on the hot path and
+  its fixed value queued requests behind in-flight fetches, adding tail
+  latency under load; production could not raise it without a code
+  change. Config-loader validation rejects negative and >128 values;
+  the knob and its relationship to `peer_max_conns_per_host` are
+  documented in ADR-0039 (PR #627).
+- Per-route origin timeout: `routes[].cache.fetch_timeout` is now the
+  authoritative origin-wait bound and can exceed the pool-wide
+  `connect.response_header_timeout`. Previously the origin client baked
+  `response_header_timeout` into its `ReadTimeout`, and fasthttp
+  composes the effective read deadline as `min(per-request deadline,
+  client.ReadTimeout)` — silently capping every route at the pool knob
+  (default 30s), so a slow endpoint could never be given more time
+  without raising the wait for every other route on the pool. Routes
+  without an explicit `fetch_timeout` now inherit
+  `connect.response_header_timeout` (same effective default as
+  before); the pool knob is also validated to stay below the 5-minute
+  data-plane safety net, mirroring `fetch_timeout` (ADR-0043, PR #624).
+
+## [0.5.10] - 2026-09-08
+
+### Fixed
+- Vary variants were keyed on the first `Vary` field line only (fasthttp
+  `Map.Get`), so an origin sending `Vary: Accept-Encoding,Accept-Language`
+  plus `Vary: X-Region` produced a variant key that dropped `X-Region` —
+  a request differing only in that header was served the wrong market's
+  cached body. RFC 9110 §5.2 makes Vary a list-based field: multi-line
+  values are equivalent to one comma-joined value. The joined read (GetAll)
+  is now used everywhere a Vary value is observed (store keys, star
+  detection already joined, 304 recompute); `MergeHeaders304` replaces
+  `Vary` wholesale instead of writing per-line entries that corrupted
+  stored multi-line values. Miss-path alloc budget unchanged; regression
+  tests cover variant isolation and 304 merge (PR #628, ca4aec4).
+
+## [0.5.9] - 2026-09-08
+
+### Added
+- `listen.read_timeout` config option (default 30s): bounds how long
+  reading a single request's header and body may take on data-plane
+  connections. Previously hard-coded. It is the slowloris defense —
+  raise it for slow mobile clients or large uploads. Validated to stay
+  below the 5-minute data-plane safety-net WriteTimeout, and exposed in
+  the Helm chart values (`config.listen.read_timeout`).
+
 ## [0.5.8] - 2026-09-04
 
 ### Fixed
@@ -154,27 +1581,7 @@ the curated, human-readable summary.
   header time with `ErrStreamUnshareable` and each follower fetches
   its own response outside singleflight (ADR-0042).
 
-### Changed
-- **H1 reactor engagement under mixed traffic** (ADR-0042; requires
-  `experimental.h1_reactor`): the blocking parser now hands keep-alive
-  connections back to the reactor loop after serving each request
-  (return-to-reactor), so a miss no longer strands a connection on the
-  blocking path for its lifetime — cluster peer-fetch and origin-miss
-  traffic keeps cycling connections back to batch hit serving.
-- **Pipelined hits served inline by the reactor**: a cache hit followed
-  by pipelined bytes on the same connection is served inline and the
-  next buffered request is parsed immediately after the flush, instead
-  of forcing a handoff (batch-writing clients stay on the reactor).
-
 ### Added
-- **H1 reactor telemetry**: `bouine_h1_reactor_conns_registered_total`,
-  `bouine_h1_reactor_hits_total`,
-  `bouine_h1_reactor_handoffs_total{reason}` (closed set: miss,
-  disqualified, malformed, oversize, overflow, cap),
-  `bouine_h1_reactor_returns_total`, and
-  `bouine_h1_reactor_conns_dropped_total` make the reactor's actual
-  engagement observable without pprof (previously invisible — the gap
-  that hid the starved-reactor regression under mixed workloads).
 - Data-integrity regression net for the hot-store ownership bug class
   (bouine#611): a slow-client body-lifetime race on the standard
   fasthttp hit path (`ServeRequest` — the path that kept corrupting
@@ -1169,7 +2576,27 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.8...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.28...HEAD
+[0.5.28]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.28
+[0.5.27]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.27
+[0.5.26]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.26
+[0.5.25]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.25
+[0.5.24]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.24
+[0.5.23]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.23
+[0.5.22]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.22
+[0.5.21]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.21
+[0.5.20]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.20
+[0.5.19]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.19
+[0.5.18]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.18
+[0.5.17]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.17
+[0.5.16]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.16
+[0.5.15]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.15
+[0.5.14]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.14
+[0.5.13]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.13
+[0.5.12]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.12
+[0.5.11]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.11
+[0.5.10]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.10
+[0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9
 [0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8
 [0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6
 [0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5

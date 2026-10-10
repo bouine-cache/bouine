@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -57,6 +58,14 @@ func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engi
 	}
 }
 
+// defaultJoinTimeout bounds the cluster join retry budget when
+// cluster.join_timeout is unset; surfaced on the dashboard cluster page.
+const defaultJoinTimeout = 120 * time.Second
+
+// joinRetryInterval steps the cluster join retry loop; surfaced on the
+// dashboard cluster page.
+const joinRetryInterval = 2 * time.Second
+
 // runState bundles subsystem references created during engine startup.
 // Passed to startAdmin and buildDashboard instead of 10+ positional args.
 type runState struct {
@@ -68,6 +77,26 @@ type runState struct {
 	snapshotPath string
 	token        string
 	handlers     []*cache.Handler // all cache.Handler instances; refresh-enabled ones filtered via RefreshEnabled()
+
+	// fastPathHandlers holds one FastPathHandler per cache-enabled
+	// route (proxied and cached-static), built from that route's
+	// Handler so pool/policy attribution matches the slow path
+	// (issue #696). The engine wires SWR/peer closures onto them and
+	// exposes them to the listeners through the router's route table
+	// (buildRouter). nil entries never occur: routes without a cache
+	// handler register no fast path at all.
+	fastPathHandlers []*cache.FastPathHandler
+
+	// router is the data-plane router built by buildHandler/buildRouter;
+	// startListeners wraps it into the routed H1 fast path. nil when
+	// buildDataPlane has not run (tests that only exercise builders).
+	router *server.Router
+
+	// trafficClassify maps the request Host to a configured traffic
+	// class, shared by the router and the routed fast path. nil when
+	// no classes are configured — everything then carries
+	// "unclassified".
+	trafficClassify *server.TrafficClassifier
 
 	clusterNode    *cluster.Cluster
 	peerFetcher    *cluster.PeerFetcher
@@ -187,11 +216,13 @@ func (e *engine) run(ctx context.Context) error {
 	updateStartupMetrics(seq, rs.startupMetrics)
 
 	handler := e.buildDataPlane(rs)
+	rs.wireGossipInvalidator() // after buildDataPlane: the callbacks iterate rs.handlers, which buildRouter appends
 
 	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
 	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
+	e.startEjectReapers(g, rs.pools)                                 // eject_for window reapers (no-op pools without the knob)
 	e.startClusterJoin(g, rs)                                        // gossip join with retry against seed peers
 	e.registerShutdownSteps(g, rs)                                   // ordered drain: readiness, store flush, cluster leave
 
@@ -237,7 +268,6 @@ func (e *engine) run(ctx context.Context) error {
 }
 
 // initSubsystems creates all subsystem instances and wires them together.
-// Returns the bundled state and a tracer shutdown func.
 func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*runState, func(), error) {
 	originMetrics := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(originMetrics)
@@ -255,7 +285,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		warmMetrics = warm.RegisterMetrics(e.metrics.Registry)
 		walMetrics = wal.RegisterMetrics(e.metrics.Registry)
 	}
-	store, err := e.buildStore(warmMetrics, walMetrics)
+	store, err := e.buildStore(warmMetrics, walMetrics, pools)
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -263,8 +293,6 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	dpMetrics.SetAccessLog(e.logger, observability.DefaultKeySampleRate)
 
-	// Set tier budget gauges from config. These are set once at startup
-	// and never change during the process lifetime.
 	dpMetrics.HotStoreMaxBytes.Set(float64(e.cfg.Storage.HotMaxBytes.Bytes()))
 	dpMetrics.WarmStoreMaxBytes.Set(float64(e.cfg.Storage.WarmMaxBytes.Bytes()))
 	// Record that metrics were initialized. If the process restarts,
@@ -322,23 +350,33 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		cfCancel:       cfCancel,
 		seq:            seq,
 	}
-	// Wire the gossip invalidator after rs is created so the purge
-	// closure can call rs.purgeKey for variant-aware deletion.
-	if clusterNode != nil {
-		clusterNode.SetInvalidator(cluster.Invalidator{
-			PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
-				return rs.purgeKey(ctx, evt.Key)
-			},
-			BanFn: func(ctx context.Context, evt api.BanEvent) error {
-				_, err := store.Ban(ctx, evt.Predicate)
-				return err
-			},
-			RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
-				return rs.softPurgeKey(ctx, evt.Key)
-			},
-		})
-	}
 	return rs, shutdownTracer, nil
+}
+
+// wireGossipInvalidator registers the purge/ban/refresh callbacks that
+// apply gossip-received invalidations to rs. Called AFTER buildDataPlane
+// completes: the callbacks iterate rs.handlers, which buildRouter is
+// still appending during initSubsystems — registering earlier lets a
+// gossip frame arriving in that window (a peer retransmitting while
+// this node joins mid-boot) race the handler-table append. Before Join
+// a node receives no peer frames, so registering at this point drops
+// nothing.
+func (rs *runState) wireGossipInvalidator() {
+	if rs.clusterNode == nil {
+		return
+	}
+	rs.clusterNode.SetInvalidator(cluster.Invalidator{
+		PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
+			return rs.purgeKey(ctx, evt.Key)
+		},
+		BanFn: func(ctx context.Context, evt api.BanEvent) error {
+			_, err := rs.store.Ban(ctx, evt.Predicate)
+			return err
+		},
+		RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
+			return rs.softPurgeKey(ctx, evt.Key)
+		},
+	})
 }
 
 // updateStartupMetrics syncs the readiness gate condition states into
@@ -414,7 +452,7 @@ func (e *engine) initCluster(
 	}
 
 	clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
-	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
+	clusterMetrics.SetMode(string(e.cfg.Cluster.Mode))
 	clusterNode.SetMetrics(clusterMetrics)
 
 	peerFetcher := cluster.NewPeerFetcherWithConfig(cluster.PeerFetcherConfig{
@@ -422,7 +460,9 @@ func (e *engine) initCluster(
 		HopLimit:            e.cfg.Cluster.HopLimit,
 		MaxConnsPerHost:     e.cfg.Cluster.PeerMaxConnsPerHost,
 		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
+		FetchConcurrency:    e.cfg.Cluster.PeerFetchConcurrency,
 	}, e.metrics.Registry, e.logger)
+	clusterNode.SetOnPeerRetired(peerFetcher.RetireAddress, peerFetcher.UnretireAddress)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
@@ -494,6 +534,7 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 		defer ticker.Stop()
 		var lastEvictions int64
 		var lastWarmSelfHeals int64
+		var lastGraceHolds int64
 		for {
 			select {
 			case <-rCtx.Done():
@@ -508,6 +549,10 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 					rs.dpMetrics.HotStoreEvictions.Add(float64(delta))
 					lastEvictions = s.Evictions
 				}
+				// Grace holds: delta-added like evictions above. Non-zero
+				// during an origin outage on stayin_alive routes (ADR-0051).
+				// Extracted to keep startBackgroundTasks' complexity flat.
+				updateReaperGraceHoldMetric(rs.dpMetrics, s, &lastGraceHolds)
 				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
 				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
 				// Warm-tier disk-pressure gauge: disk_bytes reflects total
@@ -580,6 +625,17 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 	})
 }
 
+// updateReaperGraceHoldMetric delta-adds the reaper grace-hold counter
+// from a Stats snapshot (ADR-0051), updating the caller's last-seen
+// value. Extracted from startBackgroundTasks so the poll loop's
+// complexity stays flat.
+func updateReaperGraceHoldMetric(m *observability.DataPlaneMetrics, s api.Stats, last *int64) {
+	if d := s.ReaperGraceHolds - *last; d > 0 {
+		m.HotStoreReaperGraceHolds.Add(float64(d))
+		*last = s.ReaperGraceHolds
+	}
+}
+
 // sanitizedConfig returns a deep copy of the config with secret fields
 // zeroed out so GET /v1/config never exposes credentials.
 func sanitizedConfig(cfg config.Config) config.Config {
@@ -591,11 +647,41 @@ func sanitizedConfig(cfg config.Config) config.Config {
 	return out
 }
 
+// policyForURL resolves the cache key policy the data plane would apply
+// to a URL: the first route matching the URL's host+path, via the same
+// first-match-wins router the data plane uses. Returns nil when no
+// route matches (the caller then builds the default host-ful key —
+// and an unmatched URL is by definition un-stored, so the mismatch is
+// harmless). Admin purge/refresh/cachecheck must compute keys this
+// way or routes whose key form differs from the default (include_host:
+// false, strip_query_params, ...) would invalidate and inspect keys
+// that were never stored.
+func policyForURL(rs *runState, rawURL string) *cache.KeyPolicy {
+	if rs == nil || rs.router == nil {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	label := rs.router.MatchByHostPath(u.Host, u.Path)
+	if label == "" {
+		return nil
+	}
+	for _, h := range rs.handlers {
+		if h.RouteName() == label {
+			return h.KeyPolicy()
+		}
+	}
+	return nil
+}
+
 // cacheCheck inspects the cache decision for a URL. It builds the
-// cache key using the default key policy, looks up the store, and
-// returns what the cache engine would do with this request.
+// cache key with the matching route's key policy (so host-agnostic
+// routes report the key the data plane actually computes), falling
+// back to the default all-off policy when no route matches.
 func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheCheckResult {
-	policy := cache.NewKeyPolicy(nil, nil, nil, nil, false, false)
+	policy := policyForURL(rs, rawURL)
 	key := cache.BuildKeyFromURL(rawURL, policy)
 	result := admin.CacheCheckResult{
 		URL:    rawURL,
@@ -641,6 +727,36 @@ func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
 	return nil
 }
 
+// dataPlanePurgeBroadcast builds the cache handler hook that fans a
+// data-plane invalidation (POST/PUT/DELETE, RFC 9111 §4.4) out to
+// cluster peers. Wired in every cluster mode: in strong mode the
+// invalidating request lands on a non-owner with probability (N-1)/N
+// behind a front load balancer while only the owner stores the key, and
+// in eventual mode every node caches independently, so a local-only
+// purge fixes exactly one node either way.
+//
+// The hook uses BroadcastPurgeAsync — enqueue-only, never a synchronous
+// flush: the hook fires inside a proxied client request, and the
+// batcher's idle path would block that request's response on per-peer
+// HTTP fan-out (up to broadcastTimeout per peer in strong mode), taxing
+// every invalidating request with the cluster's slowest peer. The
+// flush loop delivers within broadcastBatchFlushInterval (10 ms,
+// ADR-0044) — the same bound every coalesced event already accepts —
+// against an invalidation gap that was previously unbounded (stale
+// until TTL). The admin API keeps the synchronous variant: its
+// returned-purge-has-fanned-out contract does not apply to a proxied
+// response, which is the origin's answer, not ours. Nil when the engine
+// runs single-node.
+func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
+	if rs.broadcaster == nil {
+		return nil
+	}
+	b := rs.broadcaster
+	return func(key api.Key) {
+		b.BroadcastPurgeAsync(key, "")
+	}
+}
+
 // softPurgeKey marks the cached object for key as stale across all
 // handlers, triggering background revalidation via stale-while-revalidate
 // instead of hard-deleting it. This is the correct "refresh" / "soft
@@ -659,13 +775,34 @@ func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
 	return nil
 }
 
+// purgeKeysBatch purges every key locally, then fans the whole batch
+// out to peers in one broadcast (ADR-0044). It backs the admin
+// /v1/purge/batch endpoint: N keys cost one local pass and one POST
+// per peer instead of N of each. ok[i] reports which keys were purged
+// locally so the caller can skip Cloudflare propagation for failures.
+func (rs *runState) purgeKeysBatch(ctx context.Context, keys []api.Key) (purged, failed int, ok []bool) {
+	ok = make([]bool, len(keys))
+	for i, key := range keys {
+		if err := rs.purgeKey(ctx, key); err != nil {
+			failed++
+			continue
+		}
+		ok[i] = true
+		purged++
+	}
+	if rs.broadcaster != nil {
+		rs.broadcaster.BroadcastPurges(ctx, keys)
+	}
+	return purged, failed, ok
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
 func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalidationOps {
 	return invalidationOps{
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr, nil)
+			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
 			if err := rs.purgeKey(dCtx, key); err != nil {
 				return err
 			}
@@ -688,7 +825,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr, nil)
+			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
 			if err := rs.softPurgeKey(dCtx, key); err != nil {
 				return err
 			}
@@ -737,6 +874,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,
 		IdleTimeout:        e.cfg.Admin.IdleTimeout,
+		OpsLogFn:           rs.rings.OpsLog.Record,
 		OnPurged:           rs.cfProp.PropagateForPurge,
 		OnRefreshed:        rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
@@ -751,6 +889,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			}
 			return nil
 		},
+		PurgeBatchFn: e.purgeBatchFn(rs, ctx),
 		BanFn: func(expr api.BanExpr) (int, error) {
 			n, err := rs.store.Ban(ctx, expr)
 			if err != nil {
@@ -770,24 +909,96 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			}
 			return nil
 		},
-		PeerPurgeHandler: cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
-			return rs.purgeKey(ctx, evt.Key)
-		}),
-		PeerBanHandler: cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
-			_, err := rs.store.Ban(ctx, evt.Predicate)
-			return err
-		}),
-		PeerRefreshHandler: cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
-			return rs.softPurgeKey(ctx, evt.Key)
-		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
-		PeerPutHandler:     e.buildPeerPutHandler(rs).Handle,
-		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
-		DashboardHandler:   dashMux,
-		FaviconHandler:     webdash.FaviconHandler(),
+		PeerPurgeHandler:        e.peerPurgeApply(rs, ctx),
+		PeerBanHandler:          e.peerBanApply(rs, ctx),
+		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
+		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
+		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
+		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
+		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
+		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
+		DashboardHandler:        dashMux,
+		FaviconHandler:          webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
+}
+
+// peerPurgeApply returns the peer purge applier: deduped via the
+// per-issuer seq tracker (ADR-0044) before reaching the store, so a
+// purge delivered by both HTTP fan-out and gossip applies once.
+func (e *engine) peerPurgeApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.purgeKey(ctx, evt.Key)
+	})
+}
+
+// purgeBatchFn builds the admin /v1/purge/batch applier: one local
+// purge pass plus one batched cluster broadcast (ADR-0044). Cloudflare
+// propagation stays per-URL for successfully purged entries; the CF
+// batcher coalesces them into ≤30-item API calls.
+func (e *engine) purgeBatchFn(rs *runState, ctx context.Context) func(urls []string) (int, int) {
+	return func(urls []string) (int, int) {
+		keys := make([]api.Key, len(urls))
+		for i, u := range urls {
+			keys[i] = cache.BuildKeyFromURL(u, policyForURL(rs, u))
+		}
+		purged, failed, ok := rs.purgeKeysBatch(ctx, keys)
+		for i, u := range urls {
+			if ok[i] {
+				rs.cfProp.PropagateForPurge(ctx, u)
+			}
+		}
+		return purged, failed
+	}
+}
+
+// peerBanApply returns the peer ban applier (deduped; see peerPurgeApply).
+func (e *engine) peerBanApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		_, err := rs.store.Ban(ctx, evt.Predicate)
+		return err
+	})
+}
+
+// peerRefreshApply returns the peer refresh applier (deduped; see
+// peerPurgeApply). The batch endpoints share it: dedup makes batched
+// and unbatched deliveries interchangeable.
+func (e *engine) peerRefreshApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.softPurgeKey(ctx, evt.Key)
+	})
+}
+
+// peerPurgeBatchApply returns the peer batched-purge applier
+// (deduped; see peerPurgeApply).
+func (e *engine) peerPurgeBatchApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerPurgeBatchHandler(func(evt api.PurgeEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.purgeKey(ctx, evt.Key)
+	})
+}
+
+// peerRefreshBatchApply returns the peer batched-refresh applier
+// (deduped; see peerPurgeApply).
+func (e *engine) peerRefreshBatchApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerRefreshBatchHandler(func(evt api.RefreshEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.softPurgeKey(ctx, evt.Key)
+	})
 }
 
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore
@@ -836,27 +1047,44 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 			if rs.peerFetcher == nil {
 				return templates.PeerFetchStats{}
 			}
-			hits, misses, hopLimitHits, _, _ := rs.peerFetcher.PeerFetchStats()
+			hits, misses, hopLimitHits, latN, latSumMs := rs.peerFetcher.PeerFetchStats()
+			var avgLatMs float64
+			if latN > 0 {
+				avgLatMs = float64(latSumMs) / float64(latN)
+			}
 			return templates.PeerFetchStats{
-				Hits6h:       hits,
-				Misses6h:     misses,
+				HitsTotal:    hits,
+				MissesTotal:  misses,
+				AvgLatMs:     avgLatMs,
 				HopLimitHits: hopLimitHits,
 			}
 		},
 		CFStatusFn: func() templates.CFStatusCard {
 			s := rs.cfProp.Status()
-			return templates.CFStatusCard{
+			card := templates.CFStatusCard{
 				Enabled:   s.Enabled,
 				ZoneID:    s.ZoneID,
 				Async:     s.Async,
 				LastLagMs: s.LastLagMs,
 			}
+			if s.LastError != nil {
+				card.LastError = *s.LastError
+			}
+			if s.LastSuccessAt != nil {
+				card.LastSuccessAt = *s.LastSuccessAt
+			}
+			if s.BatchEnabled {
+				card.CircuitState = s.CircuitState
+				card.DLQDepth = s.DLQDepth
+			}
+			return card
 		},
 		PoolHealthFn:        insightsPoolHealth(rs),
 		OriginHeaderAuditFn: insightsHeaderAudit(rs),
 		VaryCapHitsFn:       func() int64 { return rs.dpMetrics.VaryCapHitsCount() },
 		BroadcastFailuresFn: func() int64 { return rs.clusterMetrics.BroadcastFailuresCount() },
 		CFPurgeSkippedFn:    func() int64 { return rs.dpMetrics.CFPurgeSkippedCount() },
+		FetchShedFn:         func() int64 { return rs.dpMetrics.FetchShedCount() },
 	})
 	return dashHandler
 }
@@ -865,16 +1093,30 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 	meta := templates.ClusterMeta{
 		ProtocolVersion:  cluster.ClusterProtocolVersion,
-		GossipInterval:   "5s",
-		JoinRetryBudget:  "60s · 2s step",
-		PeerFetchTimeout: "500ms",
+		PeerFetchTimeout: cluster.PeerFetchTimeout.String(),
 	}
+	// Derived from the effective values (including defaults) so the
+	// card cannot drift from what the runtime actually does.
+	joinTimeout := e.cfg.Cluster.JoinTimeout
+	if joinTimeout == 0 {
+		joinTimeout = defaultJoinTimeout
+	}
+	meta.JoinRetryBudget = fmt.Sprintf("%s · %s step", joinTimeout, joinRetryInterval)
 	if rs.clusterNode != nil {
-		meta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
-		meta.Mode = rs.clusterNode.Mode()
+		nodeCfg := rs.clusterNode.Config()
+		meta.VirtualNodes = nodeCfg.VirtualNodes
+		meta.Mode = string(rs.clusterNode.Mode())
+		if nodeCfg.PushPullInterval > 0 {
+			meta.GossipInterval = nodeCfg.PushPullInterval.String()
+		} else {
+			meta.GossipInterval = cluster.DefaultPushPullInterval.String()
+		}
 	} else {
 		meta.Mode = "single-node"
 	}
+	// An unset hop_limit resolves to the peer fetcher's MaxHops default,
+	// so show the effective value rather than a misleading 0.
+	meta.HopLimit = cluster.MaxHops
 	if e.cfg.Cluster.HopLimit > 0 {
 		meta.HopLimit = e.cfg.Cluster.HopLimit
 	}
@@ -914,19 +1156,7 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 
 	var fastPathHandler api.FastPathHandler
 	if e.cfg.Experimental.H1FastPath && rs.store != nil {
-		fp := cache.NewFastPathHandlerFromStore(rs.store)
-		// Wire SWR background revalidation: without this the fast path
-		// would serve stale objects that never refresh. Any
-		// refresh-enabled handler can schedule refreshes — the store is
-		// shared across routes.
-		for _, ch := range rs.handlers {
-			if ch.RefreshEnabled() {
-				fp.WithOnStale(ch.TriggerBgRevalidateFromFastPath)
-				break
-			}
-		}
-		fastPathHandler = fp
-		e.logger.Info("H1 fast path enabled", "experimental", true)
+		fastPathHandler = e.buildFastPath(rs)
 	}
 
 	h1Reactor := e.cfg.Experimental.H1Reactor && e.cfg.Experimental.H1FastPath
@@ -978,6 +1208,97 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 	}
 }
 
+// buildFastPath wires the H1 fast path for the listeners from the
+// per-route handlers built in buildRouter (issue #696). Each route's
+// handler carries its route's pool attribution and KeyPolicy, so
+// fast-path hits land in the route's upstream_pool series and the
+// peer variant gate runs under the same policy as the slow path.
+// Returns nil when no fast path can be built.
+func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
+	// SWR: wire onStale per route through that route's own cache
+	// Handler, so the background revalidation fetches from the
+	// route's upstream and applies the route's TTL/rewrite config.
+	// The old store-level wiring used the first refresh-enabled
+	// handler for every route (wrong upstream for all others) and
+	// wired nothing when no route configured refresh_before_expiry
+	// (stale objects never refreshed); per-route wiring fixes both.
+	// triggerBgRevalidate's revalSem bounds concurrency per handler.
+	for _, fp := range rs.fastPathHandlers {
+		owner := fp.Owner()
+		if owner == nil {
+			// Store-constructed handlers (NewFastPathHandlerFromStore)
+			// have no owning route handler to revalidate through; wire
+			// SWR only for handlers that carry one.
+			continue
+		}
+		fp.WithOnStale(owner.TriggerBgRevalidateFromFastPath)
+	}
+	e.wireFastPathPeerFetch(rs)
+
+	// The router owns route semantics; the routed wrapper selects the
+	// per-route handler by the router's first-match-wins table. The
+	// release target may be any per-route handler: cache.FastPathHandler
+	// returns responses to global sync.Pools independent of its
+	// receiver (pinned by TestRoutedFastPath_ReleaseCrossInstance), so
+	// one target serves every route.
+	var release api.FastPathHandler
+	if len(rs.fastPathHandlers) > 0 {
+		release = rs.fastPathHandlers[0]
+	}
+	if r := rs.router; r != nil && release != nil {
+		e.logger.Info("H1 fast path enabled", "experimental", true)
+		return server.NewRoutedFastPath(r, release)
+	}
+	if release == nil {
+		// No cache-enabled route exists: no fast path, hits were
+		// impossible before this change too (nothing was stored
+		// through a cache handler).
+		e.logger.Info("H1 fast path disabled: no cache-enabled route", "experimental", true)
+		return nil
+	}
+	// Defensive: buildRouter always runs before startListeners
+	// (buildDataPlane → buildHandler → buildRouter), so a missing
+	// router is a wiring bug, not a config state. Log loudly instead
+	// of silently dropping the feature.
+	e.logger.Error("H1 fast path disabled: router not built (engine wiring bug)",
+		"experimental", true)
+	return nil
+}
+
+// wireFastPathPeerFetch wires the cluster peer branch (issue #636): on
+// a local miss the fast path asks the key's owner before falling
+// through to the slow path. Same closures the slow-path handlers use.
+// Opt-in behind experimental.h1_fast_peer_path (default off). NOT
+// wired under the epoll reactor: TryHit runs inline on the reactor's
+// event loop, which must never block on network I/O (a miss would
+// stall every connection on that loop for the peer-fetch timeout).
+// The h1parser path blocks too, but it is already per-connection
+// blocking by design; the reactor is not. When the flag is set but a
+// condition above holds, an error is logged and the daemon starts
+// without the branch (config validation cannot catch these: they
+// depend on runtime wiring state).
+func (e *engine) wireFastPathPeerFetch(rs *runState) {
+	if !e.cfg.Experimental.H1FastPeerPath {
+		// Flag off: nothing to wire, no diagnostics.
+		return
+	}
+	if e.cfg.Experimental.H1Reactor {
+		e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
+			"experimental", true)
+		return
+	}
+	fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)
+	if fpOwnerFn == nil || fpPeerFetch == nil {
+		e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
+			"experimental", true)
+		return
+	}
+	for _, fp := range rs.fastPathHandlers {
+		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+	}
+	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
+}
+
 func boolDefault(v *bool, def bool) bool {
 	if v == nil {
 		return def
@@ -1007,6 +1328,26 @@ func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin
 	}
 }
 
+// startEjectReapers runs the eject_for window reaper for every pool that
+// configured the knob. Pools without eject_for get no goroutine —
+// historical behavior (ejected until an active probe or manual restore).
+func (e *engine) startEjectReapers(g *supervised.Group, pools map[string]*origin.Pool) {
+	for _, pc := range e.cfg.UpstreamPools {
+		if pc.Health.Passive.EjectFor <= 0 {
+			continue
+		}
+		p := pools[pc.Name]
+		if p == nil {
+			continue
+		}
+		reaper := origin.NewEjectReaper(p)
+		if reaper == nil {
+			continue
+		}
+		g.Go("eject-reaper-"+pc.Name, reaper.Run)
+	}
+}
+
 func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 	if rs.clusterNode == nil || len(e.cfg.Cluster.Join) == 0 {
 		return
@@ -1014,7 +1355,7 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 
 	joinTimeout := e.cfg.Cluster.JoinTimeout
 	if joinTimeout == 0 {
-		joinTimeout = 120 * time.Second
+		joinTimeout = defaultJoinTimeout
 	}
 
 	g.Go("cluster-join", func(joinCtx context.Context) error {
@@ -1050,6 +1391,28 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 }
 
 func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
+	// Leave the cluster and stop the gossip layer before tearing down
+	// data-plane listeners. If memberlist is still active while peers
+	// close their UDP sockets, gossip/ping goroutines log a flurry of
+	// "use of closed network connection" errors — noise, not bugs.
+	if rs.clusterNode != nil {
+		if rs.peerFetcher != nil {
+			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
+				return rs.peerFetcher.Close(ctx)
+			})
+		}
+		if rs.broadcaster != nil {
+			// Flush pending invalidation batches before leaving the
+			// cluster so final purges reach all peers (ADR-0044).
+			rs.seq.AddStep("drain-broadcaster", 5*time.Second, func(_ context.Context) error {
+				rs.broadcaster.Close()
+				return nil
+			})
+		}
+		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
+			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
+		})
+	}
 	rs.seq.AddStep("mark-not-ready", 15*time.Second, func(ctx context.Context) error {
 		var wg errgroup.Group
 		for _, ln := range rs.listeners {
@@ -1081,16 +1444,6 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 			return rs.cfProp.Close(ctx)
 		})
 	}
-	if rs.clusterNode != nil {
-		if rs.peerFetcher != nil {
-			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
-				return rs.peerFetcher.Close(ctx)
-			})
-		}
-		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
-			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
-		})
-	}
 	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {
 		<-sqCtx.Done()
 		rs.seq.Execute(context.WithoutCancel(sqCtx))
@@ -1103,7 +1456,7 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 // or an error identifying the failure if the deadline was reached.
 func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster, joinTimeout time.Duration) error {
 	seeds := e.cfg.Cluster.Join
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(joinRetryInterval)
 	defer ticker.Stop()
 
 	deadline := time.After(joinTimeout)

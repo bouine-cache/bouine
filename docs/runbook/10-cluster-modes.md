@@ -45,6 +45,29 @@ has a configuration drift — every pod must use the same mode.
 - **Peer fetch is slow or failing.** Check `bouine_peer_fetch_duration_seconds`
   (should be < 2 ms on LAN). If elevated, check cluster network health (`kubectl
   get endpoints bouine-headless`). Increase `hop_limit` if node churn is high.
+  If the RPC duration looks healthy but requests still stall behind peer
+  fetches, check `bouine_peer_fetch_queue_wait_seconds` — the fetch-semaphore
+  queue time, invisible in the RPC histogram (it starts after the semaphore).
+  A saturated queue means fetches are slow to fail (dead addresses before the
+  breaker trips, or a slow peer admin server): raise
+  `cluster.peer_fetch_concurrency` and look for "error in PipelineClient"
+  log lines naming the peer address.
+
+- **Peer fetch variant mismatches.** `bouine_peer_fetch_variant_mismatch_total`
+  counts peer-fetch RPCs rejected by the RFC 9111 §4.1 variant-assertion gate,
+  labelled by `side`:
+  - `side="server"` — this node is the owner and answered a requested variant
+    with another variant's body or the primary-key Vary resolver.
+  - `side="consumer"` — this node fetched from a peer and rejected the object
+    because its stored variant does not select the local request.
+
+  Isolated increments are benign (cold-variant races). **Alert when the rate
+  is > 0 for 5m** (e.g. `rate(bouine_peer_fetch_variant_mismatch_total[5m]) > 0`):
+  a sustained rate indicates a mixed-version fleet during a rolling upgrade
+  (older peers without the variant-assertion protocol) or a peer serving
+  wrong-variant content. Check fleet versions first (`kubectl get pods -o
+  wide` against the rollout status), then the "served peer fetch miss:
+  variant mismatch" log lines naming the keys.
 
 ### `eventual`
 
@@ -74,45 +97,6 @@ has a configuration drift — every pod must use the same mode.
   cache from origin traffic. If load is unevenly distributed across nodes
   (e.g. session affinity), some nodes may have much lower hit rates.
 
-### `full`
-
-| Check | Expected |
-|-------|----------|
-| Dashboard shows ring | No — shows per-node fill rates and replication throughput |
-| Peer-fetch metrics | Always zero |
-| Purge propagation | < 1 s via HTTP fan-out |
-| Replications sent/received | `bouine_cluster_replications_sent_total` and `_received_total` grow with cache fills. `bouine_cluster_replications_dropped_total` should stay near 0. |
-| Node failure | No impact — every node holds a full replica |
-
-**When things go wrong:**
-
-- **Replication not reaching peers.** Check `bouine_cluster_replications_sent_total`
-  on the fill node and `bouine_cluster_replications_received_total` on peers.
-  If sent > 0 but received = 0, check:
-  - `bouine_cluster_replications_dropped_total` — if increasing, the semaphore
-    is full (cluster overloaded) or peer admin ports are unreachable.
-  - Network policy allows `POST /v1/peer/replicate` on the admin port.
-  - `bouine_cluster_replication_bytes_total` against the cluster bandwidth
-    budget (see [Memory and bandwidth budget](#memory-and-bandwidth-budget)).
-
-- **Memory pressure on individual nodes.** `full` mode stores the entire working
-  set on every node. If `hot_max_bytes` is undersized, SIEVE eviction will
-  evict recently-replicated objects. Symptoms:
-  - Hit rate drops on nodes that recently received replications.
-  - SIEVE eviction spikes visible via the dashboard.
-  - Fix: increase `hot_max_bytes` to at least the total working set size, or
-    switch to `eventual` or `strong` mode.
-
-- **High cross-node bandwidth.** Replication gossip scales with fill rate ×
-  object size. On a 5-node cluster with 1 000 cacheable fills/s and avg 50 KiB
-  responses, replication bandwidth is ~50 MB/s per node. If you see bandwidth
-  saturation, consider:
-  - Switching to `strong` mode (one copy per key, no replication).
-  - Reducing the cluster size (fewer nodes = fewer replication targets).
-  - Increasing `hot_max_bytes` to reduce churn (fewer evictions = fewer re-fills).
-
----
-
 ## Memory and bandwidth budget
 
 ### `strong` mode
@@ -126,32 +110,6 @@ has a configuration drift — every pod must use the same mode.
 - Memory per node: 1–N× depending on traffic overlap. With round-robin load
   balancing, expect ~1× (each node caches ~1/N of the working set).
 - Bandwidth: minimal. Gossip invalidations only.
-
-### `full` mode
-
-- Memory per node: N× the working set. Every node holds every cached object.
-- Bandwidth budget: `fills_per_second × avg_response_bytes × (cluster_size - 1)`.
-  Example: 1 000 fills/s × 50 KiB × (5 - 1) = 200 MB/s per node.
-  Replication is via async HTTP POST (not gossip), so bandwidth is TCP
-  traffic on the admin port, not UDP gossip.
-
-**Budget validation test:**
-
-```bash
-# Run a fill burst while watching replication metrics
-watch -n 1 'curl -s http://127.0.0.1:9000/metrics | grep bouine_cluster_replication'
-```
-
-For quantitative validation, run the integration test bandwidth check:
-```bash
-make integration-cluster-full
-```
-
-The `TestFull_ReplicationBandwidthMetric` test fills the cache on node 0 and
-verifies `bouine_cluster_replication_bytes_total` increases on both the sender
-and receiver sides.
-
----
 
 ## Switching modes
 
@@ -187,27 +145,6 @@ No data migration needed — each node starts with an empty cache.
     severity: critical
   annotations:
     summary: "Cluster mode mismatch — pods running different consistency modes"
-
-# Alert if replications stall in full mode.
-- alert: FullReplicationStalled
-  expr: rate(bouine_cluster_replications_sent_total[5m]) > 0
-    and rate(bouine_cluster_replications_received_total[5m]) == 0
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "Full-mode replication sending but not receiving — gossip may be broken"
-
-# Alert on memory pressure in full mode.
-- alert: FullModeMemoryPressure
-  expr: bouine_hot_store_bytes / bouine_hot_store_max_bytes > 0.9
-    and on() bouine_cluster_mode_info{mode="full"} == 1
-  for: 10m
-  labels:
-    severity: warning
-  annotations:
-    summary: "Full-mode node at >90% hot store capacity"
-```
 
 ---
 

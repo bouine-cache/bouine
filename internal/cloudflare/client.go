@@ -4,7 +4,7 @@
 // so both the local cache and the downstream CDN stay in sync.
 //
 // The retry strategy, rate-limit handling, and error classification are
-// modelled after cache-lifecycle (github.com/backmarket/cache-lifecycle).
+// modelled after a prior internal invalidation service.
 package cloudflare
 
 import (
@@ -67,7 +67,6 @@ func New(cfg Config) (*Client, error) {
 		return nil, &ZoneConfigError{Msg: "cloudflare: zone_id must not be empty"}
 	}
 
-	// Collect all tokens (primary + additional).
 	allTokens := []string{cfg.APIToken}
 	allTokens = append(allTokens, cfg.APITokens...)
 	allTokens = nonEmpty(allTokens)

@@ -1,8 +1,3 @@
-// Package origin is the L5 upstream layer. It manages connection pools
-// to origin servers, selects targets via round-robin (ADR-0005),
-// performs passive health checking (consecutive-5xx ejection), active
-// health probes, hedged requests, and exposes a fasthttp.RequestHandler
-// that forwards requests to the chosen target.
 package origin
 
 import (
@@ -39,6 +34,26 @@ type Pool struct {
 	next         atomic.Uint64
 	mu           sync.RWMutex
 
+	// ejectFor bounds how long a passively ejected target stays out.
+	// Zero (default) keeps the historical behavior: the target is out
+	// until an active probe or manual MarkHealthy restores it.
+	ejectFor time.Duration
+
+	// hedgeTimeout, when positive, fires a duplicate request against the
+	// pool after this delay for idempotent methods; the first response
+	// wins (config connect.hedge_timeout). Zero disables hedging.
+	hedgeTimeout time.Duration
+	// preserveHost keeps the request's own Host header on origin-bound
+	// fetches instead of the pool target (config connect.preserve_host).
+	// Read by doSingleFetch and FastHandler via the UseHostHeader flag.
+	preserveHost bool
+	// consecutive5xx is the pool's passive-ejection threshold, kept on
+	// the Pool so the cache-path fetch client (FastClient) can record
+	// passive health exactly like the proxy FastHandler path does
+	// (ADR-0051: the ejection signal must be live on cached routes so
+	// grace retention can key on it). Zero disables passive health.
+	consecutive5xx int
+
 	// clientConfig holds the resolved connect settings the shared
 	// client was built with. Kept after the pointer/lock fields to
 	// preserve the struct's pointer-heavy layout (fieldalignment).
@@ -54,6 +69,11 @@ type Target struct {
 	probeErrors   atomic.Int64
 	successes     atomic.Int64
 	healthy       atomic.Bool
+	// ejectedAtUnix is the Unix-nanosecond timestamp of the most recent
+	// passive ejection; the eject_for reaper restores the target once
+	// the configured window has elapsed. Zero while healthy. Written
+	// by the ejection site, read by the reaper and MarkHealthy.
+	ejectedAt atomic.Int64
 }
 
 // recordPassiveError increments the passive error counter and ejects the
@@ -67,6 +87,7 @@ func (t *Target) recordPassiveError(threshold int, logger observability.Logger, 
 	}
 	if cnt >= int64(threshold) {
 		if t.healthy.CompareAndSwap(true, false) {
+			t.ejectedAt.Store(time.Now().UnixNano())
 			if t.metrics != nil {
 				t.metrics.incEjection(poolName, t.addr, "passive")
 			}
@@ -192,6 +213,27 @@ type PoolConfig struct {
 	// Passive health: eject after this many consecutive 5xx.
 	// Zero disables passive health.
 	Consecutive5xx int
+	// EjectFor bounds how long a passively ejected target stays out
+	// before being restored. Zero (default) keeps the ejected target
+	// out until an active probe or manual restore — the historical
+	// behavior, and the honest mode for pools without an active health
+	// check (see the config-pool-passive-eject-forever insight).
+	EjectFor time.Duration
+	// HedgeTimeout fires a duplicate request against the pool after
+	// this delay for idempotent methods (GET/HEAD/OPTIONS); the first
+	// response wins. Zero disables hedging.
+	HedgeTimeout time.Duration
+	// PreserveHost keeps the request's own Host header on the
+	// origin-bound request instead of replacing it with the pool
+	// target. The dial target is always the configured pool target —
+	// only the wire-level Host header changes. Origins that derive
+	// behaviour (market, locale, virtual-host routing) from the
+	// request Host need this; host-blind origins keep it off. Zero
+	// (default) preserves the historical behaviour: the origin sees
+	// the pool target as its Host, and request.forwarded:
+	// forwarded.host is the way to tell it which public hostname was
+	// requested.
+	PreserveHost bool
 	// DialTimeout bounds the TCP dial. Zero applies a 10s default.
 	DialTimeout time.Duration
 	// KeepAlive is the TCP keep-alive probe interval. Zero applies a
@@ -204,7 +246,11 @@ type PoolConfig struct {
 	// Zero applies a 90s default.
 	MaxIdleConnDuration time.Duration
 	// ResponseHeaderTimeout bounds the wait for origin response headers.
-	// Zero applies a 30s default.
+	// Zero applies a 30s default. Also serves as the default origin wait
+	// inherited by every route on the pool that does not set its own
+	// fetch timeout (see cmd/bouine/cmd.resolveRouteFetchTimeout); the
+	// client no longer carries a client-level read cap, so per-request
+	// deadlines are the only bound.
 	ResponseHeaderTimeout time.Duration
 }
 
@@ -239,13 +285,33 @@ func resolveDefaultInt(v, def int) int {
 // DisableHeaderNamesNormalizing fasthttp Peek misses them and the
 // cache misclassifies freshness and conditional revalidation
 // (http-tests/cache-tests drops to 283/365).
+//
+// ReadTimeout stays 0 (unlimited): fasthttp composes the effective
+// read deadline as min(per-request deadline, client.ReadTimeout), so a
+// non-zero client-level value silently caps every route's fetch
+// timeout at the pool-wide response_header_timeout. The per-request
+// deadlines (cache.Handler.fetchTimeout via DoDeadline / ctx) are the
+// sole, authoritative origin-wait bound; the builder resolves each
+// route's unset fetch_timeout to the pool's response_header_timeout so
+// the historical default still applies. The FastHandler passthrough
+// path passes its own DoTimeout explicitly.
 func newOriginClient(cc clientConfig) *fasthttp.Client {
 	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
 	return &fasthttp.Client{
 		MaxConnsPerHost:     cc.maxConnsPerHost,
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
-		ReadTimeout:         cc.responseHeaderTimeout,
+		ReadTimeout:         0,
 		WriteTimeout:        5 * time.Minute,
+		// fasthttp's default read buffer is 4 KiB, capping the
+		// parseable response-header block at that size. Origins
+		// emitting a single large header — pages-origin's /compare/
+		// Cache-Tag carries one product UUID per variant, ~4-5 KB —
+		// exceed it, and every fetch fails with ErrSmallBuffer: the
+		// idempotent retries replay the same deterministic parse error
+		// and the request surfaces as a 502. The inbound data-plane
+		// and admin servers already use 64 KiB (server/listener.go);
+		// the origin client must not be the smaller pipe.
+		ReadBufferSize: 64 << 10,
 		Dial: func(addr string) (net.Conn, error) {
 			return dialer.Dial("tcp", addr)
 		},
@@ -261,8 +327,12 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 
 	p := &Pool{
-		Name:   cfg.Name,
-		logger: cfg.Logger,
+		Name:           cfg.Name,
+		logger:         cfg.Logger,
+		ejectFor:       cfg.EjectFor,
+		hedgeTimeout:   cfg.HedgeTimeout,
+		preserveHost:   cfg.PreserveHost,
+		consecutive5xx: cfg.Consecutive5xx,
 		clientConfig: clientConfig{
 			dialTimeout:           resolveDefault(cfg.DialTimeout, defaultDialTimeout),
 			keepAlive:             resolveDefault(cfg.KeepAlive, defaultKeepAlive),
@@ -355,6 +425,13 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		req.Header.SetMethod(string(ctx.Method()))
 		req.SetRequestURI(uri)
 		req.Header.SetHost(t.url.Host)
+		// Preserve the client's Host on the wire for preserve_host
+		// pools (same UseHostHeader mechanism as doSingleFetch): the
+		// ctx Request carries the client's Host, and VisitAll below
+		// copies it over the pool target set above.
+		if p.preserveHost {
+			req.UseHostHeader = true
+		}
 		//nolint:staticcheck // deprecated but functional
 		ctx.Request.Header.VisitAll(func(k, v []byte) {
 			req.Header.AddBytesKV(k, v)
@@ -443,6 +520,7 @@ func (p *Pool) FastClient() *PoolFastClient {
 		pool:         p,
 		client:       p.client,
 		streamClient: p.streamClient,
+		hedgeTimeout: p.hedgeTimeout,
 	}
 }
 
@@ -450,48 +528,23 @@ func (p *Pool) FastClient() *PoolFastClient {
 // from the pool and fetching via fasthttp.Client. Requests that
 // announced SSE intent are routed to the pool's stream client, whose
 // connections carry per-read idle read deadlines instead of the
-// absolute fetch deadline (see sse.go).
+// absolute fetch deadline (see sse.go). When hedge_timeout is
+// configured on the pool, idempotent requests (GET/HEAD/OPTIONS) fire
+// a duplicate against the same pool after the hedge delay and the
+// first response wins (see hedgedfetch.go).
 type PoolFastClient struct {
 	pool         *Pool
 	client       *fasthttp.Client
 	streamClient *fasthttp.Client
+	hedgeTimeout time.Duration
 }
 
-// Do performs an origin fetch via fasthttp.
+// Do performs an origin fetch via fasthttp. When the pool configures
+// hedge_timeout and the request is hedgable (idempotent, non-SSE), the
+// fetch is wrapped by doHedgedFetch: a duplicate fires after the hedge
+// delay and the first response wins. See hedgedfetch.go.
 func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
-	t := c.pool.pick()
-	if t == nil {
-		return fmt.Errorf("no healthy upstream")
-	}
-	// Rewrite the request URI to the selected target.
-	scheme := t.url.Scheme
-	if scheme == "" {
-		scheme = "http"
-	}
-	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
-
-	t.metrics.incActiveConnection(c.pool.Name, t.addr)
-	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
-	originStart := time.Now()
-
-	// SSE-intent requests go through the stream client (idle read
-	// deadlines) so the event stream is not cut by the absolute fetch
-	// deadline armed before the response headers (sse.go).
-	fetchClient := c.client
-	if c.streamClient != nil && isSSERequest(req) {
-		fetchClient = c.streamClient
-	}
-
-	tc := transport.NewClient(fetchClient)
-	err := tc.Do(ctx, req, resp)
-	if err != nil {
-		connErrReason := classifyConnError(err)
-		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)
-		t.metrics.observeRequestDuration(c.pool.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
-		return err
-	}
-	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())
-	return nil
+	return c.dispatch(ctx, req, resp, time.Time{})
 }
 
 // DoDeadline performs an origin fetch bounded by an absolute deadline,
@@ -501,8 +554,38 @@ func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 // the socket level — the only mechanism that actually reaches the
 // transport (transport.Client.Do contexts without a deadline fall
 // back to a fixed 60s DoTimeout, so ctx-based timeouts alone never
-// enforce fetch_timeout here).
+// enforce fetch_timeout here). Hedged like Do when the pool configures
+// hedge_timeout and the request is hedgable; each attempt inherits the
+// same absolute deadline.
+//
+//nolint:staticcheck // SA1012: the DoDeadline contract has no context; dispatch nil-checks before use
 func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	return c.dispatch(nil, req, resp, deadline)
+}
+
+// dispatch routes a fetch through the hedge wrapper or straight to a
+// single attempt. ctx may be nil (the DoDeadline path has no context);
+// the deadline selects the mechanism: non-zero uses the kernel-level
+// DoDeadline path, zero uses the ctx-aware Do path.
+func (c *PoolFastClient) dispatch(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	if c.hedgeTimeout <= 0 || !hedgingAllowed(req, c.streamClient) {
+		return c.doSingleFetch(ctx, req, resp, deadline)
+	}
+	return c.doHedgedFetch(ctx, req, resp, func(aCtx context.Context, r *fasthttp.Request, dst *fasthttp.Response) error {
+		return c.doSingleFetch(aCtx, r, dst, deadline)
+	})
+}
+
+// doSingleFetch performs one attempt of an origin fetch: pick a target,
+// rewrite the URI, fetch, and record metrics + passive health. Exactly
+// the pre-hedge Do/DoDeadline bodies, parameterized by the deadline
+// mechanism: when deadline is non-zero the absolute DoDeadline path is
+// used, otherwise the ctx-aware Do path (transport.Client maps
+// ctx.Deadline to DoDeadline and falls back to a 60s DoTimeout).
+// attemptCtx is nil on the unhedged DoDeadline path (no context
+// exists); the SSE stream-client routing and metric labels are
+// identical on every path.
+func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
 	t := c.pool.pick()
 	if t == nil {
 		return fmt.Errorf("no healthy upstream")
@@ -517,8 +600,16 @@ func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Respon
 	// flow as Do and FastHandler, which carry the already-accepted
 	// go/request-forgery alerts. Suppressing here keeps this
 	// duplicated sink from adding a third alert.
-	// lgtm[go/request-forgery] — see docs/architecture.md §6 threat model
+	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+	// With an absolute-form request URI, fasthttp's Request.Write
+	// replaces the Host header with the URI's host (the pool target)
+	// unless UseHostHeader is set. Preserving the request's own Host
+	// (already set by the cache handler to the client's Host) is what
+	// preserve_host pools opt into; the dial target is unchanged.
+	if c.pool.preserveHost {
+		req.UseHostHeader = true
+	}
 
 	t.metrics.incActiveConnection(c.pool.Name, t.addr)
 	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
@@ -532,15 +623,105 @@ func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Respon
 		fetchClient = c.streamClient
 	}
 
-	err := fetchClient.DoDeadline(req, resp, deadline)
+	var err error
+	switch {
+	case !deadline.IsZero():
+		err = fetchClient.DoDeadline(req, resp, deadline)
+	case attemptCtx != nil:
+		tc := transport.NewClient(fetchClient)
+		err = tc.Do(attemptCtx, req, resp)
+	default:
+		err = fetchClient.DoTimeout(req, resp, DefaultResponseHeaderTimeout)
+	}
 	if err != nil {
 		connErrReason := classifyConnError(err)
 		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)
 		t.metrics.observeRequestDuration(c.pool.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
+		// Passive health on the cache path (ADR-0051): consecutive
+		// fetch failures eject the target exactly like the proxy
+		// FastHandler path, so the ejection signal — which the
+		// stayin_alive grace gate keys on — is live for cached
+		// routes too, and picks fail fast once every target is out.
+		if c.pool.consecutive5xx > 0 {
+			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "connection error", connErrReason)
+		}
 		return err
 	}
-	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())
+	statusStr := strconv.Itoa(resp.StatusCode())
+	t.metrics.observeRequestDuration(c.pool.Name, t.addr, statusStr, time.Since(originStart).Seconds())
+	// Passive health: eject on consecutive 5xx, reset on success. A
+	// 304 is a success here — a conditional hit means the origin is
+	// alive (it is the revalidation fast path).
+	if c.pool.consecutive5xx > 0 {
+		if resp.StatusCode() >= 500 {
+			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "passive 5xx", statusStr)
+		} else {
+			t.passiveErrors.Store(0)
+		}
+	}
 	return nil
+}
+
+// doHedgedFetch clones the caller's request per attempt, runs both
+// attempts through doSingleFetch, and copies the winner's response into
+// the caller's resp. The caller's pooled req and resp are never handed
+// to a goroutine: each attempt owns its own request/response clones,
+// and the winner's bytes are copied out before the attempt's objects
+// return to fasthttp's pool. The caller's resp is only written inside
+// the winning attempt — doHedged returns only after both attempts
+// delivered their results, but the loser never touches the caller's
+// resp, so no cross-goroutine access to it exists. ctx may be nil (the
+// unhedged DoDeadline path passes nil — there is no context); hedging
+// then runs without cancellation, bounded by the per-attempt deadline.
+func (c *PoolFastClient) doHedgedFetch(
+	ctx context.Context,
+	req *fasthttp.Request,
+	resp *fasthttp.Response,
+	fire func(attemptCtx context.Context, r *fasthttp.Request, dst *fasthttp.Response) error,
+) error {
+	// The winner's bytes are staged per attempt and moved to the
+	// caller's resp only after doHedged returns (both attempts have
+	// delivered their results). The staged copy is the single-writer,
+	// single-reader handoff: the attempt goroutine owns it until the
+	// channel send, the caller owns it after doHedged returns.
+	attempt := func(attemptCtx context.Context) (*fasthttp.Response, error) {
+		r := fasthttp.AcquireRequest()
+		defer fasthttp.ReleaseRequest(r)
+		req.CopyTo(r)
+		dst := fasthttp.AcquireResponse()
+		err := fire(attemptCtx, r, dst)
+		if err != nil {
+			fasthttp.ReleaseResponse(dst)
+			return nil, err
+		}
+		return dst, nil
+	}
+	winner, err := doHedgedResponse(ctx, c.hedgeTimeout, attempt)
+	if err != nil {
+		return err
+	}
+	if winner != nil {
+		winner.CopyTo(resp)
+		fasthttp.ReleaseResponse(winner)
+	}
+	return nil
+}
+
+// HasHealthyTarget reports whether at least one target is currently
+// healthy — i.e. whether a miss could be refilled from this pool. It is
+// the health signal the stayin_alive grace gate keys on (ADR-0051):
+// while false, expired KeepGrace entries are withheld from the TTL
+// reaper. Zero-alloc (atomic loads only), safe from any goroutine.
+func (p *Pool) HasHealthyTarget() bool {
+	p.mu.RLock()
+	targets := p.targets
+	p.mu.RUnlock()
+	for _, t := range targets {
+		if t.healthy.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // Healthy returns the list of currently healthy target addresses.
@@ -613,4 +794,90 @@ func (p *Pool) MarkHealthy(addr string) {
 func (p *Pool) Close(_ context.Context) error {
 	p.client.CloseIdleConnections()
 	return nil
+}
+
+// defaultEjectReapInterval is how often the eject_for reaper scans for
+// ejected targets whose window elapsed. One second keeps restore latency
+// near the operator-configured bound without meaningful CPU cost (the
+// scan is O(targets) atomics on pools with eject_for set; zero-cost for
+// pools without it — the reaper goroutine is not started).
+const defaultEjectReapInterval = time.Second
+
+// EjectReaper restores passively ejected targets once ejectFor has
+// elapsed. Zero cost when eject_for is unset (Run returns immediately);
+// engine wiring only starts it for pools with the knob configured.
+//
+// The restore is a blind CAS healthy=false→true: the target was ejected
+// for consecutive 5xx, and the operator's eject_for window is an
+// explicit opt-in to probing it again with real traffic. A target that
+// is still broken re-ejects after Consecutive5xx fresh errors — the
+// threshold counts new errors only (the counter is zeroed on restore).
+//
+// Stable.
+type EjectReaper struct {
+	pool     *Pool
+	interval time.Duration
+}
+
+// NewEjectReaper creates a reaper for the pool. Returns nil when
+// ejectFor is unset: no reaper, no goroutine, historical behavior.
+func NewEjectReaper(pool *Pool) *EjectReaper {
+	if pool.ejectFor <= 0 {
+		return nil
+	}
+	return &EjectReaper{pool: pool, interval: defaultEjectReapInterval}
+}
+
+// Run restores ejected targets whose eject_for window has elapsed.
+// Runs until ctx is cancelled (supervised-group contract).
+func (r *EjectReaper) Run(ctx context.Context) error {
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			r.reap()
+		}
+	}
+}
+
+// reap restores every target whose ejection is older than ejectFor.
+// The healthy CAS makes concurrent reaper+probe+manual restores safe:
+// exactly one wins and logs.
+func (r *EjectReaper) reap() {
+	p := r.pool
+	if p.ejectFor <= 0 {
+		return
+	}
+	now := time.Now()
+	p.mu.RLock()
+	targets := make([]*Target, len(p.targets))
+	copy(targets, p.targets)
+	p.mu.RUnlock()
+	for _, t := range targets {
+		if t.healthy.Load() {
+			continue
+		}
+		ejectedAt := t.ejectedAt.Load()
+		if ejectedAt == 0 {
+			continue
+		}
+		if now.Sub(time.Unix(0, ejectedAt)) < p.ejectFor {
+			continue
+		}
+		t.passiveErrors.Store(0)
+		t.successes.Store(0)
+		if t.healthy.CompareAndSwap(false, true) {
+			t.ejectedAt.Store(0)
+			if t.metrics != nil {
+				t.metrics.incRestore(p.Name, t.addr, "eject_for")
+			}
+			p.logger.Info("target restored (eject_for)",
+				"pool", p.Name,
+				"target", t.addr,
+				"ejected_for", now.Sub(time.Unix(0, ejectedAt)).Truncate(time.Second).String())
+		}
+	}
 }

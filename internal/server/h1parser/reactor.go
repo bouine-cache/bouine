@@ -211,7 +211,7 @@ type reactorConn struct {
 	// header accumulation O(n) instead of O(n²).
 	scanned int
 	// closeAfterFlush marks a hit whose response ended with
-	// Connection: close (RFC 9110 §9.6): the flush completes, then the
+	// Connection: close (RFC 9112 §9.6): the flush completes, then the
 	// transport drops the connection instead of returning to reading.
 	closeAfterFlush bool
 	// epollInterest is the currently-armed readiness mask, initialized
@@ -463,16 +463,17 @@ func (rc *reactorConn) recordHitMetrics(resp *api.FastPathResponse, now time.Tim
 		// retain-safety argument); no request-derived string is
 		// retained. Never blocks: overflow drops.
 		rc.parser.metricsRing.pushHit(hitMetricsRecord{
-			pool:        resp.Pool,
-			cacheResult: resp.CacheResult,
-			source:      resp.Source,
-			durNs:       dur.Nanoseconds(),
-			bytesOut:    resp.BytesOut,
-			status:      resp.StatusCode,
+			pool:         resp.Pool,
+			trafficClass: resp.TrafficClass,
+			cacheResult:  resp.CacheResult,
+			source:       resp.Source,
+			durNs:        dur.Nanoseconds(),
+			bytesOut:     resp.BytesOut,
+			status:       resp.StatusCode,
 		})
 		return
 	}
-	hook(resp.Pool, resp.CacheResult,
+	hook(resp.Pool, resp.TrafficClass, resp.CacheResult,
 		resp.Source, resp.StatusCode, resp.BytesOut, dur)
 }
 

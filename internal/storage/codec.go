@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -14,7 +15,45 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-const objCodecVersion byte = 3
+// Version 6 adds the transient-field block after Pool: the pre-merged
+// CacheControl string, OriginAge, and the gate/serialization flags
+// (HasDate, RespNoCache, RespMustRevalidate, HasConnectionList,
+// HasNoCacheFields). They MUST survive the wire: the peer-put path
+// stored v5-decoded objects with all five flags false, which served a
+// duplicate Date header on every fast-path hit and silently disabled
+// RFC 9111 §5.2.2 revalidation for no-cache/must-revalidate responses
+// (ADR-0053). v5 blobs backfill HasDate and the gate flags from the
+// header map at decode time; v4 and v3 blobs decode as before with
+// KeepGrace=false, Pool="" and an empty VaryValue (v3 only).
+const objCodecVersion byte = 6
+
+// objCodecVersionV5 is the grace-stamps encoding version, still
+// accepted by the decoder so warm-tier blobs and peer-wire frames
+// written before the transient-field block survive a rolling deploy.
+// The v5 layout is identical to v4 plus KeepGrace/Pool; the v6
+// transient block is simply absent.
+const objCodecVersionV5 byte = 5
+
+// objCodecVersionV4 is the previous encoding version, still accepted by
+// the decoder so warm-tier blobs written before the grace-retention
+// stamps survive an upgrade. New writes always use objCodecVersion.
+const objCodecVersionV4 byte = 4
+
+// objCodecVersionV3 is the encoding version before VaryValue was added to
+// the wire format. Still accepted: v3 blobs decode with an empty
+// VaryValue (re-derivable from the stored headers on load).
+const objCodecVersionV3 byte = 3
+
+// objFlagsV6 packs the Object's transient boolean flags into one wire
+// byte (codec v6, ADR-0053). Bit order is arbitrary but fixed; bit 7
+// through bit 5 are reserved for future flags and must be written 0.
+const (
+	objFlagHasDate           byte = 1 << 0
+	objFlagRespNoCache       byte = 1 << 1
+	objFlagRespMustRevalid   byte = 1 << 2
+	objFlagHasConnectionList byte = 1 << 3
+	objFlagHasNoCacheFields  byte = 1 << 4
+)
 
 // errCorrupt is returned when an encoded object blob is truncated or
 // otherwise malformed. TieredStore.Get treats it as a durable eviction:
@@ -75,14 +114,55 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
 	buf = append(buf, obj.Key[:]...)
 	buf = appendString(buf, obj.VaryKey)
+	buf = appendString(buf, obj.VaryValue)
 	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode)) //nolint:gosec // HTTP status is small and non-negative
 	buf = binary.AppendVarint(buf, int64(obj.TTL))
 	buf = binary.AppendVarint(buf, int64(obj.StaleWhileRevalidate))
 	buf = binary.AppendVarint(buf, int64(obj.StaleIfError))
 	buf = appendTime(buf, obj.StoredAt)
 	buf = appendTime(buf, obj.LastModified)
-	buf = binary.AppendUvarint(buf, obj.Hits)
+	// Atomic load: hot.Get increments Hits under the shard lock while
+	// this encoder runs outside it (tiered.writeHotOnlyToWarm), so the
+	// read must pair with the increment's atomic store (issue #218).
+	buf = binary.AppendUvarint(buf, atomic.LoadUint64(&obj.Hits))
 	buf = appendString(buf, obj.ETag)
+	// Grace-retention stamps (ADR-0051, codec v5): 1-byte KeepGrace flag
+	// followed by the Pool name. Written for every object (graced or
+	// not) so the field position is version-stable.
+	if obj.KeepGrace {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	buf = appendString(buf, obj.Pool)
+
+	// Transient-field block (ADR-0053, codec v6): the pre-merged
+	// Cache-Control string, OriginAge, and the gate/serialization
+	// flags. The header map alone cannot re-derive these faithfully on
+	// every path: buildObject merges multi-line Cache-Control values
+	// and applies CDN-Cache-Control precedence (RFC 9213) at fill time,
+	// so re-deriving from the map can disagree with what was evaluated
+	// at store time. Carrying them also keeps decodeObject O(1) in
+	// header count instead of re-parsing Cache-Control per blob.
+	buf = appendString(buf, obj.CacheControl)
+	buf = binary.AppendVarint(buf, int64(obj.OriginAge))
+	var flags byte
+	if obj.HasDate {
+		flags |= objFlagHasDate
+	}
+	if obj.RespNoCache {
+		flags |= objFlagRespNoCache
+	}
+	if obj.RespMustRevalidate {
+		flags |= objFlagRespMustRevalid
+	}
+	if obj.HasConnectionList {
+		flags |= objFlagHasConnectionList
+	}
+	if obj.HasNoCacheFields {
+		flags |= objFlagHasNoCacheFields
+	}
+	buf = append(buf, flags)
 
 	// Header map: count, then (key, value) per entry.
 	buf = binary.AppendUvarint(buf, uint64(obj.Header.Len())) //nolint:gosec // Len() returns int len of a slice, always non-negative and bounded by memory
@@ -116,13 +196,25 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if ver != objCodecVersion {
+	// v4 adds VaryValue after VaryKey; v3 blobs (pre-upgrade warm tier)
+	// decode unchanged with an empty VaryValue — the field is re-derivable
+	// from the stored headers on load, matching the v3 behavior.
+	// v5 adds the grace-retention stamps after ETag; v4 and v3 blobs
+	// decode with KeepGrace=false and Pool="" — grace cannot engage on
+	// them, matching their pre-upgrade reap behavior (ADR-0051).
+	// v6 adds the transient-field block after Pool (ADR-0053); v5-and
+	// older blobs backfill HasDate and the gate flags from the header
+	// map below.
+	if ver != objCodecVersion && ver != objCodecVersionV5 && ver != objCodecVersionV4 && ver != objCodecVersionV3 {
 		return nil, fmt.Errorf("storage: unknown object codec version %d", ver)
 	}
 
 	obj := &api.Object{}
 	copy(obj.Key[:], r.bytes(16))
 	obj.VaryKey = r.str()
+	if ver >= objCodecVersionV4 {
+		obj.VaryValue = r.str()
+	}
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder
 	obj.TTL = time.Duration(r.varint())
 	obj.StaleWhileRevalidate = time.Duration(r.varint())
@@ -131,18 +223,30 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	obj.LastModified = r.time()
 	obj.Hits = r.uvarint()
 	obj.ETag = r.str()
+	if ver >= objCodecVersionV5 {
+		obj.KeepGrace = r.byte() == 1
+		obj.Pool = r.str()
+	}
+	if ver >= objCodecVersion {
+		obj.CacheControl = r.str()
+		obj.OriginAge = time.Duration(r.varint())
+		flags := r.byte()
+		obj.HasDate = flags&objFlagHasDate != 0
+		obj.RespNoCache = flags&objFlagRespNoCache != 0
+		obj.RespMustRevalidate = flags&objFlagRespMustRevalid != 0
+		obj.HasConnectionList = flags&objFlagHasConnectionList != 0
+		obj.HasNoCacheFields = flags&objFlagHasNoCacheFields != 0
+	}
 
-	if nh := r.count(); nh > 0 {
-		hm := header.NewMap(min(nh, 32))
-		for range nh {
-			k := r.str()
-			v := r.str()
-			hm.AppendEntry(k, v)
-		}
-		hm.SortEntries()
-		obj.Header = hm
-	} else {
-		obj.Header = header.Map{}
+	obj.Header = decodeHeaderMap(&r, r.count())
+
+	// Pre-v6 blobs (rolling-deploy warm tier, in-flight peer frames)
+	// carry no flags byte: backfill via the header map so the fast path
+	// does not synthesize a second Date header on top of the stored one
+	// (the duplicate-Date bug) and the RFC 9111 §5.2.2 gate is restored
+	// for no-cache/must-revalidate responses.
+	if ver < objCodecVersion {
+		backfillPreV6Flags(obj)
 	}
 
 	if nsk := r.count(); nsk > 0 {
@@ -168,6 +272,46 @@ func decodeObject(blob []byte) (*api.Object, error) {
 func appendString(buf []byte, s string) []byte {
 	buf = binary.AppendUvarint(buf, uint64(len(s)))
 	return append(buf, s...)
+}
+
+// decodeHeaderMap reads nh (key, value) pairs from r into a sorted
+// header.Map. A zero count yields the empty Map.
+func decodeHeaderMap(r *objReader, nh int) header.Map {
+	if nh <= 0 {
+		return header.Map{}
+	}
+	hm := header.NewMap(min(nh, 32))
+	for range nh {
+		k := r.str()
+		v := r.str()
+		hm.AppendEntry(k, v)
+	}
+	hm.SortEntries()
+	return hm
+}
+
+// backfillPreV6Flags re-derives the transient flags that codec v6
+// added to the wire format (ADR-0053) for blobs written by older
+// builds: warm-tier entries from before an upgrade and peer frames
+// in flight during a rolling deploy.
+//
+// HasDate comes straight from the header map so the fast path does not
+// synthesize a second Date header on top of the stored one. The
+// RFC 9111 §5.2.2 gate flags are re-parsed from the stored
+// Cache-Control so a no-cache/must-revalidate response never degrades
+// into an unvalidated fresh hit. Bare no-cache="fields" lists set
+// neither gate flag — matching buildObject, which keeps RespNoCache
+// false for field-list no-cache and only pre-computes HasNoCacheFields.
+func backfillPreV6Flags(obj *api.Object) {
+	obj.HasDate = obj.Header.Has(header.Date)
+	cc := obj.Header.GetAll(header.CacheControl)
+	if cc == "" {
+		return
+	}
+	parsed := header.ParseCacheControl(cc)
+	obj.RespNoCache = parsed.NoCache
+	obj.RespMustRevalidate = parsed.MustRevalidate || parsed.ProxyRevalidate
+	obj.HasNoCacheFields = parsed.NoCacheFields != ""
 }
 
 // appendTime writes a 1-byte presence flag (0 = zero time) followed, when

@@ -97,9 +97,14 @@ type CFStatusCard struct {
 	ZoneID        string
 	LastError     string // empty when no error
 	LastSuccessAt string // RFC 3339 or empty
-	LastLagMs     int64  // async propagation latency (0 when sync or disabled)
-	Enabled       bool
-	Async         bool
+	// CircuitState is the Cloudflare client circuit breaker state
+	// ("closed", "open", "half-open"), empty when batching is off.
+	CircuitState string
+	LastLagMs    int64 // async propagation latency (0 when sync or disabled)
+	// DLQDepth is the number of failed purges queued for retry.
+	DLQDepth int
+	Enabled  bool
+	Async    bool
 }
 
 // HotFillPct returns the hot-tier fill percentage (0–100), clamped.
@@ -203,7 +208,7 @@ type RouteRow struct {
 	Jitter     string
 	Host       string
 	Pool       string
-	TTL        string // formatted NegativeTTL or "—"
+	TTL        string // formatted ttl_override or "—" (inherit origin TTL)
 	SWR        string // StaleWhileRevalidate or "—"
 	PathPrefix string
 	SIE        string // StaleIfError or "—"
@@ -252,12 +257,14 @@ type ClusterMeta struct {
 }
 
 // PeerFetchStats holds aggregated peer fetch telemetry for the cluster page.
+// PeerFetchStats are cumulative since process start (the peer fetcher's
+// counters never reset), plus the average RPC latency computed from the
+// same cumulative sums.
 type PeerFetchStats struct {
-	Hits6h       int64
-	Misses6h     int64
+	HitsTotal    int64
+	MissesTotal  int64
 	AvgLatMs     float64
 	HopLimitHits int64
-	DigestCount  int64
 }
 
 // ClusterData is the view model for the cluster page.
@@ -388,10 +395,13 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		{
 			Icon: "⟁", Title: "listen", Badge: "listeners",
 			Rows: []ConfigRow{
-				{Key: "http", Value: fmt.Sprintf("%q", cfg.Listen.HTTP), Kind: "str", Hint: "HTTP/1.1 + h2c data plane"},
+				{Key: "http", Value: fmt.Sprintf("%q", cfg.Listen.HTTP), Kind: "str", Hint: "HTTP/1.1 data plane"},
 				{Key: "https", Value: fmt.Sprintf("%q", cfg.Listen.HTTPS), Kind: "str", Hint: "TLS data plane"},
 				{Key: "admin", Value: fmt.Sprintf("%q", cfg.Listen.Admin), Kind: "str", Hint: "admin API · metrics · health"},
 				{Key: "cluster", Value: fmt.Sprintf("%q", cfg.Listen.Cluster), Kind: "str", Hint: "gossip · peer fetch"},
+				{Key: "read_timeout", Value: FmtDuration(cfg.Listen.ReadTimeout), Kind: "dur", Hint: "per-request slowloris cap (0 = 30s default)"},
+				{Key: "idle_timeout", Value: FmtDuration(cfg.Listen.IdleTimeout), Kind: "dur", Hint: "keep-alive idle (0 = 120s default)"},
+				{Key: "max_connections", Value: fmt.Sprintf("%d", cfg.Listen.MaxConnections), Kind: "num", Hint: "0 = unlimited"},
 			},
 		},
 		{
@@ -408,22 +418,37 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 	clusterBadge := "disabled"
 	if cfg.Listen.Cluster != "" {
 		clusterBadgeKind = "g"
-		clusterBadge = cfg.Cluster.Mode
+		clusterBadge = string(cfg.Cluster.Mode)
 	}
 	modeHint := "strong: ring-sharded · eventual: local cache, gossip invalidation"
 	sections = append(sections, ConfigSection{
 		Icon: "◎", Title: "cluster", Badge: clusterBadge, BadgeKind: clusterBadgeKind,
 		Rows: []ConfigRow{
-			{Key: "mode", Value: cfg.Cluster.Mode, Kind: "str", Hint: modeHint},
+			{Key: "mode", Value: string(cfg.Cluster.Mode), Kind: "str", Hint: modeHint},
 			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops (strong only)"},
+			{Key: "peer_fetch_concurrency", Value: fmt.Sprintf("%d", cfg.Cluster.PeerFetchConcurrency), Kind: "num", Hint: "in-flight peer fetches/puts (0 = default)"},
 		},
 	})
+
+	adminSection := ConfigSection{
+		Icon: "⚙", Title: "admin", Badge: "ops surface",
+		Rows: []ConfigRow{
+			{Key: "idle_timeout", Value: FmtDuration(cfg.Admin.IdleTimeout), Kind: "dur", Hint: "admin/peer RPC keep-alive (0 = 300s default)"},
+			{Key: "drain_duration", Value: FmtDuration(cfg.Admin.DrainDuration), Kind: "dur", Hint: "preStop graceful drain (0 = 10s default)"},
+		},
+	}
+	if cfg.Admin.MaxBodyBytes > 0 {
+		adminSection.Rows = append(adminSection.Rows, ConfigRow{
+			Key: "max_body_bytes", Value: fmt.Sprintf("%d", cfg.Admin.MaxBodyBytes), Kind: "size", Hint: "admin request body cap",
+		})
+	}
+	sections = append(sections, adminSection)
 
 	var routeEntries []ConfigRouteEntry
 	for _, rc := range cfg.Routes {
 		label := rc.Name
 		if label == "" {
-			label = rc.Match.PathPrefix
+			label = rc.Match.PathLabel()
 		}
 		rows := buildRouteCacheRows(rc)
 		routeEntries = append(routeEntries, ConfigRouteEntry{
@@ -637,13 +662,13 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 		stat := byName[label]
 		row := RouteRow{
 			Name:        label,
-			PathPrefix:  rc.Match.PathPrefix,
+			PathPrefix:  rc.Match.PathLabel(),
 			Host:        rc.Match.Host,
 			Pool:        rc.Pool,
-			TTL:         FmtDuration(rc.Cache.NegativeTTL),
+			TTL:         FmtDuration(rc.Cache.TTLOverride),
 			SWR:         FmtDuration(rc.Cache.StaleWhileRevalidate),
 			SIE:         FmtDuration(rc.Cache.StaleIfError),
-			NegTTL:      FmtDuration(rc.Cache.NegativeTTL),
+			NegTTL:      negativeTTLLabel(rc.Cache),
 			StayinAlive: rc.Cache.StayinAlive,
 			Jitter:      jitterStr(rc.Cache.JitterPercent),
 			Methods:     methodsLabel(rc.Match.Methods),
@@ -724,6 +749,12 @@ func routeFeatures(rc config.Route) []RouteFeature {
 			Title: "strip_prefix: this path prefix is removed before forwarding to the upstream. The cache key keeps the original path.",
 		})
 	}
+	if rc.Request.PathRewrite.Match != "" {
+		f = append(f, RouteFeature{
+			Label: "rewrite " + rc.Request.PathRewrite.Match,
+			Title: "path_rewrite: the origin-bound path is rewritten with this regex (query is never matched or modified). The cache key keeps the original path.",
+		})
+	}
 	if n := len(rc.Cache.Key.StripQueryParams); n > 0 {
 		f = append(f, RouteFeature{
 			Label: fmt.Sprintf("q-strip ×%d", n),
@@ -755,7 +786,7 @@ func FmtRate(v float64) string {
 
 // LatencyBucketLabels returns the x-axis labels for the latency
 // distribution chart, derived from observability.LatencyBoundsMs. The
-// final label is the overflow bucket (">1s").
+// final label is the overflow bucket (">10s").
 func LatencyBucketLabels() []string {
 	bounds := observability.LatencyBoundsMs
 	out := make([]string, 0, len(bounds)+1)
@@ -801,20 +832,36 @@ func FmtAddrPort(addr string) string {
 	return addr
 }
 
+// negativeTTLLabel renders the neg_ttl dashboard cell from the
+// policy's entries: "404:30s, 5xx:10s" with zero entries shown as
+// "410:off". The scalar shorthand is already expanded, so a "30s"
+// route shows "404:30s, 405:30s, 410:30s, 501:30s" — the policy
+// actually in effect, never a shorthand that hides it.
+func negativeTTLLabel(c config.RouteCache) string {
+	entries := c.NegativeTTL.Policy().Entries()
+	if len(entries) == 0 {
+		return FmtDuration(0)
+	}
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.TTL == 0 {
+			parts = append(parts, e.Key+":off")
+			continue
+		}
+		parts = append(parts, e.Key+":"+FmtDuration(e.TTL))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func buildRouteCacheRows(rc config.Route) []ConfigRow {
-	var rows []ConfigRow
-	if rc.Cache.NegativeTTL > 0 {
-		rows = append(rows, ConfigRow{Key: "negative_ttl", Value: rc.Cache.NegativeTTL.String(), Kind: "dur"})
+	entries := rc.Cache.NegativeTTL.Policy().Entries()
+	rows := make([]ConfigRow, 0, len(entries)+8)
+	for _, e := range entries {
+		rows = append(rows, ConfigRow{Key: "negative_ttl[" + e.Key + "]", Value: FmtDuration(e.TTL), Kind: "dur"})
 	}
-	if rc.Cache.TTLOverride > 0 {
-		rows = append(rows, ConfigRow{Key: "ttl_override", Value: rc.Cache.TTLOverride.String(), Kind: "dur"})
-	}
-	if rc.Cache.StaleWhileRevalidate > 0 {
-		rows = append(rows, ConfigRow{Key: "stale_while_revalidate", Value: rc.Cache.StaleWhileRevalidate.String(), Kind: "dur"})
-	}
-	if rc.Cache.StaleIfError > 0 {
-		rows = append(rows, ConfigRow{Key: "stale_if_error", Value: rc.Cache.StaleIfError.String(), Kind: "dur"})
-	}
+	rows = appendDurRow(rows, "ttl_override", rc.Cache.TTLOverride)
+	rows = appendDurRow(rows, "stale_while_revalidate", rc.Cache.StaleWhileRevalidate)
+	rows = appendDurRow(rows, "stale_if_error", rc.Cache.StaleIfError)
 	if rc.Cache.JitterPercent > 0 {
 		rows = append(rows, ConfigRow{Key: "jitter_percent", Value: fmt.Sprintf("%d", rc.Cache.JitterPercent), Kind: "num"})
 	}
@@ -833,14 +880,22 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 	if rc.Cache.MaxFetchConcurrency > 0 {
 		rows = append(rows, ConfigRow{Key: "max_fetch_concurrency", Value: strconv.Itoa(rc.Cache.MaxFetchConcurrency), Kind: "number"})
 	}
-	if rc.Cache.FetchWaitTimeout > 0 {
-		rows = append(rows, ConfigRow{Key: "fetch_wait_timeout", Value: rc.Cache.FetchWaitTimeout.String(), Kind: "dur"})
-	}
+	rows = appendDurRow(rows, "fetch_timeout", rc.Cache.FetchTimeout)
+	rows = appendDurRow(rows, "fetch_wait_timeout", rc.Cache.FetchWaitTimeout)
 	if rc.Cache.MaxStreamingBufferBytes > 0 {
 		rows = append(rows, ConfigRow{Key: "max_streaming_buffer_bytes", Value: rc.Cache.MaxStreamingBufferBytes.String(), Kind: "size"})
 	}
 	if len(rc.Cache.Key.StripQueryParams) > 0 {
 		rows = append(rows, ConfigRow{Key: "strip_query_params", Value: strings.Join(rc.Cache.Key.StripQueryParams, ", "), Kind: "list"})
+	}
+	return rows
+}
+
+// appendDurRow appends a duration config row when the value is set
+// (zero reads as "inherit the default" and is omitted).
+func appendDurRow(rows []ConfigRow, key string, d time.Duration) []ConfigRow {
+	if d > 0 {
+		rows = append(rows, ConfigRow{Key: key, Value: d.String(), Kind: "dur"})
 	}
 	return rows
 }

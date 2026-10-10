@@ -34,7 +34,9 @@ func TestHandler_XCacheSource_Bypass(t *testing.T) {
 	ctx := testCtxWithHeader("GET", "http://example.com/bypass", header.CacheControl, "no-store")
 	serveRequest(h, ctx)
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
-	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
+	// BYPASS responses are proxied uncached from the origin, so they
+	// are attributed to it — not to the empty default slot.
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
@@ -46,6 +48,9 @@ func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
 
 	require.Equal(t, 504, respCode(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	// The 504 is synthesized by bouine itself (the origin was never
+	// contacted): the wire source stays empty, which the metrics layer
+	// labels "bouine".
 	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
 }
 
@@ -107,7 +112,7 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer:1"}, false
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, _ string) (*api.Object, error) {
 			return &api.Object{
 				Key:        key,
 				StatusCode: 200,
@@ -178,7 +183,9 @@ func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
 	serveRequest(h, ctx)
 
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
-	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
+	// The origin-supplied spoofed source must be overwritten by the
+	// bypass attribution, never pass through.
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_Conditional304_ETagCanonical(t *testing.T) {

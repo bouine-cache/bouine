@@ -32,7 +32,7 @@ const (
 	// representation body.
 	ContentEncoding = "Content-Encoding"
 
-	// ContentLength — RFC 9110 §8.2. Length of the representation body
+	// ContentLength — RFC 9110 §8.6. Length of the representation body
 	// in octets.
 	ContentLength = "Content-Length"
 
@@ -57,7 +57,7 @@ const (
 	// http.Header map key without .Set()/.Get() canonicalization.
 	ETag = "Etag"
 
-	// Expires — RFC 9110 §8.7.2 / RFC 9111 §4.2.1. Date/time after which
+	// Expires — RFC 9111 §5.3 (freshness calculation §4.2.1). Date/time after which
 	// the response is considered stale.
 	Expires = "Expires"
 
@@ -80,7 +80,7 @@ const (
 	// Location — RFC 9110 §10.2.2. Target resource URI for a redirect.
 	Location = "Location"
 
-	// Pragma — RFC 9110 §15.2. Obsolete implementation-defined directives
+	// Pragma — RFC 9111 §5.4 (obsoleted). Obsolete implementation-defined directives
 	// (still used for "no-cache" in legacy clients).
 	Pragma = "Pragma"
 
@@ -91,11 +91,23 @@ const (
 	// request.
 	RetryAfter = "Retry-After"
 
+	// UserAgent — RFC 9110 §12.5.4. User agent initiating the request.
+	// Client-controlled, spoofable input: bouine reads it only for the
+	// per-route cache.bypass_on_user_agent opt-in (issue #771,
+	// ADR-0055) and observability — never as a trust signal.
+	UserAgent = "User-Agent"
+
+	// Cookie — RFC 6265 §4.2. Request cookie. May appear multiple
+	// times; the cache-bypass guard (ADR-0054) treats presence of any
+	// value as the bypass trigger. The canonical MIME form is "Cookie"
+	// (fasthttp canonicalizes identically).
+	Cookie = "Cookie"
+
 	// SetCookie — RFC 6265 §4.1. Response cookie. May appear multiple
 	// times.
 	SetCookie = "Set-Cookie"
 
-	// Warning — RFC 9110 §15.8 (obsolete). Additional information about
+	// Warning — obsoleted by RFC 9111 §5.5 (formerly RFC 7234 §5.5). Additional information about
 	// the status of a message.
 	Warning = "Warning"
 
@@ -107,22 +119,22 @@ const (
 // Cache-specific headers defined in RFC 9111 (HTTP Caching) and related
 // specifications.
 const (
-	// Age — RFC 9111 §4.2.3. The age of the response in seconds
+	// Age — RFC 9111 §5.1. The age of the response in seconds
 	// (time since origin server generated it).
 	Age = "Age"
 
-	// CacheControl — RFC 9110 §5.2 / RFC 9111 §4.2.1. Directives for
+	// CacheControl — RFC 9111 §5.2. Directives for
 	// caches along the request/response path.
 	CacheControl = "Cache-Control"
 
-	// CDNCacheControl — RFC 9211 §4. CDN-specific cache directives that
+	// CDNCacheControl — RFC 9213 §3. Targeted cache directives that
 	// override Cache-Control for shared caches. The canonical MIME form
 	// is "Cdn-Cache-Control" (first letter uppercase, rest lowercase per
 	// word); using this constant avoids canonicalize allocations on every
 	// header lookup.
 	CDNCacheControl = "Cdn-Cache-Control"
 
-	// Vary — RFC 9111 §4.1. Request header fields that a cache must
+	// Vary — RFC 9110 §12.5.5. Request header fields that a cache must
 	// include in the cache key to select the correct variant.
 	Vary = "Vary"
 )
@@ -160,14 +172,14 @@ const (
 	// KeepAlive — Obsolete hop-by-hop header for persistent connections.
 	KeepAlive = "Keep-Alive"
 
-	// TE — RFC 9110 §7.1.4. Transfer codings acceptable in the request.
+	// TE — RFC 9110 §10.1.4. Transfer codings acceptable in the request.
 	TE = "TE"
 
 	// Trailer — RFC 9110 §6.6.2. Header fields present in the trailer
 	// of a chunked message.
 	Trailer = "Trailer"
 
-	// TransferEncoding — RFC 9110 §6.2.2. How the message body is
+	// TransferEncoding — RFC 9112 §6.1. How the message body is
 	// encoded for transfer (e.g. "chunked").
 	TransferEncoding = "Transfer-Encoding"
 
@@ -184,9 +196,13 @@ const (
 	XCache = "X-Cache"
 
 	// XCacheSource — bouine's cache source header set on every served
-	// response: "hot", "warm", "peer", "origin", or empty for non-origin
-	// paths (BYPASS, only-if-cached 504). Split from X-Cache so operators
-	// can distinguish where a HIT was served from without scraping the
+	// response: "hot", "warm", "peer", or "origin" — the last whenever
+	// a fetch was dispatched (misses, BYPASS, failed-fetch errors).
+	// Empty for responses bouine synthesized itself without contacting
+	// the origin (only-if-cached 504, shed 503, no-client-no-upstream
+	// 502) — the metrics layer labels that slot "bouine" (see
+	// api.SourceBouine). Split from X-Cache so operators can
+	// distinguish where a HIT was served from without scraping the
 	// storage layer.
 	XCacheSource = "X-Cache-Source"
 
@@ -213,6 +229,12 @@ const (
 	// per-request header scan.
 	XBouinePool = "X-Bouine-Pool"
 
+	// XBouineTrafficClass — the router sets the request's traffic
+	// class under this name as a fasthttp UserValue (not a wire
+	// header); the value comes from the configured classifier, never
+	// from request input. The middleware reads the UserValue only.
+	XBouineTrafficClass = "X-Bouine-Traffic-Class"
+
 	// BouineHop — carries the current peer-fetch hop count for cluster
 	// loop detection.
 	BouineHop = "Bouine-Hop"
@@ -221,23 +243,34 @@ const (
 	// negotiation during rolling upgrades.
 	XBouineClusterVersion = "X-Bouine-Cluster-Version"
 
-	// BouineIssuer — carries the node name that issued a purge or ban
-	// event, sent as an HTTP header on peer POST endpoints.
-	BouineIssuer = "Bouine-Issuer"
-
-	// BouineSeq — carries the monotonic sequence number of a purge or
-	// ban event, sent as an HTTP header on peer POST endpoints.
-	BouineSeq = "Bouine-Seq"
-
-	// BouineIssuedAt — carries the wall-clock timestamp (RFC3339) of a
-	// purge or ban event, sent as an HTTP header on peer POST endpoints.
-	BouineIssuedAt = "Bouine-Issued-At"
-
-	// BouineMethod — carries the HTTP method of the original cached
-	// request, sent as an HTTP header on peer POST endpoints.
-	BouineMethod = "Bouine-Method"
-
 	// HXTrigger — htmx trigger header. Set on dashboard responses to
 	// tell the client to fire a client-side event (e.g. "refreshOpsLog").
 	HXTrigger = "HX-Trigger"
+)
+
+// Client-identity forwarding headers (issue #769). These are the
+// industry-standard (non-RFC) X-Forwarded dialect plus the RFC 9110 §7.6.3
+// Via header. bouine appends or sets them per route on origin-bound
+// requests only; client-supplied values are untrusted input (threat-model
+// T04) — appended to, never parsed or acted upon.
+const (
+	// XForwardedFor — comma-separated chain of the addresses each
+	// forwarding hop received the request from. bouine appends the
+	// address of its immediate peer (the edge), never the client IP it
+	// cannot verify (RFC-unofficial, Varnish/nginx semantics).
+	XForwardedFor = "X-Forwarded-For"
+
+	// XForwardedProto — the scheme bouine received the request on
+	// (https on a TLS listener, http otherwise). Not the scheme used
+	// towards the origin.
+	XForwardedProto = "X-Forwarded-Proto"
+
+	// XForwardedHost — the Host header of the request as bouine
+	// received it, so origins behind host-rewriting pools can generate
+	// correct absolute URLs (relevant to cache.key.include_host: false).
+	XForwardedHost = "X-Forwarded-Host"
+
+	// Via — RFC 9110 §7.6.3. Appended by bouine as "1.1 bouine" for
+	// loop detection, complementing the internal Bouine-Hop count.
+	Via = "Via"
 )

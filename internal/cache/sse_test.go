@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -64,6 +65,9 @@ func TestSSE_HintedGet_StreamsUncached(t *testing.T) {
 
 	require.Equal(t, 200, respCode(ctx))
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
+	// BYPASS is proxied uncached from the origin: attributed to it,
+	// matching the miss and streamBypass paths.
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 	require.Equal(t, sseEvents, respBody(ctx))
 
 	// The fetch slot must be released as soon as the headers are in hand:
@@ -79,6 +83,26 @@ func TestSSE_HintedGet_StreamsUncached(t *testing.T) {
 
 	// No tee buffer was ever allocated for the stream.
 	require.Equal(t, int64(0), h.streamingBufferBytes.Load())
+}
+
+// TestSSE_HintedNoFastClient_502 pins the 502 contract for a hinted SSE
+// request on a handler wired with no FastClient (misconfiguration): the
+// client sees Bad Gateway carrying X-Cache: BYPASS and the empty source
+// (labeled "bouine" — no fetch was dispatched), not a panic. ctx.Error
+// resets the response (fasthttp RequestCtx.Error), so the attribution
+// headers must be written after it: an earlier revision of this branch
+// wrote them before, and every one of them was wiped by the reset.
+func TestSSE_HintedNoFastClient_502(t *testing.T) {
+	t.Parallel()
+	h := NewHandler(HandlerConfig{Store: newTestStore()})
+
+	ctx := testCtx("GET", "http://example.com/chat")
+	ctx.Request.Header.Set(header.Accept, "text/event-stream")
+	serveRequest(h, ctx)
+
+	require.Equal(t, fasthttp.StatusBadGateway, respCode(ctx))
+	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
+	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
 }
 
 // TestSSE_HintedRequestNotCollapsed proves hinted SSE requests are excluded

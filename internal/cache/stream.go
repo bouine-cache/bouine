@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
@@ -31,9 +34,11 @@ const maxStreamBufRetain = 1 << 20
 // When buffered is true, the body is already in resp.Body() (the client
 // doesn't support streaming) and callers should use the buffered path.
 type streamFetchResult struct {
-	resp       *fasthttp.Response // body stream still open (or buffered)
+	resp       *fasthttp.Response // body stream still open (or buffered); nil on the upstream-fallback path
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
+	span       tracing.Span       // ended by releaseStreamFetch, the funnel every exit path takes
+	body       []byte             // upstream-fallback body; empty on the FastClient paths
 	Header     headerLookup
 	StatusCode int
 	buffered   bool // true when resp.BodyStream() is nil (test clients)
@@ -46,6 +51,13 @@ type streamFetchResult struct {
 type inflightStream struct {
 	done chan struct{} // closed when the fetch finished or shed
 	res  fetchResult   // set by leader before closing done; Err set on failure/shed
+	// followers counts callers that loaded this stream from the
+	// inflight table (i.e. parked as followers). Written only by
+	// loadOrStore's follower branch (under the shard lock) before the
+	// leader can observe it at publish time; read by the leader after
+	// close-adjacent publication. atomic so the leader's read is
+	// race-detector-clean without holding the shard lock.
+	followers atomic.Int32
 }
 
 // doFetchStream starts an origin fetch with response body streaming
@@ -61,9 +73,34 @@ type inflightStream struct {
 // stream writer (for streaming mode) or by the caller (for buffered mode).
 func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, error) {
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. The upstream response is fully
+			// buffered in a scratch RequestCtx, so the result carries
+			// the buffered flag and every caller takes the buffered
+			// branch; resp stays nil, which releaseStreamFetch and the
+			// buffered-only call sites tolerate.
+			res := h.fetchViaUpstream(ctx)
+			if res.Err != nil {
+				return nil, res.Err
+			}
+			return &streamFetchResult{
+				StatusCode: res.StatusCode,
+				Header:     res.Header,
+				buffered:   true,
+				body:       res.Body,
+			}, nil
+		}
 		return nil, fmt.Errorf("no fast client configured")
 	}
-	spanCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
+	// Span context stored by the middleware, never the RequestCtx. The
+	// span rides the result and ends in releaseStreamFetch, which every
+	// exit path funnels through.
+	spanCtx, span := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
+	)
 
 	if err := h.acquireFetchSlot(); err != nil {
 		span.End()
@@ -75,11 +112,21 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	resp.StreamBody = true
 
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Normalize AE to the bucket token: the tee branch of this fetch
+	// stores via buildObject, so the stored variant must match the
+	// key's bucket claim (see rewriteOutboundAE). The SSE-only branch
+	// never stores; the rewrite is harmless there.
+	h.rewriteOutboundAE(&req.Header)
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — never the ctx, so the cache key, the Vary
+	// variant key, and the stored RequestInfo stay untouched. Covers
+	// miss, bypass, and SSE fetches on this path.
+	h.applyForwardedCtx(&req.Header, ctx)
 	// Forward the request body (POST-style SSE carries the prompt/payload
 	// in the body). The pooled request outlives the handler on streaming
 	// paths (released inside the body-stream writer), so the body is
@@ -111,7 +158,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		return nil, fmt.Errorf("origin fetch: %w", err)
 	}
 
-	// Check Content-Length against maxResponseBytes if available.
 	if h.maxResponseBytes > 0 {
 		if cl := resp.Header.ContentLength(); cl > 0 && int64(cl) > h.maxResponseBytes {
 			fasthttp.ReleaseRequest(req)
@@ -128,12 +174,8 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		resp:       resp,
 		req:        req,
 		sem:        h.fetchSem,
+		span:       span,
 		buffered:   !resp.IsBodyStream(),
-	}
-
-	// In buffered mode, the span ends now (no stream writer to end it later).
-	if sf.buffered {
-		span.End()
 	}
 
 	return sf, nil
@@ -150,6 +192,13 @@ func releaseStreamFetch(sf *streamFetchResult) {
 	}
 	if sf.sem != nil {
 		<-sf.sem
+	}
+	// The span ends here for both modes: every caller funnels through
+	// this release. Span.End is idempotent, so an earlier inline End on
+	// an error path is safe; the nil guard covers results that never
+	// started a span.
+	if sf.span != nil {
+		sf.span.End()
 	}
 }
 
@@ -201,8 +250,37 @@ func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
 
 // streamBypass fetches the origin response and streams it directly to
 // the client without buffering. Used for BYPASS path where the response
-// is not cached.
+// is not cached. A dispatched fetch (success or error) is attributed to
+// the origin; the shed 503 (writeShed503) and the no-client-no-upstream
+// 502 keep the empty source — the origin was never reached — which the
+// metrics layer labels "bouine".
 func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
+	if h.fastClient == nil {
+		// Upstream fallback (issue #598): a cached-static-route handler
+		// is wired with Upstream (the staticfile handler) and no
+		// FastClient. Run the upstream handler in-process: its response
+		// is already in ctx.Response, so only the attribution headers
+		// and rewrites remain. The origin-bound URI is applied in place
+		// first (see handleBypassFast).
+		if h.upstream != nil {
+			if u := h.originURI(ctx.RequestURI()); !bytes.Equal(u, ctx.RequestURI()) {
+				ctx.Request.SetRequestURIBytes(u)
+			}
+			h.upstream(ctx)
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			h.applyResponseRewrites(&ctx.Response.Header)
+			return
+		}
+		// ctx.Error resets the response, so the attribution headers are
+		// written after it. No X-Cache-Source: neither a client nor an
+		// upstream is wired, so no fetch was dispatched — the metrics
+		// layer labels this response "bouine", not "origin".
+		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+		h.applyResponseRewrites(&ctx.Response.Header)
+		return
+	}
 	sf, err := h.doFetchStream(ctx)
 	if err != nil {
 		if errors.Is(err, ErrFetchShed) {
@@ -211,6 +289,8 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 
@@ -223,7 +303,9 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
 
@@ -258,6 +340,8 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 // streamMiss fetches the origin response, streams it to the client while
 // concurrently buffering for cache storage. Handles singleflight: the
 // leader streams, followers wait for the buffered result.
+//
+//nolint:gocyclo // 16: SSE/unshareable + upstream-fallback cacheability branches mirror the FastClient paths; splitting them would hide the symmetry
 func (h *Handler) streamMiss(
 	ctx *fasthttp.RequestCtx,
 	primaryKey api.Key,
@@ -270,23 +354,28 @@ func (h *Handler) streamMiss(
 		close(inflight.done)
 		if errors.Is(err, ErrFetchShed) {
 			h.writeShed503(ctx, "MISS")
+			// The shed must not be a lost re-warm: schedule the bounded
+			// background refill (the followers just resolved above get
+			// their 503, the store still gets the object).
+			h.triggerShedRefill(ri, primaryKey)
 			return
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 
-	// Set up response headers for the client.
 	dst := &ctx.Response.Header
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-	if len(sf.resp.Header.Peek(header.Age)) == 0 {
+	if sf.resp == nil || len(sf.resp.Header.Peek(header.Age)) == 0 {
 		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
 
@@ -314,10 +403,18 @@ func (h *Handler) streamMiss(
 	// the Map at all: every non-cacheable miss saves the FromFastHTTP
 	// conversion plus header-entry interning that only cacheable storage
 	// needs.
-	cacheable := h.isResponseCacheableBytes(sf, ri)
+	// The upstream-fallback result (issue #598) has no raw fasthttp
+	// response: cacheability is evaluated over the buffered Map path.
+	var cacheable bool
 	var resMap header.Map
-	if cacheable {
+	if sf.resp != nil {
+		cacheable = h.isResponseCacheableBytes(sf, ri)
+		if cacheable {
+			resMap = sf.Header.ToMap()
+		}
+	} else {
 		resMap = sf.Header.ToMap()
+		cacheable = h.isResponseCacheable(sf, ri, resMap)
 	}
 
 	if sf.buffered || isHEAD || !cacheable {
@@ -347,7 +444,7 @@ func (h *Handler) streamMiss(
 // isResponseCacheable checks whether the origin response should be cached.
 func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, resMap header.Map) bool {
 	parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
-	cacheable := parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL)
+	cacheable := parsed.isCacheableWithDefault(h.neg, h.defaultTTL)
 	if cacheable && !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 		return false
 	}
@@ -361,7 +458,7 @@ func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, res
 
 // isResponseCacheableBytes is isResponseCacheable over the raw fasthttp
 // response headers, without building a header.Map first. It mirrors the
-// Map-based path exactly: CDN-Cache-Control precedence (RFC 9211), the
+// Map-based path exactly: CDN-Cache-Control precedence (RFC 9213), the
 // blocking directives (no-store, private, Vary:*, Pragma, Set-Cookie,
 // request Authorization), explicit freshness (max-age/s-maxage/Expires),
 // heuristic freshness (Last-Modified on heuristically-cacheable status),
@@ -376,7 +473,7 @@ func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo
 	status := sf.StatusCode
 
 	// CDN-Cache-Control overrides Cache-Control for shared caches
-	// (RFC 9211). Reuse the Map path when present: merging multiple
+	// (RFC 9213). Reuse the Map path when present: merging multiple
 	// values and validating token characters needs the joined value,
 	// and CDN-CC is rare enough that the Map build is acceptable.
 	if cdn := hdr.Peek(header.CDNCacheControl); len(cdn) > 0 {
@@ -451,7 +548,7 @@ func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Dir
 
 // isBlockedByPragmaBytes mirrors isBlockedByPragma over raw header bytes:
 // Pragma: no-cache blocks when there is no explicit freshness signal
-// (skipped under CDN-CC per RFC 9211).
+// (skipped under CDN-CC per RFC 9213).
 func isBlockedByPragmaBytes(hdr *fasthttp.ResponseHeader, respCC Directives) bool {
 	if !bytes.Equal(hdr.Peek(header.Pragma), []byte("no-cache")) {
 		return false
@@ -480,7 +577,7 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 		(isHeuristicStatus(status) || respCC.Public) {
 		return true
 	}
-	if h.negativeTTL > 0 && IsNegativeCacheable(status) {
+	if h.neg.Cacheable(status) {
 		return true
 	}
 	// Operator default-TTL fallback: only heuristically-cacheable
@@ -569,9 +666,87 @@ func varyContainsStarBytes(vary []byte) bool {
 	return false
 }
 
+// joinedVary returns the effective Vary header value from the stored
+// header.Map: all Vary field lines joined with ", " per RFC 9110 §5.2.
+// Vary is a list-based field, so a Vary split across multiple field
+// lines is equivalent to one comma-joined value. The variant key and
+// the refresh registry must see every field name — Get (first line
+// only) silently dropped the later lines and collapsed distinct
+// variants (e.g. "Vary: Accept-Encoding" + "Vary: X-Region" stored a
+// key that ignored X-Region, serving one market's body to another).
+// Single-line Vary returns the stored value directly.
+func joinedVary(h header.Map) string {
+	return h.GetAll(header.Vary)
+}
+
+// effectiveVary returns the Vary value the variant key is built from:
+// the response's joined Vary field lines, unioned with the route's
+// include_headers allow-list (cache.key.include_headers). An include
+// header participates in the variant key exactly as if the origin had
+// listed it in Vary — the union is never a replacement. The value is
+// stored as VaryValue/VaryKey, so the hit path, the fast path, and
+// every peer gate (which read the stored value) need no changes, and
+// an include-listed header inherits the value normalization each
+// variant-key construction site already applies to Vary fields.
+//
+// A nil policy or empty include list returns the joined value
+// unchanged — the zero-allocation passthrough that keeps the
+// include-free miss path on its alloc budget (Handler_CacheMiss_
+// Cacheable). An absent response Vary with a non-empty include list
+// yields the include list itself: the variant key then selects
+// variants by those request headers, and a request header that is
+// absent hashes as an empty value (one variant), matching RFC 9111
+// Vary semantics.
+//
+// On the store paths it can never emit "*": config validation rejects
+// "*" in include_headers, and responses carrying "Vary: *" are refused
+// storage by isCacheBlocked, so their value never reaches the union.
+// The 304-revalidation path is the one exception — a 304 runs before
+// any cacheability gate, and MergeHeaders304 copies its Vary lines
+// into the stored header wholesale, so a "Vary: *" 304 can produce a
+// union containing "*". That is fail-safe downstream (every
+// variant-key constructor returns the primary key on varyContainsStar,
+// and refreshFrom304 blanks VaryKey for a "*" union), so the damage
+// is failed hits until the object is re-fetched, never a wrong body.
+func effectiveVary(h header.Map, policy *KeyPolicy) string {
+	joined := joinedVary(h)
+	if (policy == nil || len(policy.includeHeaders) == 0) && !policy.hasCookiePresence() {
+		return joined
+	}
+	// Union into a lowercase, trimmed, deduplicated, sorted field list
+	// joined with ", " per RFC 9110 §5.2. Sorting makes the result
+	// deterministic regardless of the origin's field order, so
+	// VaryValue/VaryKey stay byte-identical across the store sites and
+	// across cluster nodes; dedup collapses a field the origin also
+	// lists in Vary (NewKeyPolicy already dedupes the include side).
+	// The synthetic cookie-presence field (issue #768) unions in the
+	// same way: its hash contribution is computed by the variant-key
+	// builders (presence bits, never raw cookie values).
+	fields := make([]string, 0, strings.Count(joined, ",")+1+len(policy.includeHeaders)+1)
+	if joined != "" {
+		for f := range strings.SplitSeq(joined, ",") {
+			fields = append(fields, strings.TrimSpace(strings.ToLower(f)))
+		}
+	}
+	fields = append(fields, policy.includeHeaders...)
+	if policy.hasCookiePresence() {
+		fields = append(fields, cookiePresenceField)
+	}
+	sort.Strings(fields)
+	uniq := fields[:0]
+	for i, f := range fields {
+		if i == 0 || f != fields[i-1] {
+			uniq = append(uniq, f)
+		}
+	}
+	return strings.Join(uniq, ", ")
+}
+
 // streamMissBuffered handles the non-streaming fallback: the client
 // doesn't support body streaming, the request is HEAD, or the response
 // is not cacheable. The body is already in resp.Body().
+//
+//nolint:gocyclo // 16: Vary-variant storage branches mirror the store path; splitting would hide the ownership rules
 func (h *Handler) streamMissBuffered(
 	ctx *fasthttp.RequestCtx,
 	sf *streamFetchResult,
@@ -582,13 +757,16 @@ func (h *Handler) streamMissBuffered(
 	isHEAD, cacheable bool,
 ) {
 	// Check body size against maxResponseBytes (Content-Length may not
-	// have been available).
-	if h.maxResponseBytes > 0 && int64(len(sf.resp.Body())) > h.maxResponseBytes {
+	// have been available). The upstream-fallback result (issue #598)
+	// has no raw response; its body size was already bounded by
+	// fetchViaUpstream's conversion.
+	if h.maxResponseBytes > 0 && sf.resp != nil && int64(len(sf.resp.Body())) > h.maxResponseBytes {
 		inflight.res = fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 		close(inflight.done)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		releaseStreamFetch(sf)
 		return
 	}
@@ -599,28 +777,41 @@ func (h *Handler) streamMissBuffered(
 	// (non-cacheable miss), steal the buffer via SwapBody: the body is
 	// transient (written to this client and released singleflight
 	// followers) and the steal removes a full-body memcpy plus halves
-	// peak in-flight body memory.
+	// peak in-flight body memory. The upstream-fallback result (issue
+	// #598) has no raw response; its body is already an exact-size,
+	// independently-owned copy produced by upstreamFetchResult, and it
+	// travels on the streamFetchResult body field below.
 	var body []byte
-	if cacheable {
+	switch {
+	case sf.resp == nil:
+		body = sf.body
+	case cacheable:
 		body = make([]byte, len(sf.resp.Body()))
 		copy(body, sf.resp.Body())
-	} else {
+	default:
 		body = takeResponseBody(sf.resp)
 	}
 
 	// Owned header.Map: followers read res.Header after close(done),
 	// concurrently with releaseStreamFetch returning the pooled response
-	// to its sync.Pool (see teeStreamToClient for the same fix). On the
-	// cacheable path resMap is already an owned Map built by streamMiss
-	// (ToMap detaches from the pooled response) — reuse it instead of a
-	// second FromFastHTTP conversion. Non-cacheable misses arrive with a
-	// zero Map (streamMiss skipped the build), so build one here: it is
-	// only 2 allocs and only on the never-stored path, but followers
-	// still read it after close(done) and must not touch the pooled
-	// response.
+	// to its sync.Pool (see teeStreamToClient for the same fix), and — on
+	// the cacheable path — concurrently with buildObject mutating resMap
+	// below (obj.Header = resMap: SetEntryRaw, Del, Set stamp the stored
+	// object after close(done)). When at least one follower parked on
+	// this stream, publish a detached clone and keep the mutable
+	// original for storage — the same ownership split collapsedFetch
+	// applies with ownedClone. With no followers there is exactly one
+	// reader (this caller, before buildObject runs), so the Map is
+	// reused as-is and the benchmark's miss-path alloc budget is
+	// unchanged. Non-cacheable misses arrive with a zero Map (streamMiss
+	// skipped the build), so build one here: 2 allocs, never-stored
+	// path only, and the object-build mutations below never happen for
+	// it.
 	owned := resMap
 	if owned.Len() == 0 {
 		owned = sf.Header.ToMap()
+	} else if inflight.followers.Load() > 0 {
+		owned = owned.Clone()
 	}
 	res := fetchResult{
 		StatusCode: sf.StatusCode,
@@ -640,7 +831,7 @@ func (h *Handler) streamMissBuffered(
 			return
 		}
 		storeKey := primaryKey
-		if vary := resMap.Get(header.Vary); vary != "" {
+		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 			if storeKey != primaryKey {
 				if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
@@ -704,7 +895,7 @@ func (h *Handler) streamMissTee(
 	resMap header.Map,
 ) {
 	storeKey := primaryKey
-	if vary := resMap.Get(header.Vary); vary != "" {
+	if vary := effectiveVary(resMap, h.policy); vary != "" {
 		storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		if storeKey != primaryKey {
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
@@ -891,7 +1082,7 @@ func (h *Handler) storeStreamedObject(
 	res fetchResult,
 	resMap header.Map,
 ) *api.Object {
-	obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
 	h.storeObject(ctx, key, obj, ri, false, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj

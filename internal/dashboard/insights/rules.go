@@ -33,6 +33,7 @@ func init() {
 		ruleClusterPeerStale,
 		ruleConfigKeyQueryParams,
 		ruleConfigAllowSetCookie,
+		ruleConfigCookieBypassMissing,
 		ruleConfigJitterZero,
 		// Tier 1: config-derived standing insights.
 		ruleConfigTLSBelow12,
@@ -57,6 +58,7 @@ func init() {
 		ruleCDNPurgeSkipped,
 		ruleConfigPoolPassiveEjectForever,
 		ruleClusterPeerHealthDegraded,
+		ruleAnomalyFetchShed,
 	}
 }
 
@@ -237,7 +239,7 @@ func ruleCacheNoNegTTL(data InsightData) *Insight {
 			continue
 		}
 		r := routeNameToConfig(data, rs.Route)
-		if r != nil && isCacheEnabled(r) && r.Cache.NegativeTTL == 0 {
+		if r != nil && isCacheEnabled(r) && !r.Cache.NegativeTTL.Policy().CoversAnything() {
 			triggered = append(triggered, rs.Route)
 		}
 	}
@@ -320,6 +322,25 @@ func ruleCacheVaryExplosion(data InsightData) *Insight {
 		Detail:   "A route is generating too many Vary variants, exceeding MaxVariants. Check Vary header and key normalization.",
 		Evidence: fmt.Sprintf("vary_cap_hits_total: %d", data.VaryCapHits),
 		Action:   "/dashboard/routes",
+	}
+}
+
+// ruleAnomalyFetchShed reports foreground origin fetches shed after
+// waiting fetch_wait_timeout for a fetch-semaphore slot: miss demand
+// exceeded max_fetch_concurrency, and shed requests were served stale
+// when possible, else 503 + Retry-After.
+func ruleAnomalyFetchShed(data InsightData) *Insight {
+	if data.FetchShed <= 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "anomaly-fetch-shed",
+		Severity: SeverityHigh,
+		Category: CategoryAnomaly,
+		Title:    fmt.Sprintf("%d origin fetches shed — demand exceeds fetch concurrency", data.FetchShed),
+		Detail:   "Foreground misses waited past fetch_wait_timeout for a fetch slot and were shed (served stale when possible, else 503). Raise max_fetch_concurrency or fetch_wait_timeout, or check for a slow origin.",
+		Evidence: fmt.Sprintf("fetch_shed_total: %d", data.FetchShed),
+		Action:   "/dashboard/config",
 	}
 }
 
@@ -614,7 +635,7 @@ func ruleConfigKeyQueryParams(data InsightData) *Insight {
 	for i := range data.Config.Routes {
 		r := &data.Config.Routes[i]
 		if len(r.Cache.Key.StripQueryParams) == 0 {
-			path := r.Match.PathPrefix
+			path := r.Match.PathLabel()
 			if strings.Contains(strings.ToLower(path), "search") || strings.Contains(strings.ToLower(path), "query") {
 				triggered = append(triggered, r.Name)
 			}
@@ -658,6 +679,83 @@ func ruleConfigAllowSetCookie(data InsightData) *Insight {
 	}
 }
 
+// ruleConfigCookieBypassMissing fires when a route that stores
+// responses is receiving cookie-bearing traffic without
+// bypass_on_cookie (ADR-0054, issue #762). The storing condition is
+// operator-visible: ttl_default > 0 or ttl_override > 0 make
+// no-freshness responses storable — the exact knob that turns a
+// personalized SSR page into a stored cross-user leak, because the
+// Set-Cookie block (ADR-0012) never fires for origins that only
+// READ the cookie. The traffic condition is measured: at least
+// cookieBypassMinRequests requests in the window with at least
+// cookieBypassMinCookiedPct% carrying a Cookie header — analytics
+// noise alone won't fire it, and a route with real cookie traffic
+// will.
+func ruleConfigCookieBypassMissing(data InsightData) *Insight {
+	var triggered []string
+	var worstCookiedPct float64
+	var worstEvidence string
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		if !isCacheEnabled(r) {
+			continue
+		}
+		if r.Cache.BypassOnCookie != nil && *r.Cache.BypassOnCookie {
+			continue
+		}
+		// A named-cookie bypass (issue #768) counts as coverage for the
+		// leak shape this rule exists for only when the operator actually
+		// listed the session cookie; since the rule cannot know which
+		// cookie name personalizes the origin, a non-empty list is taken
+		// as the operator's explicit choice and suppresses the finding.
+		if len(r.Cache.BypassOnCookieNames) > 0 {
+			continue
+		}
+		storing := r.Cache.TTLDefault > 0 || r.Cache.TTLOverride > 0
+		if !storing {
+			continue
+		}
+		for _, rs := range data.RouteStats {
+			if rs.Route != r.Name || rs.Requests < cookieBypassMinRequests {
+				continue
+			}
+			cookiedPct := float64(rs.Cookied) / float64(rs.Requests) * 100
+			if cookiedPct < cookieBypassMinCookiedPct {
+				continue
+			}
+			triggered = append(triggered, r.Name)
+			if cookiedPct > worstCookiedPct {
+				worstCookiedPct = cookiedPct
+				worstEvidence = fmt.Sprintf("cookied: %d / requests: %d (%.0f%%), ttl_default: %s, ttl_override: %s",
+					rs.Cookied, rs.Requests, cookiedPct, r.Cache.TTLDefault, r.Cache.TTLOverride)
+			}
+			break
+		}
+	}
+	if len(triggered) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-cookie-bypass-missing",
+		Severity: SeverityMed,
+		Category: CategoryConfig,
+		Title:    fmt.Sprintf("Route %s caches cookie-bearing traffic without bypass_on_cookie", triggered[0]),
+		Detail: fmt.Sprintf("%d route(s) store responses (ttl_default/ttl_override) while serving cookie-bearing requests without bypass_on_cookie — personalized content can be stored and served cross-user (ADR-0054)",
+			len(triggered)),
+		Evidence: worstEvidence,
+		Routes:   truncateRoutes(triggered),
+		Action:   "/dashboard/config",
+	}
+}
+
+// cookieBypassMinRequests and cookieBypassMinCookiedPct gate the
+// cookie-bypass insight: small-sample routes and analytics-cookie-only
+// noise must not fire it, but any route with a real cookied share will.
+const (
+	cookieBypassMinRequests   = 100
+	cookieBypassMinCookiedPct = 5.0
+)
+
 func ruleConfigJitterZero(data InsightData) *Insight {
 	var triggered []string
 	for i := range data.Config.Routes {
@@ -688,7 +786,7 @@ func ruleConfigTLSBelow12(data InsightData) *Insight {
 	if mv == "" || data.Config.Listen.HTTPS == "" {
 		return nil
 	}
-	if mv == "1.2" || mv == "1.3" {
+	if mv == config.TLSVersion1_2 || mv == config.TLSVersion1_3 {
 		return nil
 	}
 	return &Insight{
@@ -1107,6 +1205,9 @@ func ruleCDNPurgeSkipped(data InsightData) *Insight {
 
 func ruleConfigPoolPassiveEjectForever(data InsightData) *Insight {
 	for _, pool := range data.Config.UpstreamPools {
+		// Ejected-forever requires BOTH restore paths absent: no
+		// eject_for window and no active health check. A configured
+		// eject_for restores the target automatically (issue #599).
 		if pool.Health.Passive.EjectFor == 0 && pool.Health.Active.Path == "" {
 			return &Insight{
 				ID:       "config-pool-passive-eject-forever",

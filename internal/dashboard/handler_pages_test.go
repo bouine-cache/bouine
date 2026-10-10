@@ -10,6 +10,7 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/dashboard/insights"
 	"github.com/bouine-cache/bouine/internal/dashboard/templates"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
@@ -77,6 +78,8 @@ func TestHandler_Performance(t *testing.T) {
 	ctx.Request.SetRequestURI("http://test/dashboard/performance?range=24h")
 	h.performance(ctx)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	// Legacy 24h URLs fall back to the 6h view; the ring only holds 6h.
+	require.Contains(t, string(ctx.Response.Body()), "latency over time (6h)")
 }
 
 func TestHandler_Routes(t *testing.T) {
@@ -204,6 +207,124 @@ func TestHandler_Insights_WithAllClosures(t *testing.T) {
 	ctx.Request.SetRequestURI("http://test/dashboard/insights")
 	h.insights(ctx)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+}
+
+// TestHandler_CFStatusWired asserts the Cloudflare card the engine
+// supplies actually reaches both surfaces that consume it: the
+// invalidation page card (last error / last success / circuit / DLQ)
+// and the insight engine input that drives ruleCDNLastError. Before
+// this wiring the engine dropped every status field except
+// enabled/zone/async/lag, so the CDN error insight could never fire.
+func TestHandler_CFStatusWired(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:  "test",
+			Rings:  rings,
+			Logger: observability.NoopLogger{},
+			CFStatusFn: func() templates.CFStatusCard {
+				return templates.CFStatusCard{
+					Enabled:       true,
+					ZoneID:        "zone1",
+					Async:         true,
+					LastError:     "429 too many requests",
+					LastSuccessAt: "2026-09-09T12:00:00Z",
+					LastLagMs:     42,
+					CircuitState:  "open",
+					DLQDepth:      3,
+				}
+			},
+		},
+		auth: newSessionAuth("test"),
+		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/invalidation")
+	h.invalidation(ctx)
+	body := string(ctx.Response.Body())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Contains(t, body, "429 too many requests")
+	assert.Contains(t, body, "2026-09-09T12:00:00Z")
+	assert.Contains(t, body, "open")
+	assert.Contains(t, body, "3")
+
+	merged, peers := h.agg.Collect(context.Background())
+	data := h.collectInsightData(merged, peers)
+	assert.Equal(t, "429 too many requests", data.CFStatus.LastError,
+		"ruleCDNLastError input must see the last error")
+}
+
+// TestHandler_Insights_Polling asserts the insights page self-polls like
+// the other live pages, and that the polling swap re-applies the
+// operator's filter/focus instead of resetting the view.
+func TestHandler_Insights_Polling(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:  "test",
+			Rings:  rings,
+			Logger: observability.NoopLogger{},
+			Config: &config.Config{Routes: []config.Route{{Name: "api", Pool: "origin1"}}},
+		},
+		auth:          newSessionAuth("test"),
+		agg:           NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+		insightEngine: insights.New(),
+	}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/insights")
+	h.insights(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+
+	body := string(ctx.Response.Body())
+	assert.Contains(t, body, `hx-get="/dashboard/insights"`, "insights page must self-poll")
+	assert.Contains(t, body, "every 15s")
+	assert.Contains(t, body, `hx-select="#insights-container"`)
+	// Poll-safety: document keydown guarded, filter/focus state kept on
+	// window and re-applied after each swap.
+	assert.Contains(t, body, "__insightsKeyBound")
+	assert.Contains(t, body, "__insightsState")
+}
+
+// TestHandler_PeerFetchStatsAvgLatency asserts the cluster page shows
+// the average peer-fetch RPC latency: the engine adapter computes it
+// from the fetcher's cumulative lat_sum/lat_n, which it previously
+// discarded, leaving the "avg peer latency" row permanently empty.
+func TestHandler_PeerFetchStatsAvgLatency(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:       "test",
+			Rings:       rings,
+			Logger:      observability.NoopLogger{},
+			ClusterMeta: templates.ClusterMeta{Mode: "strong"},
+			PeerFetchStatsFn: func() templates.PeerFetchStats {
+				return templates.PeerFetchStats{
+					HitsTotal:    7,
+					MissesTotal:  3,
+					AvgLatMs:     2.5,
+					HopLimitHits: 1,
+				}
+			},
+		},
+		auth: newSessionAuth("test"),
+		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/cluster")
+	h.cluster(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	body := string(ctx.Response.Body())
+	assert.Contains(t, body, "2.50ms", "avg peer latency must render")
+	assert.Contains(t, body, "peer hits (total)")
+	assert.Contains(t, body, "peer misses (total)")
 }
 
 func TestHandler_APIPurge_NotConfigured(t *testing.T) {
@@ -569,7 +690,7 @@ func TestHandler_Cluster_WithRingFn(t *testing.T) {
 			Rings:            rings,
 			Logger:           observability.NoopLogger{},
 			RingFn:           func() []api.RingSegment { return []api.RingSegment{{NodeName: "self", Frac: 1.0}} },
-			PeerFetchStatsFn: func() templates.PeerFetchStats { return templates.PeerFetchStats{Hits6h: 10} },
+			PeerFetchStatsFn: func() templates.PeerFetchStats { return templates.PeerFetchStats{HitsTotal: 10} },
 		},
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),

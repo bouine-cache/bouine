@@ -218,7 +218,14 @@ func shortPeerName(name string) string {
 // node in the diagram filters insights to those related to that node.
 templ Insights(d InsightsData) {
 	@Layout(d.LayoutProps) {
-		<div class="insights-container insights-split" id="insights-container">
+		<div
+			class="insights-container insights-split"
+			id="insights-container"
+			hx-get="/dashboard/insights"
+			hx-trigger="every 15s"
+			hx-swap="outerHTML"
+			hx-select="#insights-container"
+		>
 			<div class="insights-diagram">
 				<div class="insights-diagram-hd">
 					<span class="ct">Architecture Flow</span>
@@ -296,8 +303,8 @@ templ Insights(d InsightsData) {
 					}
 				</div>
 			</div>
+			@insightsScript()
 		</div>
-		@insightsScript()
 	}
 }
 
@@ -432,23 +439,31 @@ script insightsScript() {
 			}
 		}
 	})();
-	document.addEventListener('keydown',function(e){
-		if(e.key==='v'||e.key==='V'){
-			var tag=(e.target&&e.target.tagName)||'';
-			if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
-			toggleInsightsMax();
-		}
-	});
-	var currentSev='ALL';
-	var focusedNode=null;
+	if(!window.__insightsKeyBound){
+		window.__insightsKeyBound=true;
+		document.addEventListener('keydown',function(e){
+			if(e.key==='v'||e.key==='V'){
+				var tag=(e.target&&e.target.tagName)||'';
+				if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+				toggleInsightsMax();
+			}
+		});
+	}
+	// Poll swaps re-run this script; keep the operator's filter and focus
+	// in window state so live updates do not reset the view.
+	var st=window.__insightsState||(window.__insightsState={sev:'ALL',focus:null});
+	var currentSev=st.sev;
+	var focusedNode=st.focus;
 	window.filterInsights=function(sev){
 		currentSev=sev;
+		st.sev=sev;
 		var chips=document.querySelectorAll('#insights-filters .filter-chip');
 		chips.forEach(function(c){c.classList.remove('active');if(c.getAttribute('data-sev')===sev)c.classList.add('active');});
 		applyFilters();
 	};
 	function focusInsights(nodeId){
 		focusedNode=nodeId;
+		st.focus=nodeId;
 		document.querySelectorAll('.arch-node-group').forEach(function(g){
 			if(g.getAttribute('data-node-id')===nodeId){g.classList.add('focused');g.classList.remove('dimmed');}
 			else{g.classList.add('dimmed');g.classList.remove('focused');}
@@ -463,6 +478,7 @@ script insightsScript() {
 	}
 	window.defocusInsights=function(){
 		focusedNode=null;
+		st.focus=null;
 		document.querySelectorAll('.arch-node-group').forEach(function(g){g.classList.remove('focused','dimmed');});
 		var ind=document.getElementById('focus-indicator');
 		if(ind)ind.style.display='none';
@@ -485,5 +501,25 @@ script insightsScript() {
 			if(g){e.stopPropagation();focusInsights(g.getAttribute('data-node-id'));}
 			else{defocusInsights();}
 		});
+	})();
+	// After a poll swap the DOM is fresh: re-apply the operator's active
+	// severity chip and diagram focus from window state, then filter.
+	(function(){
+		if(currentSev!=='ALL'){
+			document.querySelectorAll('#insights-filters .filter-chip').forEach(function(c){
+				c.classList.toggle('active',c.getAttribute('data-sev')===currentSev);
+			});
+		}
+		if(focusedNode){
+			document.querySelectorAll('.arch-node-group').forEach(function(g){
+				if(g.getAttribute('data-node-id')===focusedNode){g.classList.add('focused');g.classList.remove('dimmed');}
+				else{g.classList.add('dimmed');g.classList.remove('focused');}
+			});
+			var lbl=document.querySelector('.arch-node-group[data-node-id="'+focusedNode+'"] .arch-label');
+			var ind=document.getElementById('focus-indicator');
+			var indLabel=document.getElementById('focus-indicator-label');
+			if(ind&&indLabel){indLabel.textContent='Filtered: '+(lbl?lbl.textContent:'');ind.style.display='flex';}
+		}
+		applyFilters();
 	})();
 }

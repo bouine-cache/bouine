@@ -25,8 +25,12 @@ func TestNormaliseSource(t *testing.T) {
 		{"warm", "warm"},
 		{"peer", "peer"},
 		{"origin", "origin"},
-		{"", ""},
-		{"unknown", ""},
+		// The bouine-synthesized default slot: an empty wire value and
+		// any unknown or spoofed value both normalise to the "bouine"
+		// label (closed set: hot/warm/peer/origin/bouine).
+		{"", string(api.SourceBouine)},
+		{"unknown", string(api.SourceBouine)},
+		{string(api.SourceBouine), string(api.SourceBouine)},
 	}
 	for _, c := range cases {
 		got := normaliseSource(c.input)
@@ -227,14 +231,26 @@ func TestFastHTTPMiddleware_SourceLabel(t *testing.T) {
 	assert.True(t, foundBytes)
 }
 
-func TestFastHTTPMiddleware_SourceLabel_Empty(t *testing.T) {
+// TestFastHTTPMiddleware_SourceLabel_Default pins the renamed default
+// source slot: a response whose X-Cache-Source is empty (a bouine-
+// synthesized 503/504 — the origin was never reached) or unknown
+// (spoofed) must land on the closed set's "bouine" label, never on an
+// empty or minted one. BYPASS traffic itself is attributed "origin" by
+// the cache layer (see internal/cache handler_source_test.go).
+func TestFastHTTPMiddleware_SourceLabel_Default(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "BYPASS")
-		ctx.SetStatusCode(200)
+		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
+	})
+
+	spoofH := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.Response.Header.Set(header.XCacheSource, "evil-tier-99999")
+		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
 	})
 
 	ctx := &fasthttp.RequestCtx{}
@@ -242,19 +258,31 @@ func TestFastHTTPMiddleware_SourceLabel_Empty(t *testing.T) {
 	ctx.Request.Header.SetMethod("GET")
 	h(ctx)
 
+	spoofCtx := &fasthttp.RequestCtx{}
+	spoofCtx.Request.SetRequestURI("/test")
+	spoofCtx.Request.Header.SetMethod("GET")
+	spoofH(spoofCtx)
+
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
+	var foundDefault bool
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
-			if labelValue(m, "cache_result") == "BYPASS" && labelValue(m, "source") == "" {
-				return
+			if labelValue(m, "cache_result") != "BYPASS" {
+				continue
+			}
+			switch src := labelValue(m, "source"); src {
+			case string(api.SourceBouine):
+				foundDefault = true
+			case "", "evil-tier-99999":
+				t.Errorf("source label must be %q for empty/spoofed values, got %q", api.SourceBouine, src)
 			}
 		}
 	}
-	t.Error("requests_total: no BYPASS series with empty source")
+	assert.True(t, foundDefault, "requests_total: no BYPASS series on the bouine default source slot")
 }
 
 func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
@@ -328,8 +356,46 @@ func TestSourceIndex(t *testing.T) {
 	assert.Equal(t, 1, sourceIndex(string(api.SourceWarm)))
 	assert.Equal(t, 2, sourceIndex(string(api.SourcePeer)))
 	assert.Equal(t, 3, sourceIndex(string(api.SourceOrigin)))
+	assert.Equal(t, 4, sourceIndex(string(api.SourceBouine)))
 	assert.Equal(t, 4, sourceIndex(""))
 	assert.Equal(t, -1, sourceIndex("unknown"))
+}
+
+// TestSourceLabelSetClosed declares the closed source-label set once, as
+// data, and fails when any hand-synced encoding of it drifts:
+// metricSourceSlots (the poolMetrics array bound), sourceIndex and
+// sourceIndexBytes (slot lookup), normaliseSource (label passthrough and
+// default collapse), and the middleware index switch (reached end-to-end
+// by TestFastHTTPMiddleware_SourceLabel_Default). A new api.Source value
+// added without touching every encoding breaks this test instead of
+// silently collapsing into the "bouine" default slot.
+func TestSourceLabelSetClosed(t *testing.T) {
+	t.Parallel()
+	set := []string{
+		string(api.SourceHot),
+		string(api.SourceWarm),
+		string(api.SourcePeer),
+		string(api.SourceOrigin),
+		string(api.SourceBouine),
+	}
+	require.Equal(t, metricSourceSlots, len(set),
+		"metricSourceSlots must bound exactly the declared source set")
+
+	for i, s := range set {
+		assert.Equal(t, i, sourceIndex(s), "sourceIndex(%q)", s)
+		assert.Equal(t, i, sourceIndexBytes([]byte(s)), "sourceIndexBytes(%q)", s)
+		assert.Equal(t, s, normaliseSource(s), "normaliseSource(%q) passes through", s)
+	}
+
+	// The wire alias of the bouine slot: an empty X-Cache-Source and any
+	// unknown or spoofed value all collapse into it.
+	last := len(set) - 1
+	assert.Equal(t, last, sourceIndex(""), "empty wire value aliases the bouine slot")
+	assert.Equal(t, last, sourceIndexBytes([]byte("")), "empty wire value aliases the bouine slot")
+	assert.Equal(t, set[last], normaliseSource(""))
+	assert.Equal(t, set[last], normaliseSource("evil-tier-99999"))
+	assert.Equal(t, -1, sourceIndex("unknown"), "unknown values stay unindexed; the middleware default collapses them")
+	assert.Equal(t, -1, sourceIndexBytes([]byte("unknown")), "unknown values stay unindexed; the middleware default collapses them")
 }
 
 func TestAccessLogMessage(t *testing.T) {

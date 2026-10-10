@@ -27,7 +27,11 @@
         "pullPolicy": {
           "description": "Kubernetes image pull policy.",
           "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"],
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
           "default": "IfNotPresent"
         },
         "pullSecrets": {
@@ -44,7 +48,10 @@
           "default": []
         }
       },
-      "required": ["repository", "pullPolicy"]
+      "required": [
+        "repository",
+        "pullPolicy"
+      ]
     },
     "serviceAccount": {
       "description": "Service account for the bouine pods.",
@@ -98,19 +105,27 @@
           "properties": {
             "http": {
               "type": "string",
-              "default": ":80"
+              "default": ":80",
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the http plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.http keeps routing coherent. An empty string disables the plane (the app requires at least one listener)."
             },
             "https": {
               "type": "string",
-              "default": ":443"
+              "default": ":443",
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the https plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.https keeps routing coherent. An empty string disables the plane — the common case when TLS terminates upstream."
             },
             "admin": {
               "type": "string",
-              "default": ":9000"
+              "default": ":9000",
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the admin plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.admin keeps routing coherent. An empty string disables the plane (the app requires at least one listener)."
             },
             "cluster": {
               "type": "string",
-              "default": ":8443"
+              "default": ":8443",
+              "pattern": "^$|^(\\d{1,3}(\\.\\d{1,3}){3})?:[1-9][0-9]{0,4}$",
+              "description": "Listen address for the cluster plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.cluster keeps routing coherent. An empty string disables the cluster plane."
             },
             "max_connections": {
               "description": "Cap on simultaneously open data-plane connections. Under HTTP/1.1 this bounds in-flight requests; over-limit connections receive 503 + close. Idle keep-alive connections hold a slot. 0 disables the limit.",
@@ -221,7 +236,9 @@
               "targets": {
                 "description": "Origin target addresses.",
                 "type": "array",
-                "items": {"type": "string"}
+                "items": {
+                  "type": "string"
+                }
               },
               "connect": {
                 "description": "Connection policy for origin targets. Zero/empty values apply built-in defaults.",
@@ -248,7 +265,7 @@
                     "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
                   },
                   "response_header_timeout": {
-                    "description": "Max wait for origin response headers. Default 30s.",
+                    "description": "Max wait for origin response headers (default 30s). Also the default origin wait (header + body) inherited by every route on the pool that does not set its own cache.fetch_timeout. Keep strictly below 5m (data plane safety-net WriteTimeout).",
                     "type": "string",
                     "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
                   },
@@ -256,6 +273,10 @@
                     "description": "Fire a duplicate request after this duration; first response wins. Empty disables.",
                     "type": "string",
                     "pattern": "^$|^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "preserve_host": {
+                    "description": "Keep the request's Host header on origin-bound requests instead of replacing it with the pool target. The dial target stays the configured pool target. Enable for origins that derive behaviour from the request Host (market selection, vhost routing). Default false.",
+                    "type": "boolean"
                   }
                 }
               }
@@ -280,7 +301,9 @@
             },
             "api_tokens": {
               "type": "array",
-              "items": {"type": "string"},
+              "items": {
+                "type": "string"
+              },
               "description": "Additional API tokens for rate limit spreading. The primary token is injected via CF_API_TOKEN env var. Additional tokens can be injected via CF_API_TOKENS (comma-separated)."
             },
             "propagate": {
@@ -322,21 +345,43 @@
               "type": "object",
               "description": "Circuit breaker for CF API outage protection.",
               "properties": {
-                "enabled": {"type": "boolean"},
-                "failure_threshold": {"type": "integer", "minimum": 0},
-                "open_timeout": {"type": "string"},
-                "half_open_max_calls": {"type": "integer", "minimum": 0}
+                "enabled": {
+                  "type": "boolean"
+                },
+                "failure_threshold": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "open_timeout": {
+                  "type": "string"
+                },
+                "half_open_max_calls": {
+                  "type": "integer",
+                  "minimum": 0
+                }
               }
             },
             "retry": {
               "type": "object",
               "description": "Dead-letter queue for failed CF purges. Failed items are retried with exponential backoff.",
               "properties": {
-                "enabled": {"type": "boolean"},
-                "max_queue_size": {"type": "integer", "minimum": 0},
-                "max_retries": {"type": "integer", "minimum": 0},
-                "base_delay": {"type": "string"},
-                "max_delay": {"type": "string"}
+                "enabled": {
+                  "type": "boolean"
+                },
+                "max_queue_size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "max_retries": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "base_delay": {
+                  "type": "string"
+                },
+                "max_delay": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -349,7 +394,11 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
           "default": "ClusterIP"
         },
         "httpPort": {
@@ -386,7 +435,11 @@
         "externalTrafficPolicy": {
           "description": "External traffic policy for the Service. 'Local' preserves the client source IP at the cost of uneven load distribution.",
           "type": "string",
-          "enum": ["", "Cluster", "Local"],
+          "enum": [
+            "",
+            "Cluster",
+            "Local"
+          ],
           "default": ""
         }
       }
@@ -398,12 +451,19 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
           "default": "ClusterIP"
         },
         "port": {
           "description": "Service port for the admin plane. Defaults to service.adminPort when empty.",
-          "type": ["integer", "string"],
+          "type": [
+            "integer",
+            "string"
+          ],
           "default": ""
         },
         "annotations": {
@@ -438,7 +498,10 @@
           "type": "object",
           "properties": {
             "cpu": {
-              "type": ["string", "number"]
+              "type": [
+                "string",
+                "number"
+              ]
             },
             "memory": {
               "type": "string"
@@ -449,7 +512,10 @@
           "type": "object",
           "properties": {
             "cpu": {
-              "type": ["string", "number"]
+              "type": [
+                "string",
+                "number"
+              ]
             },
             "memory": {
               "type": "string"
@@ -552,7 +618,10 @@
           },
           "whenUnsatisfiable": {
             "type": "string",
-            "enum": ["DoNotSchedule", "ScheduleAnyway"]
+            "enum": [
+              "DoNotSchedule",
+              "ScheduleAnyway"
+            ]
           },
           "labelSelector": {
             "type": "object"
@@ -565,11 +634,17 @@
           },
           "nodeAffinityPolicy": {
             "type": "string",
-            "enum": ["Honor", "Ignore"]
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
           },
           "nodeTaintsPolicy": {
             "type": "string",
-            "enum": ["Honor", "Ignore"]
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
           }
         }
       }
@@ -577,7 +652,10 @@
     "podManagementPolicy": {
       "description": "StatefulSet pod management policy.",
       "type": "string",
-      "enum": ["OrderedReady", "Parallel"],
+      "enum": [
+        "OrderedReady",
+        "Parallel"
+      ],
       "default": "Parallel"
     },
     "terminationGracePeriodSeconds": {
@@ -586,18 +664,39 @@
       "default": 40
     },
     "updateStrategy": {
-      "description": "StatefulSet rolling update strategy.",
+      "description": "StatefulSet update strategy.",
       "type": "object",
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["RollingUpdate", "OnDelete"],
+          "enum": [
+            "RollingUpdate",
+            "OnDelete"
+          ],
           "default": "RollingUpdate"
         },
-        "maxUnavailable": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 1
+        "rollingUpdate": {
+          "description": "Raw Kubernetes StatefulSet rolling-update values.",
+          "type": "object",
+          "properties": {
+            "maxUnavailable": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            },
+            "partition": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "default": {}
         }
       }
     },
@@ -618,7 +717,10 @@
     },
     "cloudflare": {
       "description": "Cloudflare API token secret injection for CDN invalidation propagation.",
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "properties": {
         "apiTokenSecretName": {
           "type": "string"
@@ -692,7 +794,10 @@
           "properties": {
             "targetType": {
               "type": "string",
-              "enum": ["Utilization", "AverageValue"],
+              "enum": [
+                "Utilization",
+                "AverageValue"
+              ],
               "default": "Utilization"
             },
             "averageUtilization": {
@@ -746,12 +851,18 @@
         },
         "whenScaled": {
           "type": "string",
-          "enum": ["Retain", "Delete"],
+          "enum": [
+            "Retain",
+            "Delete"
+          ],
           "default": "Retain"
         },
         "whenDeleted": {
           "type": "string",
-          "enum": ["Retain", "Delete"],
+          "enum": [
+            "Retain",
+            "Delete"
+          ],
           "default": "Retain"
         }
       }
@@ -793,6 +904,16 @@
         "scrapeTimeout": {
           "type": "string",
           "default": ""
+        },
+        "scrapeNativeHistograms": {
+          "description": "Scrape native histograms. Requires prometheus-operator >= v0.80 and Prometheus >= 2.40.",
+          "type": "boolean",
+          "default": true
+        },
+        "scrapeClassicHistograms": {
+          "description": "Also ingest classic histogram series for metrics exposed as native histograms. Requires Prometheus >= 2.45.",
+          "type": "boolean",
+          "default": true
         },
         "relabelings": {
           "description": "Prometheus relabeling rules applied before scraping.",
@@ -885,28 +1006,43 @@
           "properties": {
             "hitLatencyThreshold": {
               "description": "Hit-path p99 latency threshold in seconds (SLO DP-1).",
-              "type": ["number", "string"],
+              "type": [
+                "number",
+                "string"
+              ],
               "default": 0.002
             },
             "errorRateThreshold": {
               "description": "5xx error rate threshold as a fraction (SLO DP-4).",
-              "type": ["number", "string"],
+              "type": [
+                "number",
+                "string"
+              ],
               "default": 0.01
             },
             "hitRateThreshold": {
               "description": "Cache hit rate threshold as a fraction (SLO DP-3).",
-              "type": ["number", "string"],
-              "default": 0.60
+              "type": [
+                "number",
+                "string"
+              ],
+              "default": 0.6
             },
             "peerFetchHitRateThreshold": {
               "description": "Peer-fetch hit rate threshold as a fraction (SLO CL-2).",
-              "type": ["number", "string"],
-              "default": 0.50
+              "type": [
+                "number",
+                "string"
+              ],
+              "default": 0.5
             },
             "warmTierUsageThreshold": {
               "description": "Warm tier disk usage threshold as a fraction.",
-              "type": ["number", "string"],
-              "default": 0.90
+              "type": [
+                "number",
+                "string"
+              ],
+              "default": 0.9
             }
           }
         }

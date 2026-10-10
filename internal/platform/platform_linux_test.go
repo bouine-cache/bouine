@@ -71,6 +71,32 @@ func writeFile(t *testing.T, path string, content string) {
 	require.NoError(t, err)
 }
 
+func TestSetTCPFastOpenConnect(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+
+	if err := SetTCPFastOpenConnect(fd); err != nil {
+		t.Fatalf("SetTCPFastOpenConnect: %v", err)
+	}
+
+	got, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT)
+	if err != nil {
+		t.Fatalf("getsockopt: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("TCP_FASTOPEN_CONNECT = %d, want 1", got)
+	}
+}
+
+func TestTCPFastOpenConnectSupported_True(t *testing.T) {
+	if !TCPFastOpenConnectSupported() {
+		t.Fatal("Linux 4.11+ kernels must accept TCP_FASTOPEN_CONNECT on a fresh socket")
+	}
+}
+
 func TestRaiseFileLimit(t *testing.T) {
 	var before unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before); err != nil {

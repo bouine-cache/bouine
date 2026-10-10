@@ -16,6 +16,12 @@ func CoarseNow() time.Time { return time.Now() }
 // SetTCPFastOpen is a no-op on non-Linux platforms.
 func SetTCPFastOpen(fd int, backlog int) error { return nil }
 
+// SetTCPFastOpenConnect is a no-op on non-Linux platforms.
+func SetTCPFastOpenConnect(fd int) error { return nil }
+
+// TCPFastOpenConnectSupported is false on non-Linux platforms.
+func TCPFastOpenConnectSupported() bool { return false }
+
 // SetTCPDeferAccept is a no-op on non-Linux platforms.
 func SetTCPDeferAccept(fd int, seconds int) error { return nil }
 

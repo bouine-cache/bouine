@@ -339,6 +339,20 @@ const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
+	// PeerTCPFastOpen enables the client side of TCP Fast Open
+	// (TCP_FASTOPEN_CONNECT) on peer-bound dials (peer fetch, peer put,
+	// and invalidation broadcast): with a kernel-cached TFO cookie the
+	// first RPC bytes ride in the SYN packet, saving one RTT on every
+	// fresh peer connection. The data-plane listeners already enable
+	// server-side TFO (listen.tcp_fast_open, default on), so
+	// bouine-to-bouine peer dials can use TFO end-to-end once each
+	// peer's kernel allows server-side TFO (net.ipv4.tcp_fastopen
+	// must include bit 2). Linux only (no-op elsewhere); nil defaults to
+	// enabled on kernels that support the option (Linux 4.11+). Leads
+	// the struct — a pure pointer before the string/slice fields — so
+	// the GC scan prefix stays minimal (fieldalignment); YAML decode
+	// order is unaffected.
+	PeerTCPFastOpen *bool `yaml:"peer_tcp_fast_open,omitempty" json:"peer_tcp_fast_open,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).
@@ -423,10 +437,14 @@ type ClusterTLS struct {
 // UpstreamPool is a named set of origin targets with a shared health
 // policy and connect policy.
 type UpstreamPool struct {
-	Name    string        `yaml:"name,omitempty" json:"name,omitempty"`
-	Targets []string      `yaml:"targets,omitempty" json:"targets,omitempty"`
-	Health  HealthPolicy  `yaml:"health,omitempty" json:"health,omitempty"`
+	Name    string   `yaml:"name,omitempty" json:"name,omitempty"`
+	Targets []string `yaml:"targets,omitempty" json:"targets,omitempty"`
+	// Connect leads Health so the pointer-bearing ConnectPolicy (its
+	// TCPFastOpen) stays in the contiguous pointer block and the GC scan
+	// prefix stays minimal (fieldalignment). YAML decode order is
+	// unaffected.
 	Connect ConnectPolicy `yaml:"connect,omitempty" json:"connect,omitempty"`
+	Health  HealthPolicy  `yaml:"health,omitempty" json:"health,omitempty"`
 }
 
 // HealthPolicy aggregates active + passive health checks.
@@ -454,6 +472,17 @@ type PassiveHealthCheck struct {
 
 // ConnectPolicy bounds dial behaviour and origin connection lifetimes.
 type ConnectPolicy struct {
+	// TCPFastOpen enables the client side of TCP Fast Open
+	// (TCP_FASTOPEN_CONNECT) on origin-bound dials: with a kernel-cached
+	// TFO cookie the first request bytes ride in the SYN packet, saving
+	// one RTT on every fresh origin connection. Origins without
+	// server-side TFO (net.ipv4.tcp_fastopen bit 2) never issue a
+	// cookie, so the dial transparently falls back to the regular
+	// handshake — there is no penalty for enabling it. Linux only
+	// (no-op elsewhere); nil defaults to enabled on kernels that support
+	// the option (Linux 4.11+). Leads the struct so the pointer fields
+	// stay contiguous for the GC scan prefix (fieldalignment).
+	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
 	// Timeout bounds the TCP dial to an origin target. Zero applies a
 	// 10s built-in default.
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`

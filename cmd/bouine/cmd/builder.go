@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/cache"
@@ -319,6 +320,37 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 		MaxConnsPerHost:       pc.Connect.MaxConnections,
 		MaxIdleConnDuration:   pc.Connect.MaxIdleConnDuration,
 		ResponseHeaderTimeout: pc.Connect.ResponseHeaderTimeout,
+		DialControl:           outboundFastOpenDialControl(pc.Connect.TCPFastOpen, "origin", logger),
+	}
+}
+
+// outboundFastOpenDialControl returns a net.Dialer Control that
+// enables outbound TCP Fast Open (TCP_FASTOPEN_CONNECT) on every dial
+// of the surface named what ("origin" or "peer", used in the startup
+// log), or nil when disabled or unsupported. The option is probed once
+// here so a kernel without it (pre-4.11) skips the Control entirely
+// instead of paying a failing setsockopt on every dial. Per-socket
+// failures inside the Control are best-effort and never fail the
+// dial: TFO is advisory, and a latency optimization must not
+// manufacture connection errors.
+func outboundFastOpenDialControl(enabled *bool, what string, logger observability.Logger) func(network, addr string, c syscall.RawConn) error {
+	if !boolDefault(enabled, true) {
+		return nil
+	}
+	if !platform.TCPFastOpenConnectSupported() {
+		logger.Warn("outbound TCP Fast Open requested but not supported by this kernel",
+			"surface", what)
+		return nil
+	}
+	logger.Info("outbound TCP Fast Open enabled",
+		"surface", what,
+		"option", "tcp_fast_open_connect",
+		"note", "first request bytes ride in the SYN packet once a TFO cookie is cached")
+	return func(network, addr string, rc syscall.RawConn) error {
+		_ = rc.Control(func(fd uintptr) {
+			_ = platform.SetTCPFastOpenConnect(int(fd))
+		})
+		return nil
 	}
 }
 

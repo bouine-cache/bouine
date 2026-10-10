@@ -24,6 +24,16 @@ func TestSetTCPFastOpen_NoOp(t *testing.T) {
 	assert.NoError(t, SetTCPFastOpen(0, 16))
 }
 
+func TestSetTCPFastOpenConnect_NoOp(t *testing.T) {
+	t.Parallel()
+	assert.NoError(t, SetTCPFastOpenConnect(0))
+}
+
+func TestTCPFastOpenConnectSupported_False(t *testing.T) {
+	t.Parallel()
+	assert.False(t, TCPFastOpenConnectSupported())
+}
+
 func TestSetTCPDeferAccept_NoOp(t *testing.T) {
 	t.Parallel()
 	assert.NoError(t, SetTCPDeferAccept(0, 1))

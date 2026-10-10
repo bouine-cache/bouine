@@ -461,6 +461,7 @@ func (e *engine) initCluster(
 		MaxConnsPerHost:     e.cfg.Cluster.PeerMaxConnsPerHost,
 		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
 		FetchConcurrency:    e.cfg.Cluster.PeerFetchConcurrency,
+		DialControl:         outboundFastOpenDialControl(e.cfg.Cluster.PeerTCPFastOpen, "peer", e.logger),
 	}, e.metrics.Registry, e.logger)
 	clusterNode.SetOnPeerRetired(peerFetcher.RetireAddress, peerFetcher.UnretireAddress)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)

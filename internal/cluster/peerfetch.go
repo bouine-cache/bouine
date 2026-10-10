@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -164,7 +165,15 @@ type addrFailureState struct {
 
 // PeerFetcherConfig configures a PeerFetcher.
 type PeerFetcherConfig struct {
-	TLSConfig           *tls.Config
+	TLSConfig *tls.Config
+	// DialControl, when non-nil, is installed as net.Dialer.Control on
+	// peer-bound dials (peer fetch, peer put, and — via the fetcher — the
+	// invalidation broadcast clients). The engine wires outbound TCP
+	// Fast Open here (cluster.peer_tcp_fast_open); declared in this
+	// package — the consumer — because internal/cluster must not import
+	// internal/platform (depguard layer matrix). Sits with the pointer
+	// fields so the GC scan prefix stays minimal (fieldalignment).
+	DialControl         func(network, addr string, c syscall.RawConn) error
 	HopLimit            int
 	MaxConnsPerHost     int
 	MaxIdleConnDuration time.Duration
@@ -225,7 +234,11 @@ type PeerFetcher struct {
 	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
 	putSem    chan struct{}
 	tlsConfig *tls.Config
-	fetchSem  chan struct{}
+	// dialControl, when non-nil, is installed on every peer-bound
+	// net.Dialer (outbound TCP Fast Open). Sits with the pointer fields
+	// so the GC scan prefix stays contiguous (fieldalignment).
+	dialControl func(network, addr string, c syscall.RawConn) error
+	fetchSem    chan struct{}
 	// pipelineClients caches one PipelineClient per peer address. Held
 	// behind an atomic.Pointer so Close can drop the whole map without
 	// racing concurrent Fetch/Put lookups: swapping a bare sync.Map field
@@ -372,6 +385,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		breaker:             make(map[string]*addrFailureState),
 		failureThreshold:    failureThreshold,
 		failureCooldown:     failureCooldown,
+		dialControl:         cfg.DialControl,
 		done:                make(chan struct{}),
 	}
 	f.pipelineClients.Store(&sync.Map{})
@@ -491,6 +505,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 			return (&net.Dialer{
 				Timeout:   peerDialTimeout,
 				KeepAlive: 30 * time.Second,
+				Control:   f.dialControl,
 			}).Dial("tcp", addr)
 		},
 	}

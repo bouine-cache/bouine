@@ -47,8 +47,14 @@
 #   FastPath_Hit:                     0
 #   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
 #   H1Parse_Get:                      0
+#   H1Parse_Get_Headers8:              0  (production-shaped head: long
+#                                      request line + 8 canonical headers;
+#                                      keeps the per-header scan cost
+#                                      visible — the toy 2-header gates
+#                                      hide it)
 #   Reactor_Hit:                      0  (epoll reactor batch serving;
 #                                      parse+TryHit+serialize+flush)
+#   Reactor_Hit_Headers8:              0  (same, production-shaped head)
 #   Reactor_MissRoundTrip:             4  (worker pool dispatch + Serve miss
 #                                      cycle + return-hook reuse + recycle;
 #                                      was ~45 KiB + spawn per round trip
@@ -89,7 +95,9 @@ declare -A BUDGETS=(
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
     [H1Parse_Get]=0
+    [H1Parse_Get_Headers8]=0
     [Reactor_Hit]=0
+    [Reactor_Hit_Headers8]=0
     [Reactor_Hit_Metrics]=0
     [Middleware_Miss]=11
     [Middleware_Miss_NoLog]=0

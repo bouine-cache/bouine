@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -626,42 +627,39 @@ func findHeaderEndFrom(buf []byte, from int) int {
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
+// The searches are the stdlib's vectorized ones (W1 of
+// docs/plans/h1-reactor-perf-round-5.md); the boundary guards are
+// byte-identical to the scalar scans they replaced — no CRLF, a CRLF
+// whose '\n' would fall past the buffer, or a missing SP each keep the
+// same outcome, and every extracted field is the same bytes.
 func parseRequestLine(buf []byte, req *api.RawRequest) error {
-	lineEnd := 0
-	for lineEnd < len(buf) && buf[lineEnd] != '\r' {
-		lineEnd++
-	}
-	if lineEnd >= len(buf)-1 || buf[lineEnd+1] != '\n' {
+	lineEnd := bytes.IndexByte(buf, '\r')
+	if lineEnd < 0 || lineEnd >= len(buf)-1 || buf[lineEnd+1] != '\n' {
 		return errors.New("h1parser: malformed request line")
 	}
 	line := buf[:lineEnd]
 
-	sp1 := 0
-	for sp1 < len(line) && line[sp1] != ' ' {
-		sp1++
-	}
-	if sp1 == len(line) {
+	sp1 := bytes.IndexByte(line, ' ')
+	if sp1 < 0 {
 		return errors.New("h1parser: missing path")
 	}
 	req.Method = header.BytesToString(line[:sp1])
 
-	sp2 := sp1 + 1
-	for sp2 < len(line) && line[sp2] != ' ' {
-		sp2++
-	}
-	if sp2 == len(line) {
+	rest := line[sp1+1:]
+	sp2 := bytes.IndexByte(rest, ' ')
+	if sp2 < 0 {
 		return errors.New("h1parser: missing version")
 	}
-	fullPath := header.BytesToString(line[sp1+1 : sp2])
+	fullPath := header.BytesToString(rest[:sp2])
 
-	if q := indexByte(fullPath, '?'); q >= 0 {
+	if q := strings.IndexByte(fullPath, '?'); q >= 0 {
 		req.Path = fullPath[:q]
 		req.Query = fullPath[q+1:]
 	} else {
 		req.Path = fullPath
 	}
 
-	req.HTTPVersion = header.BytesToString(line[sp2+1:])
+	req.HTTPVersion = header.BytesToString(rest[sp2+1:])
 
 	return nil
 }
@@ -677,15 +675,20 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 	pos := skipRequestLine(buf)
 
 	for pos < len(buf) {
-		if buf[pos] == '\r' && pos+1 < len(buf) && buf[pos+1] == '\n' {
+		// One vectorized search replaces the two scalar scans the
+		// hand-rolled loop performed (W1, docs/plans/h1-reactor-perf-round-5.md):
+		// the first CRLF pair at or after pos. A pair exactly at pos is
+		// the empty line — the header terminator; a pair after pos ends
+		// this header line; no pair left ends the (partial) block. Every
+		// pair bytes.Index finds satisfies the old scan's lineEnd <
+		// len(buf)-1 bound by construction (the needle fits inside the
+		// slice), so the line/terminator/partial outcomes are identical.
+		pair := bytes.Index(buf[pos:], []byte("\r\n"))
+		if pair < 0 {
 			break
 		}
-
-		lineEnd := pos
-		for lineEnd < len(buf)-1 && (buf[lineEnd] != '\r' || buf[lineEnd+1] != '\n') {
-			lineEnd++
-		}
-		if lineEnd >= len(buf)-1 {
+		lineEnd := pos + pair
+		if lineEnd == pos {
 			break
 		}
 
@@ -729,13 +732,18 @@ func connectionCloseValue(val string) bool {
 	return false
 }
 
-// skipRequestLine advances past the first \r\n in buf.
+// skipRequestLine advances past the first \r\n in buf. With no pair it
+// returns the same past-the-end sentinel the scalar scan produced
+// (len(buf)+1, or 2 for empty input) so callers' loop guards behave
+// identically.
 func skipRequestLine(buf []byte) int {
-	pos := 0
-	for pos < len(buf)-1 && (buf[pos] != '\r' || buf[pos+1] != '\n') {
-		pos++
+	if i := bytes.Index(buf, []byte("\r\n")); i >= 0 {
+		return i + 2
 	}
-	return pos + 2
+	if len(buf) <= 1 {
+		return 2
+	}
+	return len(buf) + 1
 }
 
 // smugglingDetected checks for HTTP request smuggling indicators per
@@ -1148,16 +1156,6 @@ func (c *prefixConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
-// indexByte is a simple byte search.
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
-
 // isConnectionClose reports whether the request contains a
 // Connection: close token (RFC 9110 §7.6.1). The parser's fused header
 // scan already derived the token decision into req.ConnectionClose
@@ -1174,7 +1172,7 @@ func isConnectionClose(req *api.RawRequest) bool {
 func splitHeaderTokens(val string) []string {
 	var tokens []string
 	for len(val) > 0 {
-		comma := indexByte(val, ',')
+		comma := strings.IndexByte(val, ',')
 		var token string
 		if comma < 0 {
 			token = val

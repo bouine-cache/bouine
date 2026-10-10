@@ -144,6 +144,39 @@ func BenchmarkGate_H1Parse_Get(b *testing.B) {
 	}
 }
 
+// BenchmarkGate_H1Parse_Get_Headers8 measures the same production parse
+// path as BenchmarkGate_H1Parse_Get, but on a production-shaped request
+// head (a long request line with a query plus the eight canonical
+// browser/proxy headers, ~500 B) instead of the 4-header toy request.
+// The toy head hides the per-header scan cost that dominates real
+// parse time (~22 ns/header measured, docs/plans/h1-reactor-perf-round-5.md);
+// this gate keeps that cost visible and allocation-free.
+func BenchmarkGate_H1Parse_Get_Headers8(b *testing.B) {
+	raw := benchRealisticHead(8)
+	parser := New(nil, nil)
+	conn := &mockConn{r: &repeatReader{buf: raw}}
+	var readBuf [readBufferSize]byte
+	var scratch api.RawRequest
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, 0, &scratch)
+		if err != nil {
+			b.Fatalf("parseRequest: %v", err)
+		}
+		if fallThrough {
+			b.Fatal("parseRequest fell through unexpectedly")
+		}
+		if req.Method != "GET" {
+			b.Fatalf("method = %q", req.Method)
+		}
+		if req.NHeaders != 9 {
+			b.Fatalf("nHeaders = %d, want 9", req.NHeaders)
+		}
+	}
+}
+
 // BenchmarkH1Parse_FallThroughHeaderCopy measures the per-header cost
 // of populating fasthttp request headers from the parsed RawRequest —
 // the conversion handleFallThrough performs on every miss. Tracked for

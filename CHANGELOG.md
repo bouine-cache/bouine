@@ -87,6 +87,27 @@ the curated, human-readable summary.
   — a mid-batch return would have orphaned bytes held by the blocking
   goroutine after the reactor re-registered the fd.
 
+### Performance
+- **Vectorized HTTP/1.1 request-head scans on the hit path**: the
+  h1parser's line scans (request-line delimiters, per-header line
+  ends, the leading skip) now use the stdlib's SIMD-backed
+  `bytes.Index`/`bytes.IndexByte` searches instead of hand-rolled
+  byte-at-a-time loops — the same searches `findHeaderEnd` already
+  used for the header terminator. Parse output is byte-identical:
+  a deterministic differential test keeps the old scalar
+  implementations as reference oracles and compares every extracted
+  field, the header array, scan flags, and error identity across
+  25 000 adversarial inputs plus seeded mutations of a
+  production-shaped head — the parser feeds every cache key, so a
+  scan drift would poison the cache, not just slow it. Measured
+  (M1 Pro, alternating A/B): an 8-header production-shaped request
+  head parses 40% faster (245 → 146 ns isolated; the reactor hit
+  gate on the same head −16%, the full-parse gate −25%); the toy
+  2-header gates are unchanged at 0 allocs/op. New
+  `H1Parse_Get_Headers8` / `Reactor_Hit_Headers8` gate benchmarks
+  keep the production-shaped parse cost visible and allocation-free
+  — the toy-request gates hid it entirely.
+
 ## [0.5.8] - 2026-09-04
 
 ### Fixed

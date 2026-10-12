@@ -513,3 +513,52 @@ func splitPairs(s string) []string {
 	}
 	return out
 }
+
+// TestMap_GetNonCanonicalKeyZeroAlloc pins the alloc-free fallback for
+// non-canonical lookup keys (the lowercase Vary field names the peer
+// variant gate reads): Get must find the canonical entry
+// without materializing canonicalize(key).
+func TestMap_GetNonCanonicalKeyZeroAlloc(t *testing.T) {
+	h := Map{}
+	h.Set("X-Region", "US")
+	h.Set("Accept-Encoding", "gzip")
+	allocs := testing.AllocsPerRun(100, func() {
+		if h.Get("x-region") != "US" || h.Get("ACCEPT-ENCODING") != "gzip" {
+			t.Fatal("lookup mismatch")
+		}
+		if h.Get("x-missing") != "" {
+			t.Fatal("lookup mismatch")
+		}
+	})
+	assert.Zero(t, allocs)
+	assert.Equal(t, "gzip", h.GetAll("accept-encoding"))
+}
+
+func TestEqualsCanonicalOf(t *testing.T) {
+	keys := []string{
+		"", "a", "A", "x-region", "X-REGION", "x--b", "-x", "x-", "1abc",
+		"content-md5", "WWW-Authenticate", "a b", "\u00e9t\u00e9", "x_y-z",
+	}
+	for _, k := range keys {
+		ck := canonicalize(k)
+		assert.True(t, equalsCanonicalOf(ck, k), k)
+		assert.Equal(t, ck == k+"!", equalsCanonicalOf(k+"!", k), k)
+		for _, other := range keys {
+			assert.Equal(t, other == ck, equalsCanonicalOf(other, k), "%q vs %q", other, k)
+		}
+	}
+}
+
+func FuzzEqualsCanonicalOf(f *testing.F) {
+	f.Add("X-Region", "x-region")
+	f.Add("X--b", "x--B")
+	f.Add("", "")
+	f.Fuzz(func(t *testing.T, stored, key string) {
+		if got, want := equalsCanonicalOf(stored, key), stored == canonicalize(key); got != want {
+			t.Fatalf("equalsCanonicalOf(%q, %q) = %v, want %v", stored, key, got, want)
+		}
+		if got := equalsCanonicalOf(canonicalize(key), key); !got {
+			t.Fatalf("equalsCanonicalOf(canonicalize(%q), %q) = false", key, key)
+		}
+	})
+}

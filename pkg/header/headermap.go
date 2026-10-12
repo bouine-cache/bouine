@@ -68,6 +68,34 @@ func canonicalize(key string) string {
 	return string(b)
 }
 
+// equalsCanonicalOf reports whether stored == canonicalize(key)
+// without allocating the canonical form: the same per-byte case rule
+// as canonicalize, applied while comparing.
+func equalsCanonicalOf(stored, key string) bool {
+	if len(stored) != len(key) {
+		return false
+	}
+	upper := true
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case upper && c >= 'a' && c <= 'z':
+			c -= 32
+			upper = false
+		case upper:
+			upper = false
+		case c == '-':
+			upper = true
+		case c >= 'A' && c <= 'Z':
+			c += 32
+		}
+		if stored[i] != c {
+			return false
+		}
+	}
+	return true
+}
+
 // Map is a compact, allocation-efficient replacement for http.Header
 // in cached objects. It stores headers as a flat slice of key-offset pairs
 // backed by a shared []string values slice, eliminating map bucket overhead
@@ -162,13 +190,14 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 
 // Get returns the value of the header with the given key. The key is
 // canonicalized before lookup. Returns "" if the header is not present.
-// Allocation-free when the input key is already in canonical form.
+// Allocation-free for any key.
 //
 // Fast path: the key is compared directly against stored entries. Since
 // all stored keys are canonical (interned via InternKey at store time)
 // and all header constants in this package are pre-canonicalized, the
-// direct comparison works without calling canonicalHeaderKey. If the
-// key is not canonical, the caller must canonicalize it first.
+// direct comparison works without calling canonicalHeaderKey. A
+// non-canonical key falls back to a second scan comparing each stored
+// key against the key's canonical form, computed byte by byte.
 func (h Map) Get(key string) string {
 	if len(h.entries) == 0 {
 		return ""
@@ -178,13 +207,14 @@ func (h Map) Get(key string) string {
 			return h.values[h.entries[i].off]
 		}
 	}
-	// Fallback: canonicalize and retry (handles non-canonical caller keys).
-	ck := canonicalHeaderKey(key)
-	if ck == key {
+	// Fallback: retry against the key's canonical form (handles
+	// non-canonical caller keys, e.g. the lowercase Vary field names
+	// the peer variant gate looks up) without materializing it.
+	if isCanonical(key) {
 		return "" // already canonical, just not present
 	}
 	for i := range h.entries {
-		if h.entries[i].key == ck {
+		if equalsCanonicalOf(h.entries[i].key, key) {
 			return h.values[h.entries[i].off]
 		}
 	}
@@ -208,13 +238,12 @@ func (h Map) GetAll(key string) string {
 		}
 	}
 	if len(parts) == 0 {
-		// Fallback: canonicalize and retry.
-		ck := canonicalHeaderKey(key)
-		if ck == key {
+		// Fallback: retry against the canonical form (see Get).
+		if isCanonical(key) {
 			return ""
 		}
 		for i := range h.entries {
-			if h.entries[i].key == ck {
+			if equalsCanonicalOf(h.entries[i].key, key) {
 				parts = append(parts, h.values[h.entries[i].off])
 			}
 		}

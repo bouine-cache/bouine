@@ -67,7 +67,7 @@ jobs:
       # Without the stamp this cache served a stale golangci-lint binary
       # after the Go 1.27 bump and had to be disabled (commit 024819b);
       # the stamp is what makes re-enabling safe.
-      - uses: j178/prek-action@v3.0.0
+      - uses: j178/prek-action@v3.0.1
         with:
           cache: true
 

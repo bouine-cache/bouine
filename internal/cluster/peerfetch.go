@@ -266,8 +266,14 @@ type PeerFetcher struct {
 	misses           atomic.Int64
 	hits             atomic.Int64
 	hopLimit         int
-	useTLS           bool
-	doneClosed       atomic.Bool
+	// breakerEntries mirrors len(breaker), written under breakerMu. When
+	// it reads zero the map is empty, so breakerAllowed and
+	// recordPeerSuccess (both called on every peer RPC) skip the mutex:
+	// a healthy cluster never contends on breakerMu. A failure racing
+	// the lock-free read linearizes after it, which the mutex allows too.
+	breakerEntries atomic.Int32
+	doneClosed     atomic.Bool
+	useTLS         bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -533,6 +539,9 @@ func peerAddr(peer api.PeerInfo) string {
 // immediately, so a still-dead address costs at most one dial per
 // cooldown.
 func (f *PeerFetcher) breakerAllowed(addr string) bool {
+	if f.breakerEntries.Load() == 0 {
+		return true
+	}
 	f.breakerMu.Lock()
 	defer f.breakerMu.Unlock()
 	st, ok := f.breaker[addr]
@@ -551,12 +560,16 @@ func (f *PeerFetcher) breakerAllowed(addr string) bool {
 // round trip (including a 404 miss — the peer is reachable) proves the
 // address healthy.
 func (f *PeerFetcher) recordPeerSuccess(addr string) {
+	if f.breakerEntries.Load() == 0 {
+		return
+	}
 	f.breakerMu.Lock()
 	defer f.breakerMu.Unlock()
 	if _, ok := f.breaker[addr]; !ok {
 		return
 	}
 	delete(f.breaker, addr)
+	f.breakerEntries.Store(int32(len(f.breaker))) //nolint:gosec // G115: one entry per peer address, far below MaxInt32
 	f.updateBlacklistedLocked()
 }
 
@@ -570,6 +583,7 @@ func (f *PeerFetcher) recordPeerFailure(addr string) {
 	if st == nil {
 		st = &addrFailureState{}
 		f.breaker[addr] = st
+		f.breakerEntries.Store(int32(len(f.breaker))) //nolint:gosec // G115: one entry per peer address, far below MaxInt32
 	}
 	st.consecutive++
 	if st.consecutive >= f.failureThreshold && st.trippedUntil.IsZero() {
@@ -680,10 +694,12 @@ func (f *PeerFetcher) waitTimeout() time.Duration {
 
 // acquireFetchSlot takes one fetchSem slot, observing the time spent
 // waiting in pQueueWait (queueStart is taken by the caller before this
-// call) and bumping pActive for the slot's hold. Returns the release
-// function paired with the acquisition, or an error when the context is
-// cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
-func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
+// call) and bumping pActive for the slot's hold. On success the caller
+// must pair it with releaseFetchSlot (a method rather than a returned
+// closure, so the per-fetch acquisition does not heap-allocate). Returns
+// an error when the context is cancelled while queued or the bounded
+// wait expired (ErrPeerFetchShed); no slot is held then.
+func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) error {
 	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
 		if errors.Is(err, ErrPeerFetchShed) {
 			if f.pShed.MetricVec != nil {
@@ -697,7 +713,7 @@ func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time
 				f.pQueueWait.Observe(time.Since(queueStart).Seconds())
 			}
 		}
-		return nil, err
+		return err
 	}
 	if f.pQueueWait != nil {
 		f.pQueueWait.Observe(time.Since(queueStart).Seconds())
@@ -705,12 +721,16 @@ func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time
 	if f.pActive != nil {
 		f.pActive.Inc()
 	}
-	return func() {
-		if f.pActive != nil {
-			f.pActive.Dec()
-		}
-		<-f.fetchSem
-	}, nil
+	return nil
+}
+
+// releaseFetchSlot returns the fetchSem slot taken by a successful
+// acquireFetchSlot and drops the pActive gauge it bumped.
+func (f *PeerFetcher) releaseFetchSlot() {
+	if f.pActive != nil {
+		f.pActive.Dec()
+	}
+	<-f.fetchSem
 }
 
 // recordPeerMiss counts and logs one peer-fetch miss (404 answer).
@@ -754,11 +774,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	// is not part of the RPC-duration measurement below, which starts
 	// after acquisition.
 	queueStart := time.Now()
-	releaseSlot, err := f.acquireFetchSlot(ctx, queueStart)
-	if err != nil {
+	if err := f.acquireFetchSlot(ctx, queueStart); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
-	defer releaseSlot()
+	defer f.releaseFetchSlot()
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)

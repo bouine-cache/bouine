@@ -1603,24 +1603,25 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 }
 
 // peerHintsApply reports whether a fast-path peer-branch hint (transferred
-// by the h1parser under api.OwnerMissContextKey or
-// api.OwnerGateRejectContextKey) suppresses THIS handler's peer RPC.
-// Either hint carries the same proof — the owner was already asked for
-// exactly this nil-policy, plain-key question — so both are honored the
-// same way: skip the RPC, go to origin. The hint is trusted only when
-// the stored object is nil (otherwise the slow path's peer question
-// carries peerVaryAssertion(obj) — a different question) and the route
-// has no KeyPolicy (the hint flag does not bind to the producing
-// route's policy, so on a policied route the slow path cannot prove
-// its peer question identical to the fast path's and keeps the retry;
-// conservative, since the per-route fast path runs the route's own
-// policy — lifting the restriction needs a route-bound hint).
+// by the h1parser under api.OwnerMissContextKey,
+// api.OwnerGateRejectContextKey, or api.OwnerShedContextKey) suppresses
+// THIS handler's peer RPC.
+// Any hint carries proof that the peer fetch was already attempted or
+// shed — so the RPC is skipped and the request goes straight to origin.
+// The hint is trusted only when the stored object is nil (otherwise the
+// slow path's peer question carries peerVaryAssertion(obj) — a different
+// question) and the route has no KeyPolicy (the hint flag does not bind
+// to the producing route's policy, so on a policied route the slow path
+// cannot prove its peer question identical to the fast path's and keeps
+// the retry; conservative, since the per-route fast path runs the route's
+// own policy — lifting the restriction needs a route-bound hint).
 func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool {
 	if obj != nil || h.policy != nil {
 		return false
 	}
 	return ctx.UserValue(api.OwnerMissContextKey) == true ||
-		ctx.UserValue(api.OwnerGateRejectContextKey) == true
+		ctx.UserValue(api.OwnerGateRejectContextKey) == true ||
+		ctx.UserValue(api.OwnerShedContextKey) == true
 }
 
 // handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then

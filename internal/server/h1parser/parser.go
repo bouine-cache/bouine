@@ -424,6 +424,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.ConnectionClose = false
 	req.OwnerMiss = false
 	req.OwnerGateReject = false
+	req.OwnerShed = false
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -775,17 +776,18 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 }
 
 // transferOwnerMissHint forwards the fast path's peer-branch hints
-// (api.RawRequest.OwnerMiss and OwnerGateReject) to the fallback
-// RequestCtx so handleCacheMiss can skip the duplicate owner lookup +
-// peer RPC (definitive miss) or the deterministically-rejected retry
-// (gate rejection, nil-policy routes only). Cheap: only set when the
-// fast-path peer branch ran.
+// (api.RawRequest.OwnerMiss, OwnerGateReject, and OwnerShed) to the fallback
+// RequestCtx so handleCacheMiss can skip duplicate owner lookups, peer RPCs,
+// or shed peer retries. Cheap: only set when the fast-path peer branch ran.
 func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	if req.OwnerMiss {
 		ctx.SetUserValue(api.OwnerMissContextKey, true)
 	}
 	if req.OwnerGateReject {
 		ctx.SetUserValue(api.OwnerGateRejectContextKey, true)
+	}
+	if req.OwnerShed {
+		ctx.SetUserValue(api.OwnerShedContextKey, true)
 	}
 }
 

@@ -1894,6 +1894,31 @@ func TestFastPathHandler_PeerErrorDoesNotFlagOwnerMiss(t *testing.T) {
 	assert.False(t, req.OwnerMiss, "peer-fetch error must not flag OwnerMiss (slow path retries)")
 }
 
+// TestFastPathHandler_PeerShedFlagsOwnerShed pins that a peer-fetch shed
+// (ErrPeerFetchShed) sets RawRequest.OwnerShed so the slow path skips
+// the peer retry and goes straight to origin.
+func TestFastPathHandler_PeerShedFlagsOwnerShed(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-shed-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.err = api.ErrPeerFetchShed
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+	assert.True(t, req.OwnerShed, "peer fetch shed must flag RawRequest.OwnerShed")
+	assert.False(t, req.OwnerMiss, "peer fetch shed must not flag OwnerMiss")
+}
+
 // TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss pins that a
 // Vary-gate rejection never sets the hint: the peer answered with an
 // object, so this is not a definitive miss — the slow path's gate runs

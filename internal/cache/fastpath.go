@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sort"
 	"strconv"
@@ -293,6 +294,11 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 			// skips its duplicate owner lookup + peer RPC and goes straight
 			// to origin. Errors keep the slow-path retry.
 			req.OwnerMiss = true
+		} else if errors.Is(err, api.ErrPeerFetchShed) {
+			// Peer fetch shed (concurrency saturation): flag the request so
+			// the slow path skips its peer retry, avoiding cascading queue
+			// contention and timeout amplification, and goes straight to origin.
+			req.OwnerShed = true
 		}
 		return nil, false
 	}

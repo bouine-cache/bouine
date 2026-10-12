@@ -141,7 +141,7 @@ var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive 
 // of parking callers — without the bound, the fast path's undedlined
 // context parked one keep-alive connection goroutine per queued miss
 // until the whole connection pool sat in the semaphore queue.
-var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
+var ErrPeerFetchShed = api.ErrPeerFetchShed
 
 // errPeerAddrRetired is returned by a parked dial once the fetcher
 // closes. It reports itself as a timeout so fasthttp's pipeline worker

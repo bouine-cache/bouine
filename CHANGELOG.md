@@ -27,6 +27,16 @@ the curated, human-readable summary.
   `make bench-gate` budget is lowered from 7 to 0. Header-map lookups
   by non-canonical names (such as lowercase Vary fields) no longer
   allocate either.
+- **Peer fetches on a healthy cluster no longer take the circuit-breaker
+  lock.** Every peer fetch and write-to-owner RPC checked and cleared the
+  per-address failure breaker under a single process-wide mutex, so
+  concurrent peer RPCs serialized on it twice each. When no address has
+  recorded a failure, both checks now return after one atomic load; the
+  mutex is only taken once some address is failing, and trip, cooldown
+  and recovery behave as before. Under parallel load the per-RPC breaker
+  bookkeeping drops from 146 ns to 0.3 ns on Apple M5. Each peer fetch
+  also allocates one object less (28 to 27 allocs/op), because releasing
+  the fetch slot no longer goes through a heap-allocated closure.
 
 ## [0.5.28] - 2026-10-09
 

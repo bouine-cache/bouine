@@ -3,7 +3,7 @@ module github.com/bouine-cache/bouine
 go 1.27.2
 
 require (
-	github.com/a-h/templ v0.3.1020
+	github.com/a-h/templ v0.3.1070
 	github.com/bouine-cache/xxhash/v3 v3.0.1
 	github.com/cloudflare/cloudflare-go/v4 v4.6.0
 	github.com/hashicorp/memberlist v0.7.0

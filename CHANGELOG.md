@@ -10,6 +10,24 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Performance
+
+- **The peer variant check no longer allocates.** When a peer answers
+  with a Vary-carrying object, both the H1 fast path and the slow path
+  confirm that the peer's variant matches the requesting client. That
+  check used to copy the request headers into a map, split the Vary
+  list, and format the hex key on every peer hit. It now reads the
+  headers in place and hashes into a stack buffer, then compares the
+  result to the stored key. Inputs that do not fit (more than 16 Vary
+  fields, a hash input over 256 bytes, or non-ASCII field names) fall
+  back to the previous code. The stored key format is unchanged, and a
+  fuzz test pins parity with the previous implementation on every
+  input. `FastPath_PeerHitVary` drops from 253 ns, 88 B, 6 allocs/op
+  to 153 ns, 0 B, 0 allocs/op on Apple M5 (−40%), and its
+  `make bench-gate` budget is lowered from 7 to 0. Header-map lookups
+  by non-canonical names (such as lowercase Vary fields) no longer
+  allocate either.
+
 ## [0.5.28] - 2026-10-09
 
 ### Performance

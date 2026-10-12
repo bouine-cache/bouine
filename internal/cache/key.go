@@ -406,7 +406,210 @@ func BuildVaryKey(vary string, reqHeader header.Map, policy *KeyPolicy) string {
 	if vary == "" || vary == "*" {
 		return vary
 	}
+	if h, ok := varyAssertionHash(vary, varyAssertSrc{m: reqHeader}, policy); ok {
+		return strconv.FormatUint(h, 16)
+	}
+	return buildVaryKeySlow(vary, reqHeader, policy)
+}
 
+// varyKeyMatches reports whether BuildVaryKey(vary, src's header map,
+// policy) == want without materializing the map or the hex string: the
+// zero-alloc form of the peer variant gates (fast and slow path). Falls
+// back to the allocating BuildVaryKey on the inputs varyAssertionHash
+// declines (pathological field count, oversized hash input, non-ASCII
+// field names), so the answer is identical on every input (pinned by
+// FuzzVaryKeyMatchesParity).
+func varyKeyMatches(vary string, src varyAssertSrc, policy *KeyPolicy, want string) bool {
+	if vary == "" || vary == "*" {
+		return vary == want
+	}
+	h, ok := varyAssertionHash(vary, src, policy)
+	if !ok {
+		return buildVaryKeySlow(vary, src.toMap(), policy) == want
+	}
+	var hex [16]byte
+	return string(strconv.AppendUint(hex[:0], h, 16)) == want
+}
+
+// varyAssertSrc is the request-header view BuildVaryKey's assertion
+// hash reads: a header.Map (the slow path's RequestInfo view) when r
+// is nil, otherwise the H1 fast path's *api.RawRequest read as the map
+// reqHeaderMapFromRaw would build, without building it. A concrete
+// struct rather than a generic constraint: a generic method call via
+// the shape dictionary makes escape analysis assume its string
+// argument escapes, which would heap-move the stack hash buffer the
+// lowercased field name lives in.
+//
+// RawRequest/map equivalences: a lowercase ASCII field name matches
+// the first line (request order; SortEntries is stable) whose
+// canonical key equals the field's canonical form, the same line
+// api.EqualFold selects, since MIME canonicalization only changes
+// ASCII letter case; values carry the same right-trim of OWS
+// reqHeaderMapFromRaw applies.
+type varyAssertSrc struct {
+	r *api.RawRequest
+	m header.Map
+}
+
+// getValue returns exactly what header.Map.Get returns for a
+// lowercase Vary field name over the (materialized) map.
+func (s varyAssertSrc) getValue(field string) string {
+	if s.r == nil {
+		return s.m.Get(field)
+	}
+	return strings.TrimRight(s.r.Header(field), " \t")
+}
+
+// toMap returns the map view for the allocating fallback.
+func (s varyAssertSrc) toMap() header.Map {
+	if s.r == nil {
+		return s.m
+	}
+	return reqHeaderMapFromRaw(s.r)
+}
+
+// cookieAll returns exactly what header.Map.CookieAll returns over the
+// map view: for a RawRequest, right-trimmed Cookie line values, empty
+// lines skipped, one line returned as-is (zero-alloc), several joined
+// with "; ".
+func (s varyAssertSrc) cookieAll() string {
+	if s.r == nil {
+		return s.m.CookieAll()
+	}
+	single := ""
+	count := 0
+	for i := 0; i < s.r.NHeaders; i++ {
+		if !api.EqualFold(s.r.Headers[i].Key, header.Cookie) {
+			continue
+		}
+		if v := strings.TrimRight(s.r.Headers[i].Value, " \t"); v != "" {
+			if count == 0 {
+				single = v
+			}
+			count++
+		}
+	}
+	if count <= 1 {
+		return single
+	}
+	var b []byte
+	for i := 0; i < s.r.NHeaders; i++ {
+		if !api.EqualFold(s.r.Headers[i].Key, header.Cookie) {
+			continue
+		}
+		v := strings.TrimRight(s.r.Headers[i].Value, " \t")
+		if v == "" {
+			continue
+		}
+		if len(b) > 0 {
+			b = append(b, ';', ' ')
+		}
+		b = append(b, v...)
+	}
+	return string(b)
+}
+
+// varyAssertionHash computes the xxhash64 BuildVaryKey hex-encodes,
+// with zero allocations of its own: Vary fields are split into a stack
+// array, the hash input into a stack buffer. ok is false when the
+// input needs the allocating path (more than maxVaryFields fields, a
+// hash input over 256 bytes, or a non-ASCII field name whose Unicode
+// ToLower/TrimSpace semantics this ASCII mirror does not reproduce);
+// callers then use buildVaryKeySlow, which produces the same digest.
+//
+// Ordering is load-bearing: buildVaryKeySlow sorts the RAW split
+// fields (untrimmed, original case) and only then trims and lowercases
+// each one. Sorting the normalized names instead (variantKeyCore's
+// order) would reorder fields like " b" vs "a" or "B" vs "a" and
+// change every stored assertion hash.
+//
+//nolint:gocyclo // 16: mirrors buildVaryKeySlow's per-field branches plus the overflow guards
+func varyAssertionHash(vary string, src varyAssertSrc, policy *KeyPolicy) (uint64, bool) {
+	var fields [maxVaryFields]string
+	n := 0
+	for f := range strings.SplitSeq(vary, ",") {
+		if n >= maxVaryFields {
+			return 0, false
+		}
+		fields[n] = f
+		n++
+	}
+	for i := 1; i < n; i++ {
+		for j := i; j > 0 && fields[j-1] > fields[j]; j-- {
+			fields[j-1], fields[j] = fields[j], fields[j-1]
+		}
+	}
+
+	var buf [256]byte
+	off := 0
+	for i := range n {
+		raw, ok := trimASCIISpace(fields[i])
+		if !ok {
+			return 0, false
+		}
+		if off+len(raw)+2 > len(buf) {
+			return 0, false
+		}
+		start := off
+		for j := range len(raw) {
+			c := raw[j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			buf[start+j] = c
+		}
+		f := header.BytesToString(buf[start : start+len(raw)])
+		if policy != nil && policy.ShouldExcludeHeader(f) {
+			continue
+		}
+		var val string
+		if f == cookiePresenceField && policy.hasCookiePresence() {
+			val = policy.cookiePresenceValue(src.cookieAll())
+		} else {
+			val = varyAssertionValue(f, src.getValue(f), policy)
+		}
+		end := start + len(raw) + 1 + len(val) + 1
+		if end > len(buf) {
+			return 0, false
+		}
+		off = start + len(raw)
+		buf[off] = '='
+		off++
+		off += copy(buf[off:], val)
+		buf[off] = ';'
+		off++
+	}
+	return xxhash.Sum64(buf[:off]), true
+}
+
+// trimASCIISpace is strings.TrimSpace(strings.ToLower(s))'s trimming
+// half for an all-ASCII s (the ASCII whitespace set TrimSpace uses).
+// ok is false when s carries a non-ASCII byte: Unicode case mapping
+// and Unicode whitespace are left to the allocating path.
+func trimASCIISpace(s string) (string, bool) {
+	for i := range len(s) {
+		if s[i] >= 0x80 {
+			return "", false
+		}
+	}
+	start, end := 0, len(s)
+	for start < end && isASCIISpaceByte(s[start]) {
+		start++
+	}
+	for end > start && isASCIISpaceByte(s[end-1]) {
+		end--
+	}
+	return s[start:end], true
+}
+
+func isASCIISpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
+}
+
+// buildVaryKeySlow is the reference (allocating) BuildVaryKey
+// implementation: the fallback for inputs varyAssertionHash declines,
+// and the oracle its parity tests compare against.
+func buildVaryKeySlow(vary string, reqHeader header.Map, policy *KeyPolicy) string {
 	fields := strings.Split(vary, ",")
 	sort.Strings(fields)
 

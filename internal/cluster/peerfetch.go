@@ -214,7 +214,7 @@ type PeerFetcher struct {
 	// within peerFetchWaitTimeout). pQueueWait only observes successful
 	// acquisitions, so without this counter a saturated queue that sheds
 	// everything is invisible in metrics: no waits land in the histogram.
-	pShed prometheus.Counter
+	pShed prometheus.CounterVec
 	// breaker is the per-address failure breaker: consecutive transport
 	// failures trip a cooldown so dead peer addresses fail fast
 	// instead of paying a dial timeout per RPC.
@@ -425,11 +425,11 @@ func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
 		Namespace: "bouine", Name: "peer_addr_blacklisted",
 		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
 	})
-	f.pShed = prometheus.NewCounter(prometheus.CounterOpts{
+	f.pShed = *prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bouine", Name: "peer_fetch_shed_total",
 		Help: "Peer-fetch/put RPCs shed because no concurrency slot freed within the queue-wait bound. Rising alongside peer_fetch_active at capacity means demand exceeds the configured peer_fetch_concurrency.",
-	})
-	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, f.pShed)
+	}, []string{"direction"})
+	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, &f.pShed)
 }
 
 // getPipelineClient returns the PipelineClient for the given peer
@@ -651,7 +651,7 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Req
 // The wait bound deliberately does not extend the RPC budget: it bounds
 // the queue, not the RPC, mirroring the cache handler's split between
 // fetchWaitTimeout and fetch_timeout.
-func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error {
+func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}, direction string) error {
 	select {
 	case sem <- struct{}{}:
 		return nil
@@ -663,8 +663,8 @@ func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error 
 	case sem <- struct{}{}:
 		return nil
 	case <-timer.C:
-		if f.pShed != nil {
-			f.pShed.Inc()
+		if f.pShed.MetricVec != nil {
+			f.pShed.WithLabelValues(direction).Inc()
 		}
 		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
 	case <-ctx.Done():
@@ -687,7 +687,7 @@ func (f *PeerFetcher) waitTimeout() time.Duration {
 // function paired with the acquisition, or an error when the context is
 // cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
 func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
-	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
+	if err := f.acquireSlot(ctx, f.fetchSem, "fetch"); err != nil {
 		if errors.Is(err, ErrPeerFetchShed) && f.pQueueWait != nil {
 			// A shed after a full wait window is exactly the queue
 			// signal the histogram exists for — record it too, or a
@@ -972,7 +972,7 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 		return fmt.Errorf("peer put %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
 
-	if err := f.acquireSlot(ctx, f.putSem); err != nil {
+	if err := f.acquireSlot(ctx, f.putSem, "put"); err != nil {
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	defer func() { <-f.putSem }()

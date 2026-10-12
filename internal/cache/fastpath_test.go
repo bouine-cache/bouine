@@ -417,10 +417,11 @@ func BenchmarkGate_FastPath_PeerHit(b *testing.B) {
 }
 
 // BenchmarkGate_FastPath_PeerHitVary gates the variant gate: the peer
-// answers with a Vary-carrying object, so every iteration pays
-// reqHeaderMapFromRaw + BuildVaryKey (the #630 response-side gate). The
-// budget covers the gate's ~7 allocs; the peer branch amortizes a
-// network round-trip, so a nonzero budget is honest here.
+// answers with a Vary-carrying object, so every iteration pays the
+// #630 response-side gate (varyKeyMatches over the RawRequest). The
+// gate reads the raw headers in place and hashes into a stack buffer,
+// so the budget is 0: a regression back to materializing the header
+// map or the hex key fails the gate.
 func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)

@@ -1579,7 +1579,7 @@ func peerVaryAssertion(obj *api.Object) string {
 // production before this gate).
 func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
 	if peerObj.VaryValue != "" &&
-		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		!varyKeyMatches(peerObj.VaryValue, varyAssertSrc{m: ri.Header}, h.policy, peerObj.VaryKey) {
 		if h.onPeerVariantMismatch != nil {
 			h.onPeerVariantMismatch()
 		}

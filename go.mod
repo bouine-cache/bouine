@@ -7,7 +7,7 @@ require (
 	github.com/bouine-cache/xxhash/v3 v3.0.1
 	github.com/cloudflare/cloudflare-go/v4 v4.6.0
 	github.com/hashicorp/memberlist v0.7.0
-	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1

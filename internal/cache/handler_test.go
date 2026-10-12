@@ -3413,6 +3413,44 @@ func TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch(t *testing.T) {
 	assert.Equal(t, int32(1), originCalls.Load())
 }
 
+// TestHandleCacheMiss_FastPathOwnerShedHintSkipsPeerFetch pins the
+// owner-shed hint: when the H1 fast path hit a concurrency wait timeout
+// (ErrPeerFetchShed) from the owner (transferred via
+// api.OwnerShedContextKey), the slow path skips the peer retry
+// and goes straight to origin.
+func TestHandleCacheMiss_FastPathOwnerShedHintSkipsPeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, api.ErrPeerFetchShed
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/shed-hinted-miss")
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(0), peerFetchCalls.Load(), "owner shed hint must skip the peer retry")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
 // TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy pins the hint's
 // key-scope guard: the production fast path is built without the route's
 // KeyPolicy, so on a policied route the fast path's miss was computed

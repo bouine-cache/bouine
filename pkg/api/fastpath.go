@@ -1,9 +1,14 @@
 package api
 
 import (
+	"errors"
 	"net"
 	"time"
 )
+
+// ErrPeerFetchShed is returned by Fetch and Put when no concurrency
+// slot could be acquired within peerFetchWaitTimeout.
+var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
 
 // OwnerMissContextKey is the fasthttp user-value key under which the
 // h1parser transfers RawRequest.OwnerMiss to the fallback RequestCtx
@@ -14,6 +19,11 @@ const OwnerMissContextKey = "bouine.owner_miss"
 // the h1parser transfers RawRequest.OwnerGateReject to the fallback
 // RequestCtx on a fast-path fall-through (see RawRequest.OwnerGateReject).
 const OwnerGateRejectContextKey = "bouine.owner_gate_reject"
+
+// OwnerShedContextKey is the fasthttp user-value key under which the
+// h1parser transfers RawRequest.OwnerShed to the fallback RequestCtx
+// on a fast-path fall-through (see RawRequest.OwnerShed).
+const OwnerShedContextKey = "bouine.owner_shed"
 
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
 // from a pooled read buffer — all string fields are slices of that buffer,
@@ -86,6 +96,14 @@ type RawRequest struct {
 	// by the parser's per-request soft reset;
 	// zero value = unset.
 	OwnerGateReject bool
+	// OwnerShed reports that the fast path asked the key's ring owner and
+	// hit a queue wait timeout (ErrPeerFetchShed) — the peer fetcher shed
+	// demand due to concurrency saturation. The h1parser transfers it to
+	// the fallback RequestCtx under OwnerShedContextKey so handleCacheMiss
+	// skips the peer retry (avoiding cascading queue contention and timeout amplification)
+	// and goes straight to origin (protected by origin singleflight).
+	// Reset to false by the parser's per-request soft reset; zero value = unset.
+	OwnerShed bool
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

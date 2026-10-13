@@ -3451,6 +3451,98 @@ func TestHandleCacheMiss_FastPathOwnerShedHintSkipsPeerFetch(t *testing.T) {
 	assert.Equal(t, int32(1), originCalls.Load())
 }
 
+// TestHandleCacheMiss_OwnerShedHintIgnoredWithKeyPolicy pins the shed
+// hint's key-scope guard (mirrors the OwnerMiss variant): the hint flag
+// does not bind to the producing route's policy, so on a policied route
+// the slow path cannot prove its peer question identical to the fast
+// path's and the peer RPC must run.
+func TestHandleCacheMiss_OwnerShedHintIgnoredWithKeyPolicy(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/policied-shed?utm_foo=x")
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(),
+		"shed hint from the nil-policy fast path must not suppress the policied route's peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerShedHintIgnoredWhenStaleObjectStored pins the
+// shed hint's object-scope guard (mirrors the OwnerMiss variant): with a
+// stale object in the store (obj != nil) the slow path's peer question
+// carries peerVaryAssertion(obj) — a different question than the fast
+// path's plain "" — so the hint must not suppress the fetch.
+func TestHandleCacheMiss_OwnerShedHintIgnoredWhenStaleObjectStored(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	url := "http://example.com/shed-hinted-stale"
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
+	stale := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("stale-body"),
+		BodySize:   10,
+		StoredAt:   time.Now().Add(-2 * time.Minute),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, stale))
+
+	var peerFetchCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("from-origin"))
+		},
+		FastClient: &testFastClient{
+			handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+				ctx.SetStatusCode(200)
+				_, _ = ctx.Write([]byte("from-origin"))
+			},
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil // peer miss
+		},
+	})
+
+	r := testCtx("GET", url)
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(), "shed hint must not suppress the fetch when a stale object exists")
+}
+
 // TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy pins the hint's
 // key-scope guard: the production fast path is built without the route's
 // KeyPolicy, so on a policied route the fast path's miss was computed

@@ -182,6 +182,12 @@ func TestHandleFallThrough_TransfersOwnerShedHint(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleFallThrough_TransfersOwnerGateRejectHint pins the
+// gate-rejection plumbing: the fallback handler must see
+// api.OwnerGateRejectContextKey in its RequestCtx user values exactly
+// when RawRequest.OwnerGateReject was set, so handleCacheMiss can skip
+// the deterministically-rejected peer retry (nil-policy routes).
 func TestHandleFallThrough_TransfersOwnerGateRejectHint(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -426,7 +426,7 @@ func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
 		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
 	})
 	f.pShed = *prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bouine", Name: "peer_fetch_shed_total",
+		Namespace: "bouine", Name: "peer_shed_total",
 		Help: "Peer-fetch/put RPCs shed because no concurrency slot freed within the queue-wait bound. Rising alongside peer_fetch_active at capacity means demand exceeds the configured peer_fetch_concurrency.",
 	}, []string{"direction"})
 	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, &f.pShed)

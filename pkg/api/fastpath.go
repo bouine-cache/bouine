@@ -6,8 +6,12 @@ import (
 	"time"
 )
 
-// ErrPeerFetchShed is returned by Fetch and Put when no concurrency
-// slot could be acquired within peerFetchWaitTimeout.
+// ErrPeerFetchShed is a sentinel for peer RPCs dropped because no
+// concurrency slot freed up within the bounded queue wait. The cluster
+// peer fetcher wraps it around its shed errors so consumers
+// (fast path, cache handler) can distinguish a capacity shed — skip
+// the retry, fall back to origin — from a transient transport error,
+// which stays retryable.
 var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
 
 // OwnerMissContextKey is the fasthttp user-value key under which the

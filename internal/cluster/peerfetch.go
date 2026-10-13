@@ -66,6 +66,12 @@ const (
 	// Exported so the engine wiring can reuse the same budget for the
 	// write-to-owner goroutine (issue #509).
 	PeerFetchTimeout = 500 * time.Millisecond
+	// shedDirectionFetch / shedDirectionPut are the bouine_peer_shed_total
+	// "direction" label values distinguishing read-side (fetch) from
+	// write-side (put) sheds. Unexported consts so a typo in one call site
+	// fails to compile instead of silently forking the label cardinality.
+	shedDirectionFetch = "fetch"
+	shedDirectionPut   = "put"
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
@@ -703,7 +709,7 @@ func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time
 	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
 		if errors.Is(err, ErrPeerFetchShed) {
 			if f.pShed.MetricVec != nil {
-				f.pShed.WithLabelValues("fetch").Inc()
+				f.pShed.WithLabelValues(shedDirectionFetch).Inc()
 			}
 			if f.pQueueWait != nil {
 				// A shed after a full wait window is exactly the queue
@@ -995,7 +1001,7 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 
 	if err := f.acquireSlot(ctx, f.putSem); err != nil {
 		if errors.Is(err, ErrPeerFetchShed) && f.pShed.MetricVec != nil {
-			f.pShed.WithLabelValues("put").Inc()
+			f.pShed.WithLabelValues(shedDirectionPut).Inc()
 		}
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}

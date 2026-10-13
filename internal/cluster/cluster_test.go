@@ -119,14 +119,10 @@ func TestCluster_TwoNodeJoin(t *testing.T) {
 	_, err = c2.Join([]string{"127.0.0.1:17900"})
 	require.NoError(t, err, "join")
 
-	// Wait for gossip to propagate.
-	for range 50 {
-		if len(c1.ml.Members()) == 2 {
-			break
-		}
-		// slight pause
-		select {}
-	}
+	// Wait for gossip to propagate the join to both views.
+	require.Eventually(t, func() bool {
+		return len(c1.Members()) == 2 && len(c2.Members()) == 2
+	}, 5*time.Second, 50*time.Millisecond, "peers did not converge")
 }
 
 func TestNotifyMsg_PurgeEvent(t *testing.T) {

@@ -651,7 +651,7 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest) *fasthttp.Req
 // The wait bound deliberately does not extend the RPC budget: it bounds
 // the queue, not the RPC, mirroring the cache handler's split between
 // fetchWaitTimeout and fetch_timeout.
-func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}, direction string) error {
+func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error {
 	select {
 	case sem <- struct{}{}:
 		return nil
@@ -663,9 +663,6 @@ func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}, direct
 	case sem <- struct{}{}:
 		return nil
 	case <-timer.C:
-		if f.pShed.MetricVec != nil {
-			f.pShed.WithLabelValues(direction).Inc()
-		}
 		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
 	case <-ctx.Done():
 		return ctx.Err()
@@ -687,13 +684,18 @@ func (f *PeerFetcher) waitTimeout() time.Duration {
 // function paired with the acquisition, or an error when the context is
 // cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
 func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
-	if err := f.acquireSlot(ctx, f.fetchSem, "fetch"); err != nil {
-		if errors.Is(err, ErrPeerFetchShed) && f.pQueueWait != nil {
-			// A shed after a full wait window is exactly the queue
-			// signal the histogram exists for — record it too, or a
-			// fully-shedding queue disappears from the metric (only
-			// successful acquisitions would ever be observed).
-			f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
+		if errors.Is(err, ErrPeerFetchShed) {
+			if f.pShed.MetricVec != nil {
+				f.pShed.WithLabelValues("fetch").Inc()
+			}
+			if f.pQueueWait != nil {
+				// A shed after a full wait window is exactly the queue
+				// signal the histogram exists for — record it too, or a
+				// fully-shedding queue disappears from the metric (only
+				// successful acquisitions would ever be observed).
+				f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+			}
 		}
 		return nil, err
 	}
@@ -972,7 +974,10 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 		return fmt.Errorf("peer put %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
 
-	if err := f.acquireSlot(ctx, f.putSem, "put"); err != nil {
+	if err := f.acquireSlot(ctx, f.putSem); err != nil {
+		if errors.Is(err, ErrPeerFetchShed) && f.pShed.MetricVec != nil {
+			f.pShed.WithLabelValues("put").Inc()
+		}
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	defer func() { <-f.putSem }()

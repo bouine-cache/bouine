@@ -369,7 +369,7 @@ type Handler struct {
 	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
 	jitterPercent        int
 	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
+	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires on success/redirect responses (status < 400) when > 0; error statuses keep the negative-caching TTL ladder (ADR-0059)
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
@@ -2458,9 +2458,12 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}
-	// Re-apply route override so a 304 cannot revert bouine's storage lifetime
-	// back to the upstream's (potentially shorter) max-age.
-	if h.overrideTTL > 0 {
+	// Re-apply route override (success responses only) so a 304 cannot
+	// revert bouine's storage lifetime back to the upstream's (potentially
+	// shorter) max-age. Error objects keep the ladder TTL from the merged
+	// headers (or their previous TTL) — refreshed.StatusCode is the stale
+	// object's status (ADR-0059).
+	if h.overrideTTL > 0 && refreshed.StatusCode < 400 {
 		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
 	}
 	refreshed.OriginAge = parseOriginAge(refreshed.Header)
@@ -3503,11 +3506,13 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
 	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
-	// Route-level override wins over the upstream's freshness directives.
-	// Applied after computeTTL so jitter is seeded from the override value,
-	// not the origin's max-age. The stored object retains the unaltered
-	// upstream Cache-Control header, which is forwarded to downstream clients.
-	if overrideTTL > 0 {
+	// Route-level override wins over the upstream's freshness directives
+	// for content responses (status < 400); error responses keep the
+	// negative-caching TTL ladder (ADR-0059). Applied after computeTTL so
+	// jitter is seeded from the override value, not the origin's max-age.
+	// The stored object retains the unaltered upstream Cache-Control
+	// header, which is forwarded to downstream clients.
+	if overrideTTL > 0 && res.StatusCode < 400 {
 		ttl = JitterTTL(overrideTTL, jitterPct)
 	}
 

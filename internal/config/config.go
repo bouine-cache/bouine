@@ -684,6 +684,11 @@ type RouteCache struct {
 	// RFC 9111 boolean directives (no-store, private, no-cache,
 	// must-revalidate, proxy-revalidate) are always respected; TTLOverride
 	// only replaces the numeric freshness lifetime.
+	// Exempts error responses (status >= 400): those keep the
+	// negative-caching TTL ladder — origin explicit freshness >
+	// negative_ttl > heuristic (Last-Modified) > ttl_default — so an
+	// operator override never pins errors fresh beyond what the origin
+	// or the negative policy sanctioned (ADR-0059).
 	// Zero (default) = honour the upstream's freshness headers.
 	TTLOverride time.Duration `yaml:"ttl_override,omitempty" json:"ttl_override,omitempty"`
 	// MaxObjectSize, when > 0, skips caching for responses whose body

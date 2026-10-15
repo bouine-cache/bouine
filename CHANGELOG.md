@@ -63,6 +63,19 @@ the curated, human-readable summary.
   responses that existed at invalidation time; objects stored after
   the ban's registration are now exempt on all snapshot paths
   (literal sets, anchored prefixes, and opaque regex bans).
+- **`ttl_override` no longer pins error responses fresh.** A route with
+  `ttl_override` applied the override to *every* storable response,
+  including errors: an origin that opts a 404 into negative caching
+  (`Cache-Control: public, max-age=30`) got cached for the full override
+  duration (30 minutes instead of 30 seconds on affected routes), and
+  `negative_ttl` policies were bypassed entirely. The override now gates
+  on status < 400: success and redirect responses keep the ADR-0011
+  behavior, while error responses follow the negative-caching TTL ladder
+  (origin explicit freshness > `negative_ttl` > heuristic > `ttl_default`),
+  matching the protection `ttl_default` already had. **Operator-visible
+  change:** storable errors on `ttl_override` routes now expire per the
+  ladder instead of the override — bouine-config owners should re-check
+  routes that pair `ttl_override` with `negative_ttl` (ADR-0059).
 
 ## [0.5.28] - 2026-10-09
 

@@ -727,7 +727,7 @@ func routeFeatures(rc config.Route) []RouteFeature {
 	if rc.Cache.TTLOverride > 0 {
 		f = append(f, RouteFeature{
 			Label: "override " + FmtDuration(rc.Cache.TTLOverride),
-			Title: "ttl_override: forces bouine's internal TTL to this value regardless of the upstream Cache-Control/Expires headers (forwarded unaltered).",
+			Title: "ttl_override: forces bouine's internal TTL to this value regardless of the upstream Cache-Control/Expires headers (forwarded unaltered). Exempts error responses (status >= 400), which keep the negative-caching TTL ladder.",
 		})
 	}
 	if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {

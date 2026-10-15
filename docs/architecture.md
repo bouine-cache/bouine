@@ -586,6 +586,12 @@ routes:
       ttl_override: 60s
 ```
 
+`ttl_override` pins bouine's storage lifetime for success/redirect
+responses (status < 400) only; error responses keep the negative-caching
+TTL ladder (origin explicit freshness > `negative_ttl` > heuristic >
+`ttl_default`), so an override never pins errors fresh beyond what the
+origin or the negative policy sanctioned (ADR-0059).
+
 Route matching (`RouteMatch`) is first-match-wins in **declaration
 order** — the same precedence rule the traffic-class classifier uses.
 `match.host` is an exact host or a single leading `*.` wildcard

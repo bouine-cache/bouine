@@ -28,10 +28,11 @@ import (
 // read once and compared against immutable set members.
 type banSnapshot struct {
 	// hosts/paths/surrogates map each literal condition to the ban's
-	// exemption time (expr.CreatedAt as compiled into the predicate;
-	// zero means the ban has no exemption — always subject). An object
-	// matches the ban iff its value equals the literal AND it is
-	// subject (StoredAt not after the exemption time).
+	// exemption time (the normalized registration instant from
+	// registerBan: the original CreatedAt when set, otherwise the
+	// moment the ban was registered). An object matches the ban iff
+	// its value equals the literal AND it is subject (StoredAt not
+	// after the exemption time).
 	hosts      map[string]time.Time
 	paths      map[string]time.Time
 	surrogates map[string]time.Time
@@ -127,10 +128,13 @@ func (s *banSnapshot) matches(obj *api.Object) bool {
 	if s.prefixMatch(obj) {
 		return true
 	}
-	// Opaque bans: full predicate walk. The StoredAt/CreatedAt
-	// exemption check inside the predicate already handles staleness.
+	// Opaque bans: full predicate walk, gated by the same exemption
+	// rule as the cheap sets. The predicate's own CreatedAt check only
+	// fires when the ORIGINAL expr.CreatedAt was non-zero; for bans
+	// registered without one (the admin API path), exemptAfter carries
+	// the normalized registration time instead.
 	for _, b := range s.opaqueBans {
-		if b.pred(obj) {
+		if subjectTo(obj, b.exemptAfter) && b.pred(obj) {
 			return true
 		}
 	}
@@ -189,10 +193,11 @@ func surrogateListed(keys []string, banned map[string]time.Time, obj *api.Object
 }
 
 // subjectTo reports whether obj is subject to a ban whose exemption
-// time is exempt (the ban's original expr.CreatedAt; zero means the
-// ban has no exemption and everything is subject). Objects stored
-// after the exemption time are not subject — RFC 9111 §4.4 invalidation
-// only removes responses that existed at invalidation time.
+// time is exempt (the ban's normalized registration instant; zero
+// would mean the ban has no exemption and everything is subject).
+// Objects stored after the exemption time are not subject — RFC 9111
+// §4.4 invalidation only removes responses that existed at
+// invalidation time.
 func subjectTo(obj *api.Object, exempt time.Time) bool {
 	return exempt.IsZero() || !obj.StoredAt.After(exempt)
 }
@@ -376,10 +381,15 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	pat := patternOf(expr)
-	// exemptAfter mirrors the predicate's own exemption semantics: the
-	// ban's ORIGINAL CreatedAt (possibly zero = no exemption), not the
-	// normalized registration time used for TTL accounting.
-	exemptAfter := expr.CreatedAt
+	// exemptAfter is the normalized createdAt: the ban's original
+	// CreatedAt when set, or the registration instant otherwise (the
+	// admin API path — registerBan normalizes zero to time.Now()).
+	// Objects stored after it are not subject to the ban (RFC 9111
+	// §4.4: invalidation only removes responses that existed at
+	// invalidation time). A zero value here would mean "no exemption
+	// ever", which turned any over-broad ban (e.g. host_regex ".*")
+	// into a permanent poison for every later fill.
+	exemptAfter := createdAt
 	now := time.Now()
 	pruned := b.list[:0]
 	refreshed := false

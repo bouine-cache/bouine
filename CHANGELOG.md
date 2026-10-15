@@ -38,6 +38,18 @@ the curated, human-readable summary.
   also allocates one object less (28 to 27 allocs/op), because releasing
   the fetch slot no longer goes through a heap-allocated closure.
 
+### Fixed
+
+- **Bans no longer poison objects stored after them** (regression in
+  v0.5.13). A ban registered without `created_at` — how the admin
+  `/v1/ban` endpoint issues bans — treated every object as subject
+  forever, including objects stored long after the ban. An over-broad
+  ban (e.g. `host_regex: ".*"`) therefore permanently banned every
+  later cache fill. Per RFC 9111 §4.4, invalidation only removes
+  responses that existed at invalidation time; objects stored after
+  the ban's registration are now exempt on all snapshot paths
+  (literal sets, anchored prefixes, and opaque regex bans).
+
 ## [0.5.28] - 2026-10-09
 
 ### Performance

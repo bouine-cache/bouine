@@ -37,7 +37,7 @@ import (
 //     route.
 //
 // BYPASS responses carry X-Cache-Source: origin on every branch that
-// dispatched a fetch (success or fetch-error 502). The no-client 502
+// dispatched a fetch (success or fetch-error 502/504). The no-client 502
 // below, like the shed 503, keeps the empty source — the origin was
 // never reached — which the metrics layer labels "bouine".
 //
@@ -66,7 +66,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 			h.writeShed503(ctx, "BYPASS")
 			return
 		}
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)

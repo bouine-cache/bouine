@@ -287,7 +287,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 			h.writeShed503(ctx, xCacheHeader)
 			return
 		}
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
@@ -360,7 +360,7 @@ func (h *Handler) streamMiss(
 			h.triggerShedRefill(ri, primaryKey)
 			return
 		}
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)

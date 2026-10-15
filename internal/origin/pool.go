@@ -185,6 +185,21 @@ func classifyConnError(err error) string {
 	return "error"
 }
 
+// writeUpstreamError writes the proxied fetch-failure response for the
+// uncached FastHandler path: 504 Gateway Timeout (RFC 9110 §15.6.5) when
+// the upstream fetch timed out — the same "timeout" reason string the
+// bouine_origin_connection_errors_total label carries, so the wire status
+// and the metric agree on what a timeout is — and 502 Bad Gateway for
+// every other upstream failure (refused, reset, DNS). The cached paths
+// carry their own mapping (cache.writeUpstreamError).
+func writeUpstreamError(ctx *fasthttp.RequestCtx, connErrReason string) {
+	if connErrReason == "timeout" {
+		ctx.Error("upstream timeout", fasthttp.StatusGatewayTimeout)
+		return
+	}
+	ctx.Error("upstream error", fasthttp.StatusBadGateway)
+}
+
 // defaultOriginMaxConnsPerHost caps persistent connections per origin host
 // in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
 // Little's Law requires ~8 concurrent connections; 64 gives ~8x headroom
@@ -457,7 +472,7 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 			if conc5xx > 0 {
 				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error", connErrReason)
 			}
-			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			writeUpstreamError(ctx, connErrReason)
 			return
 		}
 

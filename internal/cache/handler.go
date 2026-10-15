@@ -46,9 +46,9 @@ var ErrAbortHandler = errors.New("abort handler")
 // ErrFetchShed is returned when a foreground origin fetch gave up waiting
 // for a fetch-semaphore slot after fetchWaitTimeout. Callers map it to
 // stale-on-shed (RFC 5861-style) when a stale object is in scope, or to
-// 503 + Retry-After otherwise — distinct from the 502 origin-failure
-// mapping. The wait bound is the fix for the goroutine-pileup livelock
-// (issue #562): previously the foreground paths parked on the semaphore
+// 503 + Retry-After otherwise — distinct from the 502/504 origin-failure
+// mapping (writeUpstreamError). The wait bound is the fix for the
+// goroutine-pileup livelock (issue #562): previously the foreground paths parked on the semaphore
 // with a dead cancellation arm and nothing ever un-parked them.
 var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 
@@ -2211,7 +2211,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 				h.triggerShedRefill(ri, lookupKey)
 				return
 			}
-			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			writeUpstreamError(ctx, res.Err)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 			h.applyResponseRewrites(&ctx.Response.Header)
@@ -2369,7 +2369,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 			h.serveObject(ctx, stale, now, cacheStale, src)
 			return
 		}
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		writeUpstreamError(ctx, res.Err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
@@ -2836,10 +2836,14 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 
 	if err := h.doFastFetch(req, resp); err != nil {
 		tracing.RecordError(span, err)
+		// writeUpstreamError runs first: ctx.Error resets the response
+		// (fasthttp RequestCtx.Error), so the attribution headers must
+		// be written after it — the same order as the sibling 50x
+		// branches (revalidate, streamBypass, handleSSE).
+		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 

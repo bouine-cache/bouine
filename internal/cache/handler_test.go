@@ -2206,7 +2206,10 @@ func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
 // TestDoFetchStreamDeadlineAbortsSlowOrigin verifies the streaming miss
 // path enforces fetch_timeout through the deadline-based context. The
 // slow origin blocks past the timeout; the fetch must abort instead of
-// hanging until the transport's own 60s fallback.
+// hanging until the transport's own 60s fallback. A timed-out upstream
+// fetch surfaces as a 504 Gateway Timeout (RFC 9110 §15.6.5), not a 502:
+// writeUpstreamError distinguishes the two, and the attribution headers
+// survive the ctx.Error reset.
 func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 	t.Parallel()
 	upstream := func(ctx *fasthttp.RequestCtx) {
@@ -2231,7 +2234,9 @@ func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, 1500*time.Millisecond, "fetch timeout must abort the slow origin")
-	require.Equal(t, 502, respCode(ctx))
+	require.Equal(t, 504, respCode(ctx))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 // TestDoFetchDeadlineRespectedByFastClient verifies the foreground fetch

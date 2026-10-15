@@ -40,6 +40,20 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Upstream timeouts now return 504, not 502.** A fetch against an
+  upstream pool that times out (dial, response-header, or the per-route
+  fetch deadline) surfaces as `504 Gateway Timeout` per RFC 9110
+  §15.6.5, with the body "upstream timeout" and the usual X-Cache /
+  X-Cache-Source attribution. Every other upstream failure (refused,
+  reset, DNS) keeps `502 Bad Gateway`. The timeout classification is
+  the same string the `bouine_origin_connection_errors_total` reason
+  label carries, so the wire status and the metric agree. Covers the
+  cached data plane (miss, BYPASS, revalidation, invalidating proxy)
+  and the uncached proxy path; the `only-if-cached` 504 and the
+  no-client 502 branches are unchanged. The invalidating-proxy path
+  also had its attribution headers written before `ctx.Error`'s
+  response reset, wiping them; they are now written after it, matching
+  the sibling paths.
 - **Bans no longer poison objects stored after them** (regression in
   v0.5.13). A ban registered without `created_at` — how the admin
   `/v1/ban` endpoint issues bans — treated every object as subject

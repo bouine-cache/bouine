@@ -175,6 +175,45 @@ func TestBanSnapshot_ExemptObjectSkipped(t *testing.T) {
 	assert.False(t, s.MatchesActiveBan(banTestObj("banned.example.com", "/x", 30*time.Minute)))
 }
 
+// TestBanSnapshot_UnsetCreatedAtExemptsLaterFills pins the admin-API
+// regression from 3b9417f9: a ban registered without CreatedAt (how
+// /v1/ban issues bans) must exempt objects stored after registration,
+// on every snapshot path — the literal sets, the anchored prefixes,
+// and the opaque (regex) walk. Pre-fix, exemptAfter was the raw
+// expr.CreatedAt (zero = no exemption ever), so an over-broad ban
+// (host_regex ".*") permanently banned every later fill. RFC 9111
+// §4.4: invalidation only removes responses that existed at
+// invalidation time.
+func TestBanSnapshot_UnsetCreatedAtExemptsLaterFills(t *testing.T) {
+	t.Parallel()
+	scenarios := []struct {
+		name string
+		expr api.BanExpr
+	}{
+		{name: "opaque regex", expr: api.BanExpr{HostRegex: ".*"}},
+		{name: "literal host", expr: api.BanExpr{HostRegex: "banned.example.com"}},
+		{name: "anchored prefix", expr: api.BanExpr{HostRegex: `^banned\.`}},
+	}
+	for _, tc := range scenarios {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+			defer func() { _ = s.Close(context.Background()) }()
+
+			_, err := s.Ban(context.Background(), tc.expr)
+			require.NoError(t, err)
+
+			// Object that predates the ban: subject.
+			require.True(t, s.MatchesActiveBan(banTestObj("banned.example.com", "/x", time.Hour)),
+				"object stored before the ban is subject to it")
+			// Object stored after registration: exempt — the ban must
+			// not poison later fills.
+			assert.False(t, s.MatchesActiveBan(banTestObj("banned.example.com", "/x", 0)),
+				"object stored after an unset-CreatedAt ban must be exempt")
+		})
+	}
+}
+
 // TestBanReaper_PrunesExpiredBans verifies fix 2: the TTL reaper
 // prunes expired bans so a quiet period after a storm stops taxing
 // hits within one reaper interval, not after the full 24 h banTTL.

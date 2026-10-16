@@ -43,26 +43,53 @@ downstream cache trusts content beyond bouine's own clock:
    fetched. Required: without this, a CF fetch at t=59m59s re-ages a full
    TTL with no SWR involved.
 2. **Stale serves — mirror mode** — `public, max-age=0,
-   stale-while-revalidate=<remaining window>` for *all* stale reasons:
-   natural SWR aging, soft purge (which rides the SWR machinery,
-   `TTL=0`), SIE (remaining SIE window), and heuristic staleness. CF
-   mirrors bouine: serves `UPDATING` instantly from its cache and
-   revalidates asynchronously, collapsed, against bouine's store. Chosen
-   over strict `max-age=0` (taxes ~30% of traffic with a blocking CF→bouine
-   reval while bouine answers from its stale store either way — same bytes,
-   only latency) and over lazy `max-age=<SWR remaining>` (propagates fresh
-   content only at window end; misrepresents stale as fresh).
-3. **Fill (MISS) serves — min() rule** — `public,
+   stale-while-revalidate=<window remaining>` within the sanctioned window,
+   for *all* stale reasons: natural SWR aging, soft purge (which rides the
+   SWR machinery, `TTL=0`), SIE, and heuristic staleness. The window is
+   sourced per staleness reason: `obj.StaleWhileRevalidate` for SWR-class
+   serves, `obj.StaleIfError` for SIE serves. Outside any sanctioned window
+   — `stayin_alive` grace past `TTL+SWR+SIE`, and request `max-stale`
+   authorization beyond the object's window — the synthesis clamps to
+   strict `public, max-age=0` (no `swr`): grace is an outage posture the
+   downstream must probe per request, and per-request client authorization
+   must not become CF entry policy. CF mirrors bouine: serves `UPDATING`
+   instantly from its cache and revalidates asynchronously, collapsed,
+   against bouine's store. Chosen over strict `max-age=0` everywhere (taxes
+   ~30% of traffic with a blocking CF→bouine reval while bouine answers from
+   its stale store either way — same bytes, only latency) and over lazy
+   `max-age=<SWR remaining>` (propagates fresh content only at window end;
+   misrepresents stale as fresh).
+3. **Stored `no-cache` objects** — `public, no-cache`, never a numeric
+   clock. `no-cache` is an explicit cacheability marker: those objects ARE
+   stored and served REVALIDATED after per-request origin revalidation
+   (`internal/cache/cacheable.go:24`, `internal/cache/engine.go:141`), so
+   they reach synthesis — and handing CF a `max-age` would license
+   unvalidated serving, which RFC 9111 §5.2.2.4 forbids and the origin
+   explicitly rejected. CF traffic is identical to passthrough (CF
+   "caches and always revalidates").
+4. **Fill (MISS) serves — min() rule** — `public,
    max-age=min(origin effective max-age, bouine final TTL)` plus the
    origin's qualitative revalidation directives. No-op when origin and
    bouine agree; preserves ADR-0011's decoupling case (origin shorter);
    caps the inverse case (bouine deliberately tighter than origin, error
    fills via the negative-TTL ladder) which would otherwise re-introduce
    the amplifier on first fill.
-4. **Downstream 304s carry the same cap** as the corresponding 200 serve
+5. **Downstream 304s carry the same cap** as the corresponding 200 serve
    (plus `Warning: 110` when stale-sourced). RFC 9111 §4.3.4: a 304's
    headers update the downstream stored entry — an uncapped 304 would let
    CF re-freshen unboundedly. Range serves carry the cap likewise.
+6. **Stale 304s trigger background revalidation — both modes.** The
+   conditional-304 path (`tryConditional304Fast`,
+   `internal/cache/handler.go:1495`) returns before the existing trigger
+   (`internal/cache/handler.go:1510-1513`), so a downstream revalidation of
+   a stale object was answered from bouine's stale store — confirming
+   content the origin was never asked about — and triggered nothing. Under
+   `sync`, CF's revalidations are precisely such conditional requests;
+   without a trigger there they freeze content for the full SWR window and
+   the TTL + SWR + one-cycle ceiling is unreachable. The trigger fires
+   under the same triple gate as the 200-path trigger
+   (`StaleHit && obj.StaleWhileRevalidate > 0 && isOwnerOrUnmanaged(key)`),
+   ungated by `sync`, which also fixes the pre-existing passthrough hole.
 
 Invariants:
 
@@ -81,7 +108,9 @@ Invariants:
   (implies `proxy-revalidate`, kills CF async SWR).
 
 End-user ceiling on `sync` routes: bouine TTL + SWR + one revalidation
-cycle; visitor latency flat during the window (CF `UPDATING`).
+cycle; visitor latency flat during the window (CF `UPDATING`). Point 6 is
+what keeps that ceiling honest when the arriving traffic is itself
+conditional (CF revalidation) rather than plain requests.
 
 ## Rejected Alternatives
 
@@ -126,6 +155,10 @@ cycle; visitor latency flat during the window (CF `UPDATING`).
 - Soft-purged content can survive at CF for ≤ one revalidation cycle —
   documented; immediate invalidation of already-admitted CF entries requires
   CF API purge integration (future work).
+- During `stayin_alive` grace or an origin outage, the strict clamp makes
+  CF-side visitors pay a synchronous reval RTT per request — bouine answers
+  stale from the grace store, so availability holds; latency only, and the
+  point-6 trigger self-heals the chain on the first healthy origin response.
 
 ## References
 

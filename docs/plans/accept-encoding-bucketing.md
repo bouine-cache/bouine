@@ -435,7 +435,7 @@ Per AGENTS.md §7/§16: touch `internal/cache` → `make bench-gate`,
 - `docs/architecture.md` §3.3: replace the aspirational text with the
   implemented behavior + `encoding_policy` knob + the
   origin-header-rewrite pairing rule.
-- ADR-0051 "Bucket Accept-Encoding in the variant key" — decision,
+- ADR-0061 "Bucket Accept-Encoding in the variant key" — decision,
   the six-builder constraint, the pairing hazard, mixed-cluster
   behavior, `verbatim` escape hatch. Follows MADR format; referenced
   from §3.3.
@@ -500,7 +500,7 @@ acceptable per §2.2 and worth the runbook line, not a blocker).
    docs in config comments + cacheCheck display.
 6. Integration tests (fill-via-A, hit-via-B; verbatim-mismatch
    fail-safe).
-7. Docs: architecture §3.3 rewrite, ADR-0051, runbook entry,
+7. Docs: architecture §3.3 rewrite, ADR-0061, runbook entry,
    changelog entries.
 8. Gates: `make lint`, `make test`, `make bench-gate`, `make conformance`,
    `make integration` (§16 table for `internal/cache`).
@@ -513,7 +513,7 @@ All items land in **one PR** (§6.0).
 
 Status: Draft
 Branch: `feat/accept-language-bucketing` (follow-up to this plan's PR)
-Depends on: this plan (the dispatch points), ADR-0051 (the pairing
+Depends on: this plan (the dispatch points), ADR-0061 (the pairing
 hazard analysis), upstream `cache-tests` `vary-normalise-lang-select`
 
 ### 10.1 Problem

@@ -83,6 +83,18 @@ the curated, human-readable summary.
   so gate comparisons stay apples-to-apples; both variables are
   overridable (`--build-arg` / workflow edit) for older fleets.
 
+### Changed
+
+- **Renumbered two colliding ADRs so every ADR file has a unique
+  number.** The Accept-Encoding variant-bucketing ADR moves from
+  ADR-0051 to ADR-0061 — ADR-0051 (stayin-alive grace retention, landed
+  the same day) keeps the number, which is baked into code comments and
+  released entries. The changelog-automation ADR moves from ADR-0047 to
+  ADR-0062 — ADR-0047 (`traffic_class` metric label) keeps it for the
+  same reason. The `docs/decisions/README.md` index now lists every ADR
+  file exactly once; both renumbered files carry a Renumbered note
+  resolving the stale references in already-released entries.
+
 ### Fixed
 
 - **Upstream timeouts now return 504, not 502.** A fetch against an

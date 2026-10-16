@@ -111,7 +111,7 @@ func TestCookiePresence_UnlistedCookiesShareVariant(t *testing.T) {
 // Variant-key computation must be byte-identical across the three
 // request representations (slow path header.Map, fasthttp Peek path,
 // RawRequest path) or store/lookup and the peer gates diverge — the
-// parity invariant ADR-0051 established for encoding buckets, applied
+// parity invariant ADR-0061 established for encoding buckets, applied
 // to cookie presence.
 func TestCookiePresence_KeyParityAcrossPaths(t *testing.T) {
 	t.Parallel()

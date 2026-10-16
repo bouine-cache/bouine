@@ -1,7 +1,10 @@
-# ADR-0051: Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding
+# ADR-0061: Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding
 
 - **Status**: Accepted
 - **Date**: 2026-09-27
+- **Renumbered**: 2026-10-16, from ADR-0051 — duplicate number; ADR-0051
+  (stayin-alive grace retention, landed the same day) keeps it, as its
+  number is baked into code comments and released changelog entries
 - **Deciders**: @bouine-core
 - **Phase**: cache key policy
 - **References**: RFC 9110 §12.5.3, §5.2.1; RFC 9111 §4.1; ADR-0046 (include_headers union); ADR-0049 (variant metadata); `docs/plans/accept-encoding-bucketing.md`

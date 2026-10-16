@@ -167,9 +167,10 @@ conditional (CF revalidation) rather than plain requests.
 
 ## References
 
-- RFC 9213 (CDN Cache Control), RFC 9111 §2.1 (Age storage), §3.2 (304 header
+- RFC 9213 (CDN Cache Control), RFC 9111 §3.2 (304 header
   update), §4.2.1 (max-age over Expires), §4.2.3 (age computation),
-  §4.2.4 (serving stale), §4.3.4 (freshening on 304), §5.2.2 (directives).
+  §4.2.4 (serving stale), §4.3.4 (freshening on 304), §5.1 (Age),
+  §5.2.2 (directives).
 - Cloudflare docs: "Cache responses" (Age resets on admit/revalidation),
   "CDN-Cache-Control" (precedence; Expires ignored; Surrogate-Control),
   "Origin Cache Control" (Always Online ignores swr/SIE; OCC mode

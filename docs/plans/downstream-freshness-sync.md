@@ -20,7 +20,7 @@ Cloudflare's published docs, 2026-10):
    asset has been in *Cloudflare's* cache since it was admitted or last
    revalidated" — it resets its own clock on every fill. Bouine's
    RFC 9111 §4.2.3-correct `Age` (`internal/cache/handler.go:1992`,
-   `internal/cache/fastpath.go:587`) signals into a void.
+   `internal/cache/fastpath.go:588`) signals into a void.
 2. **`Expires` is not a lever.** `max-age` takes precedence over `Expires`
    (RFC 9111 §4.2.1), and CF ignores `Expires` entirely for its caching
    decision when `CDN-Cache-Control`-family headers are in play.
@@ -315,7 +315,7 @@ behind the default-off config, so each is independently mergeable.
 - ADR-0060 (accompanies this plan).
 - `docs/architecture.md`: scope addition to the L3 row — user approval is
   this design session; update only the feature list, not exit criteria.
-- Runbook (new `docs/runbook/57-downstream-freshness-sync.md`): CF caveats —
+- Runbook (new `docs/runbook/58-downstream-freshness-sync.md`): CF caveats —
   zone Cache Rules with **Edge Cache TTL** ("ignore origin cache control")
   or `set_cache_control` override CDC (cap voided); **Always Online**
   ignores `stale-while-revalidate`/`stale-if-error` (mirror degrades to

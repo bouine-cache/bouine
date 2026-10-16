@@ -663,7 +663,7 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 // accept-encoding-bucketing.md §10; an unbucketable value falls back
 // to the legacy normalization) — both rules MUST match varyHeaderValue
 // (vary.go) or the peer gates reject every bucketed-variant exchange
-// (ADR-0051; pinned by
+// (ADR-0061; pinned by
 // TestVaryKeyEncodingBucket_ParityAcrossPaths). Every other field keeps
 // this path's legacy semantics: the four list-valued headers are
 // lowercase+sorted, all other field values pass through verbatim —

@@ -238,7 +238,7 @@ explicit per-route allow-list — never implicitly. This is the primary
 defense against cache-poisoning via unkeyed input (threat T06, T07).
 
 `Accept-Encoding` and `Accept-Language` are additionally reduced to
-their negotiation outcome before keying (ADR-0051): AE to the coding
+their negotiation outcome before keying (ADR-0061): AE to the coding
 bouine negotiates (see §3.3), AL to the highest-weight language tag —
 subtag preserved, ties resolved lexicographically so the winner is
 order-independent, unbucketable chains (absent, `*`, malformed, all
@@ -266,7 +266,7 @@ that cannot produce the coding falls back to identity for the whole
 bucket. Identity-bucket requests have the header removed rather than
 set to `identity` (some origins read a bare identity token as "client
 refuses compression"). The rewrite applies on every fill, revalidate,
-and refill path; the hit path never touches it. See ADR-0051.
+and refill path; the hit path never touches it. See ADR-0061.
 
 - `passthrough` (default) — store as-is, one variant per encoding-bucket.
 - `verbatim_encoding: true` (`cache.key`) — restore the pre-bucketing

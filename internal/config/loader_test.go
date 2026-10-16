@@ -1438,7 +1438,7 @@ func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
 }
 
-// --- cache.key.verbatim_encoding (ADR-0051) ---
+// --- cache.key.verbatim_encoding (ADR-0061) ---
 
 func TestParse_VerbatimEncoding(t *testing.T) {
 	t.Parallel()
@@ -1463,7 +1463,7 @@ routes:
 
 // TestValidate_VerbatimEncoding_IsBool pins that the knob is a plain
 // bool: the enum form (encoding_policy: bucket|verbatim) from the
-// original ADR-0051 draft was dropped in review — a bool cannot be
+// original ADR-0061 draft was dropped in review — a bool cannot be
 // misspelled, needs no enum validation, and keeps RouteKey
 // fieldalignment-clean.
 func TestValidate_VerbatimEncoding_IsBool(t *testing.T) {

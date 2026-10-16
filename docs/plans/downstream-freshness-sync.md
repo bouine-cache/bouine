@@ -115,6 +115,13 @@ value. Cost: touches the fill path including streaming; all cold path.
    sourced per staleness reason (§4.1); stayin-alive grace and request
    `max-stale` serve strict `max-age=0` — no negative/zero `swr` values, no
    client-authorized staleness baked into CF entry policy.
+4. **Fill no-cache carve-out** — `no-cache` responses are storable
+   (`internal/cache/cacheable.go:24`) and carry no usable `max-age`; the
+   fill min() rule would have shipped `public, max-age=<ttl_default or
+   heuristic>` and admitted a no-revalidation-required CF entry for a full
+   bouine TTL on a route whose origin demanded per-reuse validation. The
+   I2 qualifier (no numeric clock for `no-cache`) extends to fills (§4.1);
+   CF traffic identical to passthrough.
 
 ## 4. Behavior Specification
 
@@ -144,7 +151,7 @@ Serve classes carrying the formula:
 |---|---|
 | Downstream 304 | **same cap as the corresponding 200 serve** + `Warning: 110` when stale-sourced (RFC 9111 §4.3.4) |
 | Range (206) from cache | cap rides along (like `Warning: 110` today) |
-| Fill / MISS (buffered and streaming) | `public, max-age=min(origin effective max-age, bouine final TTL)`, plus origin qualitative directives (I2) |
+| Fill / MISS (buffered and streaming) | `public, max-age=min(origin effective max-age, bouine final TTL)`, plus origin qualitative directives (I2) — **except `no-cache` responses: `public, no-cache`, never a numeric clock (I2)** |
 | BYPASS / uncacheable | passthrough (nothing stored, no bouine clock exists) |
 
 `Age`, `X-Cache`, `X-Cache-Source`, `Warning` behavior is unchanged. The
@@ -291,8 +298,8 @@ behind the default-off config, so each is independently mergeable.
 - Unit matrix (table-driven, same package): each serve class × mode ×
   {override longer, override shorter, SWR, SIE, soft purge, heuristic,
   no-freshness origin, error fill, Date-less object, stored no-cache
-  object, stayin-alive grace serve, `max-stale`-authorized serve} — assert
-  exact CDC bytes, CC untouched, Age unchanged.
+  object (incl. its fill), stayin-alive grace serve, `max-stale`-authorized
+  serve} — assert exact CDC bytes, CC untouched, Age unchanged.
 - 304 cap tests (stale ETag match → 304 carries mirror cap + `Warning: 110`);
   206 cap tests; streaming-fill `min()` test (body > streaming threshold).
 - I8 trigger tests: conditional reval of a stale object triggers background

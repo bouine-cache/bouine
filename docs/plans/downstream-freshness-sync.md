@@ -127,21 +127,15 @@ value. Cost: touches the fill path including streaming; all cold path.
 
 The two modes differ only in what the downstream cache is told; bouine's own
 serving decision (status, body bytes, `Age`, `X-Cache`) is identical in both.
-`passthrough` is today's byte-for-byte behavior — nothing is synthesized,
-origin CDC-family lines forward untouched. `sync` synthesizes the cap of
-§4.1. Side by side (mirror of ADR-0060 "Behavior matrix"):
+`passthrough` (default) is today's byte-for-byte behavior — nothing is
+synthesized, origin CDC-family lines forward untouched. `sync` synthesizes
+the cap of §4.1.
 
-| Scenario at serve time | `passthrough` (default) | `sync` (§4.1) |
-|---|---|---|
-| Fresh (HIT / REVALIDATED) | no synthesis — CF re-ages a full CF TTL on every admit | `public, max-age=<TTL − Age>` |
-| Fresh, stored `no-cache` object | no synthesis — served REVALIDATED, bytes as today | `public, no-cache` (I2) |
-| Stale, qualifying window > 0 | no synthesis — CF re-admits stale bytes as fresh (the §1 amplifier) | `public, max-age=0, stale-while-revalidate=<window remaining>` |
-| Stale, windowless (`stayin_alive` grace, `max-stale` past window) | no synthesis | strict `public, max-age=0` — no `swr` |
-| Fill / MISS (buffered + streaming) | no synthesis | `public, max-age=min(origin effective max-age, bouine final TTL)` + origin qualitative directives; storable `no-cache` fills → `public, no-cache` |
-| Downstream 304 / Range (206) | uncapped | same cap as the corresponding 200 serve + `Warning: 110` when stale-sourced |
-| BYPASS / uncacheable | passthrough | passthrough — nothing stored, no bouine clock exists |
-| Origin CDC-family / `Surrogate-Control` lines | forwarded as today | **replaced** (I3) |
-| End-user content age | TTL + SWR + CF TTL (~2h10, §1) | TTL + SWR + one revalidation cycle (~1h10) |
+The per-scenario side-by-side lives in exactly one place — ADR-0060's
+"Behavior matrix" ([decision record](../decisions/0060-downstream-freshness-sync.md#behavior-matrix)):
+every serve class × both modes, the origin CDC-family handling, and the
+end-user ceiling each mode yields (~2h10 vs ~1h10 on popularity-stats). Not
+mirrored here — one comparison table to maintain, not two drifting copies.
 
 The I8 stale-304 trigger fires in **both** modes — `sync` depends on it,
 `passthrough` gets the pre-existing hole (§3 "Review fixes" 1) fixed.

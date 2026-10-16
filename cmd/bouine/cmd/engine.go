@@ -1150,10 +1150,20 @@ func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAud
 	}
 }
 
+// resolveListenerOptions resolves the tri-state listener socket-option
+// knobs into the concrete booleans ListenerConfig takes. TCP Fast Open
+// is opt-in: an unset listen.tcp_fast_open stays disabled, matching the
+// outbound surfaces (outboundFastOpenDialControl). TCP_DEFER_ACCEPT
+// defaults on. SO_REUSEPORT defaults to the platform's support.
+func resolveListenerOptions(l config.Listen) (fastOpen, deferAccept, reusePort bool) {
+	fastOpen = boolDefault(l.TCPFastOpen, false)
+	deferAccept = boolDefault(l.TCPDeferAccept, true)
+	reusePort = boolDefault(l.ReusePort, platform.ReusePortSupported)
+	return fastOpen, deferAccept, reusePort
+}
+
 func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHandler, rs *runState) {
-	tcpFastOpen := boolDefault(e.cfg.Listen.TCPFastOpen, true)
-	tcpDeferAccept := boolDefault(e.cfg.Listen.TCPDeferAccept, true)
-	reusePort := boolDefault(e.cfg.Listen.ReusePort, platform.ReusePortSupported)
+	tcpFastOpen, tcpDeferAccept, reusePort := resolveListenerOptions(e.cfg.Listen)
 
 	var fastPathHandler api.FastPathHandler
 	if e.cfg.Experimental.H1FastPath && rs.store != nil {

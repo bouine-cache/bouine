@@ -2135,7 +2135,7 @@ routes:
 	require.False(t, *cfg.UpstreamPools[0].Connect.TCPFastOpen,
 		"connect.tcp_fast_open: false must decode onto the pool")
 	require.Nil(t, cfg.UpstreamPools[1].Connect.TCPFastOpen,
-		"an unset connect.tcp_fast_open must stay nil so the engine default (enabled on Linux 4.11+) applies")
+		"an unset connect.tcp_fast_open must stay nil so the engine default (disabled) applies")
 	require.NoError(t, cfg.Validate(), "a tcp_fast_open pool with a routed path must validate")
 }
 
@@ -2157,5 +2157,5 @@ cluster:
 	cfg, err = Parse([]byte("listen:\n  admin: \":9000\"\n"))
 	require.NoError(t, err, "parse without cluster section")
 	require.Nil(t, cfg.Cluster.PeerTCPFastOpen,
-		"an unset cluster.peer_tcp_fast_open must stay nil so the engine default (enabled on Linux 4.11+) applies")
+		"an unset cluster.peer_tcp_fast_open must stay nil so the engine default (disabled) applies")
 }

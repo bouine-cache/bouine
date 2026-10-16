@@ -117,6 +117,32 @@ cycle; visitor latency flat during the window (CF `UPDATING`). Point 6 is
 what keeps that ceiling honest when the arriving traffic is itself
 conditional (CF revalidation) rather than plain requests.
 
+## Behavior matrix
+
+The two modes per scenario — `passthrough` is today's byte-for-byte
+behavior; `sync` is the synthesized cap:
+
+| Scenario | `passthrough` | `sync` |
+|---|---|---|
+| Fresh serve (HIT / REVALIDATED) | no CDC; CF re-ages a full CF TTL on every admit | `public, max-age=<TTL − Age>` — CF expires at bouine's wall |
+| Fresh, stored `no-cache` object | served REVALIDATED, bytes as today | `public, no-cache` — CF caches + always revalidates (identical CF traffic) |
+| Stale, within SWR window (natural aging, soft purge, heuristic) | CF re-admits stale bytes as fresh — the amplifier | `public, max-age=0, stale-while-revalidate=<window remaining>` — CF `UPDATING`, no visitor latency |
+| Stale, within SIE window | amplifier, on origin-down content | `public, max-age=0, stale-while-revalidate=<SIE window remaining>` — mirror, chain resilience preserved |
+| Stale via stayin-alive grace or `max-stale` beyond the object window | grace serve exists; downstream uncapped | strict `public, max-age=0` — outage posture / per-request client authorization never becomes CF entry policy |
+| Fill / MISS (buffered and streaming) | no CDC | `public, max-age=min(origin effective max-age, bouine final TTL)` + origin qualitative directives |
+| Fill of a storable `no-cache` response | no CDC | `public, no-cache`, never a numeric clock (point 3) |
+| Downstream 304 | uncapped | same cap as the corresponding 200 serve + `Warning: 110` when stale-sourced (points 5–6) |
+| Range (206) from cache | passthrough | cap rides along (like `Warning: 110`) |
+| BYPASS / uncacheable | passthrough | passthrough — no bouine clock exists |
+| Origin CDC-family / `Surrogate-Control` lines | forwarded as today | **replaced** — synthesis is authoritative |
+| End-user content age | TTL + SWR + CF TTL (~2h10 on popularity-stats) | TTL + SWR + one revalidation cycle (~1h10) |
+
+Holds identically in both modes: `Cache-Control` and browser TTLs
+untouched (I1), `Age`/`X-Cache`/`Warning` behavior unchanged, synthesized
+CDC never flows peer-ward (I5). The I8 stale-304 trigger fires in both
+modes — `sync` depends on it, `passthrough` gets the pre-existing hole
+fixed.
+
 ## Rejected Alternatives
 
 - **Synthesizing `Expires`** — loses to `max-age` (RFC 9111 §4.2.1); CF

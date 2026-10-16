@@ -78,7 +78,14 @@ field to `Superseded by ADR-NNNN`.
 | 0047   | Changelog automation                                | Accepted |
 | 0048   | kubeconform validation of rendered Helm templates   | Accepted |
 | 0049   | PurgeEvent.VaryKey is metadata; receivers purge the primary key and all variants | Accepted |
+| 0050   | internal/config is a shared kernel; eviction enum moves out of pkg/api | Accepted |
 | 0051   | Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding | Accepted |
+| 0052   | Never collapse authorized or unsafe-method requests | Accepted |
+| 0053   | Carry the transient object fields on the wire (codec v6) | Accepted |
+| 0054   | Cookie request gating — in-flight refusal, per-route cache bypass | Accepted |
+| 0055   | User-Agent-conditioned cache bypass | Accepted |
+| 0056   | Regex path and wildcard host route matching (RouteMatch) | Accepted |
 | 0057   | Key the collapsing flight on the declared variation dimensions | Accepted |
 | 0058   | Purge and signal on Vary-declaration drift at revalidation | Accepted |
+| 0059   | ttl_override exempts error responses (status gate) | Accepted |
 | 0060   | Downstream freshness sync via synthesized CDN-Cache-Control | Accepted |

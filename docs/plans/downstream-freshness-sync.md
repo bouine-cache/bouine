@@ -101,23 +101,57 @@ override 1h → CF gets 60s), and caps the inverse case (origin 24h, override
 1h → CF gets 1h, not 24h). Error fills inherit the negative-TTL ladder
 value. Cost: touches the fill path including streaming; all cold path.
 
+### Review fixes (2026-10-16, post-linus-review)
+
+1. **I8** — stale 304s trigger background revalidation, both modes: the
+   304 path returned before the existing trigger, so conditional downstream
+   traffic (all of CF's revalidations under `sync`) froze content for the
+   full SWR window.
+2. **No-cache synthesis** — stored `no-cache` objects synthesize
+   `public, no-cache`, never a numeric clock; they ARE stored and served
+   REVALIDATED, and a `max-age` would license CF to serve unvalidated,
+   violating RFC 9111 §5.2.2.4.
+3. **Clamped mirror window** — `swr=<window remaining>` with the window
+   sourced per staleness reason (§4.1); stayin-alive grace and request
+   `max-stale` serve strict `max-age=0` — no negative/zero `swr` values, no
+   client-authorized staleness baked into CF entry policy.
+
 ## 4. Behavior Specification
 
-### 4.1 Serve classes under `downstream_freshness: sync`
+### 4.1 Synthesis formula (`downstream_freshness: sync`)
 
-| Serve class | Synthesized `CDN-Cache-Control` |
+One formula covers every cache serve — no per-serve-class special cases:
+
+| Object state at serve time | Synthesized `CDN-Cache-Control` |
 |---|---|
-| Fresh HIT / REVALIDATED | `public, max-age=<TTL − Age>` (floor 0) |
-| Stale — natural aging (SWR window) | `public, max-age=0, stale-while-revalidate=<SWR remaining>` |
-| Stale — soft purge | same (rides the SWR window) |
-| Stale — SIE | `public, max-age=0, stale-while-revalidate=<SIE remaining>` |
-| Stale — heuristic | same (window = the SWR value that qualified the serve) |
-| Downstream 304 | **same cap as the corresponding 200 serve**; `Warning: 110` when the 304 is generated from a stale object |
+| Fresh (HIT / REVALIDATED) | `public, max-age=<TTL − Age>` (floor 0) |
+| Fresh, stored `no-cache` object | `public, no-cache` — no numeric clock (I2) |
+| Stale, qualifying window > 0 | `public, max-age=0, stale-while-revalidate=<window remaining>` |
+| Stale, qualifying window ≤ 0 | `public, max-age=0` (strict — no `swr`) |
+
+The **qualifying window** is whichever sanctioned the serve:
+
+| Staleness reason | Window |
+|---|---|
+| Natural aging within SWR — incl. soft purge (sets `TTL=0`, rides the SWR machinery) and heuristic staleness | `obj.StaleWhileRevalidate` |
+| Stale-if-error serve | `obj.StaleIfError` |
+| `stayin_alive` grace (past `TTL+SWR+SIE`) | none — strict (grace is an outage posture; downstream must check per request) |
+| Request `max-stale` authorization beyond the object's window | none — strict (per-request client authorization must not become CF entry policy) |
+
+Serve classes carrying the formula:
+
+| Serve class | Cap |
+|---|---|
+| Downstream 304 | **same cap as the corresponding 200 serve** + `Warning: 110` when stale-sourced (RFC 9111 §4.3.4) |
 | Range (206) from cache | cap rides along (like `Warning: 110` today) |
-| Fill / MISS (buffered and streaming) | `public, max-age=min(origin effective max-age, bouine final TTL)`, plus origin qualitative directives (see I2) |
+| Fill / MISS (buffered and streaming) | `public, max-age=min(origin effective max-age, bouine final TTL)`, plus origin qualitative directives (I2) |
 | BYPASS / uncacheable | passthrough (nothing stored, no bouine clock exists) |
 
-`Age`, `X-Cache`, `X-Cache-Source`, `Warning` behavior is unchanged.
+`Age`, `X-Cache`, `X-Cache-Source`, `Warning` behavior is unchanged. The
+strict-when-windowless clamp composes with the I8 trigger: every downstream
+conditional revalidation during grace revalidates synchronously *and*
+triggers bouine's background revalidation, so the chain self-heals on the
+first healthy origin response rather than waiting out the window.
 
 ### 4.2 Synthesis invariants
 
@@ -126,10 +160,17 @@ value. Cost: touches the fill path including streaming; all cold path.
 - **I2 — CDC = origin qualitative directives + bouine numeric clock.**
   `must-revalidate` / `proxy-revalidate` from the origin CC are preserved in
   the synthesis; numeric freshness always comes from bouine's clock. Objects
-  with `no-store`/`no-cache`/`private` are never stored, so those directives
-  never reach synthesis. `public` is always included (CF: CDC presence turns
-  Origin Cache Control on; with an `Authorization` request header, anything
-  other than `public`/`s-maxage`/`must-revalidate` yields BYPASS).
+  with `no-store` / `private` are never stored, so those directives never
+  reach synthesis. **`no-cache` objects ARE stored** (explicit cacheability
+  marker, `internal/cache/cacheable.go:24`) and served REVALIDATED after
+  per-request origin revalidation (`internal/cache/engine.go:141`) — their
+  synthesis is `public, no-cache`, never a numeric clock: a `max-age` would
+  license CF to serve without validation, which RFC 9111 §5.2.2.4 forbids
+  and the origin explicitly rejected. CF traffic is identical to passthrough
+  (CF "caches and always revalidates"). `public` is always included (CF: CDC
+  presence turns Origin Cache Control on; with an `Authorization` request
+  header, anything other than
+  `public`/`s-maxage`/`must-revalidate` yields BYPASS).
 - **I3 — origin CDC-family lines are replaced, never forwarded, when sync is
   active.** `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` from the
   origin are dropped from serves (the synthesis is authoritative);
@@ -152,15 +193,31 @@ value. Cost: touches the fill path including streaming; all cold path.
 - **I7 — synthesis runs before route response rewrites.** `header_set` /
   `header_remove` (`applyResponseRewrites`) remain the operator's escape
   hatch applied after synthesis.
+- **I8 — stale 304s trigger background revalidation (both modes).** The
+  conditional-304 path (`tryConditional304Fast`,
+  `internal/cache/handler.go:1495`) returns before the existing trigger
+  (`internal/cache/handler.go:1510-1513`), so a downstream revalidation of a
+  stale object is answered from bouine's stale store — confirming content the
+  origin was never asked about — and triggers nothing. Under `sync`, CF's
+  revalidations are precisely such conditional requests; without a trigger
+  there, they freeze content for the full SWR window and the §4.3 ceiling is
+  unreachable. The trigger fires under the same triple gate as the
+  200-path trigger (`disp.Decision == StaleHit &&
+  obj.StaleWhileRevalidate > 0 && isOwnerOrUnmanaged(key)`). This
+  also fixes a pre-existing passthrough hole: downstream conditional
+  revalidations during SWR today refresh nothing.
 
 ### 4.3 Ceiling math
 
 CF's entry for a given fetch expires at min(bouine's TTL wall, fetch time +
-capped max-age) = exactly bouine's wall. After that, CF revalidates:
-against a fresh bouine → 304 + recomputed remaining (never runs ahead);
-against a stale bouine → mirror cap (UPDATING, no visitor latency) until
-bouine's background revalidation lands. End-user content age ≤ TTL + SWR +
-one revalidation cycle.
+capped max-age) = exactly bouine's wall. After that, CF revalidates: against
+a fresh bouine → 304 + recomputed remaining (never runs ahead); against a
+stale bouine → mirror cap (UPDATING, no visitor latency) until bouine's
+background revalidation lands. CF's revalidations are conditional requests,
+so I8 makes that reval traffic itself trigger bouine's background
+revalidation — the "typically one RTT past TTL" bound holds even when all
+arriving traffic is CF revalidation. End-user content age ≤ TTL + SWR + one
+revalidation cycle.
 
 ## 5. Implementation Phases
 
@@ -192,6 +249,10 @@ behind the default-off config, so each is independently mergeable.
   `internal/cache/fastheader2.go:44`, `pkg/header/headermap.go:472`).
 - `write304Fast` (`internal/cache/fastheader.go:86`): attach cap + `Warning:
   110` when stale-sourced.
+- Stale-304 trigger (I8): in `ServeRequest`'s `Hit, StaleHit` case
+  (`internal/cache/handler.go:1495`), when `tryConditional304Fast` fires on
+  a `StaleHit` object under the standard trigger triple, call
+  `triggerBgRevalidate` before returning — both modes, not gated on `sync`.
 - `internal/cache/range.go:52`: cap on 206 serves.
 - Fill paths: `writeAndMaybeStore` (~`handler.go:2631`) and
   `internal/cache/stream.go:374` — `min()` rule. **Timing constraint**: the
@@ -229,10 +290,14 @@ behind the default-off config, so each is independently mergeable.
 
 - Unit matrix (table-driven, same package): each serve class × mode ×
   {override longer, override shorter, SWR, SIE, soft purge, heuristic,
-  no-freshness origin, error fill, Date-less object} — assert exact CDC
-  bytes, CC untouched, Age unchanged.
+  no-freshness origin, error fill, Date-less object, stored no-cache
+  object, stayin-alive grace serve, `max-stale`-authorized serve} — assert
+  exact CDC bytes, CC untouched, Age unchanged.
 - 304 cap tests (stale ETag match → 304 carries mirror cap + `Warning: 110`);
   206 cap tests; streaming-fill `min()` test (body > streaming threshold).
+- I8 trigger tests: conditional reval of a stale object triggers background
+  revalidation (both sync and passthrough); fresh-hit 304 triggers nothing;
+  non-owner does not trigger — deterministic (synctest), no sleeps.
 - Deterministic clocks per AGENTS.md §8 (injected clock, no sleeps).
 - `make conformance` (cache-tests): default passthrough must be a no-op —
   score unchanged.
@@ -271,6 +336,7 @@ Hit-path allocs/op unchanged — enforced via `BUDGETS`.
 | Streaming fills: TTL not final before first flush | P2 timing constraint; jitter computed once and reused |
 | Composed-head / FastHeader caching staleness after refresh | Existing invalidation on store; new tests pin CDC after 304-refresh |
 | Operators surprised CF keeps pre-purge content ≤1 reval cycle after soft purge | D2 documented; hard purge / CF API purge for immediate semantics |
+| Origin outage during stayin-alive grace: CF-side visitors pay a synchronous reval RTT per request | Bouine answers stale from the grace store — availability unchanged, latency only; self-heals via I8 on first healthy origin response |
 | CDC + `Authorization` → CF BYPASS if no `public` | I2 always emits `public` |
 
 ## 8. Open Questions

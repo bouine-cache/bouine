@@ -298,7 +298,7 @@ func normalizeHeaderValue(v string) string {
 //
 // Accept-Encoding is bucketed by encodingBucket unless the policy pins
 // verbatim (verbatim_encoding: true) — docs/plans/
-// accept-encoding-bucketing.md §3.2, ADR-0051. Accept-Language is
+// accept-encoding-bucketing.md §3.2, ADR-0061. Accept-Language is
 // bucketed by langBucket (plan §10) — no config: an unbucketable value
 // (absent, "*", malformed, all q=0) falls back to the legacy
 // normalization, so degenerate chains keep today's keying exactly.

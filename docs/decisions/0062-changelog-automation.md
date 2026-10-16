@@ -1,7 +1,10 @@
-# ADR-0047: Changelog automation
+# ADR-0062: Changelog automation
 
 - **Status**: Accepted
 - **Date**: 2026-08-18
+- **Renumbered**: 2026-10-16, from ADR-0047 — duplicate number; ADR-0047
+  (`traffic_class` metric label) keeps it, as its number is baked into
+  code comments and released changelog entries
 - **Deciders**: @thylong
 - **Phase**: tooling
 - **Related**: ADR-0028 (testify assertions — same review-discipline pattern)

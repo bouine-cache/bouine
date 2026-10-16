@@ -1,6 +1,6 @@
 # 60 — Accept-Encoding bucketing: upgrade and mixed-version window
 
-What changed in ADR-0051, what to expect during the rollout, and how to
+What changed in ADR-0061, what to expect during the rollout, and how to
 diagnose a cluster that looks like it lost hit ratio.
 
 ---

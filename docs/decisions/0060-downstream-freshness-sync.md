@@ -69,11 +69,16 @@ downstream cache trusts content beyond bouine's own clock:
    "caches and always revalidates").
 4. **Fill (MISS) serves — min() rule** — `public,
    max-age=min(origin effective max-age, bouine final TTL)` plus the
-   origin's qualitative revalidation directives. No-op when origin and
-   bouine agree; preserves ADR-0011's decoupling case (origin shorter);
-   caps the inverse case (bouine deliberately tighter than origin, error
-   fills via the negative-TTL ladder) which would otherwise re-introduce
-   the amplifier on first fill.
+   origin's qualitative revalidation directives — except `no-cache`
+   responses, which synthesize `public, no-cache`, never a numeric clock
+   (point 3): `no-cache` responses are storable and carry no usable
+   `max-age`, so the min() rule would admit a no-revalidation-required CF
+   entry for a full bouine TTL on a route whose origin demanded per-reuse
+   validation. No-op when origin and bouine agree; preserves ADR-0011's
+   decoupling case (origin shorter); caps the inverse case (bouine
+   deliberately tighter than origin, error fills via the negative-TTL
+   ladder) which would otherwise re-introduce the amplifier on first
+   fill.
 5. **Downstream 304s carry the same cap** as the corresponding 200 serve
    (plus `Warning: 110` when stale-sourced). RFC 9111 §4.3.4: a 304's
    headers update the downstream stored entry — an uncapped 304 would let

@@ -327,14 +327,16 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 // outboundFastOpenDialControl returns a net.Dialer Control that
 // enables outbound TCP Fast Open (TCP_FASTOPEN_CONNECT) on every dial
 // of the surface named what ("origin" or "peer", used in the startup
-// log), or nil when disabled or unsupported. The option is probed once
+// log), or nil when disabled or unsupported. Defaults to disabled —
+// an unset connect.tcp_fast_open / cluster.peer_tcp_fast_open stays
+// unwired; set the key to true to opt in. The option is probed once
 // here so a kernel without it (pre-4.11) skips the Control entirely
 // instead of paying a failing setsockopt on every dial. Per-socket
 // failures inside the Control are best-effort and never fail the
 // dial: TFO is advisory, and a latency optimization must not
 // manufacture connection errors.
 func outboundFastOpenDialControl(enabled *bool, what string, logger observability.Logger) func(network, addr string, c syscall.RawConn) error {
-	if !boolDefault(enabled, true) {
+	if !boolDefault(enabled, false) {
 		return nil
 	}
 	if !platform.TCPFastOpenConnectSupported() {

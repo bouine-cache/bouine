@@ -123,7 +123,8 @@ type ExperimentalConfig struct {
 // Listen enumerates the listener addresses. Empty strings disable.
 type Listen struct {
 	// TCPFastOpen enables Linux TCP_FASTOPEN on data-plane listeners.
-	// nil defaults to true on Linux and no-op on other platforms.
+	// nil defaults to disabled; set true to opt in (no-op on other
+	// platforms).
 	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
 	// TCPDeferAccept enables Linux TCP_DEFER_ACCEPT on data-plane
 	// listeners. nil defaults to true on Linux and no-op elsewhere.
@@ -343,12 +344,13 @@ type Cluster struct {
 	// (TCP_FASTOPEN_CONNECT) on peer-bound dials (peer fetch, peer put,
 	// and invalidation broadcast): with a kernel-cached TFO cookie the
 	// first RPC bytes ride in the SYN packet, saving one RTT on every
-	// fresh peer connection. The data-plane listeners already enable
-	// server-side TFO (listen.tcp_fast_open, default on), so
-	// bouine-to-bouine peer dials can use TFO end-to-end once each
-	// peer's kernel allows server-side TFO (net.ipv4.tcp_fastopen
-	// must include bit 2). Linux only (no-op elsewhere); nil defaults to
-	// enabled on kernels that support the option (Linux 4.11+). Leads
+	// fresh peer connection. For bouine-to-bouine peer dials to use TFO
+	// end-to-end, each peer's data-plane listeners must also enable
+	// server-side TFO (listen.tcp_fast_open, also opt-in) and each
+	// peer's kernel must allow server-side TFO (net.ipv4.tcp_fastopen
+	// must include bit 2). Linux only (no-op elsewhere); nil defaults
+	// to disabled — set true to opt in (requires a kernel that supports
+	// the option, Linux 4.11+). Leads
 	// the struct — a pure pointer before the string/slice fields — so
 	// the GC scan prefix stays minimal (fieldalignment); YAML decode
 	// order is unaffected.
@@ -479,8 +481,9 @@ type ConnectPolicy struct {
 	// server-side TFO (net.ipv4.tcp_fastopen bit 2) never issue a
 	// cookie, so the dial transparently falls back to the regular
 	// handshake — there is no penalty for enabling it. Linux only
-	// (no-op elsewhere); nil defaults to enabled on kernels that support
-	// the option (Linux 4.11+). Leads the struct so the pointer fields
+	// (no-op elsewhere); nil defaults to disabled — set true to opt
+	// in (requires a kernel that supports the option, Linux 4.11+).
+	// Leads the struct so the pointer fields
 	// stay contiguous for the GC scan prefix (fieldalignment).
 	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
 	// Timeout bounds the TCP dial to an origin target. Zero applies a

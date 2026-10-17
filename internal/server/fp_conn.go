@@ -9,6 +9,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // serveFastPath accepts connections and routes them to the h1parser
@@ -27,9 +28,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		scheme = "http"
 	}
 
-	parser := h1parser.New(
-		s.fastPath,
-		s.inner.Handler,
+	opts := []h1parser.Option{
 		h1parser.WithScheme(scheme),
 		// CoarseNow: ~2-4ns vs ~25-40ns for time.Now on Linux. The 1ms
 		// clock resolution is sufficient — deadlines are second-scale.
@@ -38,6 +37,17 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
+	}
+	// Reactor telemetry is an optional capability of the metrics
+	// implementation (api.ReactorMetrics): absent it, the loop simply
+	// reports nothing (tests, minimal configs).
+	if rm, ok := s.fastMetrics.(api.ReactorMetrics); ok {
+		opts = append(opts, h1parser.WithReactorMetrics(rm))
+	}
+	parser := h1parser.New(
+		s.fastPath,
+		s.inner.Handler,
+		opts...,
 	)
 
 	// The reactor raw-reads the socket fd and parses plaintext HTTP/1.1

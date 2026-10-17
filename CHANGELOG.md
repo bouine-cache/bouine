@@ -113,6 +113,27 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Release images and linux/amd64 binaries no longer build at
+  `GOAMD64=v3`; amd64 artifacts return to the `GOAMD64=v1` baseline.**
+  The 0.5.29-rc1/rc2 release-soak regression is convicted on the v3
+  codegen (fc70d762): at identical CPU per request (447µs on both
+  builds), v3 costs ~45% peer-RPC hold-time p50 (1.6ms → 2.3ms) with
+  erratic 2-4× tails, cutting the 4-slot peer-fetch semaphore's capacity
+  ~2× and tipping the 3h 6k/3-node knee shape into shed-runaway and an
+  origin ejection cascade. A `GOAMD64=v3` rebuild of plain 0.5.28 code
+  reproduces the collapse where the shipped v1 build holds 5-for-5;
+  rc1/rc2 (v3) tip 5-for-5. The v3 gain had only ever been measured
+  under QEMU emulation (the bench-gate runner deliberately stayed at
+  baseline, so the gate never covered what shipped); fasthttp and
+  xxhash SIMD paths are runtime CPU-dispatched, so v1 loses nothing
+  there. `GOARM64=v8.1` stays: its gains were measured natively (Apple
+  M5 benchstat) and its mechanism (LSE atomics) is unrelated. Operators
+  wanting v3 can pass `--build-arg GOAMD64=v3` after re-validating on
+  their own hardware. Validated end-to-end: HEAD built at v1 passes the
+  identical 3h pfc=4 knee shape at 99.82% with zero client timeouts and
+  a flat ~24ms peer-RPC p99 all run (the v3 rc2 build fails the same
+  shape at 69-73%).
+
 - **Upstream timeouts now return 504, not 502.** A fetch against an
   upstream pool that times out (dial, response-header, or the per-route
   fetch deadline) surfaces as `504 Gateway Timeout` per RFC 9110

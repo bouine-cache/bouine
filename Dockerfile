@@ -9,13 +9,21 @@ FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384b
 
 ARG TARGETOS
 ARG TARGETARCH
-# Microarchitecture floors for release images. GOAMD64=v3 (Haswell 2013+:
-# AVX2, BMI2, FMA — feeds fasthttp's SIMD parsers and the xxhash key
-# path) and GOARM64=v8.1 (LSE atomics + CRC32 instructions; Graviton2,
-# Ampere Altra and every later server core). Each variable is only
-# consulted when it matches TARGETARCH, so setting both is safe. Override
-# with --build-arg for older fleets.
-ARG GOAMD64=v3
+# Microarchitecture floors for release images. GOARM64=v8.1 (LSE atomics
+# + CRC32 instructions; Graviton2, Ampere Altra and every later server
+# core): natively measured gains, mechanism unrelated to the amd64 issue
+# below. GOAMD64 stays at the v1 baseline: fc70d762 tried v3 and the
+# 0.5.29 stress soaks showed it costs ~45% peer-RPC hold-time p50 at
+# identical CPU per request (the extra wall time is off-CPU) with
+# erratic 2-4x tails, tipping the pfc=4 queueing knee into shed-runaway
+# and an origin ejection cascade on otherwise-clean code: a GOAMD64=v3
+# rebuild of plain 0.5.28 collapsed where the shipped v1 build holds
+# 5-for-5. fasthttp and xxhash SIMD paths are runtime CPU-dispatched,
+# so v1 loses nothing there, and the bench-gate runner builds at
+# baseline: images must match it or the gate never covers what ships.
+# Each variable is only consulted when it matches TARGETARCH. Override
+# with --build-arg after re-validating on the target fleet.
+ARG GOAMD64=v1
 ARG GOARM64=v8.1
 ARG VERSION=dev
 ARG COMMIT=unknown

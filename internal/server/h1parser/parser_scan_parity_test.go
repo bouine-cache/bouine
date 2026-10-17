@@ -302,7 +302,7 @@ func TestScanParity_Boundaries(t *testing.T) {
 // not just adversarial byte soup.
 func TestScanParity_RealisticTraffic(t *testing.T) {
 	rng := rand.New(rand.NewSource(607)) //nolint:gosec // G404: deterministic test seed, not crypto
-	base := benchRealisticHead(8)
+	base := benchRealisticHead()
 	for i := 0; i < 5000; i++ {
 		buf := append([]byte(nil), base...)
 		for m := 0; m < rng.Intn(4); m++ {
@@ -326,16 +326,16 @@ func TestScanParity_RealisticTraffic(t *testing.T) {
 	}
 }
 
-// benchRealisticHead builds a production-shaped request head with
-// extraHeaders headers beyond Host: a long request line with a query,
-// plus the canonical browser/proxy headers real clients send (~60 B per
-// line). The W2 gate benchmarks parse this shape — the toy 2-header
+// benchRealisticHead builds a production-shaped request head: a long
+// request line with a query, plus Host and the eight canonical
+// browser/proxy headers real clients send (~60 B per line). The W2
+// gate benchmarks parse this shape — the toy 2-header
 // request the older gates use hides the per-header scan cost that
 // dominates real parse time.
-func benchRealisticHead(extraHeaders int) []byte {
+func benchRealisticHead() []byte {
 	buf := []byte("GET /v1/products/42?include=specs&fields=all HTTP/1.1\r\nHost: www.example.com\r\n")
-	for i := 0; i < extraHeaders; i++ {
-		switch i % 8 {
+	for i := 0; i < 8; i++ {
+		switch i {
 		case 0:
 			buf = append(buf, "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\r\n"...)
 		case 1:

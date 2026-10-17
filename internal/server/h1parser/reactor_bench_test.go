@@ -102,7 +102,7 @@ func BenchmarkGate_Reactor_Hit_Headers8(b *testing.B) {
 	fp := &hitFastPath{}
 	p.fastPath = fp
 
-	reqBytes := benchRealisticHead(8)
+	reqBytes := benchRealisticHead()
 	fio := &fakeIO{}
 	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
 	defer rc.release()

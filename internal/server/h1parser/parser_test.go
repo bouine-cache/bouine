@@ -152,7 +152,7 @@ func BenchmarkGate_H1Parse_Get(b *testing.B) {
 // parse time (~22 ns/header measured, docs/plans/h1-reactor-perf-round-5.md);
 // this gate keeps that cost visible and allocation-free.
 func BenchmarkGate_H1Parse_Get_Headers8(b *testing.B) {
-	raw := benchRealisticHead(8)
+	raw := benchRealisticHead()
 	parser := New(nil, nil)
 	conn := &mockConn{r: &repeatReader{buf: raw}}
 	var readBuf [readBufferSize]byte

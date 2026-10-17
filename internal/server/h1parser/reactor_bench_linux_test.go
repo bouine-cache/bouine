@@ -228,7 +228,7 @@ func BenchmarkSingle_Reactor_KeepAliveRTT_Headers8(b *testing.B) {
 			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
 		}
 		first = false
-		measureReactorRTT(b, false, benchRealisticHead(8))
+		measureReactorRTT(b, false, benchRealisticHead())
 	}
 }
 
@@ -442,7 +442,7 @@ func BenchmarkSingle_BlockingServeRTTControl_Headers8(b *testing.B) {
 			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
 		}
 		first = false
-		measureBlockingServeRTT(b, benchRealisticHead(8))
+		measureBlockingServeRTT(b, benchRealisticHead())
 	}
 }
 

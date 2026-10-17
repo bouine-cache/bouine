@@ -447,9 +447,18 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	return req, false, excess, nil
 }
 
+// headerTerm is the request-head terminator, hoisted to a package var.
+// A per-call []byte("\r\n\r\n") conversion is stack-allocated only as
+// long as the enclosing function is not inlined; when PGO raises the
+// inline budget the conversion escapes to the heap — measured as
+// +1 allocs/op on the reactor hit path with the committed profile.
+// A shared slice keeps the terminator scan allocation-free at any
+// inline depth.
+var headerTerm = []byte("\r\n\r\n")
+
 // findHeaderEnd searches for the \r\n\r\n terminator in buf.
 func findHeaderEnd(buf []byte) int {
-	idx := bytes.Index(buf, []byte("\r\n\r\n"))
+	idx := bytes.Index(buf, headerTerm)
 	if idx < 0 {
 		return -1
 	}
@@ -469,7 +478,7 @@ const headerTermOverlap = len("\r\n\r\n") - 1
 // accumulation stays O(n) overall instead of O(n²) rescan per read.
 func findHeaderEndFrom(buf []byte, from int) int {
 	if from < len(buf)-1 {
-		if idx := bytes.Index(buf[from:], []byte("\r\n\r\n")); idx >= 0 {
+		if idx := bytes.Index(buf[from:], headerTerm); idx >= 0 {
 			return from + idx + 4
 		}
 		return -1

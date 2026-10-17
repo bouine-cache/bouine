@@ -22,6 +22,7 @@ code change that introduces a new failure mode.
 | [`55-collapse-identity.md`](55-collapse-identity.md) | Request collapsing: origin load from identity-split flights (ADR-0052, ADR-0054, ADR-0057). |
 | [`56-cookie-bypass.md`](56-cookie-bypass.md) | Cookie bypass: cookied requests and personalized SSR routes (ADR-0054). |
 | [`57-ua-bypass.md`](57-ua-bypass.md) | User-Agent cache bypass: verified-bot / crawler freshness rules in layered deployments (ADR-0055). |
+| [`61-pgo-profile-refresh.md`](61-pgo-profile-refresh.md) | PGO profile refresh and custom-profile builds. |
 | [`gc-tuning-fasthttp.md`](gc-tuning-fasthttp.md) | GC tuning under fasthttp. |
 | [`native-histogram.md`](native-histogram.md) | Native-histogram latency metrics. |
 | [`static-files.md`](static-files.md) | Static file serving. |

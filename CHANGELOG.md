@@ -138,6 +138,34 @@ the curated, human-readable summary.
   change:** storable errors on `ttl_override` routes now expire per the
   ladder instead of the override — bouine-config owners should re-check
   routes that pair `ttl_override` with `negative_ttl` (ADR-0059).
+- **The request-head terminator scan no longer allocates when PGO
+  inlining engages.** With the committed profile, the Go compiler
+  raised the inline budget enough to inline the h1 reactor's
+  `findHeaderEndFrom` into the connection-advance loop, and the
+  per-call `[]byte("\r\n\r\n")` conversion it carried escaped to the
+  heap: +1 alloc per request on the reactor hit path
+  (`Reactor_Hit`/`Reactor_Hit_Metrics` benches went 0 → 1 allocs/op
+  under `-pgo`). The terminator is now a package-level slice, which
+  keeps the scan allocation-free at every inline depth; all 35
+  `make bench-gate` alloc budgets stay at their committed values with
+  the profile installed.
+
+### Added
+
+- **Profile-Guided Optimization: a committed `cmd/bouine/default.pgo`
+  profile is now picked up by every build of the main package
+  (ADR-0060).** The profile is a
+  composite captured from three load-test traffic legs (hit-only,
+  miss-storm, mixed-realistic) via the admin pprof endpoints, so both
+  hit-heavy and miss-heavy deployments are represented. `make
+  pgo-refresh` re-captures and merges it; the `release-pgo.yml`
+  workflow rebuilds the load-test image and pushes a freshly captured
+  profile onto every `chore(release): prepare vX.Y.Z` PR before the tag
+  is cut, so the capture always profiles the release candidate's own
+  code. The load-test config now enables `admin.pprof_enabled: true`.
+  Allocs/op budgets are unaffected.
+- `bench/pgo/run.sh` + Make targets `pgo-capture`, `pgo-merge`,
+  `pgo-refresh`, `pgo-verify` manage the profile lifecycle.
 
 ## [0.5.28] - 2026-10-09
 

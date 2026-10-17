@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -31,6 +32,11 @@ type Pool struct {
 	streamClient *fasthttp.Client
 	Name         string
 	targets      []*Target
+	// clientConfig holds the resolved connect settings the shared
+	// client was built with. Sits inside the pointer block — its
+	// dialControl field is pointer-bearing — so the GC scan prefix
+	// stays minimal (fieldalignment).
+	clientConfig clientConfig
 	next         atomic.Uint64
 	mu           sync.RWMutex
 
@@ -53,11 +59,6 @@ type Pool struct {
 	// (ADR-0051: the ejection signal must be live on cached routes so
 	// grace retention can key on it). Zero disables passive health.
 	consecutive5xx int
-
-	// clientConfig holds the resolved connect settings the shared
-	// client was built with. Kept after the pointer/lock fields to
-	// preserve the struct's pointer-heavy layout (fieldalignment).
-	clientConfig clientConfig
 }
 
 // Target is a single upstream endpoint.
@@ -185,6 +186,21 @@ func classifyConnError(err error) string {
 	return "error"
 }
 
+// writeUpstreamError writes the proxied fetch-failure response for the
+// uncached FastHandler path: 504 Gateway Timeout (RFC 9110 §15.6.5) when
+// the upstream fetch timed out — the same "timeout" reason string the
+// bouine_origin_connection_errors_total label carries, so the wire status
+// and the metric agree on what a timeout is — and 502 Bad Gateway for
+// every other upstream failure (refused, reset, DNS). The cached paths
+// carry their own mapping (cache.writeUpstreamError).
+func writeUpstreamError(ctx *fasthttp.RequestCtx, connErrReason string) {
+	if connErrReason == "timeout" {
+		ctx.Error("upstream timeout", fasthttp.StatusGatewayTimeout)
+		return
+	}
+	ctx.Error("upstream error", fasthttp.StatusBadGateway)
+}
+
 // defaultOriginMaxConnsPerHost caps persistent connections per origin host
 // in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
 // Little's Law requires ~8 concurrent connections; 64 gives ~8x headroom
@@ -193,8 +209,15 @@ const defaultOriginMaxConnsPerHost = 64
 
 // clientConfig holds the resolved (defaults applied) origin client
 // settings. Produced once at pool construction and shared by every
-// handler/client built from the pool.
+// handler/client built from the pool. dialControl leads the struct so
+// the pointer fields stay contiguous for the GC scan prefix
+// (fieldalignment).
 type clientConfig struct {
+	// dialControl, when non-nil, is installed as net.Dialer.Control on
+	// both pool clients' outbound dials (outbound TCP Fast Open; wired
+	// by the engine because internal/origin must not import
+	// internal/platform). nil keeps plain dials.
+	dialControl           func(network, addr string, c syscall.RawConn) error
 	dialTimeout           time.Duration
 	keepAlive             time.Duration
 	maxConnsPerHost       int
@@ -208,8 +231,16 @@ type PoolConfig struct {
 	// Metrics holds Prometheus collectors for origin health events.
 	// Nil is safe — all counter methods are no-ops on a nil Metrics.
 	Metrics *Metrics
-	Name    string
-	Targets []string
+	// DialControl, when non-nil, is installed as net.Dialer.Control on
+	// every origin-bound dial of both pool clients (shared and SSE).
+	// The engine wires outbound TCP Fast Open here (connect.tcp_fast_open);
+	// declared in this package — the consumer — because internal/origin
+	// must not import internal/platform (depguard layer matrix). Sits
+	// before the string/slice fields — a pure pointer — so the GC scan
+	// prefix stays minimal (fieldalignment).
+	DialControl func(network, addr string, c syscall.RawConn) error
+	Name        string
+	Targets     []string
 	// Passive health: eject after this many consecutive 5xx.
 	// Zero disables passive health.
 	Consecutive5xx int
@@ -296,7 +327,7 @@ func resolveDefaultInt(v, def int) int {
 // the historical default still applies. The FastHandler passthrough
 // path passes its own DoTimeout explicitly.
 func newOriginClient(cc clientConfig) *fasthttp.Client {
-	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
+	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive, Control: cc.dialControl}
 	return &fasthttp.Client{
 		MaxConnsPerHost:     cc.maxConnsPerHost,
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
@@ -339,6 +370,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 			maxConnsPerHost:       resolveDefaultInt(cfg.MaxConnsPerHost, defaultOriginMaxConnsPerHost),
 			maxIdleConnDuration:   resolveDefault(cfg.MaxIdleConnDuration, DefaultMaxIdleConnDuration),
 			responseHeaderTimeout: resolveDefault(cfg.ResponseHeaderTimeout, DefaultResponseHeaderTimeout),
+			dialControl:           cfg.DialControl,
 		},
 	}
 	p.client = newOriginClient(p.clientConfig)
@@ -457,7 +489,7 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 			if conc5xx > 0 {
 				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error", connErrReason)
 			}
-			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			writeUpstreamError(ctx, connErrReason)
 			return
 		}
 

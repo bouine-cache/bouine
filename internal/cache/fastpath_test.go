@@ -417,10 +417,11 @@ func BenchmarkGate_FastPath_PeerHit(b *testing.B) {
 }
 
 // BenchmarkGate_FastPath_PeerHitVary gates the variant gate: the peer
-// answers with a Vary-carrying object, so every iteration pays
-// reqHeaderMapFromRaw + BuildVaryKey (the #630 response-side gate). The
-// budget covers the gate's ~7 allocs; the peer branch amortizes a
-// network round-trip, so a nonzero budget is honest here.
+// answers with a Vary-carrying object, so every iteration pays the
+// #630 response-side gate (varyKeyMatches over the RawRequest). The
+// gate reads the raw headers in place and hashes into a stack buffer,
+// so the budget is 0: a regression back to materializing the header
+// map or the hex key fails the gate.
 func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)
@@ -1892,6 +1893,31 @@ func TestFastPathHandler_PeerErrorDoesNotFlagOwnerMiss(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, resp)
 	assert.False(t, req.OwnerMiss, "peer-fetch error must not flag OwnerMiss (slow path retries)")
+}
+
+// TestFastPathHandler_PeerShedFlagsOwnerShed pins that a peer-fetch shed
+// (ErrPeerFetchShed) sets RawRequest.OwnerShed so the slow path skips
+// the peer retry and goes straight to origin.
+func TestFastPathHandler_PeerShedFlagsOwnerShed(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-shed-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.err = api.ErrPeerFetchShed
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+	assert.True(t, req.OwnerShed, "peer fetch shed must flag RawRequest.OwnerShed")
+	assert.False(t, req.OwnerMiss, "peer fetch shed must not flag OwnerMiss")
 }
 
 // TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss pins that a

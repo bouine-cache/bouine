@@ -920,6 +920,25 @@ func BenchmarkPeerFetch_BuildRequest(b *testing.B) {
 	}
 }
 
+// BenchmarkPeerFetcher_BreakerHealthyParallel measures the per-RPC
+// breaker bookkeeping (breakerAllowed + recordPeerSuccess) on a healthy
+// cluster under parallel load. With no tripped address it must stay off
+// breakerMu: before the lock-free fast path every peer RPC serialized on
+// that mutex twice.
+func BenchmarkPeerFetcher_BreakerHealthyParallel(b *testing.B) {
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+	const addr = "10.0.0.1:9000"
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if f.breakerAllowed(addr) {
+				f.recordPeerSuccess(addr)
+			}
+		}
+	})
+}
+
 func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{

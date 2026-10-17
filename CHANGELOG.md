@@ -99,6 +99,135 @@ the curated, human-readable summary.
   keep the production-shaped parse cost visible and allocation-free
   — the toy-request gates hid it entirely.
 
+### Performance
+
+- **The peer variant check no longer allocates.** When a peer answers
+  with a Vary-carrying object, both the H1 fast path and the slow path
+  confirm that the peer's variant matches the requesting client. That
+  check used to copy the request headers into a map, split the Vary
+  list, and format the hex key on every peer hit. It now reads the
+  headers in place and hashes into a stack buffer, then compares the
+  result to the stored key. Inputs that do not fit (more than 16 Vary
+  fields, a hash input over 256 bytes, or non-ASCII field names) fall
+  back to the previous code. The stored key format is unchanged, and a
+  fuzz test pins parity with the previous implementation on every
+  input. `FastPath_PeerHitVary` drops from 253 ns, 88 B, 6 allocs/op
+  to 153 ns, 0 B, 0 allocs/op on Apple M5 (−40%), and its
+  `make bench-gate` budget is lowered from 7 to 0. Header-map lookups
+  by non-canonical names (such as lowercase Vary fields) no longer
+  allocate either.
+- **Peer fetches on a healthy cluster no longer take the circuit-breaker
+  lock.** Every peer fetch and write-to-owner RPC checked and cleared the
+  per-address failure breaker under a single process-wide mutex, so
+  concurrent peer RPCs serialized on it twice each. When no address has
+  recorded a failure, both checks now return after one atomic load; the
+  mutex is only taken once some address is failing, and trip, cooldown
+  and recovery behave as before. Under parallel load the per-RPC breaker
+  bookkeeping drops from 146 ns to 0.3 ns on Apple M5. Each peer fetch
+  also allocates one object less (28 to 27 allocs/op), because releasing
+  the fetch slot no longer goes through a heap-allocated closure.
+- **Outbound TCP Fast Open on origin and peer connections
+  (`TCP_FASTOPEN_CONNECT`).** bouine already supported server-side TFO on
+  its listeners (`listen.tcp_fast_open`); the outbound side was missing:
+  every fresh origin or peer connection paid a full handshake before the
+  first request byte. The origin pool's shared and SSE clients
+  (`connect.tcp_fast_open`, default disabled — opt-in, Linux 4.11+), the
+  peer-fetch/put pipeline clients, and the invalidation-broadcast fan-out
+  client (`cluster.peer_tcp_fast_open`, same opt-in default) now set
+  `TCP_FASTOPEN_CONNECT` before connect when enabled, so with a
+  kernel-cached TFO cookie the first request bytes ride in the SYN packet
+  — one full RTT saved on every fresh connection. The option is
+  advisory: origins or peers without TFO never issue a cookie and the
+  dial silently falls back to the regular handshake, so there is no
+  penalty for enabling it (bouine↔bouine peer dials can use TFO
+  end-to-end when both peers opt in — `cluster.peer_tcp_fast_open` on
+  the dialing side, `listen.tcp_fast_open` on the answering side — and
+  peers' kernels need `net.ipv4.tcp_fastopen` to include the server
+  bit). The kernel is probed once at startup
+  (`platform.TCPFastOpenConnectSupported`) and the option is left
+  unwired when unsupported, logging one warn line; per-socket failures
+  are best-effort and never fail a dial. Loopback peer-RPC benchmarks
+  are unchanged (benchstat n=10, 0 allocs/op change); the per-dial cost
+  is one setsockopt on connection establishment, amortized to ~0 by
+  connection pooling. Layering note: `internal/origin` and
+  `internal/cluster` declare the `DialControl` injection point
+  themselves (depguard keeps them off `internal/platform`); `cmd` wires
+  it.
+- **Release artifacts now build at `GOAMD64=v3` / `GOARM64=v8.1`
+  microarchitecture floors.** The container image (Dockerfile) and the
+  linux release binaries (release + nightly workflows) were building at
+  Go's baseline levels (`GOAMD64=v1`, `GOARM64=v8.0`), leaving AVX2 /
+  BMI2 (amd64) and LSE atomics + CRC32 instructions (arm64) unused on
+  every production CPU. `v3` covers every x86 server core since Haswell
+  (2013); `v8.1` covers Graviton2, Ampere Altra and every later arm64
+  server core. Darwin binaries stay at baseline — they run on mixed
+  dev-laptop fleets where performance is not the product. darwin/arm64
+  (Apple M5) benchstat, n=10, `GOARM64` v8.0 → v8.1 (LSE atomics on the
+  atomic-heavy hit path): `FastPath_Hit` −5.9%, `Evaluate_Hit` −2.8%,
+  `HotStore_Get_Hit` −2.7%, `SIEVE_Access` −2.8%, `H1Parse_Get` −2.0%,
+  zero B/op or allocs/op change on every gated benchmark; all
+  `make bench-gate` budgets pass unchanged at v8.1. linux/amd64
+  `GOAMD64` v1 → v3 was measured under QEMU TCG emulation (directional
+  only; native validation happens on the self-hosted bench-gate runner
+  at merge): focused hot-path geomeans −9.3% (cache), −5.6% (storage),
+  −1.6% (h1parser). The bench-gate runner itself keeps baseline levels
+  so gate comparisons stay apples-to-apples; both variables are
+  overridable (`--build-arg` / workflow edit) for older fleets.
+
+### Changed
+
+- **TCP Fast Open now defaults to disabled on every surface.** All
+  three TFO settings — `listen.tcp_fast_open` (server side, data-plane
+  listeners), `connect.tcp_fast_open` (origin-bound dials), and
+  `cluster.peer_tcp_fast_open` (peer-bound dials) — now stay off when
+  unset. Previously an unset key meant "enabled" (listener-side since
+  v0.2.6; outbound since it landed earlier in this release cycle).
+  **Operator-visible change:** deployments relying on the old default
+  and wanting the saved RTT on fresh connections must set the keys
+  explicitly (`listen.tcp_fast_open: true`, `connect.tcp_fast_open:
+  true` per upstream pool, `cluster.peer_tcp_fast_open: true`). The
+  option remains Linux-only (no-op elsewhere) and advisory — dials and
+  accepts never fail because of it.
+
+### Fixed
+
+- **Upstream timeouts now return 504, not 502.** A fetch against an
+  upstream pool that times out (dial, response-header, or the per-route
+  fetch deadline) surfaces as `504 Gateway Timeout` per RFC 9110
+  §15.6.5, with the body "upstream timeout" and the usual X-Cache /
+  X-Cache-Source attribution. Every other upstream failure (refused,
+  reset, DNS) keeps `502 Bad Gateway`. The timeout classification is
+  the same string the `bouine_origin_connection_errors_total` reason
+  label carries, so the wire status and the metric agree. Covers the
+  cached data plane (miss, BYPASS, revalidation, invalidating proxy)
+  and the uncached proxy path; the `only-if-cached` 504 and the
+  no-client 502 branches are unchanged. The invalidating-proxy path
+  also had its attribution headers written before `ctx.Error`'s
+  response reset, wiping them; they are now written after it, matching
+  the sibling paths.
+- **Bans no longer poison objects stored after them** (regression in
+  v0.5.13). A ban registered without `created_at` — how the admin
+  `/v1/ban` endpoint issues bans — treated every object as subject
+  forever, including objects stored long after the ban. An over-broad
+  ban (e.g. `host_regex: ".*"`) therefore permanently banned every
+  later cache fill. Per RFC 9111 §4.4, invalidation only removes
+  responses that existed at invalidation time; objects stored after
+  the ban's registration are now exempt on all snapshot paths
+  (literal sets, anchored prefixes, and opaque regex bans).
+- **`ttl_override` no longer pins error responses fresh.** A route with
+  `ttl_override` applied the override to *every* storable response,
+  including errors: an origin that opts a 404 into negative caching
+  (`Cache-Control: public, max-age=30`) got cached for the full override
+  duration (30 minutes instead of 30 seconds on affected routes), and
+  `negative_ttl` policies were bypassed entirely. The override now gates
+  on status < 400: success and redirect responses keep the ADR-0011
+  behavior, while error responses follow the negative-caching TTL ladder
+  (origin explicit freshness > `negative_ttl` > heuristic > `ttl_default`),
+  matching the protection `ttl_default` already had. **Operator-visible
+  change:** storable errors on `ttl_override` routes now expire per the
+  ladder instead of the override — bouine-config owners should re-check
+  routes that pair `ttl_override` with `negative_ttl` (ADR-0059).
+
 ## [0.5.28] - 2026-10-09
 
 ### Performance

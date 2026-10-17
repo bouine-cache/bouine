@@ -4,6 +4,9 @@
 - **Date**: 2026-06-09
 - **Deciders**: @thylong
 - **Phase**: phase 6
+- **Amended by**: [ADR-0059](0059-ttl-override-error-status-gate.md) — points 1 and 4
+  now apply to status < 400 only; error responses keep the negative-caching
+  TTL ladder.
 
 ## Context
 

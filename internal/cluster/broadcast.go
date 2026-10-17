@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/config"
@@ -74,6 +75,14 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 	if fetcher != nil && fetcher.useTLS {
 		tlsCfg = fetcher.tlsConfig
 	}
+	// The fetcher also carries the peer-bound DialControl (outbound TCP
+	// Fast Open, cluster.peer_tcp_fast_open): every peer-bound dial —
+	// pipelined fetch/put and broadcast fan-out alike — must get the
+	// same socket options.
+	var dialControl func(network, addr string, c syscall.RawConn) error
+	if fetcher != nil {
+		dialControl = fetcher.dialControl
+	}
 	fc := &fasthttp.Client{
 		MaxConnsPerHost:     broadcastMaxConnsPerHost,
 		MaxIdleConnDuration: 90 * time.Second,
@@ -81,7 +90,7 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		WriteTimeout:        5 * time.Minute,
 		TLSConfig:           tlsCfg,
 		Dial: func(addr string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).Dial("tcp", addr)
+			return (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second, Control: dialControl}).Dial("tcp", addr)
 		},
 	}
 	client := transport.NewClient(fc)

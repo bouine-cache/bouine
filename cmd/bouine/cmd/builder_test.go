@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
@@ -164,6 +167,32 @@ func TestBoolDefault(t *testing.T) {
 	assert.False(t, boolDefault(&b2, true))
 }
 
+// TestResolveListenerOptions pins the listener socket-option defaults.
+// TCP Fast Open is opt-in like on the outbound surfaces: an unset
+// listen.tcp_fast_open must resolve to disabled, and only an explicit
+// true enables it. TCP_DEFER_ACCEPT defaults on; SO_REUSEPORT follows
+// the platform. This test fails if the TFO default is flipped back to
+// enabled.
+func TestResolveListenerOptions(t *testing.T) {
+	t.Parallel()
+
+	fastOpen, deferAccept, _ := resolveListenerOptions(config.Listen{})
+	assert.False(t, fastOpen, "an unset listen.tcp_fast_open must stay disabled (TFO is opt-in)")
+	assert.True(t, deferAccept, "an unset listen.tcp_defer_accept must default on")
+
+	enabled := true
+	fastOpen, _, _ = resolveListenerOptions(config.Listen{TCPFastOpen: &enabled})
+	assert.True(t, fastOpen, "an explicit listen.tcp_fast_open: true must enable it")
+
+	fastOpen, _, _ = resolveListenerOptions(config.Listen{TCPFastOpen: &enabled, TCPDeferAccept: &enabled})
+	assert.True(t, fastOpen)
+
+	disabled := false
+	fastOpen, deferAccept, _ = resolveListenerOptions(config.Listen{TCPFastOpen: &disabled, TCPDeferAccept: &disabled})
+	assert.False(t, fastOpen, "an explicit false must disable TFO")
+	assert.False(t, deferAccept, "an explicit false must disable tcp_defer_accept")
+}
+
 func TestApplyRefreshConfig_Disabled(t *testing.T) {
 	t.Parallel()
 	cfg := &cache.HandlerConfig{}
@@ -223,6 +252,48 @@ func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
 	}
 	rt := buildHedgeTimeout(pc)
 	require.Equal(t, 500*time.Millisecond, rt)
+}
+
+// TestOutboundFastOpenDialControl pins the outbound TCP Fast Open
+// Control wiring rules: an explicitly disabled surface stays unwired;
+// the nil (default) setting stays unwired too — the option is opt-in;
+// on Linux an explicitly enabled surface wires a best-effort Control
+// on kernels that support TCP_FASTOPEN_CONNECT and stays nil
+// otherwise; on non-Linux platforms it is always nil. Whatever is
+// returned must never fail a real dial.
+func TestOutboundFastOpenDialControl(t *testing.T) {
+	t.Parallel()
+	logger := newTestLogger()
+
+	disabled := false
+	require.Nil(t, outboundFastOpenDialControl(&disabled, "origin", logger),
+		"an explicitly disabled surface must stay unwired")
+
+	require.Nil(t, outboundFastOpenDialControl(nil, "origin", logger),
+		"an unset surface must stay unwired: TCP Fast Open defaults to disabled")
+
+	enabled := true
+	control := outboundFastOpenDialControl(&enabled, "origin", logger)
+	if runtime.GOOS != "linux" {
+		require.Nil(t, control, "non-Linux platforms have no TCP_FASTOPEN_CONNECT")
+		return
+	}
+	if !platform.TCPFastOpenConnectSupported() {
+		require.Nil(t, control, "a kernel without TCP_FASTOPEN_CONNECT must stay unwired")
+		return
+	}
+	require.NotNil(t, control,
+		"an explicitly enabled surface must wire the Control on a kernel that supports it")
+
+	// The Control must never fail the dial it decorates: outbound
+	// socket options are advisory, and failing the dial would turn a
+	// latency optimization into availability damage.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	conn, err := (&net.Dialer{Control: control}).Dial("tcp", ln.Addr().String())
+	require.NoError(t, err, "a dial through the TFO Control must succeed")
+	require.NoError(t, conn.Close())
 }
 
 // newTestPool builds an origin pool from an UpstreamPool config so the

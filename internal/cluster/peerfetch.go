@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,6 +67,12 @@ const (
 	// Exported so the engine wiring can reuse the same budget for the
 	// write-to-owner goroutine (issue #509).
 	PeerFetchTimeout = 500 * time.Millisecond
+	// shedDirectionFetch / shedDirectionPut are the bouine_peer_shed_total
+	// "direction" label values distinguishing read-side (fetch) from
+	// write-side (put) sheds. Unexported consts so a typo in one call site
+	// fails to compile instead of silently forking the label cardinality.
+	shedDirectionFetch = "fetch"
+	shedDirectionPut   = "put"
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
@@ -141,7 +148,7 @@ var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive 
 // of parking callers — without the bound, the fast path's undedlined
 // context parked one keep-alive connection goroutine per queued miss
 // until the whole connection pool sat in the semaphore queue.
-var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
+var ErrPeerFetchShed = api.ErrPeerFetchShed
 
 // errPeerAddrRetired is returned by a parked dial once the fetcher
 // closes. It reports itself as a timeout so fasthttp's pipeline worker
@@ -164,7 +171,15 @@ type addrFailureState struct {
 
 // PeerFetcherConfig configures a PeerFetcher.
 type PeerFetcherConfig struct {
-	TLSConfig           *tls.Config
+	TLSConfig *tls.Config
+	// DialControl, when non-nil, is installed as net.Dialer.Control on
+	// peer-bound dials (peer fetch, peer put, and — via the fetcher — the
+	// invalidation broadcast clients). The engine wires outbound TCP
+	// Fast Open here (cluster.peer_tcp_fast_open); declared in this
+	// package — the consumer — because internal/cluster must not import
+	// internal/platform (depguard layer matrix). Sits with the pointer
+	// fields so the GC scan prefix stays minimal (fieldalignment).
+	DialControl         func(network, addr string, c syscall.RawConn) error
 	HopLimit            int
 	MaxConnsPerHost     int
 	MaxIdleConnDuration time.Duration
@@ -214,7 +229,7 @@ type PeerFetcher struct {
 	// within peerFetchWaitTimeout). pQueueWait only observes successful
 	// acquisitions, so without this counter a saturated queue that sheds
 	// everything is invisible in metrics: no waits land in the histogram.
-	pShed prometheus.Counter
+	pShed prometheus.CounterVec
 	// breaker is the per-address failure breaker: consecutive transport
 	// failures trip a cooldown so dead peer addresses fail fast
 	// instead of paying a dial timeout per RPC.
@@ -225,7 +240,11 @@ type PeerFetcher struct {
 	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
 	putSem    chan struct{}
 	tlsConfig *tls.Config
-	fetchSem  chan struct{}
+	// dialControl, when non-nil, is installed on every peer-bound
+	// net.Dialer (outbound TCP Fast Open). Sits with the pointer fields
+	// so the GC scan prefix stays contiguous (fieldalignment).
+	dialControl func(network, addr string, c syscall.RawConn) error
+	fetchSem    chan struct{}
 	// pipelineClients caches one PipelineClient per peer address. Held
 	// behind an atomic.Pointer so Close can drop the whole map without
 	// racing concurrent Fetch/Put lookups: swapping a bare sync.Map field
@@ -266,8 +285,14 @@ type PeerFetcher struct {
 	misses           atomic.Int64
 	hits             atomic.Int64
 	hopLimit         int
-	useTLS           bool
-	doneClosed       atomic.Bool
+	// breakerEntries mirrors len(breaker), written under breakerMu. When
+	// it reads zero the map is empty, so breakerAllowed and
+	// recordPeerSuccess (both called on every peer RPC) skip the mutex:
+	// a healthy cluster never contends on breakerMu. A failure racing
+	// the lock-free read linearizes after it, which the mutex allows too.
+	breakerEntries atomic.Int32
+	doneClosed     atomic.Bool
+	useTLS         bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -372,6 +397,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		breaker:             make(map[string]*addrFailureState),
 		failureThreshold:    failureThreshold,
 		failureCooldown:     failureCooldown,
+		dialControl:         cfg.DialControl,
 		done:                make(chan struct{}),
 	}
 	f.pipelineClients.Store(&sync.Map{})
@@ -425,11 +451,11 @@ func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
 		Namespace: "bouine", Name: "peer_addr_blacklisted",
 		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
 	})
-	f.pShed = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine", Name: "peer_fetch_shed_total",
+	f.pShed = *prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_shed_total",
 		Help: "Peer-fetch/put RPCs shed because no concurrency slot freed within the queue-wait bound. Rising alongside peer_fetch_active at capacity means demand exceeds the configured peer_fetch_concurrency.",
-	})
-	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, f.pShed)
+	}, []string{"direction"})
+	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, &f.pShed)
 }
 
 // getPipelineClient returns the PipelineClient for the given peer
@@ -491,6 +517,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 			return (&net.Dialer{
 				Timeout:   peerDialTimeout,
 				KeepAlive: 30 * time.Second,
+				Control:   f.dialControl,
 			}).Dial("tcp", addr)
 		},
 	}
@@ -533,6 +560,9 @@ func peerAddr(peer api.PeerInfo) string {
 // immediately, so a still-dead address costs at most one dial per
 // cooldown.
 func (f *PeerFetcher) breakerAllowed(addr string) bool {
+	if f.breakerEntries.Load() == 0 {
+		return true
+	}
 	f.breakerMu.Lock()
 	defer f.breakerMu.Unlock()
 	st, ok := f.breaker[addr]
@@ -551,12 +581,16 @@ func (f *PeerFetcher) breakerAllowed(addr string) bool {
 // round trip (including a 404 miss — the peer is reachable) proves the
 // address healthy.
 func (f *PeerFetcher) recordPeerSuccess(addr string) {
+	if f.breakerEntries.Load() == 0 {
+		return
+	}
 	f.breakerMu.Lock()
 	defer f.breakerMu.Unlock()
 	if _, ok := f.breaker[addr]; !ok {
 		return
 	}
 	delete(f.breaker, addr)
+	f.breakerEntries.Store(int32(len(f.breaker))) //nolint:gosec // G115: one entry per peer address, far below MaxInt32
 	f.updateBlacklistedLocked()
 }
 
@@ -570,6 +604,7 @@ func (f *PeerFetcher) recordPeerFailure(addr string) {
 	if st == nil {
 		st = &addrFailureState{}
 		f.breaker[addr] = st
+		f.breakerEntries.Store(int32(len(f.breaker))) //nolint:gosec // G115: one entry per peer address, far below MaxInt32
 	}
 	st.consecutive++
 	if st.consecutive >= f.failureThreshold && st.trippedUntil.IsZero() {
@@ -663,9 +698,6 @@ func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error 
 	case sem <- struct{}{}:
 		return nil
 	case <-timer.C:
-		if f.pShed != nil {
-			f.pShed.Inc()
-		}
 		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
 	case <-ctx.Done():
 		return ctx.Err()
@@ -683,19 +715,26 @@ func (f *PeerFetcher) waitTimeout() time.Duration {
 
 // acquireFetchSlot takes one fetchSem slot, observing the time spent
 // waiting in pQueueWait (queueStart is taken by the caller before this
-// call) and bumping pActive for the slot's hold. Returns the release
-// function paired with the acquisition, or an error when the context is
-// cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
-func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
+// call) and bumping pActive for the slot's hold. On success the caller
+// must pair it with releaseFetchSlot (a method rather than a returned
+// closure, so the per-fetch acquisition does not heap-allocate). Returns
+// an error when the context is cancelled while queued or the bounded
+// wait expired (ErrPeerFetchShed); no slot is held then.
+func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) error {
 	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
-		if errors.Is(err, ErrPeerFetchShed) && f.pQueueWait != nil {
-			// A shed after a full wait window is exactly the queue
-			// signal the histogram exists for — record it too, or a
-			// fully-shedding queue disappears from the metric (only
-			// successful acquisitions would ever be observed).
-			f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+		if errors.Is(err, ErrPeerFetchShed) {
+			if f.pShed.MetricVec != nil {
+				f.pShed.WithLabelValues(shedDirectionFetch).Inc()
+			}
+			if f.pQueueWait != nil {
+				// A shed after a full wait window is exactly the queue
+				// signal the histogram exists for — record it too, or a
+				// fully-shedding queue disappears from the metric (only
+				// successful acquisitions would ever be observed).
+				f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+			}
 		}
-		return nil, err
+		return err
 	}
 	if f.pQueueWait != nil {
 		f.pQueueWait.Observe(time.Since(queueStart).Seconds())
@@ -703,12 +742,16 @@ func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time
 	if f.pActive != nil {
 		f.pActive.Inc()
 	}
-	return func() {
-		if f.pActive != nil {
-			f.pActive.Dec()
-		}
-		<-f.fetchSem
-	}, nil
+	return nil
+}
+
+// releaseFetchSlot returns the fetchSem slot taken by a successful
+// acquireFetchSlot and drops the pActive gauge it bumped.
+func (f *PeerFetcher) releaseFetchSlot() {
+	if f.pActive != nil {
+		f.pActive.Dec()
+	}
+	<-f.fetchSem
 }
 
 // recordPeerMiss counts and logs one peer-fetch miss (404 answer).
@@ -752,11 +795,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	// is not part of the RPC-duration measurement below, which starts
 	// after acquisition.
 	queueStart := time.Now()
-	releaseSlot, err := f.acquireFetchSlot(ctx, queueStart)
-	if err != nil {
+	if err := f.acquireFetchSlot(ctx, queueStart); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
-	defer releaseSlot()
+	defer f.releaseFetchSlot()
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
@@ -973,6 +1015,9 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	}
 
 	if err := f.acquireSlot(ctx, f.putSem); err != nil {
+		if errors.Is(err, ErrPeerFetchShed) && f.pShed.MetricVec != nil {
+			f.pShed.WithLabelValues(shedDirectionPut).Inc()
+		}
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	defer func() { <-f.putSem }()

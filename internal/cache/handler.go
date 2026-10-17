@@ -46,9 +46,9 @@ var ErrAbortHandler = errors.New("abort handler")
 // ErrFetchShed is returned when a foreground origin fetch gave up waiting
 // for a fetch-semaphore slot after fetchWaitTimeout. Callers map it to
 // stale-on-shed (RFC 5861-style) when a stale object is in scope, or to
-// 503 + Retry-After otherwise — distinct from the 502 origin-failure
-// mapping. The wait bound is the fix for the goroutine-pileup livelock
-// (issue #562): previously the foreground paths parked on the semaphore
+// 503 + Retry-After otherwise — distinct from the 502/504 origin-failure
+// mapping (writeUpstreamError). The wait bound is the fix for the
+// goroutine-pileup livelock (issue #562): previously the foreground paths parked on the semaphore
 // with a dead cancellation arm and nothing ever un-parked them.
 var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 
@@ -369,7 +369,7 @@ type Handler struct {
 	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
 	jitterPercent        int
 	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
+	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires on success/redirect responses (status < 400) when > 0; error statuses keep the negative-caching TTL ladder (ADR-0059)
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
@@ -1579,7 +1579,7 @@ func peerVaryAssertion(obj *api.Object) string {
 // production before this gate).
 func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
 	if peerObj.VaryValue != "" &&
-		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		!varyKeyMatches(peerObj.VaryValue, varyAssertSrc{m: ri.Header}, h.policy, peerObj.VaryKey) {
 		if h.onPeerVariantMismatch != nil {
 			h.onPeerVariantMismatch()
 		}
@@ -1603,24 +1603,25 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 }
 
 // peerHintsApply reports whether a fast-path peer-branch hint (transferred
-// by the h1parser under api.OwnerMissContextKey or
-// api.OwnerGateRejectContextKey) suppresses THIS handler's peer RPC.
-// Either hint carries the same proof — the owner was already asked for
-// exactly this nil-policy, plain-key question — so both are honored the
-// same way: skip the RPC, go to origin. The hint is trusted only when
-// the stored object is nil (otherwise the slow path's peer question
-// carries peerVaryAssertion(obj) — a different question) and the route
-// has no KeyPolicy (the hint flag does not bind to the producing
-// route's policy, so on a policied route the slow path cannot prove
-// its peer question identical to the fast path's and keeps the retry;
-// conservative, since the per-route fast path runs the route's own
-// policy — lifting the restriction needs a route-bound hint).
+// by the h1parser under api.OwnerMissContextKey,
+// api.OwnerGateRejectContextKey, or api.OwnerShedContextKey) suppresses
+// THIS handler's peer RPC.
+// Any hint carries proof that the peer fetch was already attempted or
+// shed — so the RPC is skipped and the request goes straight to origin.
+// The hint is trusted only when the stored object is nil (otherwise the
+// slow path's peer question carries peerVaryAssertion(obj) — a different
+// question) and the route has no KeyPolicy (the hint flag does not bind
+// to the producing route's policy, so on a policied route the slow path
+// cannot prove its peer question identical to the fast path's and keeps
+// the retry; conservative, since the per-route fast path runs the route's
+// own policy — lifting the restriction needs a route-bound hint).
 func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool {
 	if obj != nil || h.policy != nil {
 		return false
 	}
 	return ctx.UserValue(api.OwnerMissContextKey) == true ||
-		ctx.UserValue(api.OwnerGateRejectContextKey) == true
+		ctx.UserValue(api.OwnerGateRejectContextKey) == true ||
+		ctx.UserValue(api.OwnerShedContextKey) == true
 }
 
 // handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
@@ -2210,7 +2211,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 				h.triggerShedRefill(ri, lookupKey)
 				return
 			}
-			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			writeUpstreamError(ctx, res.Err)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 			h.applyResponseRewrites(&ctx.Response.Header)
@@ -2368,7 +2369,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 			h.serveObject(ctx, stale, now, cacheStale, src)
 			return
 		}
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		writeUpstreamError(ctx, res.Err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
@@ -2457,9 +2458,12 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}
-	// Re-apply route override so a 304 cannot revert bouine's storage lifetime
-	// back to the upstream's (potentially shorter) max-age.
-	if h.overrideTTL > 0 {
+	// Re-apply route override (success responses only) so a 304 cannot
+	// revert bouine's storage lifetime back to the upstream's (potentially
+	// shorter) max-age. Error objects keep the ladder TTL from the merged
+	// headers (or their previous TTL) — refreshed.StatusCode is the stale
+	// object's status (ADR-0059).
+	if h.overrideTTL > 0 && refreshed.StatusCode < 400 {
 		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
 	}
 	refreshed.OriginAge = parseOriginAge(refreshed.Header)
@@ -2835,10 +2839,14 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 
 	if err := h.doFastFetch(req, resp); err != nil {
 		tracing.RecordError(span, err)
+		// writeUpstreamError runs first: ctx.Error resets the response
+		// (fasthttp RequestCtx.Error), so the attribution headers must
+		// be written after it — the same order as the sibling 50x
+		// branches (revalidate, streamBypass, handleSSE).
+		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		h.applyResponseRewrites(&ctx.Response.Header)
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 
@@ -3498,11 +3506,13 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
 	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
-	// Route-level override wins over the upstream's freshness directives.
-	// Applied after computeTTL so jitter is seeded from the override value,
-	// not the origin's max-age. The stored object retains the unaltered
-	// upstream Cache-Control header, which is forwarded to downstream clients.
-	if overrideTTL > 0 {
+	// Route-level override wins over the upstream's freshness directives
+	// for content responses (status < 400); error responses keep the
+	// negative-caching TTL ladder (ADR-0059). Applied after computeTTL so
+	// jitter is seeded from the override value, not the origin's max-age.
+	// The stored object retains the unaltered upstream Cache-Control
+	// header, which is forwarded to downstream clients.
+	if overrideTTL > 0 && res.StatusCode < 400 {
 		ttl = JitterTTL(overrideTTL, jitterPct)
 	}
 

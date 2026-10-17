@@ -223,6 +223,116 @@ func TestPeerFetcher_SuccessResetsBreaker(t *testing.T) {
 	assert.True(t, f.breakerAllowed(addr), "success must reset the failure count")
 }
 
+// breakerEntriesConsistent reports whether the lock-free entry counter
+// matches the breaker map it mirrors.
+func breakerEntriesConsistent(f *PeerFetcher) bool {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	return int(f.breakerEntries.Load()) == len(f.breaker)
+}
+
+// TestPeerFetcher_BreakerEntriesMirrorsMap pins the invariant the
+// lock-free fast path in breakerAllowed / recordPeerSuccess relies on:
+// the entry counter is zero exactly when the breaker map is empty, so a
+// tripped address is never skipped by the fast path.
+func TestPeerFetcher_BreakerEntriesMirrorsMap(t *testing.T) {
+	t.Parallel()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FailureThreshold: 1,
+		FailureCooldown:  time.Hour,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	const a, b = "10.0.0.1:9000", "10.0.0.2:9000"
+	require.Zero(t, f.breakerEntries.Load())
+	assert.True(t, f.breakerAllowed(a))
+	f.recordPeerSuccess(a) // no entry: must stay a no-op
+	require.Zero(t, f.breakerEntries.Load())
+
+	f.recordPeerFailure(a)
+	f.recordPeerFailure(a)
+	f.recordPeerFailure(b)
+	require.EqualValues(t, 2, f.breakerEntries.Load())
+	assert.False(t, f.breakerAllowed(a), "tripped address must not take the fast path")
+	assert.False(t, f.breakerAllowed(b))
+
+	f.recordPeerSuccess(a)
+	require.EqualValues(t, 1, f.breakerEntries.Load())
+	assert.True(t, f.breakerAllowed(a))
+	assert.False(t, f.breakerAllowed(b), "clearing one address must not clear another")
+
+	f.recordPeerSuccess(b)
+	require.Zero(t, f.breakerEntries.Load())
+	assert.True(t, f.breakerAllowed(b))
+}
+
+// TestPeerFetcher_BreakerEntriesConcurrent hammers the breaker from
+// concurrent goroutines (run under -race) and checks the counter still
+// mirrors the map once they settle.
+func TestPeerFetcher_BreakerEntriesConcurrent(t *testing.T) {
+	t.Parallel()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FailureThreshold: 2,
+		FailureCooldown:  time.Hour,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	addrs := []string{"10.0.0.1:9000", "10.0.0.2:9000", "10.0.0.3:9000"}
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Go(func() {
+			for i := range 500 {
+				addr := addrs[(g+i)%len(addrs)]
+				switch (g + 2*i) % 3 {
+				case 0:
+					f.recordPeerFailure(addr)
+				case 1:
+					f.recordPeerSuccess(addr)
+				default:
+					_ = f.breakerAllowed(addr)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	require.True(t, breakerEntriesConsistent(f))
+
+	for _, addr := range addrs {
+		f.recordPeerSuccess(addr)
+	}
+	require.Zero(t, f.breakerEntries.Load())
+	require.True(t, breakerEntriesConsistent(f))
+}
+
+// TestPeerFetcher_FetchReleasesSlot pins that every Fetch outcome
+// (miss, transport error) returns its fetchSem slot.
+func TestPeerFetcher_FetchReleasesSlot(t *testing.T) {
+	t.Parallel()
+
+	miss := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.SetStatusCode(fasthttp.StatusNotFound)
+	})
+	defer miss.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	deadAddr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FailureThreshold: 100,
+	}, prometheus.NewRegistry(), nil)
+	defer f.Close(context.Background())
+
+	for _, addr := range []string{miss.Addr, deadAddr} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = f.Fetch(ctx, api.PeerInfo{AdminAddr: addr}, api.PeerFetchRequest{Key: testkey.Key(1)})
+		cancel()
+		require.Empty(t, f.fetchSem, "fetch to %s must release its slot", addr)
+	}
+}
+
 // TestPeerFetcher_PutRespectsBlacklist mirrors the fetch test for the
 // write-to-owner path: blacklisted addresses skip the RPC entirely.
 func TestPeerFetcher_PutRespectsBlacklist(t *testing.T) {

@@ -123,7 +123,8 @@ type ExperimentalConfig struct {
 // Listen enumerates the listener addresses. Empty strings disable.
 type Listen struct {
 	// TCPFastOpen enables Linux TCP_FASTOPEN on data-plane listeners.
-	// nil defaults to true on Linux and no-op on other platforms.
+	// nil defaults to disabled; set true to opt in (no-op on other
+	// platforms).
 	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
 	// TCPDeferAccept enables Linux TCP_DEFER_ACCEPT on data-plane
 	// listeners. nil defaults to true on Linux and no-op elsewhere.
@@ -339,6 +340,21 @@ const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
+	// PeerTCPFastOpen enables the client side of TCP Fast Open
+	// (TCP_FASTOPEN_CONNECT) on peer-bound dials (peer fetch, peer put,
+	// and invalidation broadcast): with a kernel-cached TFO cookie the
+	// first RPC bytes ride in the SYN packet, saving one RTT on every
+	// fresh peer connection. For bouine-to-bouine peer dials to use TFO
+	// end-to-end, each peer's data-plane listeners must also enable
+	// server-side TFO (listen.tcp_fast_open, also opt-in) and each
+	// peer's kernel must allow server-side TFO (net.ipv4.tcp_fastopen
+	// must include bit 2). Linux only (no-op elsewhere); nil defaults
+	// to disabled — set true to opt in (requires a kernel that supports
+	// the option, Linux 4.11+). Leads
+	// the struct — a pure pointer before the string/slice fields — so
+	// the GC scan prefix stays minimal (fieldalignment); YAML decode
+	// order is unaffected.
+	PeerTCPFastOpen *bool `yaml:"peer_tcp_fast_open,omitempty" json:"peer_tcp_fast_open,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).
@@ -423,10 +439,14 @@ type ClusterTLS struct {
 // UpstreamPool is a named set of origin targets with a shared health
 // policy and connect policy.
 type UpstreamPool struct {
-	Name    string        `yaml:"name,omitempty" json:"name,omitempty"`
-	Targets []string      `yaml:"targets,omitempty" json:"targets,omitempty"`
-	Health  HealthPolicy  `yaml:"health,omitempty" json:"health,omitempty"`
+	Name    string   `yaml:"name,omitempty" json:"name,omitempty"`
+	Targets []string `yaml:"targets,omitempty" json:"targets,omitempty"`
+	// Connect leads Health so the pointer-bearing ConnectPolicy (its
+	// TCPFastOpen) stays in the contiguous pointer block and the GC scan
+	// prefix stays minimal (fieldalignment). YAML decode order is
+	// unaffected.
 	Connect ConnectPolicy `yaml:"connect,omitempty" json:"connect,omitempty"`
+	Health  HealthPolicy  `yaml:"health,omitempty" json:"health,omitempty"`
 }
 
 // HealthPolicy aggregates active + passive health checks.
@@ -454,6 +474,18 @@ type PassiveHealthCheck struct {
 
 // ConnectPolicy bounds dial behaviour and origin connection lifetimes.
 type ConnectPolicy struct {
+	// TCPFastOpen enables the client side of TCP Fast Open
+	// (TCP_FASTOPEN_CONNECT) on origin-bound dials: with a kernel-cached
+	// TFO cookie the first request bytes ride in the SYN packet, saving
+	// one RTT on every fresh origin connection. Origins without
+	// server-side TFO (net.ipv4.tcp_fastopen bit 2) never issue a
+	// cookie, so the dial transparently falls back to the regular
+	// handshake — there is no penalty for enabling it. Linux only
+	// (no-op elsewhere); nil defaults to disabled — set true to opt
+	// in (requires a kernel that supports the option, Linux 4.11+).
+	// Leads the struct so the pointer fields
+	// stay contiguous for the GC scan prefix (fieldalignment).
+	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
 	// Timeout bounds the TCP dial to an origin target. Zero applies a
 	// 10s built-in default.
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
@@ -684,6 +716,11 @@ type RouteCache struct {
 	// RFC 9111 boolean directives (no-store, private, no-cache,
 	// must-revalidate, proxy-revalidate) are always respected; TTLOverride
 	// only replaces the numeric freshness lifetime.
+	// Exempts error responses (status >= 400): those keep the
+	// negative-caching TTL ladder — origin explicit freshness >
+	// negative_ttl > heuristic (Last-Modified) > ttl_default — so an
+	// operator override never pins errors fresh beyond what the origin
+	// or the negative policy sanctioned (ADR-0059).
 	// Zero (default) = honour the upstream's freshness headers.
 	TTLOverride time.Duration `yaml:"ttl_override,omitempty" json:"ttl_override,omitempty"`
 	// MaxObjectSize, when > 0, skips caching for responses whose body

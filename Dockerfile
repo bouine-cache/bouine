@@ -5,10 +5,18 @@
 # TARGETOS / TARGETARCH: populated automatically by BuildKit from --platform;
 #   no defaults so the build fails loudly when called without a platform rather
 #   than silently producing an amd64 binary on an arm64 host.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm@sha256:55395706e9703db746cc507abfc4eb2aea75918f8a8024e4848e2cb81004f5ad AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
+# Microarchitecture floors for release images. GOAMD64=v3 (Haswell 2013+:
+# AVX2, BMI2, FMA — feeds fasthttp's SIMD parsers and the xxhash key
+# path) and GOARM64=v8.1 (LSE atomics + CRC32 instructions; Graviton2,
+# Ampere Altra and every later server core). Each variable is only
+# consulted when it matches TARGETARCH, so setting both is safe. Override
+# with --build-arg for older fleets.
+ARG GOAMD64=v3
+ARG GOARM64=v8.1
 ARG VERSION=dev
 ARG COMMIT=unknown
 # For reproducible builds, pass --build-arg SOURCE_DATE_EPOCH=<timestamp>
@@ -36,6 +44,7 @@ RUN if [ -n "${SOURCE_DATE_EPOCH}" ] && [ "${DATE}" = "unknown" ]; then \
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    GOAMD64=${GOAMD64} GOARM64=${GOARM64} \
     go build -trimpath \
     -ldflags "${STRIPFLAGS} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \

@@ -64,7 +64,7 @@ func (c *sseReadConn) Read(p []byte) (int, error) {
 // general-purpose client, so the idle-deadline semantics never leak into
 // ordinary fetches.
 func newOriginStreamClient(cc clientConfig) *fasthttp.Client {
-	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
+	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive, Control: cc.dialControl}
 	c := &fasthttp.Client{
 		MaxConnsPerHost:     cc.maxConnsPerHost,
 		MaxIdleConnDuration: cc.maxIdleConnDuration,

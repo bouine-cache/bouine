@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sort"
 	"strconv"
@@ -293,6 +294,11 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 			// skips its duplicate owner lookup + peer RPC and goes straight
 			// to origin. Errors keep the slow-path retry.
 			req.OwnerMiss = true
+		} else if errors.Is(err, api.ErrPeerFetchShed) {
+			// Peer fetch shed (concurrency saturation): flag the request so
+			// the slow path skips its peer retry, avoiding cascading queue
+			// contention and timeout amplification, and goes straight to origin.
+			req.OwnerShed = true
 		}
 		return nil, false
 	}
@@ -355,9 +361,9 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 // ends while parseHeaders only skips leading — without this, a value
 // like "US\t" would gate-mismatch the owner's view (parity pinned by
 // TestPeerVaryGateHeaderParity).
-// Allocates the entries/values slices per call (~120 B, 7 allocs) —
-// acceptable on the peer branch, which amortizes a network round-trip;
-// local hits never reach it.
+// Allocates the entries/values slices per call (~120 B, 7 allocs); the
+// peer variant gate only builds it on varyAssertionHash's overflow
+// fallback (varyAssertSrc reads the RawRequest as this map directly).
 func reqHeaderMapFromRaw(req *api.RawRequest) header.Map {
 	hm := header.NewMap(req.NHeaders)
 	for i := 0; i < req.NHeaders; i++ {
@@ -389,7 +395,7 @@ func (f *FastPathHandler) peerGateMatchesVary(req *api.RawRequest, peerObj *api.
 	if vary == "" {
 		return true
 	}
-	return BuildVaryKey(vary, reqHeaderMapFromRaw(req), f.policy) == peerObj.VaryKey
+	return varyKeyMatches(vary, varyAssertSrc{r: req}, f.policy, peerObj.VaryKey)
 }
 
 // qualifiesForFastPath checks request-level conditions that must be met

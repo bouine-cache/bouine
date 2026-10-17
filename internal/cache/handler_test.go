@@ -2206,7 +2206,10 @@ func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
 // TestDoFetchStreamDeadlineAbortsSlowOrigin verifies the streaming miss
 // path enforces fetch_timeout through the deadline-based context. The
 // slow origin blocks past the timeout; the fetch must abort instead of
-// hanging until the transport's own 60s fallback.
+// hanging until the transport's own 60s fallback. A timed-out upstream
+// fetch surfaces as a 504 Gateway Timeout (RFC 9110 §15.6.5), not a 502:
+// writeUpstreamError distinguishes the two, and the attribution headers
+// survive the ctx.Error reset.
 func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 	t.Parallel()
 	upstream := func(ctx *fasthttp.RequestCtx) {
@@ -2231,7 +2234,9 @@ func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, 1500*time.Millisecond, "fetch timeout must abort the slow origin")
-	require.Equal(t, 502, respCode(ctx))
+	require.Equal(t, 504, respCode(ctx))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 // TestDoFetchDeadlineRespectedByFastClient verifies the foreground fetch
@@ -3411,6 +3416,136 @@ func TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch(t *testing.T) {
 	assert.Equal(t, "from-origin", respBody(rr))
 	assert.Equal(t, int32(0), peerFetchCalls.Load(), "hint must skip the duplicate peer RPC")
 	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_FastPathOwnerShedHintSkipsPeerFetch pins the
+// owner-shed hint: when the H1 fast path hit a concurrency wait timeout
+// (ErrPeerFetchShed) from the owner (transferred via
+// api.OwnerShedContextKey), the slow path skips the peer retry
+// and goes straight to origin.
+func TestHandleCacheMiss_FastPathOwnerShedHintSkipsPeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, api.ErrPeerFetchShed
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/shed-hinted-miss")
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(0), peerFetchCalls.Load(), "owner shed hint must skip the peer retry")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerShedHintIgnoredWithKeyPolicy pins the shed
+// hint's key-scope guard (mirrors the OwnerMiss variant): the hint flag
+// does not bind to the producing route's policy, so on a policied route
+// the slow path cannot prove its peer question identical to the fast
+// path's and the peer RPC must run.
+func TestHandleCacheMiss_OwnerShedHintIgnoredWithKeyPolicy(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		Policy:     NewKeyPolicy(map[string]bool{"utm_foo": true}, nil, nil, nil, false, false, nil, false),
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/policied-shed?utm_foo=x")
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(),
+		"shed hint from the nil-policy fast path must not suppress the policied route's peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerShedHintIgnoredWhenStaleObjectStored pins the
+// shed hint's object-scope guard (mirrors the OwnerMiss variant): with a
+// stale object in the store (obj != nil) the slow path's peer question
+// carries peerVaryAssertion(obj) — a different question than the fast
+// path's plain "" — so the hint must not suppress the fetch.
+func TestHandleCacheMiss_OwnerShedHintIgnoredWhenStaleObjectStored(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	url := "http://example.com/shed-hinted-stale"
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
+	stale := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("stale-body"),
+		BodySize:   10,
+		StoredAt:   time.Now().Add(-2 * time.Minute),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, stale))
+
+	var peerFetchCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("from-origin"))
+		},
+		FastClient: &testFastClient{
+			handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+				ctx.SetStatusCode(200)
+				_, _ = ctx.Write([]byte("from-origin"))
+			},
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil // peer miss
+		},
+	})
+
+	r := testCtx("GET", url)
+	r.SetUserValue(api.OwnerShedContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(), "shed hint must not suppress the fetch when a stale object exists")
 }
 
 // TestHandleCacheMiss_OwnerMissHintIgnoredWithKeyPolicy pins the hint's

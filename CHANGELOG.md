@@ -87,6 +87,17 @@ the curated, human-readable summary.
 
 ### Changed
 
+- **The default `cluster.peer_fetch_concurrency` rises from 4 to 16.**
+  Slot capacity is slots divided by peer-RPC hold-time, and the 4-slot
+  default sat at the queueing knee on 3-node clusters of the 6k req/s
+  class: the 0.5.29 release soaks showed 0.5.28 riding that knee with a
+  stable shed valve (~150 sheds/s) while 0.5.29-rc1/rc2 tipped into
+  shed-runaway, ejection cascades and a pinned hit ratio on the same
+  shape; 16 slots absorbed even a 3.5× hold-time penalty in the same
+  harness. Deployments that pin the key are unaffected; deployments
+  relying on the default get more peer-fetch headroom. Worst-case
+  decode memory is unchanged (the 128-slot cap and the 64 MiB
+  per-fetch body limit still bound it).
 - **TCP Fast Open now defaults to disabled on every surface.** All
   three TFO settings — `listen.tcp_fast_open` (server side, data-plane
   listeners), `connect.tcp_fast_open` (origin-bound dials), and

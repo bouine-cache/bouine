@@ -1603,7 +1603,7 @@ func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 			c.Cluster.PeerMaxIdleConnDuration)
 	}
 	if c.Cluster.PeerFetchConcurrency < 0 {
-		ec.addf("cluster.peer_fetch_concurrency", "must be >= 0 (0 = default 4), got %d",
+		ec.addf("cluster.peer_fetch_concurrency", "must be >= 0 (0 = default 16), got %d",
 			c.Cluster.PeerFetchConcurrency)
 	}
 	if c.Cluster.PeerFetchConcurrency > MaxPeerFetchConcurrency {

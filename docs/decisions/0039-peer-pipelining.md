@@ -41,7 +41,7 @@ Two new config fields under `cluster:`:
   peer connections.
 
 A third field, `peer_fetch_concurrency` (default 16, max 128; raised
-from 4 after the 0.5.29 soaks showed 4 slots at the queueing knee),
+from 4: four slots sit at the queueing knee on 3-node clusters),
 bounds the
 fetch/put semaphore on top of the pipeline clients. It exists separately
 because the semaphore caps in-flight RPCs across all peers combined

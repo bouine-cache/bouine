@@ -88,16 +88,13 @@ the curated, human-readable summary.
 ### Changed
 
 - **The default `cluster.peer_fetch_concurrency` rises from 4 to 16.**
-  Slot capacity is slots divided by peer-RPC hold-time, and the 4-slot
-  default sat at the queueing knee on 3-node clusters of the 6k req/s
-  class: the 0.5.29 release soaks showed 0.5.28 riding that knee with a
-  stable shed valve (~150 sheds/s) while 0.5.29-rc1/rc2 tipped into
-  shed-runaway, ejection cascades and a pinned hit ratio on the same
-  shape; 16 slots absorbed even a 3.5× hold-time penalty in the same
-  harness. Deployments that pin the key are unaffected; deployments
-  relying on the default get more peer-fetch headroom. Worst-case
-  decode memory is unchanged (the 128-slot cap and the 64 MiB
-  per-fetch body limit still bound it).
+  Slot capacity is slots divided by peer-RPC hold-time, and four slots
+  sat at the queueing knee on 3-node clusters of the 6k req/s class:
+  the 0.5.29 release soaks showed 0.5.28 riding the knee with a stable
+  shed valve while rc1/rc2 tipped into shed-runaway and ejection
+  cascades on the same shape. Deployments that pin the key are
+  unaffected; the 128-slot cap and the 64 MiB per-fetch decode limit
+  still bound worst-case memory.
 - **TCP Fast Open now defaults to disabled on every surface.** All
   three TFO settings — `listen.tcp_fast_open` (server side, data-plane
   listeners), `connect.tcp_fast_open` (origin-bound dials), and
@@ -116,23 +113,17 @@ the curated, human-readable summary.
 - **Release images and linux/amd64 binaries no longer build at
   `GOAMD64=v3`; amd64 artifacts return to the `GOAMD64=v1` baseline.**
   The 0.5.29-rc1/rc2 release-soak regression is convicted on the v3
-  codegen (fc70d762): at identical CPU per request (447µs on both
-  builds), v3 costs ~45% peer-RPC hold-time p50 (1.6ms → 2.3ms) with
-  erratic 2-4× tails, cutting the 4-slot peer-fetch semaphore's capacity
-  ~2× and tipping the 3h 6k/3-node knee shape into shed-runaway and an
-  origin ejection cascade. A `GOAMD64=v3` rebuild of plain 0.5.28 code
-  reproduces the collapse where the shipped v1 build holds 5-for-5;
-  rc1/rc2 (v3) tip 5-for-5. The v3 gain had only ever been measured
-  under QEMU emulation (the bench-gate runner deliberately stayed at
-  baseline, so the gate never covered what shipped); fasthttp and
-  xxhash SIMD paths are runtime CPU-dispatched, so v1 loses nothing
-  there. `GOARM64=v8.1` stays: its gains were measured natively (Apple
-  M5 benchstat) and its mechanism (LSE atomics) is unrelated. Operators
-  wanting v3 can pass `--build-arg GOAMD64=v3` after re-validating on
-  their own hardware. Validated end-to-end: HEAD built at v1 passes the
-  identical 3h pfc=4 knee shape at 99.82% with zero client timeouts and
-  a flat ~24ms peer-RPC p99 all run (the v3 rc2 build fails the same
-  shape at 69-73%).
+  codegen (fc70d762): at identical CPU per request, v3 costs ~45%
+  peer-RPC hold-time p50 with erratic 2-4× tails, halving the 4-slot
+  peer-fetch semaphore's capacity and tipping the 3h knee shape into
+  shed-runaway and an origin ejection cascade. A v3 rebuild of plain
+  0.5.28 code reproduces it; the same rc2 code built at v1 passes the
+  identical shape at 99.82% with a flat ~24ms p99 and zero client
+  timeouts. The v3 gain had only ever been measured under QEMU, and
+  fasthttp/xxhash SIMD paths are runtime CPU-dispatched, so v1 loses
+  nothing there. `GOARM64=v8.1` stays (natively measured gains,
+  unrelated mechanism). Operators wanting v3 can pass
+  `--build-arg GOAMD64=v3` after re-validating on their hardware.
 
 - **Upstream timeouts now return 504, not 502.** A fetch against an
   upstream pool that times out (dial, response-header, or the per-route

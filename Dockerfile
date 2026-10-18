@@ -10,19 +10,12 @@ FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384b
 ARG TARGETOS
 ARG TARGETARCH
 # Microarchitecture floors for release images. GOARM64=v8.1 (LSE atomics
-# + CRC32 instructions; Graviton2, Ampere Altra and every later server
-# core): natively measured gains, mechanism unrelated to the amd64 issue
-# below. GOAMD64 stays at the v1 baseline: fc70d762 tried v3 and the
-# 0.5.29 stress soaks showed it costs ~45% peer-RPC hold-time p50 at
-# identical CPU per request (the extra wall time is off-CPU) with
-# erratic 2-4x tails, tipping the pfc=4 queueing knee into shed-runaway
-# and an origin ejection cascade on otherwise-clean code: a GOAMD64=v3
-# rebuild of plain 0.5.28 collapsed where the shipped v1 build holds
-# 5-for-5. fasthttp and xxhash SIMD paths are runtime CPU-dispatched,
-# so v1 loses nothing there, and the bench-gate runner builds at
-# baseline: images must match it or the gate never covers what ships.
-# Each variable is only consulted when it matches TARGETARCH. Override
-# with --build-arg after re-validating on the target fleet.
+# + CRC32; every arm64 server core since Graviton2). GOAMD64 stays at
+# v1: fc70d762's v3 cost ~45% peer-RPC hold-time at identical CPU per
+# request and tipped the pfc=4 knee into collapse on clean code
+# (0.5.29 release soaks; see ADR-0060). Each variable only applies
+# when it matches TARGETARCH. Override with --build-arg after
+# re-validating on the target fleet.
 ARG GOAMD64=v1
 ARG GOARM64=v8.1
 ARG VERSION=dev

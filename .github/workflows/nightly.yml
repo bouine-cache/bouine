@@ -277,11 +277,10 @@ jobs:
           for os_arch in "${platforms[@]}"; do
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
-            # Linux artifacts use the same microarchitecture floor as the
-            # container image (GOAMD64=v1, GOARM64=v8.1 - see the Dockerfile
-            # build stage; the amd64 v3 experiment of fc70d762 was reverted
-            # after the 0.5.29 stress soaks); darwin stays at baseline (mixed
-            # dev-laptop fleets).
+            # Linux artifacts match the container image's floor
+            # (GOAMD64=v1, GOARM64=v8.1 - see the Dockerfile; the amd64
+            # v3 experiment was reverted after the 0.5.29 soaks); darwin
+            # stays at baseline (mixed dev-laptop fleets).
             GO_MICRO=""
             if [ "${GOOS}/${GOARCH}" = "linux/arm64" ]; then
               GO_MICRO="GOARM64=v8.1"

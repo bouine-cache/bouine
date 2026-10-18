@@ -74,14 +74,9 @@ const (
 	shedDirectionFetch = "fetch"
 	shedDirectionPut   = "put"
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
-	// prevent memory blow-up during miss fan-out (issue #133). 16, not 4:
-	// slot capacity is slots ÷ RPC hold-time, and 3-node/6k-rps-class
-	// clusters ride the 4-slot queueing knee (the 0.5.29 release-soak
-	// filing showed a hold-time tail that 16 slots absorbs tips the
-	// 4-slot semaphore into shed-runaway and an origin ejection
-	// cascade). Each in-flight fetch still buffers up to
-	// maxPeerFetchBytes, so the worst case stays bounded by
-	// MaxPeerFetchConcurrency.
+	// prevent memory blow-up during miss fan-out (issue #133). 16, not
+	// 4: four slots sit at the queueing knee on 3-node/6k-class clusters
+	// (0.5.29 release-soak filing).
 	defaultPeerFetchConcurrency = 16
 	// peerFetchWaitTimeout bounds how long a fetch or put waits for a
 	// semaphore slot before shedding with ErrPeerFetchShed — the peer

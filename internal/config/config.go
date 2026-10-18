@@ -402,11 +402,10 @@ type Cluster struct {
 	// PeerFetchConcurrency bounds concurrent peer-fetch and peer-put
 	// RPCs per node. The semaphore prevents memory blow-up during miss
 	// fan-out (issue #133). Under strong-mode cluster traffic where most
-	// hits are peer hits (non-owner pods fetch from the key owner), the
-	// default of 16 keeps the semaphore off the queueing knee: a 4-slot
-	// default measurably sat at it on 3-node/6k-rps-class clusters
-	// (0.5.29 release-soak filing), queueing requests behind in-flight
-	// fetches and adding tail latency. Raise together with
+	// hits are peer hits (non-owner pods fetch from the key owner), too
+	// small a value queues requests behind in-flight fetches and adds
+	// tail latency; the default of 16 keeps the semaphore off the
+	// queueing knee (0.5.29 release-soak filing). Raise together with
 	// peer_max_conns_per_host so the pipeline clients stay the binding
 	// constraint. Zero applies the default (16); negative values and
 	// values above 128 are rejected by validatePeerFetchConfig.

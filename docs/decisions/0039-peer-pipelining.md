@@ -40,9 +40,9 @@ Two new config fields under `cluster:`:
 - `peer_max_idle_conn_duration` (default 120s) — idle timeout for
   peer connections.
 
-A third field, `peer_fetch_concurrency` (default 16, max 128; raised from
-4 after the 0.5.29 release-soak filing showed the 4-slot default sitting
-at the queueing knee on 3-node/6k-rps-class clusters), bounds the
+A third field, `peer_fetch_concurrency` (default 16, max 128; raised
+from 4 after the 0.5.29 soaks showed 4 slots at the queueing knee),
+bounds the
 fetch/put semaphore on top of the pipeline clients. It exists separately
 because the semaphore caps in-flight RPCs across all peers combined
 (memory-blow-up guard, issue #133), while the pipeline clients cap

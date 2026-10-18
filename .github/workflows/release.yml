@@ -44,12 +44,11 @@ jobs:
           for os_arch in "${platforms[@]}"; do
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
-            # Linux release artifacts are built at the same microarchitecture
-            # floor as the container image (GOAMD64=v1, GOARM64=v8.1 - see the
-            # Dockerfile build stage; the amd64 v3 experiment of fc70d762 was
-            # reverted after the 0.5.29 stress soaks). Darwin binaries stay at
-            # the baseline: they run on dev laptops with mixed, sometimes
-            # pre-2014 CPUs, and performance there is not the product.
+            # Linux release artifacts match the container image's
+            # microarchitecture floor (GOAMD64=v1, GOARM64=v8.1 - see the
+            # Dockerfile; the amd64 v3 experiment was reverted after the
+            # 0.5.29 soaks). Darwin binaries stay at baseline: dev laptops
+            # have mixed, sometimes pre-2014 CPUs.
             GO_MICRO=""
             if [ "${GOOS}/${GOARCH}" = "linux/arm64" ]; then
               GO_MICRO="GOARM64=v8.1"

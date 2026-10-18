@@ -45,10 +45,9 @@ jobs:
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
             # Linux release artifacts match the container image's
-            # microarchitecture floor (GOAMD64=v1, GOARM64=v8.1 - see the
-            # Dockerfile; the amd64 v3 experiment was reverted after the
-            # 0.5.29 soaks). Darwin binaries stay at baseline: dev laptops
-            # have mixed, sometimes pre-2014 CPUs.
+            # microarchitecture floor (GOAMD64=v1, GOARM64=v8.1 - see
+            # the Dockerfile and ADR-0060). Darwin binaries stay at
+            # baseline: dev laptops have mixed, sometimes pre-2014 CPUs.
             GO_MICRO=""
             if [ "${GOOS}/${GOARCH}" = "linux/arm64" ]; then
               GO_MICRO="GOARM64=v8.1"

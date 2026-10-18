@@ -11,11 +11,10 @@ ARG TARGETOS
 ARG TARGETARCH
 # Microarchitecture floors for release images. GOARM64=v8.1 (LSE atomics
 # + CRC32; every arm64 server core since Graviton2). GOAMD64 stays at
-# v1: fc70d762's v3 cost ~45% peer-RPC hold-time at identical CPU per
-# request and tipped the pfc=4 knee into collapse on clean code
-# (0.5.29 release soaks; see ADR-0060). Each variable only applies
-# when it matches TARGETARCH. Override with --build-arg after
-# re-validating on the target fleet.
+# v1: v3 measurably degrades peer-RPC hold-time with no offsetting
+# gain (ADR-0060). Each variable only applies when it matches
+# TARGETARCH. Override with --build-arg after re-validating on the
+# target fleet.
 ARG GOAMD64=v1
 ARG GOARM64=v8.1
 ARG VERSION=dev

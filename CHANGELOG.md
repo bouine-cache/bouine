@@ -10,6 +10,19 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Observability
+
+- **Cache-layer log records now carry `upstream_pool` and `route`
+  structured metadata.** Every warn/error/info/debug record emitted by
+  the cache handler (vary cap exceeded, vary drift, cache lookup
+  error, stayin-alive stale serving, streaming copy errors, peer
+  fetch fallbacks) is attributed to the route and upstream pool that
+  produced it, so operators no longer have to correlate a bare
+  `primary_key` back to a route by hand. `upstream_pool` follows the
+  metrics label conventions: the configured pool name, or `_default`
+  for pool-less routes (e.g. static files), keeping log records
+  joinable with the `bouine_requests_total` series.
+
 ## [0.5.29] - 2026-10-19
 
 ### Performance

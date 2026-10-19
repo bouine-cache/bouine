@@ -1337,6 +1337,19 @@ func (h *Handler) RouteName() string {
 	return h.routeName
 }
 
+// logUpstreamPool returns the upstream_pool attribution stamped on
+// handler log records: the route's pool name, falling back to
+// "_default" for pool-less routes (e.g. static files) — the same
+// fallback the metrics middleware applies to the upstream_pool label
+// (internal/server/router.go), so log records stay joinable with the
+// bouine_requests_total series.
+func (h *Handler) logUpstreamPool() string {
+	if h.poolName != "" {
+		return h.poolName
+	}
+	return "_default"
+}
+
 // KeyPolicy returns the route's compiled cache key policy, or nil when
 // the route has none. The engine uses it to rebuild keys from raw URLs
 // in the admin plane (purge/refresh/cachecheck): those surfaces must
@@ -1584,6 +1597,7 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 			h.onPeerVariantMismatch()
 		}
 		h.logger.Debug("peer fetch returned a foreign variant for this request",
+			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
 			"peer_vary_key", peerObj.VaryKey)
 		return false
@@ -1671,6 +1685,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 				}
 			} else if err != nil {
 				h.logger.Debug("peer fetch error, falling back to origin",
+					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 					"peer", owner.Addr, "key", lookupKey, "error", err)
 			}
 		}
@@ -1697,7 +1712,9 @@ func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKe
 	primaryKey = h.buildKey(ctx)
 	obj, src, err := h.store.Get(ctx, primaryKey)
 	if err != nil {
-		h.logger.Warn("cache lookup error", "key", primaryKey, "error", err)
+		h.logger.Warn("cache lookup error",
+			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+			"key", primaryKey, "error", err)
 	}
 	if obj == nil || obj.VaryValue == "" {
 		return primaryKey, primaryKey, obj, src
@@ -2278,12 +2295,14 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 			// shed counter (incremented at the shed point) carries the
 			// signal; keep this at Debug so a shed storm cannot INFO-spam.
 			h.logger.Debug("stayin-alive: fetch wait timeout, serving stale",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 				"key", lookupKey)
 			// Stale protects this client, but the shed must not be a lost
 			// refill: schedule the bounded background re-warm.
 			h.triggerShedRefill(ri, lookupKey)
 		} else {
 			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 				"error", res.Err, "key", lookupKey)
 		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
@@ -2291,6 +2310,7 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
+			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 			"status", res.StatusCode, "key", lookupKey)
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
@@ -2356,9 +2376,11 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	if h.stayinAlive && (res.Err != nil || res.StatusCode >= 500) {
 		if res.Err != nil {
 			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 				"error", res.Err, "key", stale.Key)
 		} else {
 			h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 				"status", res.StatusCode, "key", stale.Key)
 		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
@@ -2791,6 +2813,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 		return true
 	}
 	h.logger.Warn("vary cap exceeded, skipping variant storage",
+		"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 		"primary_key", primaryKey, "cap", h.maxVariants)
 	if h.VaryCapHits != nil {
 		h.VaryCapHits.Inc()
@@ -2852,6 +2875,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
+			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 			"key", h.buildKey(ctx), "limit", h.maxResponseBytes)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))

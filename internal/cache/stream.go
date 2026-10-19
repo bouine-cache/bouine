@@ -331,7 +331,9 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	bodyStream := sf.resp.BodyStream()
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
 		if writeErr := streamCopyFlush(w, bodyStream); writeErr != nil {
-			h.logger.Debug("stream bypass: body copy error", "error", writeErr)
+			h.logger.Debug("stream bypass: body copy error",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+				"error", writeErr)
 		}
 		releaseStreamFetch(sf)
 	})
@@ -1048,7 +1050,9 @@ func (h *Handler) streamMissNoCache(ctx *fasthttp.RequestCtx, sf *streamFetchRes
 	bodyStream := sf.resp.BodyStream()
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
 		if writeErr := streamCopyFlush(w, bodyStream); writeErr != nil {
-			h.logger.Debug("stream miss: body copy error (no cache)", "error", writeErr)
+			h.logger.Debug("stream miss: body copy error (no cache)",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+				"error", writeErr)
 		}
 		releaseStreamFetch(sf)
 	})

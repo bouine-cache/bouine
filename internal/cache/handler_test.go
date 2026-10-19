@@ -1202,6 +1202,68 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	require.Equal(t, 1, hitCount)
 }
 
+// TestVaryCapWarnLogAttribution pins the structured attribution on the
+// vary-cap warn record: operators triaging "vary cap exceeded" logs
+// need to know which pool and route the cap hit belongs to. The
+// upstream_pool value must match the metrics label conventions — the
+// configured pool name, or "_default" for pool-less routes — so log
+// records stay joinable with bouine_requests_total.
+func TestVaryCapWarnLogAttribution(t *testing.T) {
+	t.Parallel()
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
+
+	fillAndOverflow := func(h *Handler) {
+		for i := range h.maxVariants {
+			req := testCtx("GET", "http://example.com/vary")
+			req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
+			h.ServeRequest(req)
+		}
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", "overflow")
+		h.ServeRequest(req)
+	}
+
+	t.Run("named pool and route", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		h := NewHandler(HandlerConfig{
+			Upstream:    orig,
+			FastClient:  &testFastClient{handler: orig},
+			Store:       storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20}),
+			Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+			MaxVariants: 2,
+			PoolName:    "app",
+			RouteName:   "api",
+		})
+		fillAndOverflow(h)
+		logs := buf.String()
+		require.Contains(t, logs, "vary cap exceeded, skipping variant storage")
+		assert.Contains(t, logs, "upstream_pool=app")
+		assert.Contains(t, logs, "route=api")
+	})
+
+	t.Run("pool-less route falls back to _default", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		h := NewHandler(HandlerConfig{
+			Upstream:    orig,
+			FastClient:  &testFastClient{handler: orig},
+			Store:       storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20}),
+			Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+			MaxVariants: 2,
+		})
+		fillAndOverflow(h)
+		logs := buf.String()
+		require.Contains(t, logs, "vary cap exceeded, skipping variant storage")
+		assert.Contains(t, logs, "upstream_pool=_default")
+	})
+}
+
 func TestMaxVariants_CustomCapPerRoute(t *testing.T) {
 	t.Parallel()
 	hitCount := 0

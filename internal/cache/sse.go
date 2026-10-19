@@ -120,7 +120,9 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
 		err := streamCopyFlush(w, bodyStream)
 		if err != nil {
-			h.logger.Debug("sse stream: body copy error", "error", err)
+			h.logger.Debug("sse stream: body copy error",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+				"error", err)
 		}
 		releaseStreamFetch(sf)
 	})

@@ -107,6 +107,7 @@ func (h *Handler) detectVaryDrift(ctx context.Context, stale *api.Object, ri Req
 	}
 	if h.logger != nil {
 		h.logger.Warn("vary drift: origin declaration changed since store, purging resolver and variants",
+			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 			"key", primaryKey.Hex(),
 			"stored_vary", stale.VaryValue,
 			"fresh_vary", freshVary)

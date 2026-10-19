@@ -1,7 +1,7 @@
 # Downstream Freshness Sync — Synthesized `CDN-Cache-Control`
 
 - **Status**: Proposed (design approved in review session, 2026-10-16)
-- **ADR**: [ADR-0060](../decisions/0060-downstream-freshness-sync.md) — context, rationale, rejected alternatives, behavior matrix
+- **ADR**: [ADR-0063](../decisions/0063-downstream-freshness-sync.md) — context, rationale, rejected alternatives, behavior matrix
 - **Related**: [ADR-0011](../decisions/0011-ttl-override-per-route.md) (ttl_override header
   passthrough), [ADR-0022](../decisions/0022-refresh-persist-cycles.md) (downstream-stale
   concern), [ADR-0009 §8](../decisions/0009-cache-state-machine-hardening.md) (CDC parsing
@@ -9,8 +9,8 @@
 
 ## 1. Problem
 
-`popularity-stats` runs behind Cloudflare: bouine TTL = 1h,
-`stale_while_revalidate` = 10m; ~30% of CSR traffic is served STALE.
+`api-stats` runs behind Cloudflare: bouine TTL = 1h,
+`stale_while_revalidate` = 10m; ~30% of the route's traffic is served STALE.
 
 Cloudflare behaviors (verified against published docs, 2026-10):
 
@@ -47,7 +47,7 @@ SWR); `Age` emission changes.
 | D3 | Header + config | **`CDN-Cache-Control`** (RFC 9213); per-route `downstream_freshness: passthrough \| sync` |
 | D4 | Fill (MISS) serves | **min() rule**: `max-age=min(origin effective max-age, bouine final TTL)` |
 
-Rationale and rejected alternatives: ADR-0060.
+Rationale and rejected alternatives: ADR-0063.
 
 ## 4. Behavior Specification
 
@@ -56,7 +56,10 @@ Modes differ only in downstream-facing headers; status, body, `Age`,
 origin CDC-family lines forwarded. `sync`: the §4.1 cap is synthesized.
 
 Per-scenario comparison (all serve classes × both modes, end-user
-ceilings): [ADR-0060 "Behavior matrix"](../decisions/0060-downstream-freshness-sync.md#behavior-matrix).
+ceilings): [ADR-0063 "Behavior matrix"](../decisions/0063-downstream-freshness-sync.md#behavior-matrix).
+Per-downstream-CDN behavior (Cloudflare vs Fastly vs bunny.net — which
+TTL input each honors, `Age` handling, SWR/SIE support, what `sync`
+achieves): [ADR-0063 "Downstream portability"](../decisions/0063-downstream-freshness-sync.md#downstream-portability-fastly-bunnynet).
 The I8 stale-304 trigger (§4.2) fires in **both** modes.
 
 ### 4.1 Synthesis formula (`downstream_freshness: sync`)
@@ -81,7 +84,7 @@ Serve classes carrying the formula:
 | Downstream 304 | same cap as the corresponding 200 serve + `Warning: 110` when stale-sourced (RFC 9111 §4.3.4) |
 | Range (206) from cache | cap rides along (like `Warning: 110`) |
 | Fill / MISS (buffered + streaming) | `public, max-age=min(origin effective max-age, bouine final TTL)` + origin qualitative directives (I2); storable `no-cache` responses → `public, no-cache` (I2) |
-| BYPASS / uncacheable | passthrough — nothing stored |
+| BYPASS / uncacheable-to-shared (`private`, `no-store`, `Vary: *`, Set-Cookie-blocked, unauthorized) | no synthesis — nothing is stored, and a synthesized `public` line must never override an origin privacy marker at a shared downstream cache (RFC 9111 §5.2.2.5, §5.2.2.7) |
 
 `Age`, `X-Cache`, `X-Cache-Source`, `Warning` behavior unchanged.
 
@@ -91,7 +94,9 @@ Serve classes carrying the formula:
   (ADR-0011), every serve class, both modes.
 - **I2** — CDC = origin qualitative directives + bouine numeric clock:
   `must-revalidate` / `proxy-revalidate` preserved; `no-store`/`private`
-  never stored. `no-cache` objects ARE stored
+  never stored (`internal/cache/cacheable.go:233-240`) — and therefore
+  never synthesized, on any serve class incl. fills (fill-class
+  carve-out above). `no-cache` objects ARE stored
   (`internal/cache/cacheable.go:24`) and served REVALIDATED
   (`internal/cache/engine.go:141`) — synthesis `public, no-cache`, never
   a numeric clock (RFC 9111 §5.2.2.4). `public` always present (CF: with
@@ -192,7 +197,9 @@ the default-off config, independently mergeable.
 - Unit matrix (table-driven, same package): each serve class × mode ×
   {override longer, override shorter, SWR, SIE, soft purge, heuristic,
   no-freshness origin, error fill, Date-less object, stored no-cache
-  object (incl. its fill), stayin-alive grace serve, `max-stale`-authorized
+  object (incl. its fill), **uncacheable-to-shared fills (`private`,
+  `no-store`): no CDC synthesized, `Cache-Control` forwarded
+  byte-for-byte**, stayin-alive grace serve, `max-stale`-authorized
   serve} — assert exact CDC bytes, `Cache-Control` untouched, `Age`
   unchanged.
 - 304 cap tests (stale ETag match → 304 carries mirror cap + `Warning:
@@ -207,7 +214,7 @@ the default-off config, independently mergeable.
 
 ### P6 — Docs and ops
 
-- ADR-0060 (accompanies this plan).
+- ADR-0063 (accompanies this plan).
 - `docs/architecture.md`: L3 row feature-list addition only (not exit
   criteria).
 - Runbook (new `docs/runbook/58-downstream-freshness-sync.md`): zone Cache
@@ -215,7 +222,10 @@ the default-off config, independently mergeable.
   `set_cache_control` override CDC (cap voided); **Always Online** ignores
   `swr`/SIE (mirror → strict); Browser Cache TTL rules govern the eyeball
   TTL independently; verification via `CF-Cache-Status` (expect `UPDATING`
-  during bouine's SWR window) and direct curl against bouine.
+  during bouine's SWR window) and direct curl against bouine; per-CDN
+  portability notes from ADR-0063 (Fastly `Age`-subtraction residual under
+  `ttl_override`, bunny.net CDC-blindness and its "Override Cache Time"
+  Edge Rules).
 - `CHANGELOG.md` entry under `## [Unreleased]`.
 - Dashboard: route config panel surfaces `downstream_freshness` (templ
   regen committed alongside `_templ.go`, AGENTS.md §4).
@@ -239,6 +249,7 @@ Hit-path allocs/op unchanged — enforced via `BUDGETS`.
 | CF keeps pre-purge content ≤ 1 reval cycle after soft purge | Documented (D2); hard purge / CF API purge for immediate semantics |
 | Origin outage during grace: CF-side visitors pay a sync reval RTT per request | Bouine serves stale from the grace store; self-heals via I8 |
 | CDC + `Authorization` → CF BYPASS without `public` | I2 always emits `public` |
+| Non-CF downstreams: Fastly caps at the origin's clock (`Age` subtraction, CDC inert); bunny.net ignores CDC-family entirely | Documented in ADR-0063 "Downstream portability"; runbook covers zone-side mitigations; `sync` degrades to inert, never unsafe |
 
 ## 8. Open Questions
 

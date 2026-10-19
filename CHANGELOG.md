@@ -293,7 +293,10 @@ the curated, human-readable summary.
   ADR-0062 — ADR-0047 (`traffic_class` metric label) keeps it for the
   same reason. The `docs/decisions/README.md` index now lists every ADR
   file exactly once; both renumbered files carry a Renumbered note
-  resolving the stale references in already-released entries.
+  resolving the stale references in already-released entries. The
+  downstream freshness sync ADR (this PR) takes number **0063** —
+  ADR-0060 belongs to profile-guided optimization, whose number is
+  baked into build-workflow and runbook comments on main.
 
 ### Fixed
 

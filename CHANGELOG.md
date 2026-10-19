@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.29] - 2026-10-19
+
 ### Performance
 
 - **The peer variant check no longer allocates.** When a peer answers
@@ -2634,7 +2636,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.28...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.29...HEAD
+[0.5.29]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.29
 [0.5.28]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.28
 [0.5.27]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.27
 [0.5.26]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.26

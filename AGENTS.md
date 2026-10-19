@@ -399,6 +399,12 @@ Observability is a product feature, not an afterthought.
 - VCL shim is deferred (`internal/vcl` does not exist yet); when it lands
   it will support the subset defined in `docs/architecture.md` §16 item 4.
   Unsupported constructs are reported, never silently ignored.
+- Per-route `downstream_freshness` (`passthrough` | `sync`, default
+  `passthrough`) caps downstream CDN freshness by synthesizing
+  `CDN-Cache-Control` (RFC 9213) — `Cache-Control` is never mutated
+  (ADR-0011). Investigate chain-TTL behavior there, not here: ADR-0063
+  holds the behavior matrix, the per-CDN portability table (Cloudflare,
+  Fastly, bunny.net) and the ceiling math.
 - The Go SDK (`pkg/bouineapi`) follows semver. Wire types in `pkg/api` are
   additive — add fields, never remove or rename in the same major.
 - Feature flags for experimental work live under `experimental:` in
@@ -635,6 +641,11 @@ substitutes.
   system; performance gates are strictest here.
 - **Miss path** — request not in cache; fetches from peer or origin.
 - **SWR / SIE** — `stale-while-revalidate` / `stale-if-error` (RFC 5861).
+- **Downstream freshness sync** — per-route `downstream_freshness` mode
+  (`passthrough` | `sync`, default `passthrough`) synthesizing
+  `CDN-Cache-Control` (RFC 9213) so a downstream CDN's clock cannot
+  outlive bouine's; see ADR-0063 (behavior matrix, per-CDN portability,
+  ceiling math).
 - **Surrogate key** — opaque label attached to a response for grouped
   invalidation.
 - **Ban** — predicate-based invalidation, evaluated lazily on lookup.

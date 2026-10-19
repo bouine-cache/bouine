@@ -1,16 +1,19 @@
-# ADR-0060: Downstream freshness sync via synthesized CDN-Cache-Control
+# ADR-0063: Downstream freshness sync via synthesized CDN-Cache-Control
 
 - **Status**: Accepted
 - **Date**: 2026-10-16
+- **Renumbered**: 2026-10-20, from ADR-0060 — duplicate number; ADR-0060
+  (profile-guided optimization) keeps it, as its number is baked into
+  build-workflow, Dockerfile and runbook comments on main
 - **Deciders**: product + data-plane review session
 - **Plan**: [docs/plans/downstream-freshness-sync.md](../plans/downstream-freshness-sync.md)
 
 ## Context
 
-Bouine sits behind Cloudflare on routes like `popularity-stats` (bouine TTL
-1h, `stale_while_revalidate` 10m, ~30% of CSR traffic served stale during
-background revalidation). Three verified Cloudflare behaviors create a TTL
-amplification chain:
+Bouine sits behind Cloudflare on routes like `api-stats` (bouine TTL
+1h, `stale_while_revalidate` 10m, ~30% of the route's traffic served stale
+during background revalidation). Three verified Cloudflare behaviors create a
+TTL amplification chain:
 
 1. CF **resets its own `Age` clock** on every admit/revalidation — bouine's
    RFC 9111 §4.2.3-correct `Age` on serves is discarded downstream.
@@ -24,7 +27,7 @@ amplification chain:
 
 Net effect: CF re-admits bouine's stale serves as fresh for CF's own TTL —
 an end-user ceiling of bouine TTL + SWR + CF TTL (~2h10 on
-popularity-stats), and ~2h even without SWR from fresh re-aging alone.
+`api-stats`), and ~2h even without SWR from fresh re-aging alone.
 ADR-0011 guarantees byte-for-byte `Cache-Control` passthrough, so no
 existing knob addresses this. ADR-0022 noted the general problem and rejected
 `Warning: 110`-reliance because it "depends on downstream behavior"; this
@@ -134,14 +137,62 @@ behavior; `sync` is the synthesized cap:
 | Downstream 304 | uncapped | same cap as the corresponding 200 serve + `Warning: 110` when stale-sourced (points 5–6) |
 | Range (206) from cache | passthrough | cap rides along (like `Warning: 110`) |
 | BYPASS / uncacheable | passthrough | passthrough — no bouine clock exists |
+| Uncacheable-to-shared (`private`, `no-store`, `Vary: *`, Set-Cookie-blocked, unauthorized) — serves **and fills** | passthrough — never stored (`internal/cache/cacheable.go:233-240`) | passthrough — never stored, and no synthesized `public` line: a synthesized CDC must never override an origin privacy marker at a shared downstream cache (RFC 9111 §5.2.2.5, §5.2.2.7) |
 | Origin CDC-family / `Surrogate-Control` lines | forwarded as today | **replaced** — synthesis is authoritative |
-| End-user content age | TTL + SWR + CF TTL (~2h10 on popularity-stats) | TTL + SWR + one revalidation cycle (~1h10) |
+| End-user content age | TTL + SWR + CF TTL (~2h10 on `api-stats`) | TTL + SWR + one revalidation cycle (~1h10) |
 
 Holds identically in both modes: `Cache-Control` and browser TTLs
 untouched (I1), `Age`/`X-Cache`/`Warning` behavior unchanged, synthesized
 CDC never flows peer-ward (I5). The I8 stale-304 trigger fires in both
 modes — `sync` depends on it, `passthrough` gets the pre-existing hole
-fixed.
+fixed. `private`/`no-store` responses are never stored
+(`internal/cache/cacheable.go:233-240`) and therefore never reach
+synthesis in either mode — the fill-serve carve-out exists so the min()
+rule can never mint a `public` CDC line for content the origin marked
+uncacheable-to-shared.
+
+## Downstream portability (Fastly, bunny.net)
+
+`CDN-Cache-Control` was chosen because RFC 9213 is the portable contract,
+but what a downstream CDN actually honors differs per vendor. Verified
+against published docs (2026-10); Akamai out of scope.
+
+| | Cloudflare | Fastly | bunny.net |
+|---|---|---|---|
+| TTL input (precedence) | `Cloudflare-CDN-Cache-Control` > `CDN-Cache-Control` > `Cache-Control` | `Surrogate-Control: max-age` > `s-maxage` > `max-age` > `Expires`; CDC-family not in the documented precedence | `Cache-Control` / `Expires` + zone Cache Expiration / "Override Cache Time" Edge Rules; CDC-family not documented |
+| Upstream `Age` | discarded — clock resets on every admit | **subtracted** from `max-age` (floor 0; `Expires`-derived TTL exempt) | not documented — presumed discarded |
+| `stale-while-revalidate` | async `UPDATING`, from CDC | async bg revalidation, from `Surrogate-Control` / `Cache-Control` | not supported — expiry is a blocking origin fetch |
+| `stale-if-error` | honored (Always Online caveat) | honored, from `Surrogate-Control` / `Cache-Control` | not supported |
+| `private` / `no-store` | BYPASS (OCC off) | `return(pass)` — never stored | not cached ("cacheable headers" gate; Smart Cache excludes `text/html`, `application/json`) |
+
+What `sync` achieves per vendor:
+
+- **Cloudflare** — the design target: the full cap of the matrix above.
+- **Fastly** — the synthesized CDC is inert: `CDN-Cache-Control` is
+  absent from Fastly's documented TTL precedence, and I3 replaces the
+  `Surrogate-Control` line Fastly *would* read. The cap instead rides
+  Fastly's native `Age` subtraction — entry TTL = `max-age − Age`,
+  i.e. the **origin's** clock, not bouine's wall. The two agree whenever
+  bouine's final TTL equals the origin's effective max-age (no
+  override); with `ttl_override` tighter than the origin, Fastly
+  overshoots by the difference, bounded by one origin max-age per admit
+  and re-aged on Fastly's own 304 revalidations (they reset `Age`).
+  Stale serves do not amplify at Fastly: `Age ≥ max-age` ⇒ TTL 0 ⇒
+  blocking revalidation — the mirror degrades to strict, never unsafe.
+- **bunny.net** — CDC-family headers are not part of bunny's documented
+  behavior: `sync` is inert. Entry TTL comes from the un-mutated
+  `Cache-Control`, `Age` is not accounted for, and expiry is a blocking
+  re-fetch — so the fresh-serve amplifier persists whenever bouine TTL <
+  origin max-age. Capping at bunny requires either `Cache-Control`
+  mutation (rejected, ADR-0011) or zone-side controls ("Override Cache
+  Time" Edge Rules — the operator escape hatch). The
+  `downstream_freshness` enum (D3) leaves room for a future
+  vendor-specific value rather than a new bool.
+
+Net: `sync` is never *wrong* downstream — worst case inert — and the
+per-vendor ceilings and mitigations belong in the runbook, not in code.
+A chain that puts a second CDN behind Cloudflare should treat CF as the
+capped hop and document the second hop's contract explicitly.
 
 ## Rejected Alternatives
 
@@ -166,7 +217,7 @@ fixed.
 
 ### Positive
 
-- Opt-in routes cap the chain at bouine's clock; popularity-stats ceiling
+- Opt-in routes cap the chain at bouine's clock; the `api-stats` ceiling
   drops ~2h10 → ~1h10 with zero added visitor latency during stale windows.
 - ADR-0011's use case (bouine longer than downstream) composes cleanly via
   the min() rule.
@@ -201,6 +252,17 @@ fixed.
   "CDN-Cache-Control" (precedence; Expires ignored; Surrogate-Control),
   "Origin Cache Control" (Always Online ignores swr/SIE; OCC mode
   behavior), "Revalidation" (asynchronous UPDATING model).
+- Fastly docs: "HTTP caching semantics" (TTL precedence:
+  Surrogate-Control > s-maxage > max-age > Expires; `Age` subtracted
+  from max-age; `private` → pass; `Surrogate-Control` stripped
+  client-side), "Lifetime and revalidation" (SWR/SIE from
+  Surrogate-Control/Cache-Control; 304 extends lifetime and resets
+  `Age`).
+- bunny.net docs: "Smart Cache" (cacheable-headers gate; excluded MIME
+  types), "Custom Cache Time for File Extensions" ("Override Cache
+  Time" / "Override Browser Cache Time" Edge Rules), "Does BunnyCDN
+  automatically detect when a file is changed?" (expiry-driven
+  re-fetch).
 - [ADR-0011](0011-ttl-override-per-route.md), [ADR-0009](0009-cache-state-machine-hardening.md) §8,
   [ADR-0022](0022-refresh-persist-cycles.md).
 - Code anchors: `internal/cache/handler.go` — `serveObject`, `buildObject`,

@@ -94,8 +94,34 @@ func TestHandler_NoCacheWithETag_RevalidatesOnUse(t *testing.T) {
 // requests and answers a conditional request per notModified: 304 when
 // the received If-None-Match list contains the stored ETag (true), or a
 // full 200 with the new variant body (false) — the representation
-// changed. It records the observed INM and Abc values.
+// changed. The 304 carries no ETag — RFC 9110 §15.4.5 says a 304 SHOULD
+// carry it, and plenty of origins and intermediary proxies do not —
+// which is exactly the ambiguity the guards resolve. It records the
+// observed INM and Abc values.
 func varyMissUpstream(notModified bool, originINM, originAbc *[]string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		*originAbc = append(*originAbc, string(ctx.Request.Header.Peek("Abc")))
+		ctx.Response.Header.Set(header.Vary, "Abc")
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 {
+			*originINM = append(*originINM, string(inm))
+			if notModified && strings.Contains(string(inm), `"v1"`) {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
+				return
+			}
+		}
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body-" + string(ctx.Request.Header.Peek("Abc")))
+	}
+}
+
+// varyMissNamed304Upstream serves a Vary: Abc origin whose current
+// representation for every request is the one tagged current: a 304
+// answering an If-None-Match list names it explicitly (RFC 9110
+// §15.4.5 — the 304 carries the selected representation's ETag).
+// It records the observed If-None-Match and Abc values.
+func varyMissNamed304Upstream(current string, originINM, originAbc *[]string) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		*originAbc = append(*originAbc, string(ctx.Request.Header.Peek("Abc")))
 		ctx.Response.Header.Set(header.Vary, "Abc")
@@ -103,7 +129,8 @@ func varyMissUpstream(notModified bool, originINM, originAbc *[]string) fasthttp
 		ctx.Response.Header.Set(header.ETag, `"v1"`)
 		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 {
 			*originINM = append(*originINM, string(inm))
-			if notModified && strings.Contains(string(inm), `"v1"`) {
+			if strings.Contains(string(inm), current) {
+				ctx.Response.Header.Set(header.ETag, current)
 				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
@@ -175,13 +202,17 @@ func TestHandler_VaryMiss_FullResponseFillsVariant(t *testing.T) {
 	require.Equal(t, "body-456", respBody(r3))
 }
 
-// TestHandler_VaryMiss_UnionsClientIfNoneMatch pins the RFC 9111 §4.3.1
-// MAY-combine clause: a client that brings its own If-None-Match list on
-// a vary-mismatch request gets the union with the stored resolver's
-// entity-tag, not a replacement. The origin validates the union and
-// answers 304 (the stored tag is in the list); the client's own tag does
-// not match, so it still receives the full 200.
-func TestHandler_VaryMiss_UnionsClientIfNoneMatch(t *testing.T) {
+// TestHandler_VaryMiss_Ambiguous304FallsBackToFill pins the union
+// clause plus its ambiguity guard: a client that brings its own
+// If-None-Match list on a vary-mismatch request gets the union with
+// the stored resolver's entity-tag (RFC 9111 §4.3.1's MAY-combine
+// clause), but when the origin's 304 does not name which tag matched
+// (no ETag — RFC 9110 §13.1.2 allows a 304 when ANY listed tag
+// matches), the client's own tag may be the current representation
+// for this variant. Nothing about the stored resolver's body is
+// proven, so the attempt falls back to the ordinary unconditional
+// fill, whose origin answer is authoritative.
+func TestHandler_VaryMiss_Ambiguous304FallsBackToFill(t *testing.T) {
 	t.Parallel()
 	var originINM []string
 	var originAbc []string
@@ -196,23 +227,26 @@ func TestHandler_VaryMiss_UnionsClientIfNoneMatch(t *testing.T) {
 	r2.Request.Header.Set("Abc", "456")
 	r2.Request.Header.Set(header.IfNoneMatch, `"v9"`)
 	h.ServeRequest(r2)
-	require.Equal(t, []string{`"v9", "v1"`}, originINM,
-		"the client's list is unioned with the stored entity-tag")
+	require.Equal(t, []string{`"v9", "v1"`, `"v9"`}, originINM,
+		"the first fetch unions the client's list with the stored tag; the fallback refetch carries the client's own list")
 	require.Equal(t, 200, respCode(r2),
-		"the origin 304'd the union, but the client's own tag did not match, so it gets the full 200")
-	require.NotEqual(t, "", respBody(r2))
+		"the ambiguous 304 must not serve the stored resolver's body")
+	require.Equal(t, "body-456", respBody(r2),
+		"the unconditional fill serves this request's own variant content")
 }
 
 // TestHandler_VaryMiss_ClientConditionalGets304 pins the complement of
-// RFC 9111 §4.3.1's MUST-generate-200 clause: when the origin's 304
-// validates an entity-tag that IS in the client's own If-None-Match
-// list, the client receives its 304 — not a full re-serving of the
-// stored response.
+// RFC 9111 §4.3.2's MUST-generate-200 clause for the vary-miss path:
+// when the origin's 304 names the stored resolver's entity-tag (the
+// current representation for this request is the stored one) and that
+// tag is also in the client's own If-None-Match list, the client's
+// condition was validated and the client receives its 304 — in a
+// single origin round trip.
 func TestHandler_VaryMiss_ClientConditionalGets304(t *testing.T) {
 	t.Parallel()
 	var originINM []string
 	var originAbc []string
-	h := testHandler(t, varyMissUpstream(true, &originINM, &originAbc))
+	h := testHandler(t, varyMissNamed304Upstream(`"v1"`, &originINM, &originAbc))
 
 	r1 := testCtx("GET", "http://example.com/vary4")
 	r1.Request.Header.Set("Abc", "123")
@@ -224,10 +258,86 @@ func TestHandler_VaryMiss_ClientConditionalGets304(t *testing.T) {
 	r2.Request.Header.Set(header.IfNoneMatch, `"v1"`)
 	h.ServeRequest(r2)
 	require.Equal(t, []string{`"v1", "v1"`}, originINM,
-		"the client's matching tag is unioned with the stored one")
+		"the client's matching tag is unioned with the stored one, single fetch")
 	require.Equal(t, 304, respCode(r2),
 		"the origin validated the client's own tag, so the client gets its 304")
 	require.Equal(t, 0, len(r2.Response.Body()))
+}
+
+// TestHandler_VaryMiss_304NamesClientTag pins the cross-requester
+// guard: when the origin's 304 names the CLIENT's own entity-tag as
+// the current representation for this request (the stored resolver's
+// variant is not current), the client gets its 304 and the stored
+// resolver is left untouched. Adopting the 304's metadata into the
+// stored resolver would corrupt it — body from one variant, ETag
+// from another — and serve wrong content to every future variant
+// miss.
+func TestHandler_VaryMiss_304NamesClientTag(t *testing.T) {
+	t.Parallel()
+	var originINM []string
+	var originAbc []string
+	h := testHandler(t, varyMissNamed304Upstream(`"v0"`, &originINM, &originAbc))
+
+	r1 := testCtx("GET", "http://example.com/vary7")
+	r1.Request.Header.Set("Abc", "123")
+	h.ServeRequest(r1)
+	require.Equal(t, "body-123", respBody(r1))
+
+	r2 := testCtx("GET", "http://example.com/vary7")
+	r2.Request.Header.Set("Abc", "456")
+	r2.Request.Header.Set(header.IfNoneMatch, `"v0"`)
+	h.ServeRequest(r2)
+	require.Equal(t, []string{`"v0", "v1"`}, originINM,
+		"the client's list is unioned with the stored resolver's tag")
+	require.Equal(t, 304, respCode(r2),
+		"the origin named the client's own tag: its cached copy is current")
+	require.Equal(t, 0, len(r2.Response.Body()))
+
+	key := BuildKeyFast([]byte("GET"), []byte("/vary7"), []byte("example.com"), []byte("/vary7"), false, nil)
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj, "the stored resolver must survive")
+	require.Equal(t, `"v1"`, obj.ETag,
+		"the stored resolver's validator must not be overwritten by the client-tag 304")
+}
+
+// TestHandler_VaryMiss_304DoesNotFreshenResolver pins the §4.3.4 half
+// of the guard: the 304 was generated for a request whose Vary values
+// differ from the stored resolver's own variant, so the resolver's body
+// is served (RFC 9111 §4.3.2's reuse clause) but the STORED resolver is
+// never freshened — its freshness window must not be extended on the
+// strength of another requester's validation, during which the origin
+// may have rotated the resolver's own variant.
+func TestHandler_VaryMiss_304DoesNotFreshenResolver(t *testing.T) {
+	t.Parallel()
+	var originINM []string
+	var originAbc []string
+	h := testHandler(t, varyMissUpstream(true, &originINM, &originAbc))
+
+	r1 := testCtx("GET", "http://example.com/varynf")
+	r1.Request.Header.Set("Abc", "123")
+	h.ServeRequest(r1)
+	require.Equal(t, "body-123", respBody(r1))
+
+	expireStoredObject(t, h, "/varynf")
+	key := BuildKeyFast([]byte("GET"), []byte("/varynf"), []byte("example.com"), []byte("/varynf"), false, nil)
+	stored, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	expiredAt := stored.StoredAt.Add(stored.TTL)
+	require.True(t, expiredAt.Before(time.Now()), "precondition: the resolver is stale")
+
+	r2 := testCtx("GET", "http://example.com/varynf")
+	r2.Request.Header.Set("Abc", "456")
+	h.ServeRequest(r2)
+	require.Equal(t, 200, respCode(r2), "the resolver-validated 304 serves the stored body")
+	require.Equal(t, "body-123", respBody(r2))
+
+	after, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, after, "the stored resolver must survive the vary-miss 304")
+	require.Equal(t, expiredAt, after.StoredAt.Add(after.TTL),
+		"the stored resolver's expiry must be untouched — its own variant's freshness was never validated")
 }
 
 // TestHandler_VaryMiss_WildcardNotUnioned pins that a bare If-None-Match

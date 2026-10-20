@@ -55,8 +55,8 @@ the curated, human-readable summary.
   upstream.** RFC 9111 §4.3.1 allows a cache that cannot use a stored
   response (the request's `Vary` values differ) to still combine the
   stored entity-tag into the forwarded request — the origin then
-  either answers `304` (the stored representation is still current:
-  it is freshened and served as a `200`, or as a `304` when the
+  either answers `304` (the stored representation is proven current
+  for this request: it is served as a `200`, or as a `304` when the
   client's own conditional was among the validated tags, per the
   complement of the spec's MUST-generate-200 clause) or delivers the
   full response, which fills the request's variant as an ordinary
@@ -68,6 +68,17 @@ the curated, human-readable summary.
   Upstream errors fall back to the unconditional fill; the attempt is
   never singleflight-shared with plain misses (a follower would
   receive a `304` with no usable response in scope).
+  Cross-requester guards, hardened in review: the unioned list is
+  only trusted when the origin's `304` names the stored resolver's tag
+  (or the resolver's tag was the only condition sent upstream) — a
+  `304` that names the client's own tag answers the client with its
+  `304` and leaves the store untouched, and a `304` that names neither
+  falls back to the unconditional fill, because the stored body was
+  never proven current for this request. The served `304`-merged
+  response is also never re-stored: RFC 9111 §4.3.4 limits freshening
+  to stored responses that could have been chosen for the request, so
+  the resolver's own variant keeps its own freshness clock instead of
+  riding a window bought by a different requester's validation.
   Fixes the `cache-tests` `conditional-etag-vary-headers-mismatch`
   failure.
 

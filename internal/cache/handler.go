@@ -1505,7 +1505,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if tryConditional304Fast(ctx, disp.Object, src, h.rewriteHook()) {
+		if tryConditional304Fast(ctx, disp.Object, src, "HIT", h.rewriteHook()) {
 			return
 		}
 		// Range requests need the full RequestInfo for ServeRange.
@@ -2411,6 +2411,16 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		// old resolver even if the refreshed variant re-lands elsewhere.
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
+		// RFC 9111 §4.3.1 (validation model): a 304 from the origin means
+		// the stored response's conditionals are satisfied. The client's
+		// own conditional is evaluated against the freshened validators —
+		// the complement of the spec's rule that a 304 whose ETag is not
+		// in the client's If-None-Match list MUST produce a 200 for the
+		// client. A matching If-None-Match / If-Modified-Since therefore
+		// gets the 304 it asked for instead of a full re-served response.
+		if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
+			return
+		}
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}

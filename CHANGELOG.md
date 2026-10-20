@@ -22,6 +22,36 @@ the curated, human-readable summary.
   `X-Cache: REVALIDATED`. Closes the last `cache-tests` gap where
   Varnish scored higher than bouine (`conditional-lm-stale`).
 
+### Dependencies
+
+- **fasthttp v1.75.0 → v1.76.0: HTTP framing hardening with no hit-path
+  cost.** The data-plane HTTP stack gains fixes that align with our own
+  smuggling defenses (RFC 9110 §7.6.1): requests carrying both
+  `Content-Length` and `Transfer-Encoding` no longer reuse the
+  connection, outgoing messages synchronize raw `Content-Length` with
+  the body and reject conflicting framing headers, multipart epilogues
+  are drained before connection reuse, and rejected TLS connections no
+  longer stall the accept loop. Trailer parsing is no longer quadratic
+  in the number of trailer names (CPU-amplification fix).
+  `Accept-Encoding` now matches complete tokens and `Expect:
+  100-continue` matches case-insensitively, both of which tighten
+  upstream-conformance behavior. Verified locally: all zero-alloc
+  hit-path gate budgets hold (`Reactor_Hit`, `Handler_CacheHit_…`,
+  `H1Parse_Get`, `FastPath_*`) and ns/op on the hit path is unchanged
+  within noise on darwin/arm64.
+- **klauspost/compress v1.20.1 → v1.20.3: zstd decode security fix.**
+  v1.20.2 fixes a `DecodeAll` crash on specially crafted input
+  (GHSA-fpmh-frq8-7rj8) and tightens s2/dictionary input validation;
+  v1.20.3 speeds up zstd and huff0 encode/decode, mostly on arm64.
+  bouine does not import compress directly (it rides along with
+  fasthttp), so the fix is defense-in-depth for any compressed-body
+  handling below the cache.
+- Routine indirect refresh: `grpc-gateway` v2.32.0 (gateway header
+  spoofing and path-unescape fixes), `prometheus/common` v0.72.1,
+  `tidwall/gjson` v1.20.0, `molecule-man/go-brrr` v1.3.0,
+  `golang.org/x/{net,text}`, and `google.golang.org/genproto`
+  datestamps. `govulncheck` is clean on the refreshed graph.
+
 ### Observability
 
 - **Cache-layer log records now carry `upstream_pool` and `route`

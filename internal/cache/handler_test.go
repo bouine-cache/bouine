@@ -51,6 +51,45 @@ func testHandler(t *testing.T, upstream fasthttp.RequestHandler) *Handler {
 	})
 }
 
+// TestHandler_NoCacheWithETag_RevalidatesOnUse pins the cache-tests
+// cc-resp-no-cache-revalidate behavior: a response with Cache-Control:
+// no-cache and an ETag (no other freshness) is stored, and every reuse
+// revalidates conditionally (RFC 9111 §5.2.2.4 — no-cache requires
+// successful validation before reuse, storage stays permitted by §3).
+func TestHandler_NoCacheWithETag_RevalidatesOnUse(t *testing.T) {
+	t.Parallel()
+	var originINM []string
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 {
+			originINM = append(originINM, string(inm))
+			ctx.Response.Header.Set(header.CacheControl, "no-cache")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "no-cache")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body")
+	}
+	h := testHandler(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/nc")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "body", respBody(rr))
+
+	cr := testCtx("GET", "http://example.com/nc")
+	h.ServeRequest(cr)
+	require.Equal(t, 200, respCode(cr), "origin 304 refreshes the stored response for the client")
+	require.Equal(t, "REVALIDATED", respHeader(cr, header.XCache),
+		"no-cache responses must be revalidated before reuse, not served stale")
+	require.Equal(t, "body", respBody(cr))
+	require.Equal(t, []string{`"v1"`}, originINM,
+		"the revalidation must carry the stored validator")
+}
+
 func TestHandler_MissThenHit(t *testing.T) {
 	t.Parallel()
 	var originCalls int

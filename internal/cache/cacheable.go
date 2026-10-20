@@ -109,6 +109,17 @@ func IsCacheable(status int, reqHeader, respHeader header.Map, neg *StatusTTL) b
 		return true
 	}
 
+	// RFC 9111 §5.2.2.4: no-cache forbids reuse without successful
+	// validation, not storage (§3 permits storing the response). A
+	// validator-bearing no-cache response is therefore storable with a
+	// zero freshness lifetime — the engine's Revalidate decision sends
+	// the stored validator on every use. Restricted to heuristically
+	// cacheable statuses so origin errors are never silently cached by
+	// this branch; the negative-TTL policy still governs those.
+	if respCC.NoCache && respHeader.Get(header.ETag) != "" && isHeuristicStatus(status) {
+		return true
+	}
+
 	// Negative caching: cache error responses with a configured TTL.
 	if neg.Cacheable(status) {
 		return true
@@ -206,6 +217,12 @@ func (p *parsedResponse) isCacheable(neg *StatusTTL) bool {
 		if !p.hasCDN && isBlockedByPragma(p.respCC, p.respHeader) {
 			return false
 		}
+		return true
+	}
+	// Validator-bearing no-cache responses are storable with zero
+	// freshness — see the corresponding branch in IsCacheable (RFC 9111
+	// §5.2.2.4 / §3).
+	if p.respCC.NoCache && p.respHeader.Get(header.ETag) != "" && isHeuristicStatus(p.status) {
 		return true
 	}
 	return neg.Cacheable(p.status)

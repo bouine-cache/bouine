@@ -168,6 +168,35 @@ func TestParsedResponse_IsCacheable(t *testing.T) {
 		p := newParsedResponse(404, header.Map{}, h)
 		require.True(t, p.isCacheable(mustStatusTTL(t, map[string]time.Duration{"404": 30 * time.Second})))
 	})
+	t.Run("no_cache_with_etag_is_storable", func(t *testing.T) {
+		t.Parallel()
+		h := headerMap(header.CacheControl, "no-cache")
+		h.Set(header.ETag, `"v1"`)
+		p := newParsedResponse(200, header.Map{}, h)
+		require.True(t, p.isCacheable(nil),
+			"no-cache forbids reuse without validation, not storage (RFC 9111 §5.2.2.4)")
+	})
+	t.Run("no_cache_without_validator_not_storable", func(t *testing.T) {
+		t.Parallel()
+		h := headerMap(header.CacheControl, "no-cache")
+		p := newParsedResponse(200, header.Map{}, h)
+		require.False(t, p.isCacheable(nil))
+	})
+	t.Run("no_cache_with_etag_error_status_not_storable", func(t *testing.T) {
+		t.Parallel()
+		h := headerMap(header.CacheControl, "no-cache")
+		h.Set(header.ETag, `"v1"`)
+		p := newParsedResponse(502, header.Map{}, h)
+		require.False(t, p.isCacheable(nil),
+			"origin errors must not be cached by the no-cache+validator branch")
+	})
+	t.Run("no_cache_with_etag_private_blocks", func(t *testing.T) {
+		t.Parallel()
+		h := headerMap(header.CacheControl, "no-cache, private")
+		h.Set(header.ETag, `"v1"`)
+		p := newParsedResponse(200, header.Map{}, h)
+		require.False(t, p.isCacheable(nil))
+	})
 }
 
 func TestParsedResponse_IsCacheableWithDefault(t *testing.T) {

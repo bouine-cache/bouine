@@ -21,6 +21,16 @@ the curated, human-readable summary.
   client's list MUST generate a 200). The revalidated `304` is labeled
   `X-Cache: REVALIDATED`. Closes the last `cache-tests` gap where
   Varnish scored higher than bouine (`conditional-lm-stale`).
+- **Responses carrying `Cache-Control: no-cache` and a validator are now
+  stored and revalidated on use.** RFC 9111 §5.2.2.4 forbids reuse of a
+  no-cache response without successful validation, but storage itself
+  stays permitted (§3). A no-cache response with an `ETag` (or
+  `Last-Modified`, already covered by the heuristic path) is now stored
+  with a zero freshness lifetime and conditionally revalidated on every
+  use, instead of refetched in full. Error statuses are excluded; the
+  negative-TTL policy still governs those. Fixes the `cache-tests`
+  `cc-resp-no-cache-revalidate` failure (conditional revalidation was
+  never reached because the response was never stored).
 
 ### Dependencies
 

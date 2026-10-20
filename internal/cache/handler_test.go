@@ -3031,6 +3031,27 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 // TestBuildObject_ResponseDelayFeedsOriginAge pins the RFC 9111 §4.2.3
 // corrected_age_value: the origin's response_delay is added to the
 // stored initial age, and the freshness lifetime shrinks accordingly.
+// TestWriteBufferedResult_CorrectedAge pins that singleflight followers
+// report the same corrected initial age as the flight leader (RFC 9111
+// §4.2.3): the leader's response delay rides the shared fetchResult, so
+// two clients served one flight must never see different Age values.
+func TestWriteBufferedResult_CorrectedAge(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("x"))
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60")),
+		Body:       []byte("body"),
+		Delay:      5 * time.Second,
+	}
+	ctx := testCtx("GET", "http://example.com/f")
+	h.writeBufferedResult(ctx, res, api.Key{}, requestInfoFromCtx(ctx))
+	require.Equal(t, 200, respCode(ctx))
+	require.Equal(t, "5", respHeader(ctx, header.Age),
+		"the follower must report the leader's corrected age, not Age: 0")
+	require.Equal(t, "body", respBody(ctx))
+}
+
 // This is the storage half of the cache-tests other-age-delay behavior
 // (the served half is the corrected Age header on the miss response).
 func TestBuildObject_ResponseDelayFeedsOriginAge(t *testing.T) {

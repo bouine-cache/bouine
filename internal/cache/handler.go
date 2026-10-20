@@ -1703,11 +1703,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// §4.3.1): the stored response can never be selected for this
 	// request (its Vary values differ), but the cache MAY still combine
 	// the stored validators into the forwarded request — the origin
-	// then either answers 304 (the stored representation is still
-	// current, so it is freshened and served) or delivers a full
-	// response (the ordinary miss fill, stored under this request's
-	// variant). An upstream error falls through to the unconditional
-	// fill; the validators are an optimization, never a requirement.
+	// then either answers 304 (serveResolver304 serves the stored
+	// representation only when the origin proves it is the current one
+	// for THIS request) or delivers a full response (the ordinary miss
+	// fill, stored under this request's variant). An ambiguous 304 or
+	// upstream error falls through to the unconditional fill; the
+	// validators are an optimization, never a requirement.
 	// Requests carrying Authorization or Cookie are excluded: the
 	// resolver can be another requester's variant, and ADR-0052 keeps
 	// personal-request traffic from ever being entangled with stored
@@ -1737,19 +1738,16 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 // attempt for a Vary-variant miss: the stored response can never be
 // selected for this request (its Vary values differ), but the cache
 // MAY combine the stored resolver's entity-tag into the forwarded
-// request and let the origin decide. A 304 answer means the stored
-// representation is still current — the resolver is freshened
-// (RFC 9111 §3.2) and served as a 200, exactly the spec's
-// "MUST generate a 200 by reusing its corresponding stored response"
-// clause; the wire request carried no conditional of the client's own,
-// so a 304 to the client would be wrong. Any full response takes the
-// ordinary miss fill (writeAndMaybeStore stores it under this
-// request's variant via its own Vary declaration).
+// request and let the origin decide. A 304 answer hands off to
+// serveResolver304, which serves the stored representation only when
+// the origin proves it is the current one for THIS request. Any full
+// response takes the ordinary miss fill (writeAndMaybeStore stores it
+// under this request's variant via its own Vary declaration).
 //
 // Returns true when the request was fully handled here. false means
 // the caller must proceed with the ordinary unconditional miss fill —
-// the only such outcome is an upstream error, where the validators
-// were an optimization, never a requirement.
+// an upstream error or an ambiguous 304, where the validators were
+// an optimization, never a requirement.
 //
 // Deliberately not singleflight-collapsed: joining the plain-miss
 // flight would hand this caller an unconditional result, and letting a
@@ -1809,27 +1807,7 @@ func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey ap
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
-		refreshed := h.refreshFrom304(resolver, res, ri, now)
-		// Drift check before the store (ADR-0058): a declaration change
-		// in the 304 purges the stale resolver and its variants before
-		// the refreshed resolver re-lands.
-		h.detectVaryDrift(ctx, resolver, ri, res.StatusCode, refreshed.VaryValue)
-		// The refreshed object keeps the resolver's primary slot, so its
-		// VaryKey must stay blank: the primary entry is the Vary
-		// resolver, not a variant, and a peer that only holds it must
-		// answer variant fetches with a miss (see writeAndMaybeStore).
-		refreshed.VaryKey = ""
-		h.storeObject(ctx, refreshed.Key, refreshed, ri, false, 0)
-		// RFC 9111 §4.3.1: the MUST-generate-200 clause applies only when
-		// the 304's entity-tag is not in the client's own If-None-Match
-		// list. When the client's condition was part of the union the
-		// origin validated, the client gets its 304 — the same complement
-		// the plain revalidation path serves.
-		if tryConditional304Fast(ctx, refreshed, src, h.rewriteHook()) {
-			return true
-		}
-		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
-		return true
+		return h.serveResolver304(ctx, resolver, res, src, ri, now)
 	}
 
 	// Full response: the ordinary miss fill. writeAndMaybeStore derives
@@ -1838,6 +1816,88 @@ func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey ap
 	// resolver's primary slot. stale is nil: the resolver was never
 	// usable for this request and must not become an error fallback.
 	h.writeAndMaybeStore(ctx, res, primaryKey, nil, ri)
+	return true
+}
+
+// serveResolver304 handles the 304 answer to a vary-miss validator
+// reuse. The forwarded If-None-Match carried the union of the client's
+// tags and the resolver's, so the 304 validates only SOME member of
+// that list (RFC 9111 §4.3.2); the origin's ETag names which
+// representation is current for this request. Returns true when the
+// request was fully handled here; false directs the caller to the
+// ordinary unconditional miss fill.
+//
+// Cross-requester safety: the stored resolver's body may be served to
+// THIS requester only when the 304 identifies the resolver's tag (or
+// the resolver's tag was the only condition sent upstream) — the origin
+// then explicitly asserted the stored representation is the one this
+// request's selecting headers select. A 304 that answered the client's
+// own tag, or that names neither's representation, proves nothing
+// about the stored body; serving it would hand this requester another
+// variant's content.
+//
+// The refreshed resolver is served to this client only and is never
+// re-stored: RFC 9111 §4.3.4 limits 304 freshening to stored responses
+// that could have been chosen for the request, and the resolver could
+// not (its Vary values differ). Re-storing would extend the freshness
+// window of the resolver's own variant based on a validation made with
+// a different requester's selecting headers — a window in which the
+// origin may have already rotated that variant's representation.
+func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Object, res fetchResult, src api.Source, ri RequestInfo, now time.Time) bool {
+	tag304 := res.Header.Get(header.ETag)
+	clientConditional := len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 ||
+		len(ctx.Request.Header.Peek(header.IfModifiedSince)) > 0
+	if tag304 == "" {
+		// A 304 without an ETag cannot say which member of the union
+		// matched (RFC 9110 §13.1.2: the origin 304s when ANY listed tag
+		// matches). Without a client conditional, the resolver's tag was
+		// the only one sent, so it was the match. With one, the client's
+		// own tag may be the current representation and nothing about
+		// the stored body is proven — refetch unconditionally.
+		if clientConditional {
+			return false
+		}
+	} else if tag304 != "*" && !etagMatch(tag304, resolver.ETag) {
+		// The 304 names a representation other than the stored
+		// resolver's.
+		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 && etagMatch(string(inm), tag304) {
+			// It is the client's own tag: the client's condition was
+			// validated (RFC 9111 §4.3.2's complement of the
+			// MUST-generate-200 clause). Answer with the origin's 304,
+			// metadata intact; the store stays untouched.
+			res.Header.CopyToFastHTTP(&ctx.Response.Header)
+			dst := &ctx.Response.Header
+			dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
+			dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			h.applyResponseRewrites(dst)
+			return true
+		}
+		// Neither the resolver's nor the client's representation was
+		// named: nothing reusable is proven. Fall through to the
+		// ordinary unconditional fill — the validators were an
+		// optimization, never a requirement.
+		return false
+	}
+	// The 304 proves the stored resolver's representation is the
+	// current one for THIS request. Serve it, merged with the 304's
+	// metadata (RFC 9111 §4.3.2: "reusing its corresponding stored
+	// response, as updated by the 304 response metadata"); the stored
+	// resolver keeps its own clock (see the doc comment above).
+	refreshed := h.refreshFrom304(resolver, res, ri, now)
+	// Drift check (ADR-0058): a declaration change in the 304 purges
+	// the resolver and its variants — they are keyed under the retired
+	// declaration and can never be selected again.
+	h.detectVaryDrift(ctx, resolver, ri, res.StatusCode, refreshed.VaryValue)
+	// RFC 9111 §4.3.1: the MUST-generate-200 clause applies only when
+	// the 304's entity-tag is not in the client's own If-None-Match
+	// list. When the client's condition was part of what the origin
+	// validated, the client gets its 304 — the same complement the
+	// plain revalidation path serves.
+	if tryConditional304Fast(ctx, refreshed, src, h.rewriteHook()) {
+		return true
+	}
+	h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 	return true
 }
 

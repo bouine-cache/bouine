@@ -340,6 +340,37 @@ func TestHandler_VaryMiss_304DoesNotFreshenResolver(t *testing.T) {
 		"the stored resolver's expiry must be untouched — its own variant's freshness was never validated")
 }
 
+// TestHandler_ColdMissOrigin304_NeverStored pins RFC 9110 §15.4.5 on
+// the miss path: the origin's 304 answers the client's own conditional
+// and is forwarded to that client, but it is never stored — a bodiless
+// 304 can satisfy no later request, yet it was previously stored as a
+// fresh hit and re-served to subsequent unconditional clients.
+func TestHandler_ColdMissOrigin304_NeverStored(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body")
+	}
+	h := testHandler(t, upstream)
+
+	r1 := testCtx("GET", "http://example.com/c304")
+	r1.Request.Header.Set(header.IfNoneMatch, `"v1"`)
+	h.ServeRequest(r1)
+	require.Equal(t, 304, respCode(r1), "the client's conditional is answered")
+
+	r2 := testCtx("GET", "http://example.com/c304")
+	h.ServeRequest(r2)
+	require.Equal(t, 200, respCode(r2),
+		"the bodiless 304 must never be stored and re-served to an unconditional client")
+	require.Equal(t, "body", respBody(r2))
+}
+
 // TestHandler_VaryMiss_WildcardNotUnioned pins that a bare If-None-Match
 // wildcard is forwarded verbatim: unioning it into a list would be
 // invalid field syntax (RFC 9110 §13.1.2) that an origin may reject.

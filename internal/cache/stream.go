@@ -483,6 +483,13 @@ func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo
 	hdr := &sf.resp.Header
 	status := sf.StatusCode
 
+	// A 304 is only ever valid in reply to a conditional request (RFC
+	// 9110 §15.4.5) and carries no body — never storable from a miss
+	// fill; mirrors IsCacheable's guard.
+	if status == fasthttp.StatusNotModified {
+		return false
+	}
+
 	// CDN-Cache-Control overrides Cache-Control for shared caches
 	// (RFC 9213). Reuse the Map path when present: merging multiple
 	// values and validating token characters needs the joined value,

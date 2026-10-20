@@ -3,6 +3,8 @@ package cache
 import (
 	"time"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -63,6 +65,15 @@ func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 // neg, when non-nil, enables negative caching for error statuses via
 // the per-status TTL policy.
 func IsCacheable(status int, reqHeader, respHeader header.Map, neg *StatusTTL) bool {
+	// RFC 9110 §15.4.5: a 304 is only ever valid in reply to a
+	// conditional request. It carries no body, so a stored 304 can
+	// satisfy no later request — storing one from a miss fetch (the
+	// origin answered the client's own conditional, forwarded verbatim)
+	// would serve bare 304s to subsequent unconditional clients. The
+	// revalidation paths consume their 304s before any store gate.
+	if status == fasthttp.StatusNotModified {
+		return false
+	}
 	// CDN-Cache-Control overrides Cache-Control for shared-cache
 	// decisions (RFC 9213). Use it when present.
 	var respCC Directives
@@ -202,6 +213,10 @@ func newParsedResponse(status int, reqHeader, respHeader header.Map) parsedRespo
 // This is the zero-reparse path for callers that have already called
 // cdnCacheControl or ParseCacheControl (e.g. buildObject).
 func (p *parsedResponse) isCacheable(neg *StatusTTL) bool {
+	// 304s are never storable — see IsCacheable (RFC 9110 §15.4.5).
+	if p.status == fasthttp.StatusNotModified {
+		return false
+	}
 	if isCacheBlocked(p.status, p.respCC, p.hasCDN, p.reqHeader, p.respHeader) {
 		return false
 	}

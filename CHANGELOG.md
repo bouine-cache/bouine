@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Conformance
+
+- **A client conditional that survives revalidation now gets a `304`,
+  not a full replay.** When a stale object is revalidated and the origin
+  answers `304`, a client `If-None-Match` / `If-Modified-Since` that
+  matches the freshened validators is answered with `304 Not Modified`
+  instead of a `200` re-serving of the stored body (RFC 9111 §4.3.1 —
+  the complement of the rule that a 304 whose ETag is absent from the
+  client's list MUST generate a 200). The revalidated `304` is labeled
+  `X-Cache: REVALIDATED`. Closes the last `cache-tests` gap where
+  Varnish scored higher than bouine (`conditional-lm-stale`).
+
 ### Observability
 
 - **Cache-layer log records now carry `upstream_pool` and `route`

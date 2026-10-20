@@ -450,6 +450,106 @@ func TestHandler_HeadRevalidate_Origin304_KeepsStoredBody(t *testing.T) {
 		"HEAD-304 revalidation must preserve the stored body for subsequent GETs")
 }
 
+// revalidate304Upstream returns an origin that serves a validator-bearing
+// 200 to plain requests and a 304 to any conditional request, recording
+// the received If-Modified-Since in *seen ("" when the request was not
+// conditional).
+func revalidate304Upstream(lm, etag string, seen *string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.LastModified, lm)
+		ctx.Response.Header.Set(header.ETag, etag)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		if ims := ctx.Request.Header.Peek(header.IfModifiedSince); len(ims) > 0 {
+			if seen != nil {
+				*seen = string(ims)
+			}
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body")
+	}
+}
+
+// TestHandler_RevalidateOrigin304_ClientConditionalServes304 pins the
+// cache-tests `conditional-lm-stale` behavior (RFC 9111 §4.3.1): when a
+// stale object is revalidated, the origin answers 304, and the client's
+// own If-Modified-Since matches the freshened validators, the client
+// receives 304 — not a full 200 replay of the stored response.
+func TestHandler_RevalidateOrigin304_ClientConditionalServes304(t *testing.T) {
+	t.Parallel()
+	lm := "Mon, 01 Jan 2024 00:00:00 GMT"
+	var seen string
+	upstream := revalidate304Upstream(lm, `"v1"`, &seen)
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/rlm")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "body", respBody(rr))
+
+	expireStoredObject(t, h, "/rlm")
+
+	cr := testCtx("GET", "http://example.com/rlm")
+	cr.Request.Header.Set(header.IfModifiedSince, lm)
+	h.ServeRequest(cr)
+	require.Equal(t, 304, respCode(cr),
+		"a matching client If-Modified-Since must get 304 after successful revalidation")
+	require.Equal(t, "REVALIDATED", respHeader(cr, header.XCache))
+	require.Equal(t, 0, len(cr.Response.Body()))
+	require.Equal(t, lm, seen, "the revalidation request must carry the stored validator")
+}
+
+// TestHandler_RevalidateOrigin304_ClientConditionalMismatchServes200 is
+// the complement: a client conditional that does NOT match the freshened
+// validators must still receive the full 200 response (RFC 9111 §4.3.1
+// — the 200-for-client rule when the stored response does not satisfy
+// the client's condition).
+func TestHandler_RevalidateOrigin304_ClientConditionalMismatchServes200(t *testing.T) {
+	t.Parallel()
+	lm := "Mon, 01 Jan 2024 00:00:00 GMT"
+	upstream := revalidate304Upstream(lm, `"v1"`, nil)
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       1 << 20,
+		NumShards:      2,
+		ReaperInterval: -1,
+	})
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	rr := testCtx("GET", "http://example.com/rlmm")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	require.Equal(t, "body", respBody(rr))
+
+	expireStoredObject(t, h, "/rlmm")
+
+	cr := testCtx("GET", "http://example.com/rlmm")
+	cr.Request.Header.Set(header.IfNoneMatch, `"other"`)
+	h.ServeRequest(cr)
+	require.Equal(t, 200, respCode(cr),
+		"a non-matching client If-None-Match must receive the full stored response")
+	require.Equal(t, "REVALIDATED", respHeader(cr, header.XCache))
+	require.Equal(t, "body", respBody(cr))
+}
+
 // TestHandler_HeadRevalidate_Origin200_RingChangeNoPeerPut pins the
 // strong-mode half of issue #752: a node that stored the object while it
 // owned the key (then lost it to a ring change) must not forward the

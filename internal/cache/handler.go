@@ -2275,10 +2275,11 @@ func (h *Handler) writeBufferedResult(
 	res.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-	resMap := res.Header.ToMap()
-	if resMap.Get(header.Age) == "" {
-		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
-	}
+	// Same corrected Age as the flight leader's response (RFC 9111
+	// §4.2.3): origin Age + the leader's response delay. Followers of
+	// one flight must not report a different initial age than the
+	// leader, and res.Delay rides the shared fetchResult.
+	setCorrectedAgeHeader(dst, res.Header, res.Delay)
 	ctx.SetStatusCode(res.StatusCode)
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)

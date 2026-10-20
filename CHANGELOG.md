@@ -42,7 +42,10 @@ the curated, human-readable summary.
   object's initial age, so `max-age=3600` behind a 5s-slow origin is
   stored with `3595s` of remaining freshness. Fixes the `cache-tests`
   `other-age-delay` failure (Trafficserver was the only cache passing
-  it). Zero-alloc on the miss path in the common no-Age/no-Date case.
+  it). Zero-alloc on the miss path in the common no-Age/no-Date case,
+  and singleflight followers of one origin flight report the same
+  corrected `Age` as the flight leader (the follower path also no
+  longer allocates a header map just to check for the origin `Age`).
 
 ### Dependencies
 

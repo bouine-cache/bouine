@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -52,6 +55,47 @@ func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 	// warm-tier / legacy objects whose field is zero.
 	age += effectiveOriginAge(obj)
 	return age
+}
+
+// correctedInitialAge computes the initial age of a freshly received
+// origin response per RFC 9111 §4.2.3:
+//
+//	corrected_age_value = age_value + response_delay
+//	corrected_initial_age = max(apparent_age, corrected_age_value)
+//
+// responseDelay is the time from sending the request to receiving the
+// response headers — a slow origin makes the response already aged on
+// arrival, even when it sends no Age header of its own. apparentAge
+// derives from the origin's Date header against the receipt time and
+// guards against clock skew between cache and origin (a future or
+// unparseable Date yields no apparent age).
+func correctedInitialAge(originAge, responseDelay time.Duration, dateStr string, received time.Time) time.Duration {
+	corrected := originAge + responseDelay
+	if dateStr != "" {
+		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(received) {
+			if apparent := received.Sub(dt); apparent > corrected {
+				corrected = apparent
+			}
+		}
+	}
+	// Age is delta-seconds (RFC 9111 §5.1): truncate to whole seconds so
+	// sub-second fetch jitter neither shaves the freshness lifetime nor
+	// makes stored TTLs nondeterministic. Only delays of a full second or
+	// more move the age.
+	return corrected.Truncate(time.Second)
+}
+
+// setCorrectedAgeHeader writes the Age header for a freshly received
+// origin response per RFC 9111 §4.2.3 / §5.1: the corrected initial age
+// (origin Age + response delay, floored by apparent age from Date
+// skew) replaces any raw origin Age. Zero allocations in the common
+// no-Age/no-Date case — the seconds land in a stack buffer that
+// SetCanonical copies; the Peek string conversions only allocate when
+// the origin actually sent those headers.
+func setCorrectedAgeHeader(dst *fasthttp.ResponseHeader, lh headerLookup, delay time.Duration) {
+	age := correctedInitialAge(parseOriginAge(lh), delay, lh.Get(header.Date), time.Now())
+	var ageBuf [16]byte
+	dst.SetCanonical(header.S2b(header.Age), strconv.AppendInt(ageBuf[:0], int64(age.Seconds()), 10))
 }
 
 // parseOriginAge parses the Age header from the response, handling

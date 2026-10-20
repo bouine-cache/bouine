@@ -3028,6 +3028,63 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
 }
 
+// TestBuildObject_ResponseDelayFeedsOriginAge pins the RFC 9111 §4.2.3
+// corrected_age_value: the origin's response_delay is added to the
+// stored initial age, and the freshness lifetime shrinks accordingly.
+// This is the storage half of the cache-tests other-age-delay behavior
+// (the served half is the corrected Age header on the miss response).
+func TestBuildObject_ResponseDelayFeedsOriginAge(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=3600")),
+		Body:       []byte("hello"),
+		Delay:      5 * time.Second,
+	}
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", now)
+	require.NotNil(t, obj)
+	assert.Equal(t, 5*time.Second, obj.OriginAge,
+		"the response delay must become the initial age of a response with no Age/Date")
+	assert.Equal(t, 3595*time.Second, obj.TTL,
+		"max-age=3600 minus the 5s already-accrued age")
+}
+
+func TestCorrectedInitialAge(t *testing.T) {
+	t.Parallel()
+	received := time.Date(2026, 10, 20, 12, 0, 10, 0, time.UTC)
+	t.Run("delay_only", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, 5*time.Second,
+			correctedInitialAge(0, 5*time.Second, "", received))
+	})
+	t.Run("origin_age_plus_delay", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, 12*time.Second,
+			correctedInitialAge(7*time.Second, 5*time.Second, "", received))
+	})
+	t.Run("apparent_age_dominates", func(t *testing.T) {
+		t.Parallel()
+		// Date is 30s before receipt: apparent age 30s beats delay+age.
+		assert.Equal(t, 30*time.Second,
+			correctedInitialAge(2*time.Second, 3*time.Second,
+				"Tue, 20 Oct 2026 11:59:40 GMT", received))
+	})
+	t.Run("future_date_ignored", func(t *testing.T) {
+		t.Parallel()
+		// A future Date (clock skew) yields no apparent age.
+		assert.Equal(t, 3*time.Second,
+			correctedInitialAge(0, 3*time.Second,
+				"Tue, 20 Oct 2026 12:00:11 GMT", received))
+	})
+	t.Run("invalid_date_ignored", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, 3*time.Second,
+			correctedInitialAge(0, 3*time.Second, "garbage", received))
+	})
+}
+
 func TestBuildObject_LastModifiedParsed(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{

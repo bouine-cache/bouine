@@ -31,6 +31,18 @@ the curated, human-readable summary.
   negative-TTL policy still governs those. Fixes the `cache-tests`
   `cc-resp-no-cache-revalidate` failure (conditional revalidation was
   never reached because the response was never stored).
+- **`Age` now accounts for the time an origin response spent in
+  flight.** Per RFC 9111 §4.2.3, `corrected_age_value = Age +
+  response_delay` — the time from sending the request to receiving the
+  response headers is added to the origin's `Age`, floored by the
+  apparent age from `Date` skew, and truncated to whole seconds (Age is
+  delta-seconds; sub-second fetch jitter neither shaves freshness
+  lifetime nor makes stored TTLs nondeterministic). The corrected value
+  replaces any raw origin `Age` on served misses and becomes the stored
+  object's initial age, so `max-age=3600` behind a 5s-slow origin is
+  stored with `3595s` of remaining freshness. Fixes the `cache-tests`
+  `other-age-delay` failure (Trafficserver was the only cache passing
+  it). Zero-alloc on the miss path in the common no-Age/no-Date case.
 
 ### Dependencies
 

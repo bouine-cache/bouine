@@ -42,6 +42,11 @@ type streamFetchResult struct {
 	Header     headerLookup
 	StatusCode int
 	buffered   bool // true when resp.BodyStream() is nil (test clients)
+	// Delay is the time from sending the origin request to receiving
+	// the response headers (RFC 9111 §4.2.3 response_delay). It feeds
+	// the corrected initial age of the served and stored response.
+	// Zero on the upstream-fallback path (in-process handler).
+	Delay time.Duration
 }
 
 // inflightStream tracks an in-progress streaming fetch so that
@@ -149,6 +154,7 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	// DoTimeout) — fetch_timeout was silently ignored in production.
 	// The conn read deadline persists into the body stream, bounding
 	// the total fetch (header + body) per the fetch_timeout contract.
+	fetchStart := time.Now()
 	if err := h.doFastFetch(req, resp); err != nil {
 		fasthttp.ReleaseRequest(req)
 		fasthttp.ReleaseResponse(resp)
@@ -176,6 +182,7 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		sem:        h.fetchSem,
 		span:       span,
 		buffered:   !resp.IsBodyStream(),
+		Delay:      time.Since(fetchStart),
 	}
 
 	return sf, nil
@@ -373,9 +380,11 @@ func (h *Handler) streamMiss(
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-	if sf.resp == nil || len(sf.resp.Header.Peek(header.Age)) == 0 {
-		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
-	}
+	// RFC 9111 §4.2.3 / §5.1: a cache generating a response computes Age
+	// from the corrected initial age — the origin's Age plus the
+	// response delay, floored by apparent age from Date skew. Overwrites
+	// any origin Age copied above with the corrected value.
+	setCorrectedAgeHeader(dst, sf.Header, sf.Delay)
 	ctx.SetStatusCode(sf.StatusCode)
 	h.applyResponseRewrites(dst)
 
@@ -826,6 +835,7 @@ func (h *Handler) streamMissBuffered(
 		StatusCode: sf.StatusCode,
 		Header:     fromHeaderMap(owned),
 		Body:       body,
+		Delay:      sf.Delay,
 	}
 	inflight.res = res
 	close(inflight.done)
@@ -1012,6 +1022,7 @@ func (h *Handler) teeStreamToClient(
 		StatusCode: sf.StatusCode,
 		Header:     fromHeaderMap(sf.Header.ToMap()),
 		Body:       bodyCopy,
+		Delay:      sf.Delay,
 	}
 	close(inflight.done)
 

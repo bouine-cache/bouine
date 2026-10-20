@@ -585,7 +585,7 @@ func TestFetchAndStore_UnsafeMethodNeverParksOnSharedFlight(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ctx := testCtxWithBody("POST", "http://example.com/owned", []byte(body))
-			primaryKey, lookupKey, _, _ := h.lookup(ctx)
+			primaryKey, lookupKey, _, _, _ := h.lookup(ctx)
 			h.fetchAndStore(ctx, lookupKey, primaryKey, nil, requestInfoFromCtx(ctx))
 			bodies[i] = respBody(ctx)
 		}()

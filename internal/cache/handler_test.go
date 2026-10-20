@@ -90,6 +90,116 @@ func TestHandler_NoCacheWithETag_RevalidatesOnUse(t *testing.T) {
 		"the revalidation must carry the stored validator")
 }
 
+// varyMissUpstream serves a Vary: Abc origin that returns 200 to plain
+// requests and answers a conditional request per notModified: 304 when
+// the received If-None-Match matches the stored ETag (true), or a full
+// 200 with the new variant body (false) — the representation changed.
+// It records the observed INM and Abc values.
+func varyMissUpstream(notModified bool, originINM, originAbc *[]string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		*originAbc = append(*originAbc, string(ctx.Request.Header.Peek("Abc")))
+		ctx.Response.Header.Set(header.Vary, "Abc")
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		if inm := ctx.Request.Header.Peek(header.IfNoneMatch); len(inm) > 0 {
+			*originINM = append(*originINM, string(inm))
+			if notModified && string(inm) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
+				return
+			}
+		}
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("body-" + string(ctx.Request.Header.Peek("Abc")))
+	}
+}
+
+// TestHandler_VaryMiss_ReusesResolverETag304 pins the cache-tests
+// conditional-etag-vary-headers-mismatch behavior (RFC 9111 §4.3.1): a
+// request whose Vary values mismatch the stored variant still carries
+// the stored resolver's ETag upstream. When the origin answers 304, the
+// stored representation is freshened and served as a 200 — the wire
+// request carried no conditional of the client's own.
+func TestHandler_VaryMiss_ReusesResolverETag304(t *testing.T) {
+	t.Parallel()
+	var originINM, originAbc []string
+	h := testHandler(t, varyMissUpstream(true, &originINM, &originAbc))
+
+	r1 := testCtx("GET", "http://example.com/vary")
+	r1.Request.Header.Set("Abc", "123")
+	h.ServeRequest(r1)
+	require.Equal(t, 200, respCode(r1))
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	require.Equal(t, "body-123", respBody(r1))
+
+	r2 := testCtx("GET", "http://example.com/vary")
+	r2.Request.Header.Set("Abc", "456")
+	h.ServeRequest(r2)
+	require.Equal(t, 200, respCode(r2),
+		"a 304 to the resolver's validator must become a 200 for the client")
+	require.Equal(t, "REVALIDATED", respHeader(r2, header.XCache))
+	require.Equal(t, "body-123", respBody(r2),
+		"the origin asserted the stored representation is current, so it is reused")
+	require.Equal(t, []string{`"v1"`}, originINM,
+		"the vary-mismatch fetch must carry the stored resolver's validator")
+	require.Equal(t, []string{"123", "456"}, originAbc)
+}
+
+// TestHandler_VaryMiss_FullResponseFillsVariant is the complement: when
+// the origin answers the resolver-ETag revalidation with a full 200,
+// the response fills the request's variant normally and is stored
+// under the variant key.
+func TestHandler_VaryMiss_FullResponseFillsVariant(t *testing.T) {
+	t.Parallel()
+	var originINM []string
+	var originAbc []string
+	h := testHandler(t, varyMissUpstream(false, &originINM, &originAbc))
+
+	r1 := testCtx("GET", "http://example.com/vary2")
+	r1.Request.Header.Set("Abc", "123")
+	h.ServeRequest(r1)
+	require.Equal(t, "body-123", respBody(r1))
+
+	r2 := testCtx("GET", "http://example.com/vary2")
+	r2.Request.Header.Set("Abc", "456")
+	h.ServeRequest(r2)
+	require.Equal(t, 200, respCode(r2))
+	require.Equal(t, "MISS", respHeader(r2, header.XCache))
+	require.Equal(t, "body-456", respBody(r2))
+	require.Equal(t, []string{`"v1"`}, originINM)
+
+	// The fetched variant is now stored: a repeat request hits it.
+	r3 := testCtx("GET", "http://example.com/vary2")
+	r3.Request.Header.Set("Abc", "456")
+	h.ServeRequest(r3)
+	require.Equal(t, "HIT", respHeader(r3, header.XCache))
+	require.Equal(t, "body-456", respBody(r3))
+}
+
+// TestHandler_VaryMiss_UnionsClientIfNoneMatch pins the RFC 9111 §4.3.1
+// MAY-combine clause: a client that brings its own If-None-Match list on
+// a vary-mismatch request gets the union with the stored resolver's
+// entity-tag, not a replacement.
+func TestHandler_VaryMiss_UnionsClientIfNoneMatch(t *testing.T) {
+	t.Parallel()
+	var originINM []string
+	var originAbc []string
+	h := testHandler(t, varyMissUpstream(true, &originINM, &originAbc))
+
+	r1 := testCtx("GET", "http://example.com/vary3")
+	r1.Request.Header.Set("Abc", "123")
+	h.ServeRequest(r1)
+	require.Equal(t, "body-123", respBody(r1))
+
+	r2 := testCtx("GET", "http://example.com/vary3")
+	r2.Request.Header.Set("Abc", "456")
+	r2.Request.Header.Set(header.IfNoneMatch, `"v9"`)
+	h.ServeRequest(r2)
+	require.Equal(t, []string{`"v9", "v1"`}, originINM,
+		"the client's list is unioned with the stored entity-tag")
+	// The origin does not recognize "v9"/union → 200 with the variant body.
+	require.Equal(t, 200, respCode(r2))
+}
+
 func TestHandler_MissThenHit(t *testing.T) {
 	t.Parallel()
 	var originCalls int

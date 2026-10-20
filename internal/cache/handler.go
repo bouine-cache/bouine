@@ -1708,7 +1708,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// response (the ordinary miss fill, stored under this request's
 	// variant). An upstream error falls through to the unconditional
 	// fill; the validators are an optimization, never a requirement.
-	if resolver != nil && resolver.ETag != "" && h.isOwnerOrUnmanaged(lookupKey) {
+	// Requests carrying Authorization or Cookie are excluded: the
+	// resolver can be another requester's variant, and ADR-0052 keeps
+	// personal-request traffic from ever being entangled with stored
+	// state belonging to a different identity — even for validator
+	// metadata, even though the origin makes the content decision.
+	if resolver != nil && resolver.ETag != "" && !collapseDenied(ri) && h.isOwnerOrUnmanaged(lookupKey) {
 		if h.revalidateResolverMiss(ctx, primaryKey, resolver, now, src, ri) {
 			return
 		}
@@ -1769,8 +1774,15 @@ func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey ap
 	// RFC 9111 §4.3.1: combine the received If-None-Match list with the
 	// stored response's entity-tag — the union replaces the client's own
 	// list. When the client sent none, the stored tag alone is sent.
+	// A bare "*" is never unioned: it matches every current
+	// representation on its own, and mixing it into a list is invalid
+	// field syntax (RFC 9110 §13.1.2) that an origin may reject.
 	if clientINM := revalReq.Header.Peek(header.IfNoneMatch); len(clientINM) > 0 {
-		revalReq.Header.Set(header.IfNoneMatch, string(clientINM)+", "+quoteETag(resolver.ETag))
+		if bytes.Equal(bytes.TrimSpace(clientINM), []byte("*")) {
+			// keep the wildcard as-is
+		} else {
+			revalReq.Header.Set(header.IfNoneMatch, string(clientINM)+", "+quoteETag(resolver.ETag))
+		}
 	} else {
 		revalReq.Header.Set(header.IfNoneMatch, quoteETag(resolver.ETag))
 	}
@@ -1808,6 +1820,14 @@ func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey ap
 		// answer variant fetches with a miss (see writeAndMaybeStore).
 		refreshed.VaryKey = ""
 		h.storeObject(ctx, refreshed.Key, refreshed, ri, false, 0)
+		// RFC 9111 §4.3.1: the MUST-generate-200 clause applies only when
+		// the 304's entity-tag is not in the client's own If-None-Match
+		// list. When the client's condition was part of the union the
+		// origin validated, the client gets its 304 — the same complement
+		// the plain revalidation path serves.
+		if tryConditional304Fast(ctx, refreshed, src, h.rewriteHook()) {
+			return true
+		}
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return true
 	}

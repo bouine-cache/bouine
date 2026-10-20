@@ -226,6 +226,12 @@ type fetchResult struct {
 	Header     headerLookup
 	Body       []byte
 	StatusCode int
+	// Delay is the time from sending the origin request to receiving
+	// the response headers (RFC 9111 §4.2.3 response_delay). It feeds
+	// the corrected initial age of the stored/served response: a slow
+	// origin leaves the response already aged on arrival. Zero on the
+	// upstream-fallback path (in-process handler, no network).
+	Delay time.Duration
 }
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -2160,6 +2166,7 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 
 	resp := fasthttp.AcquireResponse()
 
+	fetchStart := time.Now()
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
@@ -2184,6 +2191,7 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		Delay:      time.Since(fetchStart),
 	}
 }
 
@@ -2658,11 +2666,11 @@ func (h *Handler) writeAndMaybeStore(
 	// Set-Cookie, Vary) and passed to buildObject. Each ToMap() call
 	// invokes FromFastHTTP which allocates a new header.Map.
 	resMap := res.Header.ToMap()
-	// A proxy SHOULD add an Age header to responses it forwards,
-	// even on first fetch (Age: 0 + any origin Age).
-	if resMap.Get(header.Age) == "" {
-		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
-	}
+	// RFC 9111 §4.2.3 / §5.1: a cache generating a response computes
+	// Age from the corrected initial age — origin Age plus the response
+	// delay, floored by apparent age from Date skew. Replaces any origin
+	// Age copied above with the corrected value.
+	setCorrectedAgeHeader(dst, res.Header, res.Delay)
 	ctx.SetStatusCode(res.StatusCode)
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
@@ -3339,6 +3347,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 
+	fetchStart := time.Now()
 	if err := h.doFastFetch(req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		tracing.RecordError(span, err)
@@ -3369,6 +3378,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		Delay:      time.Since(fetchStart),
 	}
 }
 
@@ -3526,18 +3536,15 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
-	originAge := parseOriginAge(resMap)
-	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
-	// Apparent age is derived from the Date header: max(0, now - Date).
+	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age,
+	// corrected_age_value) where corrected_age_value = Age +
+	// response_delay. The response delay (res.Delay) makes a
+	// slow-origin response already aged on arrival; apparent age is
+	// derived from the Date header and guards against clock skew
+	// between cache and origin.
 	dateStr := resMap.Get(header.Date)
 	hasDate := dateStr != ""
-	if hasDate {
-		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(now) {
-			if apparentAge := now.Sub(dt); apparentAge > originAge {
-				originAge = apparentAge
-			}
-		}
-	}
+	originAge := correctedInitialAge(parseOriginAge(resMap), res.Delay, dateStr, now)
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
 	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
 	// Route-level override wins over the upstream's freshness directives

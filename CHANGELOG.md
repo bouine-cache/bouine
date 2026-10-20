@@ -46,6 +46,11 @@ the curated, human-readable summary.
   and singleflight followers of one origin flight report the same
   corrected `Age` as the flight leader (the follower path also no
   longer allocates a header map just to check for the origin `Age`).
+  Revalidation is an origin response like any other: a `304` round
+  trip feeds the same corrected age into the freshened object
+  (`refreshFrom304` had been re-parsing the bare `Age` header), so a
+  slow-origin `304` no longer restores full freshness to validators
+  that were already response_delay seconds old.
 
 ### Dependencies
 

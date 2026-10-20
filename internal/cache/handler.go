@@ -2507,7 +2507,15 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	if h.overrideTTL > 0 && refreshed.StatusCode < 400 {
 		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
 	}
-	refreshed.OriginAge = parseOriginAge(refreshed.Header)
+	// RFC 9111 §4.2.3: a 304 is an origin response too — its round-trip
+	// delay ages the freshened object exactly like a full response's
+	// (corrected_age_value = Age + response_delay), floored by apparent
+	// age from Date skew. The revalidation fetch measures res.Delay;
+	// without it a slow-origin 304 would restore full freshness to an
+	// object whose validators were already response_delay seconds old.
+	refreshed.OriginAge = correctedInitialAge(
+		parseOriginAge(refreshed.Header), res.Delay,
+		refreshed.Header.Get(header.Date), now)
 	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}

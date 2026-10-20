@@ -3072,6 +3072,35 @@ func TestBuildObject_ResponseDelayFeedsOriginAge(t *testing.T) {
 		"max-age=3600 minus the 5s already-accrued age")
 }
 
+// TestRefreshFrom304_DelayFeedsOriginAge pins the revalidation half of
+// the corrected-initial-age rule (RFC 9111 §4.2.3): a 304 is an origin
+// response like any other, so its round-trip delay must age the
+// freshened object — a slow-origin 304 must not restore full freshness
+// to validators that are already response_delay seconds old.
+func TestRefreshFrom304_DelayFeedsOriginAge(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("x"))
+	now := time.Now()
+	stale := &api.Object{
+		Key:        api.Key{},
+		StatusCode: 200,
+		TTL:        time.Minute,
+		StoredAt:   now.Add(-2 * time.Minute),
+		ETag:       `"v1"`,
+		Header:     headerMap(header.ETag, `"v1"`),
+	}
+	res := fetchResult{
+		StatusCode: fasthttp.StatusNotModified,
+		Header: fromHeaderMap(headerMap(header.CacheControl, "max-age=3600",
+			header.Age, "2")),
+		Delay: 5 * time.Second,
+	}
+	r := testCtx("GET", "http://example.com/")
+	refreshed := h.refreshFrom304(stale, res, requestInfoFromCtx(r), now)
+	assert.Equal(t, 7*time.Second, refreshed.OriginAge,
+		"origin Age 2 + the 5s revalidation round trip (RFC 9111 §4.2.3)")
+}
+
 func TestCorrectedInitialAge(t *testing.T) {
 	t.Parallel()
 	received := time.Date(2026, 10, 20, 12, 0, 10, 0, time.UTC)

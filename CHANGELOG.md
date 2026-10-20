@@ -51,6 +51,20 @@ the curated, human-readable summary.
   (`refreshFrom304` had been re-parsing the bare `Age` header), so a
   slow-origin `304` no longer restores full freshness to validators
   that were already response_delay seconds old.
+- **A `Vary`-variant miss now reuses the stored resolver's `ETag`
+  upstream.** RFC 9111 §4.3.1 allows a cache that cannot use a stored
+  response (the request's `Vary` values differ) to still combine the
+  stored entity-tag into the forwarded request — the origin then
+  either answers `304` (the stored representation is still current:
+  it is freshened and served as a `200`, never a bare `304` on the
+  wire since the client sent no conditional) or delivers the full
+  response, which fills the request's variant as an ordinary miss.
+  A client-supplied `If-None-Match` is unioned with the stored tag
+  instead of replaced. Upstream errors fall back to the unconditional
+  fill; the attempt is never singleflight-shared with plain misses
+  (a follower would receive a `304` with no usable response in scope).
+  Fixes the `cache-tests` `conditional-etag-vary-headers-mismatch`
+  failure.
 
 ### Dependencies
 

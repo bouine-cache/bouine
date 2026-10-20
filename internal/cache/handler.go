@@ -1486,7 +1486,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	now := time.Now()
-	primaryKey, key, obj, src := h.lookup(ctx)
+	primaryKey, key, obj, resolver, src := h.lookup(ctx)
 
 	// Fast path: evaluate using direct Peek calls on the request headers,
 	// avoiding the headerFromCtx allocation (which builds a header.Map
@@ -1535,14 +1535,14 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 			ctx.SetUserValue("cacheKey", key)
 		}
 		ri := requestInfoFromCtx(ctx)
-		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
+		h.handleCacheMiss(ctx, primaryKey, key, obj, resolver, now, src, ri)
 	case Revalidate:
 		if h.logCacheKeys {
 			ctx.SetUserValue("cacheKey", key)
 		}
 		if !h.isOwnerOrUnmanaged(key) {
 			ri := requestInfoFromCtx(ctx)
-			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
+			h.handleCacheMiss(ctx, primaryKey, key, obj, nil, now, src, ri)
 			return
 		}
 		ri := requestInfoFromCtx(ctx)
@@ -1656,9 +1656,12 @@ func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
+// resolver is the primary-key Vary resolver on a variant miss (nil on a
+// plain miss); when it carries validators the origin fetch reuses them
+// (RFC 9111 §4.3.1) before falling through to the unconditional fill.
 //
 //nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
-func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
+func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj, resolver *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
 	// OwnerGateReject), transferred by the h1parser under
 	// api.OwnerMissContextKey / api.OwnerGateRejectContextKey:
@@ -1696,6 +1699,20 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 			}
 		}
 	}
+	// Vary-variant miss with a validator-bearing resolver (RFC 9111
+	// §4.3.1): the stored response can never be selected for this
+	// request (its Vary values differ), but the cache MAY still combine
+	// the stored validators into the forwarded request — the origin
+	// then either answers 304 (the stored representation is still
+	// current, so it is freshened and served) or delivers a full
+	// response (the ordinary miss fill, stored under this request's
+	// variant). An upstream error falls through to the unconditional
+	// fill; the validators are an optimization, never a requirement.
+	if resolver != nil && resolver.ETag != "" && h.isOwnerOrUnmanaged(lookupKey) {
+		if h.revalidateResolverMiss(ctx, primaryKey, resolver, now, src, ri) {
+			return
+		}
+	}
 	// If a stale object exists, use fetchAndStoreStayinAlive which will serve
 	// the stale copy on 5xx/error — unless the stored response has
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
@@ -1711,10 +1728,108 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	}
 }
 
+// revalidateResolverMiss runs the RFC 9111 §4.3.1 validator-reuse
+// attempt for a Vary-variant miss: the stored response can never be
+// selected for this request (its Vary values differ), but the cache
+// MAY combine the stored resolver's entity-tag into the forwarded
+// request and let the origin decide. A 304 answer means the stored
+// representation is still current — the resolver is freshened
+// (RFC 9111 §3.2) and served as a 200, exactly the spec's
+// "MUST generate a 200 by reusing its corresponding stored response"
+// clause; the wire request carried no conditional of the client's own,
+// so a 304 to the client would be wrong. Any full response takes the
+// ordinary miss fill (writeAndMaybeStore stores it under this
+// request's variant via its own Vary declaration).
+//
+// Returns true when the request was fully handled here. false means
+// the caller must proceed with the ordinary unconditional miss fill —
+// the only such outcome is an upstream error, where the validators
+// were an optimization, never a requirement.
+//
+// Deliberately not singleflight-collapsed: joining the plain-miss
+// flight would hand this caller an unconditional result, and letting a
+// plain miss join a conditional one would hand the follower a 304
+// with no stored response in scope. Variant mismatches are cold-path;
+// concurrent ones simply each fetch.
+func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, resolver *api.Object, now time.Time, src api.Source, ri RequestInfo) bool {
+	revalReq := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(revalReq)
+	revalReq.Header.SetMethodBytes(ctx.Method())
+	revalReq.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
+	revalReq.Header.SetHostBytes(ctx.Host())
+	for k, v := range ctx.Request.Header.All() {
+		revalReq.Header.AddBytesKV(k, v)
+	}
+	// Normalize AE to the bucket token so the filled variant matches the
+	// key's bucket claim (see rewriteOutboundAE).
+	h.rewriteOutboundAE(&revalReq.Header)
+	// Client-identity headers (request.forwarded, issue #769) on the
+	// outbound copy only — see applyForwardedCtx.
+	h.applyForwardedCtx(&revalReq.Header, ctx)
+	// RFC 9111 §4.3.1: combine the received If-None-Match list with the
+	// stored response's entity-tag — the union replaces the client's own
+	// list. When the client sent none, the stored tag alone is sent.
+	if clientINM := revalReq.Header.Peek(header.IfNoneMatch); len(clientINM) > 0 {
+		revalReq.Header.Set(header.IfNoneMatch, string(clientINM)+", "+quoteETag(resolver.ETag))
+	} else {
+		revalReq.Header.Set(header.IfNoneMatch, quoteETag(resolver.ETag))
+	}
+	// The stored Last-Modified only rides along when the client did not
+	// bring its own If-Modified-Since: If-None-Match takes precedence at
+	// the origin (RFC 9110 §13.1.2), and overwriting the client's own
+	// date would change their condition's meaning.
+	if !resolver.LastModified.IsZero() && len(revalReq.Header.Peek(header.IfModifiedSince)) == 0 {
+		revalReq.Header.Set(header.IfModifiedSince,
+			resolver.LastModified.UTC().Format(httpTimeFormat))
+	}
+
+	// Span context stored by the middleware, never the RequestCtx (whose
+	// lifetime ends at handler return); ended by the deferred End below.
+	revalCtx, revalSpan := tracing.StartOriginSpan(
+		tracing.SpanContextFromRequest(ctx),
+		ctx.Method(), ctx.Path(), h.poolName, h.routeName,
+	)
+	defer revalSpan.End()
+	res := h.doFetchBg(revalCtx, revalReq)
+	if res.Err != nil {
+		tracing.RecordError(revalSpan, res.Err)
+		return false
+	}
+
+	if res.StatusCode == fasthttp.StatusNotModified {
+		refreshed := h.refreshFrom304(resolver, res, ri, now)
+		// Drift check before the store (ADR-0058): a declaration change
+		// in the 304 purges the stale resolver and its variants before
+		// the refreshed resolver re-lands.
+		h.detectVaryDrift(ctx, resolver, ri, res.StatusCode, refreshed.VaryValue)
+		// The refreshed object keeps the resolver's primary slot, so its
+		// VaryKey must stay blank: the primary entry is the Vary
+		// resolver, not a variant, and a peer that only holds it must
+		// answer variant fetches with a miss (see writeAndMaybeStore).
+		refreshed.VaryKey = ""
+		h.storeObject(ctx, refreshed.Key, refreshed, ri, false, 0)
+		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
+		return true
+	}
+
+	// Full response: the ordinary miss fill. writeAndMaybeStore derives
+	// the store key from this response's own Vary declaration, so the
+	// newly fetched variant lands under the variant key, not the
+	// resolver's primary slot. stale is nil: the resolver was never
+	// usable for this request and must not become an error fallback.
+	h.writeAndMaybeStore(ctx, res, primaryKey, nil, ri)
+	return true
+}
+
 // lookup resolves the cache key and stored object for r, accounting
 // for Vary-based secondary keys. Returns the source (hot/warm) from
-// the storage tier that served the object.
-func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKey api.Key, obj *api.Object, src api.Source) {
+// the storage tier that served the object. On a variant miss (a
+// stored Vary resolver exists but the request's variant is not
+// stored), obj is nil and resolver carries the primary-key resolver —
+// the caller can still use its validators for an origin revalidation
+// attempt (RFC 9111 §4.3.1) even though the response itself can never
+// be selected for this request.
+func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKey api.Key, obj, resolver *api.Object, src api.Source) {
 	primaryKey = h.buildKey(ctx)
 	obj, src, err := h.store.Get(ctx, primaryKey)
 	if err != nil {
@@ -1723,17 +1838,17 @@ func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKe
 			"key", primaryKey, "error", err)
 	}
 	if obj == nil || obj.VaryValue == "" {
-		return primaryKey, primaryKey, obj, src
+		return primaryKey, primaryKey, obj, nil, src
 	}
 	vk := VariantKeyFast(primaryKey, obj.VaryValue, &ctx.Request.Header, h.policy)
 	if vk == primaryKey {
-		return primaryKey, primaryKey, obj, src
+		return primaryKey, primaryKey, obj, nil, src
 	}
 	vobj, vsrc, verr := h.store.Get(ctx, vk)
 	if verr == nil && vobj != nil {
-		return primaryKey, vk, vobj, vsrc
+		return primaryKey, vk, vobj, nil, vsrc
 	}
-	return primaryKey, vk, nil, ""
+	return primaryKey, vk, nil, obj, src
 }
 
 // isOwnerOrUnmanaged reports whether this node owns key, or whether the

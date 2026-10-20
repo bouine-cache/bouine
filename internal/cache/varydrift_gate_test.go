@@ -72,7 +72,7 @@ func TestRevalidate_VaryDrift_5xxNeverSignals(t *testing.T) {
 	// The stored resolver and variant must survive the outage.
 	ctx3 := testCtx("GET", "http://example.com/page")
 	ctx3.Request.Header.Set("X-Tenant-Id", "14")
-	primaryKey, lookupKey, obj, _ := h.lookup(ctx3)
+	primaryKey, lookupKey, obj, _, _ := h.lookup(ctx3)
 	require.NotNil(t, obj, "the stored object must survive a 502 revalidation")
 	require.NotEqual(t, primaryKey, lookupKey, "the Vary resolver must survive a 502 revalidation")
 }

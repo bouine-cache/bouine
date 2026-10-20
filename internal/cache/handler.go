@@ -1894,7 +1894,7 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 	// list. When the client's condition was part of what the origin
 	// validated, the client gets its 304 — the same complement the
 	// plain revalidation path serves.
-	if tryConditional304Fast(ctx, refreshed, src, h.rewriteHook()) {
+	if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
 		return true
 	}
 	h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
@@ -3167,6 +3167,11 @@ func (h *Handler) purgeAndBroadcast(ctx *fasthttp.RequestCtx, key api.Key) {
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 7234 §3; dropped by RFC 9111, kept by design).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
+	// A 304 is never storable (RFC 9110 §15.4.5) — see IsCacheable's
+	// guard; it carries no body and satisfies no subsequent request.
+	if resp.StatusCode() == fasthttp.StatusNotModified {
+		return
+	}
 	// Responses with Set-Cookie are client-specific and never stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return

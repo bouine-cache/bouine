@@ -81,6 +81,14 @@ the curated, human-readable summary.
   riding a window bought by a different requester's validation.
   Fixes the `cache-tests` `conditional-etag-vary-headers-mismatch`
   failure.
+- **An origin `304` answering a cold miss is no longer stored.** The
+  miss path forwards the client's `If-None-Match` verbatim; when the
+  origin answers `304` on a cold cache, that bodiless response was
+  previously stored as a cacheable object and later re-served as a
+  `304 X-Cache: HIT` to unconditional clients. A `304` is only ever
+  valid in reply to a conditional request (RFC 9110 §15.4.5) and
+  carries no body, so it now reaches the requesting client but never
+  the store — the Map, bytes, and POST-response gates all refuse it.
 
 ### Dependencies
 

@@ -56,13 +56,18 @@ the curated, human-readable summary.
   response (the request's `Vary` values differ) to still combine the
   stored entity-tag into the forwarded request — the origin then
   either answers `304` (the stored representation is still current:
-  it is freshened and served as a `200`, never a bare `304` on the
-  wire since the client sent no conditional) or delivers the full
-  response, which fills the request's variant as an ordinary miss.
-  A client-supplied `If-None-Match` is unioned with the stored tag
-  instead of replaced. Upstream errors fall back to the unconditional
-  fill; the attempt is never singleflight-shared with plain misses
-  (a follower would receive a `304` with no usable response in scope).
+  it is freshened and served as a `200`, or as a `304` when the
+  client's own conditional was among the validated tags, per the
+  complement of the spec's MUST-generate-200 clause) or delivers the
+  full response, which fills the request's variant as an ordinary
+  miss. A client-supplied `If-None-Match` is unioned with the stored
+  tag instead of replaced (a bare `*` wildcard is forwarded verbatim —
+  unioning it would be invalid field syntax). Requests carrying
+  `Authorization` or `Cookie` never reuse another requester's stored
+  validators (ADR-0052 posture); they fetch unconditionally as before.
+  Upstream errors fall back to the unconditional fill; the attempt is
+  never singleflight-shared with plain misses (a follower would
+  receive a `304` with no usable response in scope).
   Fixes the `cache-tests` `conditional-etag-vary-headers-mismatch`
   failure.
 

@@ -579,6 +579,13 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 		(isHeuristicStatus(status) || respCC.Public) {
 		return true
 	}
+	// Validator-bearing no-cache responses are storable with zero
+	// freshness — mirrors the Map path's branch in parsedResponse.
+	// isCacheable (RFC 9111 §5.2.2.4 forbids reuse without validation,
+	// §3 permits storing).
+	if respCC.NoCache && len(hdr.Peek(header.ETag)) > 0 && isHeuristicStatus(status) {
+		return true
+	}
 	if h.neg.Cacheable(status) {
 		return true
 	}

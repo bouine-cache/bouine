@@ -10,6 +10,20 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Security
+
+- **Toolchain upgraded for GO-2026-6809** — the pinned Go toolchain
+  (`go 1.27.2 → 1.27.3`) distrusts compromised intermediate
+  certificates in `crypto/x509`; bouine reaches the affected path
+  through the h1 parser's TLS prefix connection
+  (`internal/server/h1parser`: `tls.Conn.Read` →
+  `x509.Certificate.Verify`). The same PR syncs every pin of the old
+  version: `GO_VERSION_STAMP` (`.pre-commit-config.yaml` — it keys
+  the CI prek cache), `GO_VERSION` in
+  `ci.yml`/`nightly.yml`/`release.yml`, and the
+  `golang:1.27.3-bookworm` build-stage image (digest-pinned) in the
+  `Dockerfile`. `govulncheck ./...` is clean on 1.27.3.
+
 ### Conformance
 
 - **A HEAD response now freshens the stored GET entry (RFC 9111

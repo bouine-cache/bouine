@@ -821,6 +821,215 @@ func TestHandler_HeadRevalidate_Origin304_KeepsStoredBody(t *testing.T) {
 		"HEAD-304 revalidation must preserve the stored body for subsequent GETs")
 }
 
+// TestHandler_HeadFreshening_Origin200_UpdatesStoredEntry pins RFC 9111
+// §4.3.5 (cache-tests head-200-update / head-200-freshness-update): a HEAD
+// response received while revalidating a stale stored GET entry freshens
+// that entry — headers received in the HEAD response replace the stored
+// ones (RFC 9111 §3.2) and its freshness metadata resets the stored TTL —
+// while the stored body is preserved (issue #752: a HEAD exchange must
+// never store a bodiless response over the GET representation).
+func TestHandler_HeadFreshening_Origin200_UpdatesStoredEntry(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if ctx.IsHead() {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+			ctx.Response.Header.Set("Template-A", "2")
+			// A real origin (Node, nginx) echoes the representation's
+			// Content-Length on a HEAD response (RFC 9110 §9.3.2).
+			ctx.Response.Header.Set(header.ContentLength, "9")
+			ctx.SetStatusCode(200)
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=2")
+		ctx.Response.Header.Set("Template-A", "1")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("orig-body")
+	}
+	h := testHandler(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/hf")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "orig-body", respBody(rr))
+
+	expireStoredObject(t, h, "/hf")
+
+	hr := testCtx("HEAD", "http://example.com/hf")
+	h.ServeRequest(hr)
+	require.Equal(t, 200, respCode(hr))
+	require.Equal(t, "REVALIDATED", respHeader(hr, header.XCache))
+	require.Equal(t, "2", respHeader(hr, "Template-A"),
+		"a header received in the HEAD response must replace the stored one (RFC 9111 §3.2)")
+	require.Equal(t, 0, len(hr.Response.Body()), "HEAD responses must not carry a body")
+
+	gr := testCtx("GET", "http://example.com/hf")
+	h.ServeRequest(gr)
+	require.Equal(t, "HIT", respHeader(gr, header.XCache),
+		"the HEAD response's freshness metadata must freshen the stored entry (RFC 9111 §4.3.5)")
+	require.Equal(t, "orig-body", respBody(gr),
+		"freshening must keep the stored GET body, never the bodiless HEAD exchange (issue #752)")
+	require.Equal(t, "2", respHeader(gr, "Template-A"))
+}
+
+// TestHandler_HeadFreshening_RetainsStoredHeadersNotReceived pins the
+// header-retention half of the RFC 9111 §3.2 merge on the HEAD-freshen
+// path (cache-tests head-200-retain): a HEAD response that omits a stored
+// header must not drop it from the stored entry — dropping it corrupted
+// the cached entry for every subsequent GET on that key.
+func TestHandler_HeadFreshening_RetainsStoredHeadersNotReceived(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if ctx.IsHead() {
+			// Origin HEAD response carries no Cache-Control and no
+			// Template-A: everything but its own Date is retained.
+			ctx.Response.Header.Set(header.ContentLength, "11")
+			ctx.SetStatusCode(200)
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+		ctx.Response.Header.Set("Template-A", "1")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("retain-body")
+	}
+	h := testHandler(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/hf-retain")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "retain-body", respBody(rr))
+
+	expireStoredObject(t, h, "/hf-retain")
+
+	hr := testCtx("HEAD", "http://example.com/hf-retain")
+	h.ServeRequest(hr)
+	require.Equal(t, 200, respCode(hr))
+	require.Equal(t, "REVALIDATED", respHeader(hr, header.XCache))
+	require.Equal(t, "1", respHeader(hr, "Template-A"),
+		"headers absent from the HEAD response must be retained from the stored entry (RFC 9111 §3.2)")
+
+	gr := testCtx("GET", "http://example.com/hf-retain")
+	h.ServeRequest(gr)
+	require.Equal(t, "HIT", respHeader(gr, header.XCache))
+	require.Equal(t, "1", respHeader(gr, "Template-A"),
+		"the freshened entry must keep headers the HEAD response did not carry")
+	require.Equal(t, "retain-body", respBody(gr))
+}
+
+// TestHandler_HeadFreshening_Origin410_UpdatesStoredFields pins the
+// cache-tests head-410-update expectation: a 410 response to a HEAD
+// updates the stored entry's header fields and freshness while the stored
+// status (200) and body are preserved — the client still receives the
+// origin's 410 for the HEAD itself.
+func TestHandler_HeadFreshening_Origin410_UpdatesStoredFields(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if ctx.IsHead() {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+			ctx.Response.Header.Set("Template-A", "2")
+			ctx.Response.Header.Set(header.ContentLength, "9")
+			ctx.SetStatusCode(fasthttp.StatusGone)
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=2")
+		ctx.Response.Header.Set("Template-A", "1")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("gone-body")
+	}
+	h := testHandler(t, upstream)
+
+	rr := testCtx("GET", "http://example.com/hf-410")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
+	require.Equal(t, "gone-body", respBody(rr))
+
+	expireStoredObject(t, h, "/hf-410")
+
+	hr := testCtx("HEAD", "http://example.com/hf-410")
+	h.ServeRequest(hr)
+	require.Equal(t, fasthttp.StatusGone, respCode(hr), "the origin's HEAD status is written through")
+	require.Equal(t, 0, len(hr.Response.Body()))
+
+	gr := testCtx("GET", "http://example.com/hf-410")
+	h.ServeRequest(gr)
+	require.Equal(t, "HIT", respHeader(gr, header.XCache))
+	require.Equal(t, 200, respCode(gr),
+		"the stored GET status is preserved; only header fields are updated (RFC 9111 §3.2)")
+	require.Equal(t, "2", respHeader(gr, "Template-A"))
+	require.Equal(t, "gone-body", respBody(gr))
+}
+
+// TestHandler_HeadFreshening_ValidatorMismatch_LeavesEntryStale pins the
+// RFC 9111 §4.3.5 mismatch gate: when the HEAD response's validators (or
+// its Content-Length) do not match the stored entry, the cache considers
+// the stored response stale — no freshening — so the next GET must
+// revalidate rather than hit a metadata-refreshed entry.
+func TestHandler_HeadFreshening_ValidatorMismatch_LeavesEntryStale(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		head func(ctx *fasthttp.RequestCtx)
+	}{
+		{
+			name: "etag mismatch",
+			head: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+				ctx.Response.Header.Set(header.ETag, `"v2"`)
+				ctx.SetStatusCode(200)
+			},
+		},
+		{
+			name: "content-length mismatch",
+			head: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+				ctx.Response.Header.Set(header.ETag, `"v1"`)
+				ctx.Response.Header.Set(header.ContentLength, "999")
+				ctx.SetStatusCode(200)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := func(ctx *fasthttp.RequestCtx) {
+				if ctx.IsHead() {
+					tc.head(ctx)
+					return
+				}
+				if len(ctx.Request.Header.Peek(header.IfNoneMatch)) > 0 && !ctx.IsHead() {
+					ctx.Response.Header.Set(header.CacheControl, "max-age=1000")
+					ctx.Response.Header.Set(header.ETag, `"v2"`)
+					ctx.SetStatusCode(200)
+					_, _ = ctx.WriteString("changed-body")
+					return
+				}
+				ctx.Response.Header.Set(header.CacheControl, "max-age=2")
+				ctx.Response.Header.Set(header.ETag, `"v1"`)
+				ctx.SetStatusCode(200)
+				_, _ = ctx.WriteString("match-body")
+			}
+			h := testHandler(t, upstream)
+
+			rr := testCtx("GET", "http://example.com/hf-mismatch")
+			h.ServeRequest(rr)
+			require.Equal(t, "MISS", respHeader(rr, header.XCache))
+			require.Equal(t, "match-body", respBody(rr))
+
+			expireStoredObject(t, h, "/hf-mismatch")
+
+			hr := testCtx("HEAD", "http://example.com/hf-mismatch")
+			h.ServeRequest(hr)
+			require.Equal(t, 200, respCode(hr))
+
+			gr := testCtx("GET", "http://example.com/hf-mismatch")
+			h.ServeRequest(gr)
+			require.NotEqual(t, "HIT", respHeader(gr, header.XCache),
+				"a mismatching HEAD response must not freshen the stored entry (RFC 9111 §4.3.5)")
+			require.Equal(t, "changed-body", respBody(gr),
+				"the next GET must revalidate and pick up the new content")
+		})
+	}
+}
+
 // revalidate304Upstream returns an origin that serves a validator-bearing
 // 200 to plain requests and a 304 to any conditional request, recording
 // the received If-Modified-Since in *seen ("" when the request was not

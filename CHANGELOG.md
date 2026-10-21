@@ -12,6 +12,27 @@ the curated, human-readable summary.
 
 ### Conformance
 
+- **A HEAD response now freshens the stored GET entry (RFC 9111
+  §4.3.5).** When a HEAD request revalidates or refetches a URL that has
+  a stored GET response, the origin's HEAD response updates the stored
+  entry's header fields (§3.2 merge: received fields replace stored
+  ones, fields the HEAD response omits are retained) and its freshness
+  lifetime, while the stored status and body are preserved — a HEAD
+  exchange still never stores a bodiless response (issue #752). The
+  client receives the freshened entry's headers under the HEAD
+  response's own status code. A HEAD response whose validators (`ETag`,
+  `Last-Modified`) or `Content-Length` do not match the stored entry
+  leaves it stale instead, per the §4.3.5 gate. Fixes the `cache-tests`
+  failures `head-200-update`, `head-200-retain`,
+  `head-200-freshness-update`, and `head-410-update`; the conformance
+  score moves to **349/365 (95.6%)**.
+- **HEAD-led origin fetches no longer share singleflight flights with
+  GET-led ones.** A HEAD representation fetch cannot substitute a GET
+  one: sharing a revalidation or stale-fallback flight let a GET
+  follower store the HEAD flight's empty body under the GET-shared
+  cache key (the issue #752 poisoning class, via singleflight). HEAD
+  requests still collapse with each other, and the cache key space is
+  untouched (HEAD still folds into GET).
 - **A client conditional that survives revalidation now gets a `304`,
   not a full replay.** When a stale object is revalidated and the origin
   answers `304`, a client `If-None-Match` / `If-Modified-Since` that

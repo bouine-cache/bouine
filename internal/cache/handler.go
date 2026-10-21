@@ -2251,7 +2251,11 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey
 		res.Header = res.Header.ownedClone()
 		return res
 	}
-	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(0), func() (any, error) {
+	suffix := uint64(0)
+	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
+		suffix = headRevalKeySuffix
+	}
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
 	})
@@ -2264,6 +2268,21 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey
 // key that won't collide with regular fetches for the same cache key,
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
+
+// headRevalKeySuffix separates HEAD-led origin-fetch flights from
+// GET-led ones in the singleflight space (collapsedRevalidateBg's
+// revalidation flights and collapsedFetch's stale-fallback flights). A
+// HEAD representation fetch cannot substitute a GET one: sharing one
+// flight let a GET follower store a HEAD-led flight's empty body under
+// the GET-shared key (the issue #752 poisoning via singleflight), and
+// would hand a HEAD follower a GET-led flight's full response, which
+// freshenFromHead must not merge over the stored body. HEAD requests
+// still collapse with each other; background fetches always remap
+// HEAD→GET (remapHeadToGet) and stay in the GET flight space. The cache
+// KEY space is untouched — BuildKey still folds HEAD into GET, so the
+// stored entry serves both methods; only the in-flight fetch dedup is
+// method-aware.
+const headRevalKeySuffix uint64 = 0x68656164 // "head" in ASCII
 
 // collapsedFetchBg deduplicates concurrent background origin fetches for
 // the same key. Every caller holds a stored object (a refresh or rewrite
@@ -2302,7 +2321,11 @@ func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Reque
 		res.Header = res.Header.ownedClone()
 		return res
 	}
-	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(revalKeySuffix), func() (any, error) {
+	suffix := revalKeySuffix
+	if req.Header.IsHead() {
+		suffix = headRevalKeySuffix
+	}
+	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
@@ -2519,6 +2542,16 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
+	// RFC 9111 §4.3.5 (freshening with HEAD): a full origin response to
+	// a HEAD on a stale-but-choosable entry (the no-validator Miss
+	// decision lands here via revalidateOrMiss) updates the stored
+	// entry's headers and freshness instead of being merely served
+	// through. A non-freshenable response falls through to
+	// writeAndMaybeStore's write-through.
+	if bytes.Equal(ctx.Method(), []byte("HEAD")) &&
+		h.freshenFromHead(ctx, res, lookupKey, stale, now, src, ri) {
+		return
+	}
 	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
@@ -2629,6 +2662,18 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		return
 	}
 
+	// RFC 9111 §4.3.5 (freshening with HEAD): the origin answered the
+	// HEAD with a full response. The client is served the freshened
+	// stored entry — retained headers plus the HEAD response's §3.2
+	// updates — while the stored GET body stays in place (issue #752).
+	// A non-freshenable response (mismatching validators, status other
+	// than 200/410) falls through to the ordinary write-through. GET
+	// requests always take the full-response handling below.
+	if bytes.Equal(ctx.Method(), []byte("HEAD")) &&
+		h.freshenFromHead(ctx, res, lookupKey, stale, now, src, ri) {
+		return
+	}
+
 	// A 200 is a full fresh response: writeAndMaybeStore compares its
 	// effectiveVary (the declaration that will be stored) against the
 	// stored one, INSIDE the cacheability gate — an uncacheable response
@@ -2636,11 +2681,15 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	h.writeAndMaybeStore(ctx, res, primaryKey, stale, ri)
 }
 
-// refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
-// it merges the validating response's headers (RFC 9111 §3.2) and recomputes
-// the stored Cache-Control, TTL, OriginAge, and ETag. The caller stores the
-// result with its own context. Shared by foreground revalidate and background
-// SWR revalidation so the recompute logic lives in exactly one place.
+// refreshFrom304 builds an updated copy of stale after a metadata-only
+// validating response (a 304 Not Modified, or — via freshenFromHead — a
+// response to a HEAD, RFC 9111 §4.3.5): it merges the validating
+// response's headers (RFC 9111 §3.2) and recomputes the stored
+// Cache-Control, TTL, OriginAge, ETag, and Last-Modified. The stored
+// status and body are preserved; the caller stores the result with its
+// own context. Shared by foreground revalidate, background SWR
+// revalidation, and HEAD freshening so the recompute logic lives in
+// exactly one place.
 //
 // stale.Header is cloned by CloneForRefresh before mutation: it is shared
 // with any other goroutine that looked up the same object, and
@@ -2714,7 +2763,112 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}
+	// Recompute the parsed Last-Modified from the merged header line so
+	// future revalidations send the merged validator (setConditionalHeaders
+	// reads the parsed field, not the header map).
+	if lm := refreshed.Header.Get(header.LastModified); lm != "" {
+		if t, err := time.Parse(httpTimeFormat, lm); err == nil {
+			refreshed.LastModified = t
+		}
+	}
 	return refreshed
+}
+
+// freshenFromHead applies RFC 9111 §4.3.5 to a full (non-304) response
+// received for a HEAD on a stored GET entry (revalidate path when the
+// entry carries validators, stale-fallback path when it does not):
+// the stored entry's header fields are updated from the HEAD response
+// (§3.2 merge — received fields replace stored ones, absent fields are
+// retained) and its freshness is recomputed, while the stored status
+// and body are preserved (a HEAD exchange must never store a bodiless
+// response, issue #752). The client is answered with the freshened
+// entry's headers under the HEAD response's own status code, minus the
+// body HEAD never carries.
+//
+// Returns true when it fully handled the request. false means the
+// caller proceeds with the ordinary write-through (writeAndMaybeStore),
+// which serves the origin response and never stores for a HEAD client:
+//
+//   - The §4.3.5 SHOULD gate: a HEAD response whose validators (ETag,
+//     Last-Modified) or Content-Length do not match the stored entry
+//     means the representations differ, so the stored response is
+//     considered stale instead of freshened.
+//   - Statuses other than 200 and 410: §4.3.5 specifies the update for
+//     a 200, and the cache-tests suite extends it to 410
+//     (head-410-update); redirects and other client errors must keep
+//     reaching GET clients, not resurrect a stored 200 under them.
+//   - A fetch that returned a body: defense in depth on top of the
+//     method-separated flights (collapsedRevalidateBg,
+//     collapsedFetch) — a bodied fetch is a full GET response, never
+//     a HEAD exchange, and freshening from it would merge its headers
+//     over the stored body (whose full copy that flight's leader
+//     stores itself).
+func (h *Handler) freshenFromHead(
+	ctx *fasthttp.RequestCtx,
+	res fetchResult,
+	lookupKey api.Key,
+	stale *api.Object,
+	now time.Time,
+	src api.Source,
+	ri RequestInfo,
+) bool {
+	if res.StatusCode != fasthttp.StatusOK && res.StatusCode != fasthttp.StatusGone {
+		return false
+	}
+	if len(res.Body) > 0 || !headFreshenAllowed(stale, res) {
+		return false
+	}
+	// refreshFrom304 is the shared §3.2 merge machinery: it clones the
+	// stale object (keeping status and body), merges the response's
+	// headers, and recomputes freshness — identical requirements for a
+	// HEAD response, whose headers are metadata-only.
+	refreshed := h.refreshFrom304(stale, res, ri, now)
+	// Drift check before the store (ADR-0058), mirroring the 304 branch.
+	h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
+	h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
+	// The HEAD client's own conditional is evaluated against the
+	// freshened entry, mirroring the 304 branch (§4.3.1).
+	if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
+		return true
+	}
+	dst := &ctx.Response.Header
+	fh := getOrComputeFastHeader(refreshed)
+	fh.CopyTo(dst)
+	var ageBuf [16]byte
+	ageStr := strconv.AppendInt(ageBuf[:0], int64(ComputeAge(refreshed, now).Seconds()), 10)
+	dst.SetCanonical(header.S2b(header.Age), ageStr)
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+	dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
+	// Write-through status: the client gets the HEAD response's status
+	// (e.g. 410), while the stored entry keeps its own.
+	ctx.SetStatusCode(res.StatusCode)
+	h.applyResponseRewrites(dst)
+	return true
+}
+
+// headFreshenAllowed implements the RFC 9111 §4.3.5 validator gate: the
+// stored entry may be updated from a HEAD response only when every
+// validator received in it matches the stored entry, and a received
+// Content-Length matches the stored body's size. Any mismatch (or an
+// unparseable value) means the representations differ — the caller
+// leaves the stored response stale instead of freshening it.
+func headFreshenAllowed(stale *api.Object, res fetchResult) bool {
+	if e := res.Header.Get(header.ETag); e != "" && !etagMatch(e, stale.ETag) {
+		return false
+	}
+	if lm := res.Header.Get(header.LastModified); lm != "" {
+		lmTime := parseHTTPDate(lm)
+		if lmTime.IsZero() || stale.LastModified.IsZero() || !stale.LastModified.Equal(lmTime) {
+			return false
+		}
+	}
+	if cl := res.Header.Get(header.ContentLength); cl != "" {
+		n, err := strconv.Atoi(cl)
+		if err != nil || int64(n) != stale.BodySize {
+			return false
+		}
+	}
+	return true
 }
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh
@@ -2882,14 +3036,17 @@ func (h *Handler) writeAndMaybeStore(
 	h.applyResponseRewrites(dst)
 
 	// A HEAD exchange must never (re)store an object: the origin's
-	// response to the revalidation or miss carries no body, and HEAD
-	// shares the GET cache key — storing would replace a live body with
-	// an empty one served to every subsequent GET (issue #752). The
-	// streaming miss path applies the same guard (streamMissBuffered's
-	// !isHEAD). Background fetchers (doBackgroundRevalidate,
-	// doShedRefill) never reach this guard — they remap HEAD→GET when
-	// materializing their origin request (remapHeadToGet) so the
-	// refresh reproduces the stored GET representation instead.
+	// response to the miss carries no body, and HEAD shares the GET
+	// cache key — storing would replace a live body with an empty one
+	// served to every subsequent GET (issue #752). The revalidation
+	// path freshens the stored entry from the HEAD response's headers
+	// instead (RFC 9111 §4.3.5, freshenFromHead) — it never reaches this
+	// guard. The streaming miss path applies its own guard
+	// (streamMissBuffered's !isHEAD). Background fetchers
+	// (doBackgroundRevalidate, doShedRefill) never reach this guard
+	// either — they remap HEAD→GET when materializing their origin
+	// request (remapHeadToGet) so the refresh reproduces the stored GET
+	// representation instead.
 	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		return
 	}

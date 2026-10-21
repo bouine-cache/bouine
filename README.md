@@ -26,7 +26,7 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 > Status: **v1.0-rc** — core caching, clustering, negative caching,
 > jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s
 > with 3-node gossip cluster.
-> `make conformance` scores **342/365 (93.7%)** on
+> `make conformance` scores **349/365 (95.6%)** on
 > [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 > See [`CHANGELOG.md`](CHANGELOG.md) for what's shipped and what's deferred
 > (prefetching, HTTP/3, VCL shim, and AI insights are not yet implemented).
@@ -41,8 +41,8 @@ It targets the same problem space as a classic HTTP cache but is designed from d
   external KV.
 - **Clustering**: gossip membership + consistent hash + peer fetch. K8s
   StatefulSet friendly.
-- **Compliance**: **93.7 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
-  (342/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
+- **Compliance**: **95.6 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
+  (349/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
   heuristic caching, Vary, conditional requests, and `must-understand`.
 - **Performance**: zero-alloc hit path, benchmark-gated CI.
 - **Observability**: Prometheus, OpenTelemetry, slog, pprof.

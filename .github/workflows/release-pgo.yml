@@ -55,13 +55,30 @@ jobs:
           # workflow identity (scripts/check-dco.sh + CI dco job).
           fetch-depth: 0
 
+      - name: Skip if this tree already carries its capture
+        id: guard
+        run: |
+          set -euo pipefail
+          # PGO profiles are timing-dependent, never byte-stable, so a
+          # green capture always pushes a new refresh commit — which
+          # re-triggers this workflow on its own push. Converge instead
+          # of looping: a refresh commit at HEAD means this exact tree
+          # (the parent's code plus the profile file) already carries
+          # its own capture (ADR-0060).
+          if git log -1 --format=%s | grep -q '^perf(build): refresh default.pgo for release PR #'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD is a profile-refresh commit; this tree already carries its own capture — skipping."
+          fi
+
       - name: Set up Go
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Run capture legs + merge (make pgo-refresh)
+        if: steps.guard.outputs.skip != 'true'
         env:
           BOUINE_ADMIN_TOKEN: ${{ secrets.BOUINE_ADMIN_TOKEN }}
         # loadtest-setup first: bench/pgo/run.sh boots the pre-built
@@ -71,6 +88,7 @@ jobs:
         run: make loadtest-setup pgo-refresh
 
       - name: Fail if profile unchanged or missing
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           if [ ! -f cmd/bouine/default.pgo ]; then
@@ -84,9 +102,13 @@ jobs:
           echo "profile bytes: $(wc -c < cmd/bouine/default.pgo)"
 
       - name: Commit + push to PR branch
+        if: steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
+          # Passed through env, not inline ${{ }}, so a crafted branch
+          # name can never execute as shell (script-injection rule).
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           git config user.name  "bouine-release-bot"
@@ -104,5 +126,15 @@ jobs:
 
           Re-captured from the hit/miss/mixed load legs against this
           release candidate tree (ADR-0060, bench/pgo/run.sh)."
-          git push origin HEAD:"$(git rev-parse --abbrev-ref HEAD)"
+          # actions/checkout at head.sha leaves a detached HEAD, so
+          # rev-parse --abbrev-ref HEAD returns "HEAD" and the push
+          # refspec HEAD:HEAD is invalid — every release-prepare PR
+          # failed here on its first run. Resolve the destination
+          # explicitly: the PR head ref on pull_request events, a
+          # gh lookup on workflow_dispatch re-rolls.
+          branch="$HEAD_REF"
+          if [ -z "$branch" ]; then
+            branch="$(gh pr view "$PR" --json headRefName -q .headRefName)"
+          fi
+          git push origin HEAD:"refs/heads/$branch"
           echo "Pushed refreshed default.pgo to PR #${PR}"

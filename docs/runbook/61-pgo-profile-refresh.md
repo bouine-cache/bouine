@@ -43,6 +43,7 @@ refreshes the committed profile on every release-prepare PR.
 | Build fails `pgo: parse error` | non-gzip file named `default.pgo` in `cmd/bouine/` | restore from git |
 | `make pgo-refresh` fails "only N samples" | capture legs too short / load too low | raise `PGO_PROFILE_SECS` or leg RPS |
 | `make pgo-capture` fails "k6" not found | load-gen image tag changed | check `bench/loadtest/docker-compose.yaml` digest |
+| `release-pgo.yml` fails the miss leg (`http_req_failed` crossed) right after a push | the capture races the push-triggered CI suite on the shared self-hosted runner; the origin container starves under an 8k rps miss storm | re-run the failed job once that SHA's CI has finished; a run whose HEAD is already a profile-refresh commit skips the capture entirely |
 
 ## Verification
 

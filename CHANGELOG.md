@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.30] - 2026-10-21
+
 ### Security
 
 - **Toolchain upgraded for GO-2026-6809** — the pinned Go toolchain
@@ -2822,7 +2824,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.29...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.30...HEAD
+[0.5.30]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.30
 [0.5.29]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.29
 [0.5.28]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.28
 [0.5.27]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.27

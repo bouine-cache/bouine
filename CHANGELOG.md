@@ -10,6 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- **CLI: global connection configuration (#812).** `--server`,
+  `--token`, and `--format text|json` are now persistent root flags
+  shared by every admin-plane subcommand (`purge`, `ban`, `refresh`,
+  `cluster peers`) instead of being redeclared per command. Values
+  resolve flag > environment (`BOUINE_SERVER`, `BOUINE_TOKEN`,
+  `BOUINE_FORMAT`) > default, so scripts export the connection once
+  and the admin token never has to be typed on a command line. All
+  commands gained machine-friendly `--format json` output, and a bad
+  `--format` is rejected before any command runs. The README now
+  documents the Kubernetes targeting recipe: port-forward a named pod
+  (the ClusterIP admin Service routes each connection to a random
+  pod, which is only correct for broadcast operations), and
+  `docs/architecture.md` §11 no longer lists the never-implemented
+  `--insecure` flag.
+
 ## [0.5.30] - 2026-10-21
 
 ### Security

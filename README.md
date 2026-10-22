@@ -179,6 +179,45 @@ make build   # -> ./bin/bouine
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 
+### Administering a cache with the CLI
+
+Every admin-plane subcommand (`purge`, `ban`, `refresh`, `cluster peers`)
+accepts the global flags `--server`, `--token`, and `--format text|json`.
+Values resolve **flag > environment > default**, so scripts usually export
+the connection once:
+
+```bash
+export BOUINE_SERVER=127.0.0.1:9000        # admin listener
+export BOUINE_TOKEN=<admin bearer token>     # prefer env: never lands in shell history
+bouine purge http://example.com/img.png
+bouine cluster peers --format json
+```
+
+**Targeting a pod in Kubernetes.** The admin port is deliberately never
+exposed by a LoadBalancer (the admin Service is ClusterIP, and the image
+is distroless so there is no shell to `kubectl exec` into). Use
+port-forward against a named pod:
+
+```bash
+kubectl -n cache port-forward pod/bouine-0 9000:9000 &
+export BOUINE_SERVER=127.0.0.1:9000
+export BOUINE_TOKEN="$(kubectl -n cache get secret bouine-admin-token \
+  -o jsonpath='{.data.token}' | base64 -d)"
+bouine cluster peers
+```
+
+Caveats:
+
+- Port-forward works because `listen.admin` binds `:9000` on all
+  interfaces; RBAC on `pods/portforward` gates access.
+- The ClusterIP admin Service picks a **random pod per connection** —
+  fine for broadcast operations (`purge`, `ban`, `refresh` propagate
+  cluster-wide) but wrong for node-local output. Target named pods via
+  port-forward or the StatefulSet headless DNS
+  (`bouine-0.bouine-headless.<namespace>.svc:9000`).
+- Do not expose the admin port via Ingress/LoadBalancer: token-only
+  auth is too thin for a public listener.
+
 ### Verifying release signatures
 
 All releases are cryptographically signed using [cosign](https://github.com/sigstore/cosign)

@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-
-	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 func newClusterCmd() *cobra.Command {
@@ -19,25 +17,36 @@ func newClusterCmd() *cobra.Command {
 }
 
 func newClusterPeersCmd() *cobra.Command {
-	var server, token string
-
 	c := &cobra.Command{
 		Use:   "peers",
 		Short: "List live cluster peers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			baseURL := "http://" + server
-			client := bouineapi.New(baseURL).WithToken(token)
-			peers, err := client.Peers(cmd.Context())
+			peers, err := adminClient(cmd).Peers(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("cluster peers: %w", err)
 			}
-			out, _ := json.MarshalIndent(peers, "", "  ")
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(out))
-			return err
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format == formatJSON {
+				out, err := json.MarshalIndent(peers, "", "  ")
+				if err != nil {
+					return fmt.Errorf("marshal peers: %w", err)
+				}
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				return err
+			}
+			for _, p := range peers {
+				line := fmt.Sprintf("%s\t%s\t%s\t%s\n",
+					p.Name, p.Addr, p.Version, p.JoinedAt.Format("2006-01-02 15:04:05"))
+				if _, err := fmt.Fprint(cmd.OutOrStdout(), line); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
-	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
-	c.Flags().StringVar(&token, "token", "", "admin bearer token")
 	return c
 }

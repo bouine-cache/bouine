@@ -7,37 +7,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 func newPurgeCmd() *cobra.Command {
-	var server, token string
-
 	c := &cobra.Command{
 		Use:   "purge <url>",
 		Short: "Purge a URL from the cache",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := bouineapi.New("http://" + server)
-			if token != "" {
-				client = client.WithToken(token)
-			}
-			res, err := client.Purge(cmd.Context(), args[0])
+			res, err := adminClient(cmd).Purge(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), res.Status)
-			return err
+			return printResult(cmd, res.Status, res)
 		},
 	}
-	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
-	c.Flags().StringVar(&token, "token", "", "admin bearer token")
 	return c
 }
 
 func newBanCmd() *cobra.Command {
-	var server, token string
-
 	c := &cobra.Command{
 		Use:   "ban <predicate>",
 		Short: "Ban cache entries matching a predicate",
@@ -62,44 +50,28 @@ func newBanCmd() *cobra.Command {
 					return fmt.Errorf("unknown predicate key %q", k)
 				}
 			}
-			client := bouineapi.New("http://" + server)
-			if token != "" {
-				client = client.WithToken(token)
-			}
-			res, err := client.Ban(cmd.Context(), expr)
+			res, err := adminClient(cmd).Ban(cmd.Context(), expr)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s (count: %d)\n", res.Status, res.Count)
-			return err
+			return printResult(cmd, fmt.Sprintf("%s (count: %d)", res.Status, res.Count), res)
 		},
 	}
-	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
-	c.Flags().StringVar(&token, "token", "", "admin bearer token")
 	return c
 }
 
 func newRefreshCmd() *cobra.Command {
-	var server, token string
-
 	c := &cobra.Command{
 		Use:   "refresh <url>",
 		Short: "Soft-purge a URL (mark stale, revalidate on next request)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := bouineapi.New("http://" + server)
-			if token != "" {
-				client = client.WithToken(token)
-			}
-			res, err := client.Refresh(cmd.Context(), args[0])
+			res, err := adminClient(cmd).Refresh(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), res.Status)
-			return err
+			return printResult(cmd, res.Status, res)
 		},
 	}
-	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
-	c.Flags().StringVar(&token, "token", "", "admin bearer token")
 	return c
 }

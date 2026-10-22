@@ -17,11 +17,20 @@ func Root() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       buildinfo.Version,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Fail fast on a bad --format before any command runs, so
+			// offline commands reject it too instead of silently
+			// ignoring it (issue #812).
+			_, err := outputFormat(cmd)
+			return err
+		},
 	}
 
 	root.SetVersionTemplate(versionTemplate())
 
 	root.CompletionOptions.DisableDefaultCmd = true
+
+	addGlobalFlags(root)
 
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newServeCmd())

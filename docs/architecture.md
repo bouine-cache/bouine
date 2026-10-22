@@ -641,7 +641,14 @@ bouine cachecheck <url>
 bouine version
 ```
 
-All subcommands honor `--server`, `--token`, and `--insecure`.
+All admin-plane subcommands honor the global `--server`, `--token`, and
+`--format text|json` flags. Values resolve flag > environment
+(`BOUINE_SERVER`, `BOUINE_TOKEN`, `BOUINE_FORMAT`) > default; the
+environment is preferred for the token so it never lands in shell
+history. On Kubernetes, target a named pod via
+`kubectl port-forward` (admin binds all interfaces; the ClusterIP
+admin Service routes each connection to a random pod, which is only
+correct for broadcast operations) — see README for the recipe.
 
 ---
 

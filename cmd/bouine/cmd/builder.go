@@ -420,6 +420,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			LogCacheKeys:            true,
 			DefaultTTL:              rc.Cache.TTLDefault,
 			OverrideTTL:             rc.Cache.TTLOverride,
+			DownstreamFreshness:     string(rc.Cache.DownstreamFreshness),
 			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:              rc.Cache.StaleIfError,
 			AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
@@ -449,9 +450,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
 			cfg.OwnerFn = ownerFn
 			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() {
-				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
-			}
+			cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
 			// hit (issue #509). Fire-and-forget in a bounded goroutine so
@@ -599,6 +598,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			LogCacheKeys:            true,
 			DefaultTTL:              rc.Cache.TTLDefault,
 			OverrideTTL:             rc.Cache.TTLOverride,
+			DownstreamFreshness:     string(rc.Cache.DownstreamFreshness),
 			DefaultSWR:              rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:              rc.Cache.StaleIfError,
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
@@ -620,9 +620,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
 			cfg.OwnerFn = ownerFn
 			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() {
-				rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer")
-			}
+			cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
 			// hit (issue #509). Fire-and-forget in a bounded goroutine so

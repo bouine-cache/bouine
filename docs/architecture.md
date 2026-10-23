@@ -182,6 +182,13 @@ are an action (`HIT`, `MISS`, `REVALIDATE`, `STALE_HIT`, `BYPASS`) and a
 - `Age` calculation including `Date` skew and forward proxies.
 - Trailer headers, `Transfer-Encoding: chunked` for HTTP/1.1.
 - Method invalidation (`POST`/`PUT`/`DELETE` evict matching URLs).
+- Downstream freshness sync (`downstream_freshness: sync`, ADR-0063):
+  a synthesized `CDN-Cache-Control` (RFC 9213) on client-facing serves —
+  fresh carries the wall remaining, sanctioned stale mirrors the
+  SWR/SIE window, fills carry `min(origin effective max-age, bouine
+  final TTL)` — so a downstream CDN's clock cannot outlive bouine's.
+  `Cache-Control` itself is never mutated (ADR-0011); the default
+  `passthrough` forwards byte-for-byte.
 
 ### 3.5 Response streaming
 

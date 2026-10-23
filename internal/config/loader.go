@@ -1162,10 +1162,24 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 		ec.addf(path+".fetch_wait_timeout", "must be <= %v, got %v", maxFetchWaitTimeout, rc.FetchWaitTimeout)
 	}
 	validateRouteKey(ec, path+".key", rc.Key)
+	validateDownstreamFreshness(ec, path, rc.DownstreamFreshness)
 	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
 	validateCookieNames(ec, path, *rc)
 	validateCookiePresenceConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
+}
+
+// validateDownstreamFreshness checks the downstream_freshness enum
+// (ADR-0063 D3): the zero value, passthrough and sync. Kept as a
+// separate function so validateRouteCache stays within the complexity
+// budget.
+func validateDownstreamFreshness(ec *errCollector, path string, v DownstreamFreshness) {
+	switch v {
+	case "", DownstreamFreshnessPassthrough, DownstreamFreshnessSync:
+		// valid
+	default:
+		ec.addf(path+".downstream_freshness", `must be %q or %q, got %q`, DownstreamFreshnessPassthrough, DownstreamFreshnessSync, v)
+	}
 }
 
 // maxBypassUAEntries caps the bypass_on_user_agent pattern list: the

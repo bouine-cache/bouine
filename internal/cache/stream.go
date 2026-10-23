@@ -378,6 +378,11 @@ func (h *Handler) streamMiss(
 
 	dst := &ctx.Response.Header
 	sf.Header.CopyToFastHTTP(dst)
+	// Under sync the origin's CDC-family lines never reach a downstream
+	// cache (ADR-0063 I3); the synthesized cap below is authoritative.
+	if h.syncCDC {
+		removeCDCFamily(dst)
+	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	// RFC 9111 §4.2.3 / §5.1: a cache generating a response computes Age
@@ -420,7 +425,11 @@ func (h *Handler) streamMiss(
 	var resMap header.Map
 	if sf.resp != nil {
 		cacheable = h.isResponseCacheableBytes(sf, ri)
-		if cacheable {
+		// Under sync the fill cap needs resMap even when the operator
+		// storage gates (Set-Cookie, max object size) block storage: the
+		// cap applies to every RFC-cacheable fill, stored or not
+		// (ADR-0063 behavior matrix, Fill / MISS row).
+		if cacheable || h.syncCDC {
 			resMap = sf.Header.ToMap()
 		}
 	} else {
@@ -428,8 +437,28 @@ func (h *Handler) streamMiss(
 		cacheable = h.isResponseCacheable(sf, ri, resMap)
 	}
 
+	// Downstream freshness sync (ADR-0063): the fill cap must be
+	// complete at header-processing time — the streaming paths flush
+	// the head before the body (and the concurrent store) run, so the
+	// final TTL is computed here once (fillFinalTTL) and threaded to
+	// the store path as a buildObject preset: the cap advertised
+	// downstream and the stored clock are the same number.
+	// Uncacheable-to-shared fills never synthesize (no bouine clock
+	// exists; RFC 9111 §5.2.2.5, §5.2.2.7).
+	var fillTTL *time.Duration
+	if h.syncCDC {
+		parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
+		if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
+			ttl := h.fillFinalTTLFor(resMap, sf.Delay, parsed, time.Now())
+			var cdcBuf [88]byte
+			dst.SetCanonical(header.S2b(header.CDNCacheControl),
+				appendFillCDCDirectives(cdcBuf[:0], parsed.respCC, originEffectiveMaxAge(parsed.respCC, resMap), ttl))
+			fillTTL = &ttl
+		}
+	}
+
 	if sf.buffered || isHEAD || !cacheable {
-		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable)
+		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable, fillTTL)
 		return
 	}
 
@@ -445,11 +474,11 @@ func (h *Handler) streamMiss(
 		if h.StreamingFallbackInc != nil {
 			h.StreamingFallbackInc.Inc()
 		}
-		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable)
+		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable, fillTTL)
 		return
 	}
 
-	h.streamMissTee(ctx, sf, inflight, primaryKey, ri, resMap)
+	h.streamMissTee(ctx, sf, inflight, primaryKey, ri, resMap, fillTTL)
 }
 
 // isResponseCacheable checks whether the origin response should be cached.
@@ -780,6 +809,7 @@ func (h *Handler) streamMissBuffered(
 	ri RequestInfo,
 	resMap header.Map,
 	isHEAD, cacheable bool,
+	fillTTL *time.Duration,
 ) {
 	// Check body size against maxResponseBytes (Content-Length may not
 	// have been available). The upstream-fallback result (issue #598)
@@ -866,7 +896,7 @@ func (h *Handler) streamMissBuffered(
 				}
 			}
 		}
-		obj := h.storeStreamedObject(ctx, storeKey, ri, res, resMap)
+		obj := h.storeStreamedObject(ctx, storeKey, ri, res, resMap, fillTTL)
 		if storeKey != primaryKey {
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
@@ -917,8 +947,7 @@ func (h *Handler) streamMissTee(
 	sf *streamFetchResult,
 	inflight *inflightStream,
 	primaryKey api.Key,
-	ri RequestInfo,
-	resMap header.Map,
+	ri RequestInfo, resMap header.Map, fillTTL *time.Duration,
 ) {
 	storeKey := primaryKey
 	if vary := effectiveVary(resMap, h.policy); vary != "" {
@@ -941,7 +970,7 @@ func (h *Handler) streamMissTee(
 	buf.Reset()
 
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-		h.teeStreamToClient(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap)
+		h.teeStreamToClient(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap, fillTTL)
 	})
 }
 
@@ -965,8 +994,7 @@ func (h *Handler) teeStreamToClient(
 	sf *streamFetchResult,
 	inflight *inflightStream,
 	storeKey, primaryKey api.Key,
-	ri RequestInfo,
-	resMap header.Map,
+	ri RequestInfo, resMap header.Map, fillTTL *time.Duration,
 ) {
 	var totalBytes int64
 	cacheExceeded := false
@@ -1036,7 +1064,7 @@ func (h *Handler) teeStreamToClient(
 	if !cacheExceeded && !clientDisconnected && !(h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) { //nolint:staticcheck // QF1001: readability
 		res := inflight.res
 		bgCtx := context.Background()
-		obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap)
+		obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap, fillTTL)
 		if storeKey != primaryKey {
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
@@ -1110,8 +1138,12 @@ func (h *Handler) storeStreamedObject(
 	ri RequestInfo,
 	res fetchResult,
 	resMap header.Map,
+	fillTTL *time.Duration,
 ) *api.Object {
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+	// fillTTL: preset by the sync-mode fill cap at header-processing
+	// time (ADR-0063) so the stored clock equals the advertised cap;
+	// nil (passthrough) computes the TTL in buildObject as before.
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
 	h.storeObject(ctx, key, obj, ri, false, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj

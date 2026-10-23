@@ -1,6 +1,7 @@
 # Downstream Freshness Sync — Synthesized `CDN-Cache-Control`
 
-- **Status**: Proposed (design approved in review session, 2026-10-16)
+- **Status**: Implemented (P1–P6 landed in a single PR on this branch,
+  2026-10-23; design approved in review session 2026-10-16)
 - **ADR**: [ADR-0063](../decisions/0063-downstream-freshness-sync.md) — context, rationale, rejected alternatives, behavior matrix
 - **Related**: [ADR-0011](../decisions/0011-ttl-override-per-route.md) (ttl_override header
   passthrough), [ADR-0022](../decisions/0022-refresh-persist-cycles.md) (downstream-stale
@@ -15,7 +16,7 @@
 Cloudflare behaviors (verified against published docs, 2026-10):
 
 1. `Age` resets on admit/revalidation — bouine's RFC 9111 §4.2.3-correct
-   `Age` (`internal/cache/handler.go:1992`, `internal/cache/fastpath.go:588`)
+   `Age` (`internal/cache/httpdate.go`, `internal/cache/fastpath.go`)
    is discarded downstream.
 2. CF ignores `Expires` for its caching decision when CDC-family headers are
    present; `max-age` takes precedence anyway (RFC 9111 §4.2.1).
@@ -68,7 +69,7 @@ The I8 stale-304 trigger (§4.2) fires in **both** modes.
 |---|---|---|
 | Fresh (HIT / REVALIDATED) | — | `public, max-age=<TTL − Age>` (floor 0) |
 | Fresh, stored `no-cache` object | — | `public, no-cache` — no numeric clock (I2) |
-| Stale: natural aging within SWR — incl. soft purge (sets `TTL=0`, rides the SWR machinery, `internal/cache/handler.go:1089-1093`) and heuristic staleness | `obj.StaleWhileRevalidate` | `public, max-age=0, stale-while-revalidate=<window remaining>` |
+| Stale: natural aging within SWR — incl. soft purge (sets `TTL=0`, rides the SWR machinery, `internal/cache/handler.go:1077` (SoftPurge)) and heuristic staleness | `obj.StaleWhileRevalidate` | `public, max-age=0, stale-while-revalidate=<window remaining>` |
 | Stale: stale-if-error serve | `obj.StaleIfError` | same mirror |
 | Stale: `stayin_alive` grace (past `TTL+SWR+SIE`) | none | strict `public, max-age=0` — no `swr` |
 | Stale: request `max-stale` authorization beyond the object's window | none | strict `public, max-age=0` — no `swr` |
@@ -110,15 +111,15 @@ Serve classes carrying the formula:
   the downstream stored entry).
 - **I5** — synthesized CDC never flows peer-ward: the fill path ignores
   CDC-family headers on peer fetches (`buildObject`,
-  `internal/cache/handler.go:3485`), or TTLs cascade-shrink across the
+  `internal/cache/handler.go:3966`), or TTLs cascade-shrink across the
   cluster.
 - **I6** — integer values, unquoted (ADR-0009 §8). No `s-maxage`, ever.
 - **I7** — synthesis runs before route response rewrites;
   `header_set` / `header_remove` remain the operator escape hatch.
 - **I8** — stale 304s trigger background revalidation, both modes: the
   conditional-304 path (`tryConditional304Fast`,
-  `internal/cache/handler.go:1495`) returns before the 200-path trigger
-  (`internal/cache/handler.go:1510-1513`); the same trigger triple
+  `internal/cache/fastheader.go:58`) returns before the 200-path trigger
+  (the 200-path trigger in the same case block); the same trigger triple
   (`StaleHit && obj.StaleWhileRevalidate > 0 && isOwnerOrUnmanaged(key)`)
   must fire there too, else CF revalidations (all conditional under
   `sync`) freeze content for the full SWR window.
@@ -132,105 +133,124 @@ bouine's background reval lands. CF revalidations are conditional
 requests, so I8 makes them trigger bouine's background reval. End-user
 content age ≤ TTL + SWR + one revalidation cycle.
 
-## 5. Implementation Phases
+## 5. Implementation Record (P1–P6, landed in this PR)
 
-PRs ≤ 400 changed lines each (AGENTS.md §15.4); P2–P5 each land behind
-the default-off config, independently mergeable.
+Implemented in a single PR on the plan branch (user-approved), one
+commit per phase below. Anchors are refreshed against the final merged
+code — the original draft's anchors were written against the 2026-10-15
+tree and drifted ~13–200 lines when the 2026-10-20 conformance batch
+landed; this record cites the final locations.
 
-### P1 — Config and wiring
+### P1 — Config and wiring ✓
 
 - `internal/config/config.go`: `type DownstreamFreshness string`
   (`passthrough` / `sync`, string-enum convention of `TLSVersion` /
   `EvictionAlgorithm`); `RouteCache.DownstreamFreshness` + godoc
   (D1–D4, CF caveats).
-- `internal/config/loader.go` (`config.Validate`): value ∈
-  {passthrough, sync}; no cross-field constraints.
-- `cmd/bouine/cmd/builder.go`: wire `RouteCache.DownstreamFreshness` →
-  `HandlerConfig` (next to `defaultSWR` wiring, ~:421, :600).
+- `internal/config/loader.go`: `validateDownstreamFreshness` (value ∈
+  {passthrough, sync}; extracted from `validateRouteCache` to stay
+  within its complexity budget).
+- `cmd/bouine/cmd/builder.go`: `DownstreamFreshness:
+  string(rc.Cache.DownstreamFreshness)` wired into both `HandlerConfig`
+  sites.
 
-### P2 — Engine, slow path
+### P2 — Engine, slow path ✓
 
-- New `internal/cache/downstreamcc.go`: pure cap helpers
-  (fresh-remaining, stale mirror window, fill `min()`,
-  qualitative-directive carry-over), table-tested.
-- `serveObject` (`internal/cache/handler.go:1982`): set CDC after the
-  `Age`/`X-Cache` block; origin CDC-family skip policy-conditional in
-  `getOrComputeFastHeader` / `WriteToFastHTTP` skip lists
-  (`internal/cache/fastheader2.go:44`, `pkg/header/headermap.go:472`).
-- `write304Fast` (`internal/cache/fastheader.go:86`): cap + `Warning:
-  110` when stale-sourced.
-- I8: `ServeRequest` `Hit, StaleHit` case (`internal/cache/handler.go:1495`)
-  — `tryConditional304Fast` firing on a `StaleHit` calls
-  `triggerBgRevalidate` before returning, both modes.
-- `internal/cache/range.go:52`: cap on 206 serves.
-- Fill paths `writeAndMaybeStore` (~`handler.go:2631`) and
-  `internal/cache/stream.go:374`: `min()` rule. Final TTL (override,
-  negative ladder, `JitterTTL` applied once) computed at
-  header-processing time, before first body-byte flush on streaming;
-  same value reused for storage.
-- `TestOverrideTTL_ForwardsOriginalCacheControlHeader`
-  (`internal/cache/override_test.go:59`): sync-mode sibling — CDC
-  synthesized, `Cache-Control` untouched.
+- New `internal/cache/downstreamcc.go`: the cap builders
+  (`appendServeCDCDirectives`, `appendStaleMirrorDirectives`,
+  `appendFillCDCDirectives`, `fillFinalTTLFor`, `removeCDCFamily`) —
+  zero-alloc, shared with the fast path.
+- `serveObject` (`internal/cache/handler.go:2241`): CDC after the
+  `Age`/`X-Cache` switch, before `applyResponseRewrites` (I7);
+  origin CDC-family lines removed from the copied head (`removeCDCFamily`)
+  rather than via the `getOrComputeFastHeader` / `WriteToFastHTTP` skip
+  lists — the pre-built cached header stays mode-agnostic and the serve
+  strips the lines per request, which also avoids mode-flip staleness of
+  the cached header (fastheader2.go:44, pkg/header/headermap.go:472 are
+  unchanged).
+- `write304Fast` / `tryConditional304Fast` are now `*Handler` methods
+  (`internal/cache/fastheader.go:58,97`): the 304 path had no notion of
+  staleness (X-Cache is a literal, no result input), so the cacheResult
+  is threaded through both — this was the plumbing this plan's first
+  review flagged. The 304 carries the cap + `Warning: 110` when
+  stale-sourced; X-Cache labels keep today's values.
+- I8: `ServeRequest` `Hit, StaleHit` case (`internal/cache/handler.go`
+  — `tryConditional304Fast` call site in the case block): a stale
+  conditional 304 calls `triggerBgRevalidate` under the same triple
+  gate as the 200 path, both modes.
+- `serveRange` (`internal/cache/range.go:25`): 206 cap via
+  `setRangeCDC`; stored-header copy skips the CDC family under sync
+  (`copyStoredHeaders`).
+- Fills: `writeAndMaybeStore` (`internal/cache/handler.go:3065`) and
+  `streamMiss` (`internal/cache/stream.go:354`) compute the final TTL
+  once at header-processing time via `fillFinalTTL`
+  (`internal/cache/handler.go:4132` — the single definition, extracted
+  from buildObject's inline ladder) and thread it into `buildObject`
+  as a `presetTTL` so the advertised cap and the stored clock are the
+  same number. One deviation: the relayed 304 in the vary-miss
+  resolver path (`res.Header.CopyToFastHTTP` in the client-own-tag
+  branch) is capped strict (`public, max-age=0`): that branch relays
+  the origin's 304 while the stored resolver keeps its stale clock
+  untouched, so the only honest cap is the strict one.
 
-### P3 — Fast path (zero-alloc budget)
+### P3 — Fast path (zero-alloc budget) ✓
 
-- `internal/cache/fastpath.go`: `skipStaticHeader`/`shouldSkipHeader`
-  (:747-781) gain the policy-conditional CDC-family skip;
-  `appendDynamicHeaders` (:570-617) appends the CDC line next to `Age` —
-  per-second dynamic, reused buffers, zero allocs.
-- Composed-head cache (`ComposedHeadFor`, `pkg/api/storage.go:170`): CDC
-  appended per serve like `Age`, not baked into the cached head;
-  invalidation-on-refresh verified.
-- Bench: `BenchmarkGate_*` + `BUDGETS` entries in `bench/run.sh`
-  (drift/stale fail both directions). Acceptance: allocs/op == 0 on hit
-  path; byte-identical to baseline in passthrough mode.
+- `internal/cache/fastpath.go`: `FastPathHandler.syncCDC` (inherited
+  from the owning `Handler` in `NewFastPathHandler`; store-constructed
+  handlers stay passthrough — they share one store across routes, so
+  no single mode applies, and the slow path still synthesizes);
+  `skipStaticHeader` (:795) gains the policy-conditional CDC-family
+  skip; `appendDynamicHeaders` (:585) appends the CDC line — per-second
+  dynamic, stack-buffer formatting, zero allocs.
+- Composed-head cache (`ComposedHeadFor`, `pkg/api/storage.go:170`):
+  the CDC rides in the per-second composed head exactly like `Age` —
+  no pkg/api change needed.
+- Bench: `BenchmarkGate_FastPath_Hit_SyncCDC` +
+  `BUDGETS[FastPath_Hit_SyncCDC]=0` in `bench/run.sh` (drift/stale fail
+  both directions). Verified: allocs/op == 0 locally.
 
-### P4 — Cluster isolation (I5)
+### P4 — Cluster isolation (I5) ✓ (verified moot, pinned by test)
 
-- Fill side: skip the CDC-family parse in `buildObject`/respCC on peer
-  fetches (owner-first lookup transport).
-- Test: peer response carrying CDC → stored TTL from origin CC only; no
-  cascade across a 3-node integration cluster.
+The plan assumed peer fetches flow through the HTTP fill parser; they
+do not: the owner-first transport is the binary object codec
+(`internal/cluster/peerfetch.go` — `storage.DecodeObject`), peer
+objects are served and never re-stored, and no `buildObject` call ever
+sees peer headers. The synthesized CDC never enters the stored
+object's headers (it is written only to the client-facing response
+head), so it cannot flow peer-ward by construction. Pinned by
+`TestSyncCDC_PeerWardIsolation` and `TestSyncCDC_PeerResponseCDCIgnored`
+in `internal/cache/downstreamcc_test.go`.
 
-### P5 — Tests, conformance, benchmarks
+### P5 — Tests, conformance, benchmarks ✓
 
-- Unit matrix (table-driven, same package): each serve class × mode ×
-  {override longer, override shorter, SWR, SIE, soft purge, heuristic,
-  no-freshness origin, error fill, Date-less object, stored no-cache
-  object (incl. its fill), **uncacheable-to-shared fills (`private`,
-  `no-store`): no CDC synthesized, `Cache-Control` forwarded
-  byte-for-byte**, stayin-alive grace serve, `max-stale`-authorized
-  serve} — assert exact CDC bytes, `Cache-Control` untouched, `Age`
-  unchanged.
-- 304 cap tests (stale ETag match → 304 carries mirror cap + `Warning:
-  110`); 206 cap tests; streaming-fill `min()` test (body > streaming
-  threshold).
-- I8 trigger tests: conditional reval of stale object triggers background
-  reval (both modes); fresh-hit 304 triggers nothing; non-owner does not
-  trigger. Deterministic (synctest), injected clock, no sleeps
-  (AGENTS.md §8).
-- `make conformance`: default passthrough is a no-op — score unchanged.
-- `make bench-gate` + baseline comparison per §7 gates.
+- `internal/cache/downstreamcc_test.go`: the serve-class matrix —
+  fresh HIT (wall remaining, must-revalidate carry-over), stored
+  no-cache REVALIDATED (never numeric), SWR mirror, soft purge mirror
+  (window from purge time), stayin-alive grace + max-stale strict
+  clamp, origin CDC-family replacement, fill min() (both override
+  directions, qualitative carry-over), uncacheable-to-shared
+  (private) never synthesizes, 304 cap + Warning, 206 cap, fast-path
+  head bytes, passthrough byte-for-byte.
+- I8: `TestSyncCDC_I8_Stale304TriggersBgRevalidate` (both modes,
+  synctest, deterministic) and `..._Fresh304TriggersNothing`.
+- `internal/config/loader_test.go`: `TestValidate_DownstreamFreshness`.
+- `make conformance`: default passthrough is a no-op — score unchanged
+  (CI gate).
 
-### P6 — Docs and ops
+### P6 — Docs and ops ✓
 
-- ADR-0063 (accompanies this plan).
-- `docs/architecture.md`: L3 row feature-list addition only (not exit
-  criteria).
-- Runbook (new `docs/runbook/58-downstream-freshness-sync.md`): zone Cache
-  Rules with **Edge Cache TTL** ("ignore origin cache control") or
-  `set_cache_control` override CDC (cap voided); **Always Online** ignores
-  `swr`/SIE (mirror → strict); Browser Cache TTL rules govern the eyeball
-  TTL independently; verification via `CF-Cache-Status` (expect `UPDATING`
-  during bouine's SWR window) and direct curl against bouine; per-CDN
-  portability notes from ADR-0063 (Fastly `Age`-subtraction residual under
-  `ttl_override`, bunny.net CDC-blindness and its "Override Cache Time"
-  Edge Rules).
-- `CHANGELOG.md` entry under `## [Unreleased]`.
-- Dashboard: route config panel surfaces `downstream_freshness` (templ
-  regen committed alongside `_templ.go`, AGENTS.md §4).
-- Optional metric `bouine_downstream_cc_serves_total{route, mode}` — only
-  if it clears the §9 cardinality bar.
+- ADR-0063 (revised with this PR: renumber note for the 0060
+  collision resolution).
+- `docs/architecture.md` §3.1: L3 feature-list addition only.
+- Runbook `docs/runbook/58-downstream-freshness-sync.md` + README row.
+- `CHANGELOG.md` entries under `## [Unreleased]`.
+- Dashboard: `sync-cdc` badge in the route features panel
+  (`internal/dashboard/templates/models.go` — a models.go change only,
+  no `.templ` edit, so no `templ generate` output changed).
+- Optional metric deferred: `bouine_downstream_cc_serves_total{route,
+  mode}` does not clear the cardinality bar's *usefulness* test — the
+  mode is already visible per route in config; revisit only if
+  operators ask for serve-rate visibility.
 
 ## 6. Verification Gates (AGENTS.md §16.4)
 

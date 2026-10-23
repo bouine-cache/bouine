@@ -88,8 +88,8 @@ downstream cache trusts content beyond bouine's own clock:
    CF re-freshen unboundedly. Range serves carry the cap likewise.
 6. **Stale 304s trigger background revalidation — both modes.** The
    conditional-304 path (`tryConditional304Fast`,
-   `internal/cache/handler.go:1495`) returns before the existing trigger
-   (`internal/cache/handler.go:1510-1513`), so a downstream revalidation of
+   `internal/cache/fastheader.go:58`) returns before the existing trigger
+   (the 200-path trigger in the same case block), so a downstream revalidation of
    a stale object was answered from bouine's stale store — confirming
    content the origin was never asked about — and triggered nothing. Under
    `sync`, CF's revalidations are precisely such conditional requests;

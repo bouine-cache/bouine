@@ -94,6 +94,7 @@ declare -A BUDGETS=(
     [Cachaner_AccessSlowPath]=0
     [Cachaner_EvictBounded]=0
     [FastPath_Hit]=0
+    [FastPath_Hit_SyncCDC]=0
     [FastPath_HitWithWrite]=0
     [RoutedFastPath_Hit]=0
     [RoutedFastPath_Hit_WildcardHost]=0

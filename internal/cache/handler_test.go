@@ -3120,9 +3120,9 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	// SerializedHead is lazy — must be nil after refresh (not eagerly computed).
 	require.Nil(t, refreshed.LoadSerializedHead())
 
-	// Verify that serializeHead(refreshed) produces the correct result.
-	expected := serializeHead(refreshed)
-	require.True(t, bytes.Equal(expected, serializeHead(refreshed)))
+	// Verify that serializeHead(refreshed, false) produces the correct result.
+	expected := serializeHead(refreshed, false)
+	require.True(t, bytes.Equal(expected, serializeHead(refreshed, false)))
 	require.True(t, bytes.Contains(expected, []byte("max-age=3600")))
 	require.False(t, bytes.Contains(expected, []byte("max-age=60")))
 	require.False(t, bytes.Contains(expected, []byte("X-Sensitive: secret")))
@@ -3522,7 +3522,7 @@ func TestBuildObject_CDNCacheControl(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 120*time.Second, obj.TTL)
 	assert.Contains(t, obj.CacheControl, "max-age=120")
@@ -3536,7 +3536,7 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 300*time.Second, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -3549,7 +3549,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 		Body:       []byte("hello world"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
 }
@@ -3563,7 +3563,7 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", now)
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, now)
 	require.NotNil(t, obj)
 	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
@@ -3605,7 +3605,7 @@ func TestBuildObject_ResponseDelayFeedsOriginAge(t *testing.T) {
 		Delay:      5 * time.Second,
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", now)
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, now)
 	require.NotNil(t, obj)
 	assert.Equal(t, 5*time.Second, obj.OriginAge,
 		"the response delay must become the initial age of a response with no Age/Date")
@@ -3684,7 +3684,7 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.False(t, obj.LastModified.IsZero())
 }
@@ -3697,7 +3697,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 30*time.Second, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -3710,7 +3710,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 60*time.Second, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -3723,7 +3723,7 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
-	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, 0, 0, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	// VaryKey should be non-empty (the object has a Vary header).
 	assert.NotEqual(t, "", obj.VaryKey)

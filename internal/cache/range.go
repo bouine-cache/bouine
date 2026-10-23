@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -16,8 +17,12 @@ type rangeWriter interface {
 	Write([]byte) (int, error)
 }
 
-// ServeRange handles a Range request against a fully cached body.
-func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src api.Source) bool {
+// serveRange handles a Range request against a fully cached body.
+// Under downstream_freshness: sync the 206 serves carry the same
+// synthesized CDN-Cache-Control cap as the corresponding 200 serve
+// (ADR-0063 behavior matrix), and the origin's CDC-family lines are
+// skipped in the stored-header copy (invariant I3).
+func (h *Handler) serveRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, now time.Time, src api.Source) bool {
 	rangeHeader := ri.Header.Get(header.Range)
 	if rangeHeader == "" {
 		return false
@@ -40,14 +45,7 @@ func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src 
 		ranges = append(ranges, resolvedRange{start, end})
 	}
 
-	obj.Header.Range(func(k, v string) bool {
-		if strings.EqualFold(k, header.ContentLength) {
-			return true
-		}
-		w.SetHeader(k, v)
-		return true
-	})
-
+	copyStoredHeaders(w, obj, h.syncCDC)
 	xCache := "HIT"
 	if stale {
 		xCache = "STALE"
@@ -55,6 +53,7 @@ func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src 
 	}
 	w.SetHeader(header.XCache, xCache)
 	w.SetHeader(header.XCacheSource, string(src))
+	h.setRangeCDC(w, obj, stale, now)
 
 	if len(ranges) == 1 {
 		ra := ranges[0]
@@ -88,6 +87,39 @@ func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src 
 	}
 	_, _ = fmt.Fprintf(w, "\r\n--%s--\r\n", boundary)
 	return true
+}
+
+// copyStoredHeaders copies the stored object's headers to w, skipping
+// Content-Length (recomputed for the served range) and, under
+// downstream_freshness: sync (ADR-0063 I3), the origin's CDC-family
+// lines: the synthesized cap below is authoritative.
+func copyStoredHeaders(w rangeWriter, obj *api.Object, syncCDC bool) {
+	obj.Header.Range(func(k, v string) bool {
+		if strings.EqualFold(k, header.ContentLength) {
+			return true
+		}
+		if syncCDC && isCDCFamilyHeader(k) {
+			return true
+		}
+		w.SetHeader(k, v)
+		return true
+	})
+}
+
+// setRangeCDC writes the synthesized CDN-Cache-Control on a 206 serve
+// (ADR-0063 behavior matrix: the cap rides along, like Warning: 110).
+// No-op under passthrough.
+func (h *Handler) setRangeCDC(w rangeWriter, obj *api.Object, stale bool, now time.Time) {
+	if !h.syncCDC {
+		return
+	}
+	var cdcBuf [80]byte
+	result := cacheHit
+	if stale {
+		result = cacheStale
+	}
+	w.SetHeader(header.CDNCacheControl,
+		string(appendServeCDCDirectives(cdcBuf[:0], obj, now, result)))
 }
 
 func parseRange(spec string, size int64) (int64, int64, bool) {

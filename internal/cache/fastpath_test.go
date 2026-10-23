@@ -351,6 +351,56 @@ func BenchmarkGate_FastPath_Hit(b *testing.B) {
 	}
 }
 
+func BenchmarkGate_FastPath_Hit_SyncCDC(b *testing.B) {
+	// ADR-0063: the downstream_freshness: sync fast path must stay at
+	// zero allocations — the synthesized CDN-Cache-Control is appended
+	// to the dynamic head (per composed second, like Age) with
+	// stack-buffer int formatting, and the origin's CDC-family lines are
+	// excluded from the cached static head once at serialization.
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+	fp.syncCDC = true
+
+	obj := &api.Object{
+		Key:        testkey.Key(1),
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj.Key = key
+	if err := store.Put(context.Background(), key, obj); err != nil {
+		b.Fatalf("Put failed: %v", err)
+	}
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		fp.Release(resp)
+	}
+}
+
 func BenchmarkGate_FastPath_PeerHit(b *testing.B) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	var ownerFnCalls int
@@ -874,10 +924,10 @@ func TestShouldSkipHeader(t *testing.T) {
 func TestSkipStaticHeader(t *testing.T) {
 	t.Parallel()
 	noCache := map[string]bool{}
-	assert.True(t, skipStaticHeader(header.XCache, noCache))
-	assert.True(t, skipStaticHeader(header.XCacheSource, noCache))
-	assert.True(t, skipStaticHeader(header.Warning, noCache))
-	assert.False(t, skipStaticHeader("Content-Type", noCache))
+	assert.True(t, skipStaticHeader(header.XCache, noCache, false))
+	assert.True(t, skipStaticHeader(header.XCacheSource, noCache, false))
+	assert.True(t, skipStaticHeader(header.Warning, noCache, false))
+	assert.False(t, skipStaticHeader("Content-Type", noCache, false))
 }
 
 func TestParseNoCacheFieldNames(t *testing.T) {

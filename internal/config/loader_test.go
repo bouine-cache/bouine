@@ -1480,6 +1480,37 @@ func TestValidate_VerbatimEncoding_IsBool(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+// --- cache.downstream_freshness (ADR-0063) ---
+
+func TestValidate_DownstreamFreshness(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value DownstreamFreshness
+		ok    bool
+	}{
+		{DownstreamFreshnessPassthrough, true},
+		{DownstreamFreshnessSync, true},
+		{"", true},
+		{"Synchronize", false},
+	} {
+		cfg := Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}}},
+			Routes: []Route{{
+				Pool:  "app",
+				Cache: RouteCache{TTLDefault: 60_000_000_000, DownstreamFreshness: tc.value},
+			}},
+		}
+		err := cfg.Validate()
+		if tc.ok {
+			require.NoError(t, err, "value %q", tc.value)
+		} else {
+			require.Error(t, err, "value %q", tc.value)
+			assert.Contains(t, err.Error(), "downstream_freshness")
+		}
+	}
+}
+
 // --- cache.key.include_headers (issue #632) ---
 
 func TestParse_IncludeHeaders_ValidYAML(t *testing.T) {

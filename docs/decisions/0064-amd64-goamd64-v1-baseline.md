@@ -1,7 +1,13 @@
-# ADR-0060: amd64 release artifacts build at the GOAMD64=v1 baseline
+# ADR-0064: amd64 release artifacts build at the GOAMD64=v1 baseline
 
 - **Status**: Accepted
 - **Date**: 2026-10-17
+- **Renumbered**: 2026-10-23, from ADR-0060 — duplicate number; ADR-0060
+  (profile-guided optimization) keeps it, as its number is baked into
+  build-workflow, runbook and released changelog entries. Released
+  changelog entries citing "ADR-0060" in a build-baseline / GOAMD64
+  context (e.g. the [0.5.30] GOAMD64=v1 entry) resolve to this ADR;
+  released entries are append-only and cannot be edited in place
 - **Deciders**: @chrisdupin
 - **Phase**: phase 6
 - **Amends**: fc70d762 (build: compile linux release artifacts at GOAMD64=v3 and GOARM64=v8.1)

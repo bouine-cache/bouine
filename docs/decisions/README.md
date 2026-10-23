@@ -93,3 +93,4 @@ field to `Superseded by ADR-NNNN`.
 | 0061   | Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding | Accepted |
 | 0062   | Changelog automation | Accepted |
 | 0063   | Downstream freshness sync via synthesized CDN-Cache-Control | Accepted |
+| 0064   | amd64 release artifacts build at the GOAMD64=v1 baseline | Accepted |

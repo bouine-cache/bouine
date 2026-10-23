@@ -3,6 +3,7 @@ package cache
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,8 @@ func TestServeRange_SingleRange(t *testing.T) {
 
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=0-4")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	require.Equal(t, fasthttp.StatusPartialContent, respCode(r))
 	require.Equal(t, "Hello", respBody(r))
@@ -61,7 +63,8 @@ func TestServeRange_SuffixRange(t *testing.T) {
 
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=-3")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	require.Equal(t, "hij", respBody(r))
 }
@@ -77,7 +80,8 @@ func TestServeRange_OpenEnded(t *testing.T) {
 
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=3-")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	require.Equal(t, "de", respBody(r))
 }
@@ -93,7 +97,8 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=5-10")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	require.Equal(t, fasthttp.StatusRequestedRangeNotSatisfiable, respCode(r))
 }
@@ -103,7 +108,8 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 	obj := &api.Object{Body: []byte("x"), BodySize: 1}
 	r := testCtx("GET", "http://example.com/")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.False(t, ok)
 }
 
@@ -112,7 +118,8 @@ func TestServeRange_MultiRange(t *testing.T) {
 	obj := &api.Object{Body: []byte("abcde"), BodySize: 5}
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=0-1, 3-4")
 
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	require.Equal(t, 206, respCode(r))
 	ct := respHeader(r, header.ContentType)
@@ -130,7 +137,8 @@ func TestServeRange_StaleWarning(t *testing.T) {
 		BodySize:   5,
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=0-1")
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, true, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, true, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	assert.Equal(t, "STALE", respHeader(r, header.XCache))
 	w := respHeader(r, header.Warning)
@@ -141,7 +149,8 @@ func TestServeRange_NonBytesPrefix(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{Body: []byte("x"), BodySize: 1}
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "items=0-1")
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.False(t, ok)
 }
 
@@ -154,7 +163,8 @@ func TestServeRange_HEAD_SingleRange(t *testing.T) {
 		BodySize:   5,
 	}
 	r := testCtxWithHeader("HEAD", "http://example.com/", header.Range, "bytes=0-1")
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	assert.Equal(t, fasthttp.StatusPartialContent, respCode(r))
 	assert.Empty(t, respBody(r))
@@ -169,7 +179,8 @@ func TestServeRange_HEAD_MultiRange(t *testing.T) {
 		BodySize:   5,
 	}
 	r := testCtxWithHeader("HEAD", "http://example.com/", header.Range, "bytes=0-1, 3-4")
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	assert.Equal(t, fasthttp.StatusPartialContent, respCode(r))
 	assert.Empty(t, respBody(r))
@@ -184,7 +195,8 @@ func TestServeRange_MissingContentType(t *testing.T) {
 		BodySize:   5,
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.Range, "bytes=0-1, 3-4")
-	ok := ServeRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, api.SourceHot)
+	h := &Handler{}
+	ok := h.serveRange(&fastRangeWriter{ctx: r}, requestInfoFromCtx(r), obj, false, time.Now(), api.SourceHot)
 	require.True(t, ok)
 	ct := respHeader(r, header.ContentType)
 	require.Contains(t, ct, "multipart/byteranges")

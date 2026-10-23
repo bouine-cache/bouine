@@ -75,7 +75,13 @@ type FastPathHandler struct {
 	// (kept individually by the h1parser, unlike fasthttp's joined
 	// Peek). Empty scanner (no names) costs one bool read.
 	bypassCookieNames cookieNameScanner
-	cachedDateUnix    atomic.Int64
+	// syncCDC mirrors the owning route's downstream_freshness mode
+	// (ADR-0063): when true, the fast path appends the synthesized
+	// CDN-Cache-Control to the dynamic head and skips the origin's
+	// CDC-family lines in the static head. Store-constructed handlers
+	// (NewFastPathHandlerFromStore) keep the zero value (passthrough):
+	// they share one store across routes, so no single mode applies.
+	syncCDC bool
 	// bypassOnCookie mirrors the owning Handler's cache.bypass_on_cookie
 	// flag (ADR-0054). When true, TryHit declines cookied requests so
 	// they fall through to the slow path's ServeRequest, which routes
@@ -85,6 +91,10 @@ type FastPathHandler struct {
 	// request, with the header scan (req.Header) only on flag-on
 	// routes' cookied requests.
 	bypassOnCookie bool
+	// cachedDateUnix is the unix second the cachedDate string is valid
+	// for; a value field placed after the pointer block
+	// (fieldalignment).
+	cachedDateUnix atomic.Int64
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's
@@ -105,6 +115,7 @@ func NewFastPathHandler(h *Handler) *FastPathHandler {
 		bypassOnCookie:    h.bypassOnCookie,
 		bypassCookieNames: h.bypassCookieNames,
 		uaBypass:          h.uaBypass,
+		syncCDC:           h.syncCDC,
 	}
 }
 
@@ -501,11 +512,11 @@ func (f *FastPathHandler) composeResponse(req *api.RawRequest, obj *api.Object, 
 	} else {
 		// Fallback: serialize headers on-the-fly (serialization failed
 		// or headers exceed maxFastPathHeaderBytes).
-		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now), closeConn)
+		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now), closeConn, f.syncCDC)
 	}
 
 	dateStr := f.getCachedDate(now)
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn, f.syncCDC)
 
 	if cap(hbuf) > maxFastPathHeaderBytes {
 		*bufPtr = hbuf
@@ -526,7 +537,7 @@ func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 	if head := obj.LoadSerializedHead(); head != nil {
 		return head
 	}
-	head := serializeHead(obj)
+	head := serializeHead(obj, f.syncCDC)
 	if len(head) > maxFastPathHeaderBytes {
 		return nil // too large, don't cache — fall back to per-hit serialization
 	}
@@ -541,7 +552,7 @@ func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 // into hbuf, then appends dynamic headers via appendDynamicHeaders.
 // Used as a fallback when SerializedHead is not available (warm-tier
 // objects loaded from disk without pre-serialization).
-func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
+func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool, skipCDC bool) []byte {
 	var noCacheFields map[string]bool
 	if obj.CacheControl != "" {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
@@ -549,7 +560,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {
 		key, value := obj.Header.At(i)
-		if skipStaticHeader(key, noCacheFields) {
+		if skipStaticHeader(key, noCacheFields, skipCDC) {
 			continue
 		}
 		hbuf = append(hbuf, key...)
@@ -558,7 +569,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		hbuf = append(hbuf, '\r', '\n')
 	}
 
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn, skipCDC)
 	return hbuf
 }
 
@@ -567,7 +578,11 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
 // The Connection trailer reflects the request's own token (RFC 9112 §9.6): "close" when the client requested close, keep-alive otherwise.
-func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
+// Under downstream_freshness: sync (ADR-0063) the synthesized
+// CDN-Cache-Control is appended here — per second, like Age, so the
+// composed-head caching stays valid — with zero allocations
+// (downstreamcc.go appendServeCDCLine).
+func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool, syncCDC bool) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
 	// it). Only synthesize a Date when the stored object has none. The
@@ -605,6 +620,14 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 	if cacheResult == "STALE" {
 		hbuf = append(hbuf, header.Warning...)
 		hbuf = append(hbuf, ": 110 - \"Response is Stale\"\r\n"...)
+	}
+
+	if syncCDC {
+		result := cacheHit
+		if cacheResult == "STALE" {
+			result = cacheStale
+		}
+		hbuf = appendServeCDCLine(hbuf, obj, now, result)
 	}
 
 	if closeConn {
@@ -769,7 +792,7 @@ func shouldSkipHeader(key string, noCacheFields map[string]bool) bool {
 // Date is NOT excluded — the origin's Date header is preserved per
 // RFC 9110 §6.6.1; appendDynamicHeaders adds a Date only when the
 // stored object has none.
-func skipStaticHeader(key string, noCacheFields map[string]bool) bool {
+func skipStaticHeader(key string, noCacheFields map[string]bool, skipCDC bool) bool {
 	if shouldSkipHeader(key, noCacheFields) {
 		return true
 	}
@@ -777,7 +800,11 @@ func skipStaticHeader(key string, noCacheFields map[string]bool) bool {
 	case header.XCache, header.XCacheSource, header.Warning:
 		return true
 	}
-	return false
+	// Under downstream_freshness: sync (ADR-0063 I3) the origin's
+	// RFC 9213-family and Surrogate-Control lines never reach a
+	// downstream cache: the synthesized line (appendDynamicHeaders) is
+	// authoritative.
+	return skipCDC && isCDCFamilyHeader(key)
 }
 
 // parseNoCacheFieldNames extracts the field names from a Cache-Control

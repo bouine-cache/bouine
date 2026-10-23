@@ -49,14 +49,17 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 // tryConditional304Fast checks if the client's conditional headers match
 // the cached object, using direct Peek calls. Returns true if a 304
 // response was sent. xCache labels the response with the X-Cache value
-// of the serving path ("HIT" for fresh hits, "REVALIDATED" after a
-// successful revalidation). rw applies the route's response header
-// rewrite directives to the 304; nil for routes without directives.
-func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, rw func(*fasthttp.ResponseHeader)) bool {
+// of the serving path ("HIT" for hits, "REVALIDATED" after a successful
+// revalidation); result selects the synthesized CDN-Cache-Control cap
+// for downstream_freshness: sync routes (ADR-0063 I4) — a StaleHit
+// conditional gets cacheStale, so the 304 carries the mirror cap and
+// Warning: 110. rw applies the route's response header rewrite
+// directives to the 304; nil for routes without directives.
+func (h *Handler) tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) bool {
 	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
 	if len(inm) > 0 {
 		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
-			write304Fast(ctx, obj, src, xCache, rw)
+			h.write304Fast(ctx, obj, src, xCache, result, now, rw)
 			return true
 		}
 		return false
@@ -68,13 +71,13 @@ func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.So
 			return false
 		}
 		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
-			write304Fast(ctx, obj, src, xCache, rw)
+			h.write304Fast(ctx, obj, src, xCache, result, now, rw)
 			return true
 		}
 		if obj.LastModified.IsZero() {
 			if d := obj.Header.Get(header.Date); d != "" {
 				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
-					write304Fast(ctx, obj, src, xCache, rw)
+					h.write304Fast(ctx, obj, src, xCache, result, now, rw)
 					return true
 				}
 			}
@@ -84,10 +87,24 @@ func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.So
 }
 
 // write304Fast sets the headers and status code for a 304 Not Modified
-// response using SetCanonical to skip key normalization.
-func write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, rw func(*fasthttp.ResponseHeader)) {
+// response using SetCanonical to skip key normalization. Under
+// downstream_freshness: sync the 304 carries the same synthesized
+// CDN-Cache-Control cap as the corresponding 200 serve (ADR-0063 I4:
+// RFC 9111 §4.3.4 — a 304's headers update the downstream stored entry,
+// so an uncapped 304 would let a downstream cache re-freshen unboundedly)
+// plus Warning: 110 when the 304 is stale-sourced, mirroring the 200
+// stale serve. X-Cache keeps today's label ("HIT"/"REVALIDATED").
+func (h *Handler) write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) {
 	if obj.ETag != "" {
 		ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
+	}
+	if result == cacheStale {
+		ctx.Response.Header.SetCanonical(header.S2b(header.Warning), header.S2b(`110 - "Response is Stale"`))
+	}
+	if h.syncCDC {
+		var cdcBuf [80]byte
+		ctx.Response.Header.SetCanonical(header.S2b(header.CDNCacheControl),
+			appendServeCDCDirectives(cdcBuf[:0], obj, now, result))
 	}
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))

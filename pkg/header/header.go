@@ -134,10 +134,32 @@ const (
 	// header lookup.
 	CDNCacheControl = "Cdn-Cache-Control"
 
+	// CloudflareCDNCacheControl — Cloudflare's vendor-prefixed RFC 9213
+	// field. It outranks CDNCacheControl in Cloudflare's documented
+	// precedence. Canonical MIME form, as above.
+	CloudflareCDNCacheControl = "Cloudflare-Cdn-Cache-Control"
+
+	// SurrogateControl — RFC 9213 §3.6 (surrogate control). Honored by
+	// Fastly ahead of s-maxage/max-age; forwarded to and understood by
+	// other CDNs that implement the RFC 9213 family. Canonical MIME form.
+	SurrogateControl = "Surrogate-Control"
+
 	// Vary — RFC 9110 §12.5.5. Request header fields that a cache must
 	// include in the cache key to select the correct variant.
 	Vary = "Vary"
 )
+
+// CDCFamilyHeaders lists the RFC 9213 targeted-cache-control family plus
+// Surrogate-Control — the response headers a downstream CDN may honor in
+// preference to Cache-Control (ADR-0063). Under
+// downstream_freshness: sync these lines are replaced by bouine's own
+// synthesized CDN-Cache-Control; under passthrough they forward
+// byte-for-byte.
+var CDCFamilyHeaders = []string{
+	CDNCacheControl,
+	CloudflareCDNCacheControl,
+	SurrogateControl,
+}
 
 // Surrogate-key headers used by different CDN dialects for grouped
 // invalidation. The first non-empty header wins when parsing.

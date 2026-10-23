@@ -761,6 +761,12 @@ func routeFeatures(rc config.Route) []RouteFeature {
 			Title: "strip_query_params (still forwarded to origin): " + strings.Join(rc.Cache.Key.StripQueryParams, ", "),
 		})
 	}
+	if rc.Cache.DownstreamFreshness == config.DownstreamFreshnessSync {
+		f = append(f, RouteFeature{
+			Label: "sync-cdc",
+			Title: "downstream_freshness: sync — bouine synthesizes CDN-Cache-Control (RFC 9213) on every client-facing serve so a downstream CDN (e.g. Cloudflare) cannot trust content beyond bouine's own clock; Cache-Control is never mutated. See ADR-0063 / runbook 58.",
+		})
+	}
 	return f
 }
 

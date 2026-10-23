@@ -376,7 +376,7 @@ func TestBuildObject_MultiLineVaryValue(t *testing.T) {
 	res := fetchResult{StatusCode: 200, Header: fromHeaderMap(resMap), Body: []byte("body")}
 	ri := requestInfoFromHTTP("http://example.com/page", "/page",
 		headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "X-Region", "fr"))
-	obj := buildObject(testkey.Key(1), ri, res, resMap, nil, 0, 0, 0, 0, 0, nil, false, "", time.Now())
+	obj := buildObject(testkey.Key(1), ri, res, resMap, nil, 0, 0, 0, 0, 0, nil, false, "", nil, time.Now())
 	require.NotNil(t, obj)
 	require.Equal(t, "Accept-Encoding,Accept-Language, X-Region", obj.VaryValue)
 	require.NotEmpty(t, obj.VaryKey)

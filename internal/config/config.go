@@ -205,6 +205,30 @@ const (
 	EvictionCachaner EvictionAlgorithm = "cachaner"
 )
 
+// DownstreamFreshness selects how client-facing serves communicate
+// freshness to a downstream CDN (ADR-0063). Values are the wire
+// strings used in routes.*.cache.downstream_freshness; the zero value
+// means the documented default (DownstreamFreshnessPassthrough).
+type DownstreamFreshness string
+
+const (
+	// DownstreamFreshnessPassthrough forwards headers byte-for-byte as
+	// today (ADR-0011); the downstream CDN's clock may outlive
+	// bouine's.
+	DownstreamFreshnessPassthrough DownstreamFreshness = "passthrough"
+	// DownstreamFreshnessSync synthesizes CDN-Cache-Control (RFC 9213)
+	// on every client-facing serve class so no downstream cache trusts
+	// content beyond bouine's own clock: fresh serves carry
+	// max-age=<TTL-Age>, sanctioned stale serves mirror
+	// max-age=0,stale-while-revalidate=<window remaining>, and fills
+	// carry min(origin effective max-age, bouine final TTL).
+	// Cache-Control itself is never mutated. See ADR-0063 for the
+	// behavior matrix and per-CDN portability (Cloudflare is the design
+	// target; Fastly caps at the origin's clock via Age subtraction;
+	// bunny.net is inert).
+	DownstreamFreshnessSync DownstreamFreshness = "sync"
+)
+
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	// EvictionAlgorithm selects the eviction policy for both tiers.
@@ -724,6 +748,23 @@ type RouteCache struct {
 	// or the negative policy sanctioned (ADR-0059).
 	// Zero (default) = honour the upstream's freshness headers.
 	TTLOverride time.Duration `yaml:"ttl_override,omitempty" json:"ttl_override,omitempty"`
+	// DownstreamFreshness controls whether bouine synthesizes
+	// CDN-Cache-Control (RFC 9213) on client-facing serves so a
+	// downstream CDN (e.g. Cloudflare) cannot trust content beyond
+	// bouine's own clock (ADR-0063). "passthrough" (default): headers
+	// forwarded byte-for-byte as today. "sync": fresh serves carry
+	// public, max-age=<TTL-Age>; stale serves within a sanctioned SWR/SIE
+	// window mirror public, max-age=0,
+	// stale-while-revalidate=<window remaining> (Cloudflare serves
+	// UPDATING, no visitor latency); grace and max-stale serves clamp to
+	// strict public, max-age=0; fills carry min(origin effective
+	// max-age, bouine final TTL) plus the origin's qualitative
+	// revalidation directives. Cache-Control itself is never mutated
+	// (ADR-0011). Caveats (runbook 58): Cloudflare zone Cache Rules with
+	// Edge Cache TTL or set_cache_control override the synthesized
+	// header; Always Online zones ignore stale-while-revalidate (mirror
+	// degrades to strict, never unsafe).
+	DownstreamFreshness DownstreamFreshness `yaml:"downstream_freshness,omitempty" json:"downstream_freshness,omitempty"`
 	// MaxObjectSize, when > 0, skips caching for responses whose body
 	// exceeds this size. The response is still proxied to the client —
 	// only storage is skipped. Prevents large downloads from evicting

@@ -382,6 +382,12 @@ type Handler struct {
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
 	stayinAlive          bool
+	// syncCDC mirrors routes.*.cache.downstream_freshness (ADR-0063):
+	// when true, client-facing serves carry a synthesized
+	// CDN-Cache-Control (RFC 9213) capping downstream freshness at
+	// bouine's own clock, and the origin's CDC-family lines are removed
+	// (downstreamcc.go). Set once at NewHandler from HandlerConfig.
+	syncCDC bool
 	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
@@ -404,6 +410,9 @@ type Handler struct {
 }
 
 // HandlerConfig configures a cache Handler.
+// HandlerConfig is the per-route cache handler configuration.
+//
+//nolint:govet // fieldalignment: fields follow the config-file order
 type HandlerConfig struct {
 	// StreamingFallback, if non-nil, is incremented when a cacheable
 	// miss falls back to synchronous buffering because the streaming
@@ -645,6 +654,14 @@ type HandlerConfig struct {
 	// access-log sampler; when no access logger is configured the store
 	// is a wasted per-request allocation (api.Key boxed into any).
 	LogCacheKeys bool
+	// DownstreamFreshness mirrors routes.*.cache.downstream_freshness
+	// (ADR-0063): DownstreamFreshnessSync ("sync") synthesizes
+	// CDN-Cache-Control (RFC 9213) on every client-facing serve class so
+	// a downstream CDN's clock cannot outlive bouine's; any other value
+	// (including the zero value) forwards headers as today. Values are
+	// validated upstream by config.Validate. Lives in the value region
+	// with the other non-pointer fields (fieldalignment).
+	DownstreamFreshness string
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
 	RefreshBeforeExpiry bool
@@ -865,6 +882,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		peerPut:                 cfg.PeerPut,
 		purgeBroadcast:          cfg.PurgeBroadcast,
 		allowSetCookie:          cfg.AllowSetCookie,
+		syncCDC:                 cfg.DownstreamFreshness == downstreamSync,
 		bypassOnCookie:          cfg.BypassOnCookie,
 		uaBypass:                compileUABypass(cfg.BypassOnUserAgent),
 		bypassCookieNames:       newCookieNameScanner(cfg.BypassOnCookieNames),
@@ -1281,7 +1299,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
-		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -1511,19 +1529,31 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if tryConditional304Fast(ctx, disp.Object, src, "HIT", h.rewriteHook()) {
+		cacheRes := cacheHit
+		if disp.Decision == StaleHit {
+			cacheRes = cacheStale
+		}
+		if h.tryConditional304Fast(ctx, disp.Object, src, "HIT", cacheRes, now, h.rewriteHook()) {
+			// I8 (ADR-0063): a stale-sourced conditional 304 must fire
+			// the same background-revalidation trigger the 200 path
+			// does, under both freshness modes. Under sync a
+			// downstream CDN's revalidations are precisely such
+			// conditional requests; without a trigger here they would
+			// freeze content for the full SWR window (the stale-304
+			// hole also existed in passthrough mode — this fixes it
+			// there too). Same triple gate as the 200 path below.
+			if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
+				ri := requestInfoFromCtx(ctx)
+				h.triggerBgRevalidate(ri, key, disp.Object)
+			}
 			return
 		}
 		// Range requests need the full RequestInfo for ServeRange.
 		if hasRangeHeader(ctx) {
 			ri := requestInfoFromCtx(ctx)
-			if ServeRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, src) {
+			if h.serveRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, now, src) {
 				return
 			}
-		}
-		cacheRes := cacheHit
-		if disp.Decision == StaleHit {
-			cacheRes = cacheStale
 		}
 		h.serveObject(ctx, disp.Object, now, cacheRes, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
@@ -1867,6 +1897,17 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 			// metadata intact; the store stays untouched.
 			res.Header.CopyToFastHTTP(&ctx.Response.Header)
 			dst := &ctx.Response.Header
+			if h.syncCDC {
+				// ADR-0063 I3/I4: the origin's CDC-family lines are removed,
+				// and the 304 is capped strictly — this branch relays the
+				// origin's 304 to the client while the stored resolver keeps
+				// its own (stale) clock untouched, so the only honest cap is
+				// the strict one: bouine would not serve this content again
+				// without revalidation, so a downstream cache must not trust
+				// it either.
+				removeCDCFamily(dst)
+				dst.SetCanonical(header.S2b(header.CDNCacheControl), header.S2b(cdcStrict))
+			}
 			dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
 			dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
 			ctx.SetStatusCode(fasthttp.StatusNotModified)
@@ -1894,7 +1935,7 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 	// list. When the client's condition was part of what the origin
 	// validated, the client gets its 304 — the same complement the
 	// plain revalidation path serves.
-	if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
+	if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 		return true
 	}
 	h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
@@ -2221,6 +2262,19 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 		dst.SetCanonical(header.S2b(header.Warning), header.S2b(`110 - "Response is Stale"`))
 	case cacheRevalidated:
 		dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
+	}
+
+	// Downstream freshness sync (ADR-0063): under sync the origin's
+	// RFC 9213-family and Surrogate-Control lines are replaced (the
+	// synthesis is authoritative, invariant I3) and the cap is
+	// synthesized from bouine's own clock. Runs before the route's
+	// response rewrites so header_set / header_remove remain the
+	// operator escape hatch (invariant I7).
+	if h.syncCDC {
+		removeCDCFamily(dst)
+		var cdcBuf [80]byte
+		dst.SetCanonical(header.S2b(header.CDNCacheControl),
+			appendServeCDCDirectives(cdcBuf[:0], obj, now, result))
 	}
 
 	ctx.SetStatusCode(obj.StatusCode)
@@ -2655,7 +2709,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		// in the client's If-None-Match list MUST produce a 200 for the
 		// client. A matching If-None-Match / If-Modified-Since therefore
 		// gets the 304 it asked for instead of a full re-served response.
-		if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
+		if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 			return
 		}
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
@@ -2828,7 +2882,7 @@ func (h *Handler) freshenFromHead(
 	h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 	// The HEAD client's own conditional is evaluated against the
 	// freshened entry, mirroring the 304 branch (§4.3.1).
-	if tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", h.rewriteHook()) {
+	if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 		return true
 	}
 	dst := &ctx.Response.Header
@@ -3003,7 +3057,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
-		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -3017,6 +3071,11 @@ func (h *Handler) writeAndMaybeStore(
 ) {
 	dst := &ctx.Response.Header
 	res.Header.CopyToFastHTTP(dst)
+	// Under sync the origin's CDC-family lines never reach a downstream
+	// cache (ADR-0063 I3): the synthesized cap below is authoritative.
+	if h.syncCDC {
+		removeCDCFamily(dst)
+	}
 	// Overwrite origin-supplied attribution headers (prevent spoofing).
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
@@ -3056,6 +3115,25 @@ func (h *Handler) writeAndMaybeStore(
 	// IsCacheableWithDefault re-parses again).
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
+	// Downstream freshness sync (ADR-0063): the fill cap is computed at
+	// header-processing time — the same final TTL (fillFinalTTL) the
+	// object is stored with below, so the cap advertised downstream and
+	// the stored clock never diverge — and applies to every
+	// RFC-cacheable fill, stored or not (the operator storage gates
+	// below only skip the store). Uncacheable-to-shared fills
+	// (private, no-store, Vary:*, unauthorized) never synthesize: no
+	// bouine clock exists, and a synthesized public line must never
+	// override an origin privacy marker at a shared downstream cache
+	// (RFC 9111 §5.2.2.5, §5.2.2.7).
+	var fillTTL *time.Duration
+	if h.syncCDC && parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
+		ttl := h.fillFinalTTLFor(resMap, res.Delay, parsed, time.Now())
+		var cdcBuf [88]byte
+		dst.SetCanonical(header.S2b(header.CDNCacheControl),
+			appendFillCDCDirectives(cdcBuf[:0], parsed.respCC, originEffectiveMaxAge(parsed.respCC, resMap), ttl))
+		fillTTL = &ttl
+	}
+
 	if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
 		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			return
@@ -3083,7 +3161,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -3347,7 +3425,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 	}
 	now := time.Now()
 	obj := buildObject(key, getRI, res, hdr, h.neg, h.defaultTTL, h.overrideTTL,
-		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, now)
+		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, now)
 	if obj == nil {
 		return
 	}
@@ -3590,7 +3668,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, time.Now())
+	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
 	h.storeObject(ctx, key, obj, ri, true, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
@@ -3885,7 +3963,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, stayinAlive bool, poolName string, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, stayinAlive bool, poolName string, presetTTL *time.Duration, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
@@ -3912,15 +3990,17 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	hasDate := dateStr != ""
 	originAge := correctedInitialAge(parseOriginAge(resMap), res.Delay, dateStr, now)
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
-	ttl := computeTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, jitterPct, originAge, now)
-	// Route-level override wins over the upstream's freshness directives
-	// for content responses (status < 400); error responses keep the
-	// negative-caching TTL ladder (ADR-0059). Applied after computeTTL so
-	// jitter is seeded from the override value, not the origin's max-age.
-	// The stored object retains the unaltered upstream Cache-Control
-	// header, which is forwarded to downstream clients.
-	if overrideTTL > 0 && res.StatusCode < 400 {
-		ttl = JitterTTL(overrideTTL, jitterPct)
+	// presetTTL (non-nil) is a caller-computed final TTL: the ADR-0063
+	// sync-mode fill cap is computed at header-processing time and must
+	// advertise the exact clock the object is stored with, so the caller
+	// computes fillFinalTTL once and passes it in (the streaming fill
+	// paths flush the head before the store runs, so the value must
+	// exist before the body streams). Nil = compute here, as before.
+	var ttl time.Duration
+	if presetTTL != nil {
+		ttl = *presetTTL
+	} else {
+		ttl = fillFinalTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, overrideTTL, jitterPct, originAge, now)
 	}
 
 	// res.Body is already an independently-owned copy: all production
@@ -4024,13 +4104,16 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 //
 // Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning), internal
 // headers (X-Bouine-*), and no-cache fields stripped per RFC 9111 §5.2.2.4.
-func serializeHead(obj *api.Object) []byte {
+// Under downstream_freshness: sync (skipCDC, ADR-0063 I3) the origin's
+// RFC 9213-family and Surrogate-Control lines are excluded: the
+// synthesized CDN-Cache-Control (appendDynamicHeaders) is authoritative.
+func serializeHead(obj *api.Object, skipCDC bool) []byte {
 	noCacheFields := parseNoCacheFieldNames(obj.CacheControl)
 	buf := make([]byte, 0, 512)
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {
 		key, value := obj.Header.At(i)
-		if skipStaticHeader(key, noCacheFields) {
+		if skipStaticHeader(key, noCacheFields, skipCDC) {
 			continue
 		}
 		buf = append(buf, key...)
@@ -4039,6 +4122,25 @@ func serializeHead(obj *api.Object) []byte {
 		buf = append(buf, '\r', '\n')
 	}
 	return buf
+}
+
+// fillFinalTTL computes bouine's final TTL for a fill response: the
+// computeTTL ladder, then the route override (jittered from the override
+// value itself) for content statuses. Single definition — buildObject
+// and the ADR-0063 sync-mode fill cap both call it, so the cap
+// advertised downstream and the stored clock can never diverge.
+func fillFinalTTL(resMap header.Map, status int, respCC Directives,
+	neg *StatusTTL, defaultTTL, overrideTTL time.Duration, jitterPct int,
+	originAge time.Duration, now time.Time) time.Duration {
+	ttl := computeTTL(resMap, status, respCC, neg, defaultTTL, jitterPct, originAge, now)
+	// Route-level override wins over the upstream's freshness directives
+	// for content responses (status < 400); error responses keep the
+	// negative-caching TTL ladder (ADR-0059). Applied after computeTTL so
+	// jitter is seeded from the override value, not the origin's max-age.
+	if overrideTTL > 0 && status < 400 {
+		ttl = JitterTTL(overrideTTL, jitterPct)
+	}
+	return ttl
 }
 
 // computeTTL derives the freshness lifetime for a response. Precedence

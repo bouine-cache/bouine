@@ -26,6 +26,53 @@ the curated, human-readable summary.
   pod, which is only correct for broadcast operations), and
   `docs/architecture.md` §11 no longer lists the never-implemented
   `--insecure` flag.
+- **`downstream_freshness: sync` caps downstream CDN freshness at
+  bouine's own clock (ADR-0063).** Per-route opt-in
+  (`routes.*.cache.downstream_freshness: passthrough | sync`, default
+  `passthrough`): under `sync`, bouine synthesizes
+  `CDN-Cache-Control` (RFC 9213) on every client-facing serve class so
+  a downstream CDN (e.g. Cloudflare, which discards bouine's
+  RFC 9111 §4.2.3-correct `Age` on admit and re-ages a full own TTL)
+  cannot trust content beyond bouine's wall — fresh serves carry
+  `public, max-age=<TTL − Age>`, stale serves within a sanctioned SWR
+  or SIE window (incl. soft purge, which rides the SWR machinery)
+  mirror `public, max-age=0,
+  stale-while-revalidate=<window remaining>` (Cloudflare serves
+  `UPDATING`, no visitor latency), stayin-alive grace and
+  `max-stale`-authorized serves beyond the window clamp strict
+  `public, max-age=0`, and fills carry
+  `min(origin effective max-age, bouine final TTL)` plus the origin's
+  qualitative revalidation directives. Stored `no-cache` objects
+  synthesize `public, no-cache`, never a numeric clock (RFC 9111
+  §5.2.2.4). 304s carry the same cap as the corresponding 200 serve
+  (plus `Warning: 110` when stale-sourced), and 206 range serves
+  carry the cap likewise. The origin's `CDN-Cache-Control` /
+  `Cloudflare-CDN-Cache-Control` / `Surrogate-Control` lines are
+  replaced under `sync`; `Cache-Control` itself is never mutated
+  (ADR-0011). Also fixes a pre-existing hole both modes had: a
+  stale-while-revalidate conditional 304 answered from the stale
+  store without triggering the background revalidation, freezing
+  content for the full SWR window when the arriving traffic is itself
+  conditional. The `api-stats` ceiling drops from TTL + SWR + CF TTL
+  (~2h10) to TTL + SWR + one revalidation cycle (~1h10). Zero
+  allocations on the hit path (`BenchmarkGate_FastPath_Hit_SyncCDC`,
+  budget 0). Runbook 58; dashboard route badges surface the mode.
+
+### Documentation
+
+- **Renumbered three colliding ADRs so every ADR file has a unique
+  number.** The Accept-Encoding variant-bucketing ADR moves from
+  ADR-0051 to ADR-0061 — ADR-0051 (stayin-alive grace retention, landed
+  the same day) keeps the number, which is baked into code comments and
+  released entries. The changelog-automation ADR moves from ADR-0047 to
+  ADR-0062 — ADR-0047 (`traffic_class` metric label) keeps it for the
+  same reason. The GOAMD64=v1 build-baseline ADR moves from ADR-0060 to
+  ADR-0064 — ADR-0060 (profile-guided optimization) keeps it, as its
+  number is baked into build-workflow, runbook and released changelog
+  entries. The `docs/decisions/README.md` index now lists every ADR
+  file exactly once; the renumbered files carry Renumbered notes
+  resolving the stale references in already-released entries. The
+  downstream freshness sync ADR (this PR) takes number **0063**.
 
 ## [0.5.30] - 2026-10-21
 
@@ -285,18 +332,6 @@ the curated, human-readable summary.
   true` per upstream pool, `cluster.peer_tcp_fast_open: true`). The
   option remains Linux-only (no-op elsewhere) and advisory — dials and
   accepts never fail because of it.
-- **Renumbered two colliding ADRs so every ADR file has a unique
-  number.** The Accept-Encoding variant-bucketing ADR moves from
-  ADR-0051 to ADR-0061 — ADR-0051 (stayin-alive grace retention, landed
-  the same day) keeps the number, which is baked into code comments and
-  released entries. The changelog-automation ADR moves from ADR-0047 to
-  ADR-0062 — ADR-0047 (`traffic_class` metric label) keeps it for the
-  same reason. The `docs/decisions/README.md` index now lists every ADR
-  file exactly once; both renumbered files carry a Renumbered note
-  resolving the stale references in already-released entries. The
-  downstream freshness sync ADR (this PR) takes number **0063** —
-  ADR-0060 belongs to profile-guided optimization, whose number is
-  baked into build-workflow and runbook comments on main.
 
 ### Fixed
 

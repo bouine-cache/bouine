@@ -23,7 +23,14 @@ the curated, human-readable summary.
   is node-local and never touches the network; `--cluster` performs
   one peer-metrics round-trip via the existing dashboard aggregator
   and fills per-peer request counters. `--watch` re-renders on an
-  interval and Ctrl-C aborts the in-flight fetch cleanly. The
+  interval and Ctrl-C aborts the in-flight fetch cleanly. On a
+  terminal, `--watch` renders a fullscreen alternate-screen TUI
+  (ADR-0065: charmbracelet/bubbletea) with semantic colors, tier
+  fill bars, client-side request-rate and hit-ratio deltas, and
+  live keys (`q`/`Esc`/Ctrl-C quit, `r` refresh, `c` toggle
+  cluster); a one-shot on a terminal prints the same styled frame
+  inline, and piped output plus `--format json` never take the TUI
+  path. The
   bouineapi SDK gained `Client.Status` with a mirrored
   `StatusReport` shape, and its request path now honors context
   cancellation mid-exchange (previously a cancelled context only

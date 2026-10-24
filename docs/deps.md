@@ -51,6 +51,9 @@ aren't `slog`-compatible, HTTP servers other than
 | `golang.org/x/text`                             | BSD-3      | (transitive)             | Unicode handling. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`   | YAML config parsing. Standard for Go config files. |
 | `github.com/stretchr/testify`                 | MIT        | `*_test.go` across packages | Test assertions (`require` + `assert` only). Pre-approved in `AGENTS.md §5`. See ADR-0028. |
+| `github.com/charmbracelet/bubbletea`          | MIT        | `cmd/bouine/cmd`         | TUI event loop for `bouine status --watch` (ADR-0065). Pinned v1.3.x; pipes and `--format json` never take the TUI path. |
+| `github.com/charmbracelet/lipgloss`           | MIT        | `cmd/bouine/cmd`         | TUI styling and color-profile degradation (ADR-0065). Also transitive via bubbletea. |
+| `golang.org/x/term`                           | BSD-3      | `cmd/bouine/cmd`         | TTY detection and terminal sizing for the status TUI (ADR-0065). |
 
 > **Fiber removed in ADR-0006.** `gofiber/fiber/v3`, `gofiber/utils`,
 > `gofiber/schema`, `valyala/fasthttp`, `valyala/bytebufferpool`,

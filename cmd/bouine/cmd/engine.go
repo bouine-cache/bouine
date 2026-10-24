@@ -850,7 +850,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	}
 
 	ops := e.buildInvalidationOps(ctx, rs)
-	dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
+	dash, dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
 
 	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
 		Addr:       addr,
@@ -863,6 +863,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return rs.cfProp.PropagateExternal(ctx, req)
 		},
 		StatsFn:  func() api.Stats { return rs.store.Stats() },
+		StatusFn: e.statusFn(rs, dash),
 		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
@@ -1017,8 +1018,11 @@ func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {
 	return h
 }
 
-// buildDashboard wires and returns the dashboard fasthttp handler.
-func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) fasthttp.RequestHandler {
+// buildDashboard wires and returns the dashboard handler plus its
+// fasthttp wrapper. The concrete *dashboard.Handler is returned so the
+// admin /v1/status endpoint can reuse its insight evaluation and
+// peer-metrics aggregation (issue #813).
+func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) (*dashboard.Handler, fasthttp.RequestHandler) {
 	var ringFn func() []api.RingSegment
 	if rs.clusterNode != nil {
 		ringFn = rs.clusterNode.RingSegments
@@ -1026,7 +1030,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 
 	clusterMeta := e.buildClusterMeta(rs)
 
-	dashHandler, _ := dashboard.New(dashboard.Config{
+	dashHandler, dash := dashboard.New(dashboard.Config{
 		Rings:        rs.rings,
 		Version:      buildinfo.Version,
 		PeersFn:      rs.peersFn,
@@ -1087,7 +1091,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		CFPurgeSkippedFn:    func() int64 { return rs.dpMetrics.CFPurgeSkippedCount() },
 		FetchShedFn:         func() int64 { return rs.dpMetrics.FetchShedCount() },
 	})
-	return dashHandler
+	return dash, dashHandler
 }
 
 // buildClusterMeta constructs the cluster metadata card for the dashboard.

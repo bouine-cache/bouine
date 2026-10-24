@@ -906,12 +906,7 @@ func (h *Handler) insights(ctx *fasthttp.RequestCtx) {
 	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 	merged, peers := h.agg.Collect(context.Background())
 
-	data := h.collectInsightData(merged, peers)
-	h.prevStoreStatsMu.Lock()
-	data.PrevStoreStats = h.prevStoreStats
-	h.prevStoreStats = data.StoreStats
-	h.prevStoreStatsMu.Unlock()
-	rawInsights := h.insightEngine.Evaluate(context.Background(), data)
+	rawInsights, data := h.evaluateInsights(context.Background(), merged, peers)
 	routeToPool := h.buildRouteToPool()
 	cards, highCount, medCount, lowCount := convertInsightCards(rawInsights, routeToPool)
 	nodes := h.buildArchNodes(data.PoolHealth, h.cfStatusCard(), data.StoreStats, peers)

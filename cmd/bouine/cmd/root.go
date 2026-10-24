@@ -35,6 +35,7 @@ func Root() *cobra.Command {
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newClusterCmd())
+	root.AddCommand(newStatusCmd())
 	root.AddCommand(newPurgeCmd())
 	root.AddCommand(newBanCmd())
 	root.AddCommand(newRefreshCmd())

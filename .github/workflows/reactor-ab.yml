@@ -1,0 +1,87 @@
+# .github/workflows/reactor-ab.yml — on-demand A/B of the H1 reactor
+# vs the blocking fast path (the "is the reactor actually faster"
+# question, answerable on demand instead of waiting for the nightly).
+#
+# Runs the BenchmarkSingle_* RTT and concurrency arms from
+# internal/server/h1parser/reactor_bench_linux_test.go on a
+# GitHub-hosted Linux runner: the reactor epoll loop and the blocking
+# Parser.Serve goroutine-per-connection model, same fast-path stub,
+# same request bytes, same run — so the delta is transport + scheduling
+# + parse machinery and nothing else.
+#
+# Arms (all single-shot: -benchtime=1x -count=15, medians compared):
+#   EchoRTTControl                  — loopback RTT floor
+#   Reactor_KeepAliveRTT            — reactor, 2-header toy request
+#   BlockingServeRTTControl         — blocking, 2-header toy request
+#   Reactor_KeepAliveRTT_Headers8   — reactor, production-shaped head
+#   BlockingServeRTTControl_Headers8— blocking, production-shaped head
+#   Reactor_ConcurrencySweep        — reactor at 1/4/16 clients
+#   BlockingServe_ConcurrencySweep  — blocking at 1/4/16 clients
+#
+# Manual follow-up: `gh workflow run reactor-ab.yml --ref <branch>`.
+
+name: reactor-ab
+
+on:
+  # pull_request: runs on the PR ref whenever the A/B arms or this
+  # workflow change (workflow_dispatch only registers from the default
+  # branch, so a branch-local workflow cannot be dispatched before
+  # merge). workflow_dispatch covers on-demand runs once merged.
+  pull_request:
+    paths:
+      - 'internal/server/h1parser/reactor_bench_linux_test.go'
+      - '.github/workflows/reactor-ab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reactor-ab
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    name: Reactor vs blocking-path A/B
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      GO_VERSION: "1.27.2"
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          cache: false
+      - name: Run the reactor vs blocking A/B arms
+        run: |
+          go test -run='^$' \
+            -bench='BenchmarkSingle_(Reactor_KeepAliveRTT$|Reactor_KeepAliveRTT_Headers8$|BlockingServeRTTControl$|BlockingServeRTTControl_Headers8$|EchoRTTControl$|Reactor_ConcurrencySweep$|BlockingServe_ConcurrencySweep$)' \
+            -benchtime=1x -count=15 -timeout=20m \
+            ./internal/server/h1parser/ | tee reactor-ab.txt
+      - name: Summarize medians
+        run: |
+          python3 - <<'EOF'
+          import re, statistics
+          samples = {}
+          for line in open("reactor-ab.txt"):
+              m = re.match(r"(Benchmark\S+?)(?:-\d+)?\s+\d+\s+[\d.]+ ns/op(.*)", line)
+              if not m:
+                  continue
+              name, rest = m.group(1), m.group(2)
+              # ReportMetric prints "value name" pairs (like ns/op); accept
+              # "name=value" too in case the format changes.
+              for value, metric in re.findall(r"(\d+)\s+(\S+?)-ns\b", rest):
+                  samples.setdefault((name, metric), []).append(int(value))
+              for metric, value in re.findall(r"(\S+?)-ns=(\d+)", rest):
+                  samples.setdefault((name, metric), []).append(int(value))
+          for (name, metric), vals in sorted(samples.items()):
+              print(f"{name:60s} {metric:>7s} median {statistics.median(vals):>10.0f} ns  (n={len(vals)})")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reactor-ab-results
+          path: reactor-ab.txt
+          if-no-files-found: error
+          retention-days: 30

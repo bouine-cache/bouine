@@ -20,7 +20,7 @@ import (
 // five sections.
 func statusFixture() bouineapi.StatusReport {
 	return bouineapi.StatusReport{
-		Node: bouineapi.StatusNode{Name: "bouine-0", Version: "0.6.0", UptimeSec: 3661, Ready: true},
+		Node: bouineapi.StatusNode{Name: "bouine-0", Version: "v0.6.0", UptimeSec: 3661, Ready: true},
 		Cache: bouineapi.StatusCache{
 			Hits: 80, Misses: 20, HitRatio: 0.8, Evictions: 4,
 			Hot:  bouineapi.StatusTier{Entries: 12, Bytes: 2048, MaxBytes: 8192},
@@ -34,7 +34,7 @@ func statusFixture() bouineapi.StatusReport {
 			},
 		}},
 		Cluster: bouineapi.StatusCluster{
-			Peers:     []bouineapi.StatusPeer{{Name: "bouine-0", Version: "0.6.0", Requests: 100, Hits: 80, Misses: 20}},
+			Peers:     []bouineapi.StatusPeer{{Name: "bouine-0", Version: "v0.6.0", Requests: 100, Hits: 80, Misses: 20}},
 			PeerFetch: bouineapi.StatusPeerFetch{Hits: 9, Misses: 1, HopLimitHits: 0, AvgLatencyMs: 1.5},
 		},
 		Insights: []bouineapi.StatusInsight{{ID: "cache-low-hit-rate", Severity: "high", Title: "Hit rate is low", Action: "Raise TTLs"}},

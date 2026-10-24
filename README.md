@@ -202,8 +202,14 @@ round-trip to `GET /v1/status`:
 ```bash
 bouine status                # node-local; no peer traffic
 bouine status --cluster      # adds per-peer request counters (one peer fan-out)
-bouine status --watch        # re-render every --interval; Ctrl-C aborts the in-flight fetch
+bouine status --watch        # fullscreen TUI on a terminal; Ctrl-C aborts the in-flight fetch
 ```
+
+On a terminal, one-shot `status` prints the styled frame inline
+(colors, tier bars) and exits; `--watch` enters a fullscreen
+alternate-screen TUI with `q`/`Esc`/Ctrl-C (quit), `r` (refresh),
+and `c` (toggle cluster) keys. Piped output and `--format json`
+never take the TUI path, so scripts never see escape sequences.
 
 **Targeting a pod in Kubernetes.** The admin port is deliberately never
 exposed by a LoadBalancer (the admin Service is ClusterIP, and the image

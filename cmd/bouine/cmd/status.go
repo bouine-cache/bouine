@@ -53,6 +53,20 @@ func runStatus(ctx context.Context, cmd *cobra.Command, cluster, watch bool, int
 		return err
 	}
 	client := adminClient(cmd)
+	// Terminal routing (issue #813): on a TTY, a one-shot prints the
+	// styled frame inline and --watch runs the fullscreen alternate-
+	// screen TUI. Piped output and --format json keep the line-based
+	// rendering so scripts never see escape sequences.
+	if format == formatText && statusIsTTY(os.Stdout.Fd()) {
+		if watch {
+			return runStatusTUI(ctx, client, cluster, interval)
+		}
+		report, err := client.Status(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		return renderInlineFrame(cmd.OutOrStdout(), report, inlineWidth())
+	}
 	render := func() error {
 		report, err := client.Status(ctx, cluster)
 		if err != nil {

@@ -53,7 +53,7 @@ func statusHeader(p tuiPalette, r *bouineapi.StatusReport, meta frameMeta, width
 	if !r.Node.Ready {
 		ready = p.sick.Render("NOT-READY")
 	}
-	fmt.Fprintf(&b, " %s  v%s  up %s  %s",
+	fmt.Fprintf(&b, " %s  %s  up %s  %s",
 		p.title.Render(r.Node.Name), r.Node.Version, formatUptime(r.Node.UptimeSec), ready)
 	if meta.cluster {
 		b.WriteString(p.dim.Render(fmt.Sprintf("  every %s · cluster on", meta.interval)))
@@ -76,7 +76,7 @@ func statusCacheSection(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi
 		driftPoints := (r.Cache.HitRatio - prev.Cache.HitRatio) * 100
 		drift = fmt.Sprintf("  %s/s  %+.1f%% drift", humanCount(rate), driftPoints)
 	}
-	fmt.Fprintf(&b, " CACHE     hit %s%%  %s hits / %s misses%s  evictions %s\n",
+	fmt.Fprintf(&b, " CACHE     hit %s  %s hits / %s misses%s  evictions %s\n",
 		humanPct(r.Cache.HitRatio), humanCount(float64(r.Cache.Hits)),
 		humanCount(float64(r.Cache.Misses)), drift, humanCount(float64(r.Cache.Evictions)))
 	b.WriteString(renderTierBar(p, "hot", r.Cache.Hot))
@@ -84,18 +84,23 @@ func statusCacheSection(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi
 	return b.String()
 }
 
+// renderTierBar renders one tier's fill bar with the name padded so
+// hot and warm bars start at the same column. An unbudgeted tier
+// (MaxBytes 0) renders an empty bar labeled "unlimited": a full bar
+// would read as full when the tier is empty and has no budget to
+// measure against.
 func renderTierBar(p tuiPalette, name string, t bouineapi.StatusTier) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "           %s ", name)
-	frac := 1.0
-	if t.MaxBytes > 0 {
-		frac = float64(t.Bytes) / float64(t.MaxBytes)
-	}
-	b.WriteString(renderBar(p, frac, 20))
+	fmt.Fprintf(&b, "           %-4s ", name)
+	frac := 0.0
 	detail := fmt.Sprintf(" %s", humanBytes(t.Bytes))
 	if t.MaxBytes > 0 {
+		frac = float64(t.Bytes) / float64(t.MaxBytes)
 		detail += fmt.Sprintf(" / %s (%s)", humanBytes(t.MaxBytes), humanPct(frac))
+	} else {
+		detail += " / unlimited"
 	}
+	b.WriteString(renderBar(p, frac, 20))
 	if t.DiskBytes > 0 {
 		detail += fmt.Sprintf("  disk %s", humanBytes(t.DiskBytes))
 	}
@@ -159,7 +164,7 @@ func statusClusterSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 		}
 		line := fmt.Sprintf("   %s  %s  %s", peer.Name, style.Render(state), peer.Version)
 		if peer.Requests > 0 {
-			line = fmt.Sprintf("   %s  %s  %s  %s req  %s%% hit",
+			line = fmt.Sprintf("   %s  %s  %s  %s req  %s hit",
 				peer.Name, style.Render(state), peer.Version,
 				humanCount(float64(peer.Requests)), humanPct(hitPeerRatio(peer)))
 		}
@@ -206,7 +211,7 @@ func truncateLine(p tuiPalette, line string, width int) string {
 }
 
 func humanPct(frac float64) string {
-	return fmt.Sprintf("%.1f", frac*100)
+	return fmt.Sprintf("%.1f%%", frac*100)
 }
 
 func humanCount(n float64) string {

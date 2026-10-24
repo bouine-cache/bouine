@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 // tuiPaletteFor builds a palette over a non-terminal writer, so the
@@ -37,6 +39,39 @@ func TestRenderStatusFrame_InlineHasSectionsAndBars(t *testing.T) {
 	assert.NotContains(t, frame, "q quit", "inline frame has no key footer")
 	assert.NotContains(t, frame, "drift", "no deltas without a previous report")
 	assert.NotContains(t, frame, "\x1b[", "ascii profile emits no escape sequences")
+	assert.NotContains(t, frame, "vv0.6.0", "version is not double-prefixed")
+}
+
+// TestRenderStatusFrame_TierBarAlignmentAndUnlimited pins the
+// layout contract from the live review: hot and warm bars start at
+// the same column, an unbudgeted tier renders an empty bar labeled
+// unlimited (not a full bar), and the fill percentage carries its
+// percent sign.
+func TestRenderStatusFrame_TierBarAlignmentAndUnlimited(t *testing.T) {
+	t.Parallel()
+	report := statusFixture()
+	report.Cache.Hot = bouineapi.StatusTier{Entries: 5, Bytes: 1024, MaxBytes: 4096}
+	report.Cache.Warm = bouineapi.StatusTier{Entries: 9, Bytes: 2048} // no budget
+	frame := renderStatusFrame(tuiPaletteFor(io.Discard), &report, nil, frameMeta{width: 100})
+
+	hotLine := tierBarLine(t, frame, "hot")
+	warmLine := tierBarLine(t, frame, "warm")
+	require.Contains(t, hotLine, "1.0KiB / 4.0KiB (25.0%)", "budgeted detail keeps its percent sign")
+	require.Contains(t, warmLine, "2.0KiB / unlimited", "unbudgeted tier is labeled unlimited")
+	require.NotContains(t, warmLine, "█", "unbudgeted tier renders an empty bar")
+	require.Equal(t, strings.IndexAny(hotLine, "█░"), strings.IndexAny(warmLine, "█░"),
+		"hot and warm bars must start at the same column")
+}
+
+func tierBarLine(t *testing.T, frame, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(frame, "\n") {
+		if strings.Contains(line, name+" ") && strings.ContainsAny(line, "█░") {
+			return line
+		}
+	}
+	t.Fatalf("no tier bar line for %s", name)
+	return ""
 }
 
 func TestRenderStatusFrame_WatchFooterAndDeltas(t *testing.T) {

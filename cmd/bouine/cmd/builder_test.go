@@ -2198,7 +2198,7 @@ func TestBuildDashboard(t *testing.T) {
 	rs, _, err := e.initSubsystems(context.Background(), seq)
 	require.NoError(t, err)
 	ops := e.buildInvalidationOps(context.Background(), rs)
-	dashMux := e.buildDashboard(rs, "127.0.0.1:9000", ops)
+	_, dashMux := e.buildDashboard(rs, "127.0.0.1:9000", ops)
 	require.NotNil(t, dashMux)
 }
 
@@ -2317,7 +2317,7 @@ func TestBuildDashboard_WithCluster(t *testing.T) {
 	rs, _, err := e.initSubsystems(context.Background(), seq)
 	require.NoError(t, err)
 	ops := e.buildInvalidationOps(context.Background(), rs)
-	dashMux := e.buildDashboard(rs, "127.0.0.1:9000", ops)
+	_, dashMux := e.buildDashboard(rs, "127.0.0.1:9000", ops)
 	require.NotNil(t, dashMux)
 }
 

@@ -97,8 +97,15 @@ func New() *Engine {
 }
 
 // Evaluate runs all insight rules and returns the results, sorted by
-// severity (HIGH first, then MED, then LOW).
+// severity (HIGH first, then MED, then LOW). A nil Config behaves as
+// an empty one: rules may loop Config.Routes unguarded, so consumers
+// that evaluate without a config (e.g. the /v1/status snapshot on a
+// bare test handler) cannot panic.
 func (e *Engine) Evaluate(_ context.Context, data InsightData) []Insight {
+	if data.Config == nil {
+		empty := config.Config{}
+		data.Config = &empty
+	}
 	var results []Insight
 	for _, rule := range rules {
 		if insight := rule(data); insight != nil {

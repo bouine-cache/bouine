@@ -36,11 +36,16 @@ type Config struct {
 	// PurgeBatchFn applies a whole batch of purge URLs in one call:
 	// one local pass and one cluster broadcast (ADR-0044). Falls back
 	// to PurgeFn per key when unset.
-	PurgeBatchFn       func(urls []string) (purged int, failed int)
-	BanFn              func(expr api.BanExpr) (int, error)
-	CacheCheckFn       func(ctx context.Context, rawURL string) CacheCheckResult
-	ConfigFn           func() any
-	StatsFn            func() api.Stats
+	PurgeBatchFn func(urls []string) (purged int, failed int)
+	BanFn        func(expr api.BanExpr) (int, error)
+	CacheCheckFn func(ctx context.Context, rawURL string) CacheCheckResult
+	ConfigFn     func() any
+	StatsFn      func() api.Stats
+	// StatusFn builds the node-status document for GET /v1/status
+	// (bouine status, issue #813). cluster=true asks for the
+	// one-round-trip peer aggregation; the default is node-local data
+	// only. nil disables the endpoint.
+	StatusFn           func(ctx context.Context, cluster bool) StatusReport
 	DrainFn            func()
 	RefreshFn          func(key api.Key) error
 	ConditionsFn       func() []Condition
@@ -456,6 +461,11 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p string) bool {
 			s.configHandler(ctx)
 			return true
 		}
+	case "/v1/status":
+		if s.cfg.StatusFn != nil {
+			s.status(ctx)
+			return true
+		}
 	case "/v1/debug/cachecheck":
 		if s.cfg.CacheCheckFn != nil {
 			s.cacheCheck(ctx)
@@ -467,6 +477,11 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p string) bool {
 
 func (s *Server) healthz(ctx *fasthttp.RequestCtx) {
 	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) status(ctx *fasthttp.RequestCtx) {
+	v := string(ctx.QueryArgs().Peek("cluster"))
+	writeJSON(ctx, fasthttp.StatusOK, s.cfg.StatusFn(ctx, v == "1" || v == "true"))
 }
 
 func (s *Server) readyz(ctx *fasthttp.RequestCtx) {

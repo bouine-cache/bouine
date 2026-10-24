@@ -177,81 +177,93 @@ func (c *Client) Refresh(ctx context.Context, url string) (*RefreshResult, error
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-
-	req.SetRequestURI(c.BaseURL + path)
-	req.Header.SetMethod("GET")
-	c.setAuth(req)
-
-	return c.doJSON(ctx, req, resp, "GET", path, out)
+	return c.exchange(ctx, "GET", path, nil, out)
 }
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-
-	req.SetRequestURI(c.BaseURL + path)
-	req.Header.SetMethod("POST")
+	var b []byte
 	if body != nil {
-		b, err := jsonv2.Marshal(body)
-		if err != nil {
+		var err error
+		if b, err = jsonv2.Marshal(body); err != nil {
 			return err
 		}
-		req.Header.SetContentType("application/json")
-		req.SetBody(b)
 	}
-	c.setAuth(req)
+	return c.exchange(ctx, "POST", path, b, out)
+}
 
-	return c.doJSON(ctx, req, resp, "POST", path, out)
+// exchangeResult carries the response across the exchange goroutine:
+// a status, a private copy of the body, or an error. The fasthttp
+// objects never leave the goroutine.
+type exchangeResult struct { //nolint:govet // fieldalignment: cold-path CLI envelope; order follows the status-then-body-then-error reading order
+	status int
+	body   []byte
+	err    error
+}
+
+// exchange runs one admin API request. fasthttp in the pinned
+// version has no context-aware Do, so the wire exchange runs on a
+// goroutine and the caller selects on ctx.Done: cancellation (Ctrl-C
+// during `bouine status --watch`) returns promptly instead of
+// waiting out the client timeout. The abandoned exchange is bounded
+// by the client's ReadTimeout and the goroutine owns every pooled
+// object, so nothing is released under the winner's feet.
+func (c *Client) exchange(ctx context.Context, method, path string, body []byte, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan exchangeResult, 1)
+	go func() {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.SetRequestURI(c.BaseURL + path)
+		req.Header.SetMethod(method)
+		if body != nil {
+			req.Header.SetContentType("application/json")
+			req.SetBody(body)
+		}
+		c.setAuth(req)
+
+		hc := c.httpClient()
+		var err error
+		if deadline, ok := ctx.Deadline(); ok {
+			err = hc.DoDeadline(req, resp, deadline)
+		} else if hc.ReadTimeout > 0 {
+			err = hc.DoTimeout(req, resp, hc.ReadTimeout)
+		} else {
+			err = hc.Do(req, resp)
+		}
+		r := exchangeResult{err: err}
+		if err == nil {
+			r.status = resp.StatusCode()
+			r.body = append([]byte(nil), resp.Body()...)
+		}
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return r.err
+		}
+		if r.status < 200 || r.status >= 300 {
+			return fmt.Errorf("bouineapi: %s %s: status %d: %s",
+				method, path, r.status, sanitizeErrorBody(r.body))
+		}
+		if out != nil && len(r.body) > 0 {
+			return jsonv2.Unmarshal(r.body, out)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) setAuth(req *fasthttp.Request) {
 	if c.Token != "" {
 		req.Header.Set(header.Authorization, "Bearer "+c.Token)
 	}
-}
-
-func (c *Client) doJSON(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, method, path string, out any) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	deadline, ok := ctx.Deadline()
-	if ok {
-		if err := c.httpClient().DoDeadline(req, resp, deadline); err != nil {
-			return err
-		}
-	} else {
-		// Use the client's ReadTimeout as the default timeout to avoid
-		// hanging indefinitely on unresponsive servers.
-		hc := c.httpClient()
-		if hc.ReadTimeout > 0 {
-			if err := hc.DoTimeout(req, resp, hc.ReadTimeout); err != nil {
-				return err
-			}
-		} else {
-			if err := hc.Do(req, resp); err != nil {
-				return err
-			}
-		}
-	}
-
-	statusCode := resp.StatusCode()
-	if statusCode < 200 || statusCode >= 300 {
-		body := resp.Body()
-		return fmt.Errorf("bouineapi: %s %s: status %d: %s",
-			method, path, statusCode, sanitizeErrorBody(body))
-	}
-
-	respBody := resp.Body()
-	if out != nil && len(respBody) > 0 {
-		return jsonv2.Unmarshal(respBody, out)
-	}
-	return nil
 }
 
 // sanitizeErrorBody truncates the body to maxErrorBody bytes and strips

@@ -70,6 +70,12 @@ type Target struct {
 	probeErrors   atomic.Int64
 	successes     atomic.Int64
 	healthy       atomic.Bool
+	// lastChange is the Unix-nanosecond timestamp of the most recent
+	// health-state transition (ejection or restore). Zero means no
+	// transition was recorded since boot; /v1/status renders it as an
+	// empty last_change. Written only inside healthy-transition CAS
+	// blocks, never on the fetch path.
+	lastChange atomic.Int64
 	// ejectedAtUnix is the Unix-nanosecond timestamp of the most recent
 	// passive ejection; the eject_for reaper restores the target once
 	// the configured window has elapsed. Zero while healthy. Written
@@ -88,7 +94,9 @@ func (t *Target) recordPassiveError(threshold int, logger observability.Logger, 
 	}
 	if cnt >= int64(threshold) {
 		if t.healthy.CompareAndSwap(true, false) {
-			t.ejectedAt.Store(time.Now().UnixNano())
+			now := time.Now().UnixNano()
+			t.ejectedAt.Store(now)
+			t.lastChange.Store(now)
 			if t.metrics != nil {
 				t.metrics.incEjection(poolName, t.addr, "passive")
 			}
@@ -115,6 +123,7 @@ func (t *Target) recordProbeError(threshold int, logger observability.Logger, po
 			if t.metrics != nil {
 				t.metrics.incEjection(poolName, t.addr, "active")
 			}
+			t.lastChange.Store(time.Now().UnixNano())
 			logger.Warn("target ejected (active)",
 				"pool", poolName,
 				"target", t.addr,
@@ -136,6 +145,7 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 	if cnt >= int64(threshold) {
 		if t.healthy.CompareAndSwap(false, true) {
 			t.successes.Store(0)
+			t.lastChange.Store(time.Now().UnixNano())
 			if t.metrics != nil {
 				t.metrics.incRestore(poolName, t.addr, "active")
 			}
@@ -772,12 +782,17 @@ func (p *Pool) Healthy() []string {
 // TargetStatus reports the health and error counts for a single
 // upstream target. ConsecutiveErrors is the sum of passive and probe
 // errors for backward compatibility with dashboard consumers.
+// ProbeSuccesses is the current consecutive probe-success streak;
+// LastChangeUnixNano is the most recent health transition (0 = none
+// since boot).
 type TargetStatus struct {
-	Addr              string
-	Healthy           bool
-	ConsecutiveErrors int64
-	PassiveErrors     int64
-	ProbeErrors       int64
+	Addr               string
+	Healthy            bool
+	ConsecutiveErrors  int64
+	PassiveErrors      int64
+	ProbeErrors        int64
+	ProbeSuccesses     int64
+	LastChangeUnixNano int64
 }
 
 // Targets returns the health status of all targets in the pool.
@@ -789,11 +804,13 @@ func (p *Pool) Targets() []TargetStatus {
 		pe := t.passiveErrors.Load()
 		pr := t.probeErrors.Load()
 		out[i] = TargetStatus{
-			Addr:              t.addr,
-			Healthy:           t.healthy.Load(),
-			ConsecutiveErrors: pe + pr,
-			PassiveErrors:     pe,
-			ProbeErrors:       pr,
+			Addr:               t.addr,
+			Healthy:            t.healthy.Load(),
+			ConsecutiveErrors:  pe + pr,
+			PassiveErrors:      pe,
+			ProbeErrors:        pr,
+			ProbeSuccesses:     t.successes.Load(),
+			LastChangeUnixNano: t.lastChange.Load(),
 		}
 	}
 	return out
@@ -812,6 +829,7 @@ func (p *Pool) MarkHealthy(addr string) {
 			t.probeErrors.Store(0)
 			t.successes.Store(0)
 			if t.healthy.CompareAndSwap(false, true) {
+				t.lastChange.Store(time.Now().UnixNano())
 				p.logger.Info("target restored (manual)",
 					"pool", p.Name,
 					"target", t.addr)

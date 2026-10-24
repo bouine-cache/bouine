@@ -635,6 +635,7 @@ compile cost per request.
 
 ```
 bouine serve [--config /etc/bouine/config.yaml]
+bouine status [--cluster] [--watch]
 bouine purge <url>
 bouine ban <predicate>            # e.g. host=example.com path~^/foo
 bouine refresh <url>
@@ -647,6 +648,12 @@ bouine bench [--profile canonical]
 bouine cachecheck <url>
 bouine version
 ```
+
+`bouine status` fetches `GET /v1/status`: node, cache (hit ratio,
+tier fill), origins (per-target health with last-change), cluster
+(peers + peer-fetch telemetry; `--cluster` adds per-peer request
+counters via one peer-metrics fan-out), and the evaluated insight
+rules.
 
 All admin-plane subcommands honor the global `--server`, `--token`, and
 `--format text|json` flags. Values resolve flag > environment

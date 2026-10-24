@@ -181,16 +181,28 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 
 ### Administering a cache with the CLI
 
-Every admin-plane subcommand (`purge`, `ban`, `refresh`, `cluster peers`)
-accepts the global flags `--server`, `--token`, and `--format text|json`.
-Values resolve **flag > environment > default**, so scripts usually export
-the connection once:
+Every admin-plane subcommand (`status`, `purge`, `ban`, `refresh`,
+`cluster peers`) accepts the global flags `--server`, `--token`, and
+`--format text|json`. Values resolve **flag > environment > default**, so
+scripts usually export the connection once:
 
 ```bash
 export BOUINE_SERVER=127.0.0.1:9000        # admin listener
 export BOUINE_TOKEN=<admin bearer token>     # prefer env: never lands in shell history
 bouine purge http://example.com/img.png
 bouine cluster peers --format json
+```
+
+**One-glance overview.** `bouine status` renders five sections — node
+(version, uptime, readiness), cache (hit ratio, tier fill), origins
+(per-target health and probe streaks), cluster (peers, peer-fetch
+stats), and insights (the dashboard's evaluated rules) — in one
+round-trip to `GET /v1/status`:
+
+```bash
+bouine status                # node-local; no peer traffic
+bouine status --cluster      # adds per-peer request counters (one peer fan-out)
+bouine status --watch        # re-render every --interval; Ctrl-C aborts the in-flight fetch
 ```
 
 **Targeting a pod in Kubernetes.** The admin port is deliberately never

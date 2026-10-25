@@ -58,12 +58,28 @@ type Config struct {
 	// issue #817): re-parse and validate a config file, apply the
 	// hot-appliable subset, and report what needs a restart. nil
 	// disables the endpoint (experimental.config_reload off).
-	ReloadFn           func(ctx context.Context, req ConfigReloadRequest) (ConfigReloadResult, error)
-	DrainFn            func()
-	RefreshFn          func(key api.Key) error
-	ConditionsFn       func() []Condition
-	PeerBanHandler     fasthttp.RequestHandler
-	PeerRefreshHandler fasthttp.RequestHandler
+	ReloadFn func(ctx context.Context, req ConfigReloadRequest) (ConfigReloadResult, error)
+	// KeysFindFn serves GET /v1/keys/find (bouine keys find, issue
+	// #816): compute the cache key for a URL the same way the data
+	// plane does, report this node's storage state, and — with
+	// peer=true in cluster mode — query the ring owner over the peer
+	// channel. nil disables the endpoint.
+	KeysFindFn func(ctx context.Context, rawURL string, peer bool) (KeysFindResult, error)
+	// KeysTopFn serves GET /v1/keys/top and GET /v1/keys/recent
+	// (bouine keys top/recent, issue #816): the URL ring's recorded
+	// traffic, kind "top" (most requests) or "recent" (latest
+	// activity). nil disables both endpoints.
+	KeysTopFn func(kind, class string, limit int) KeysTopResult
+	// PeerKeysFindHandler serves GET /v1/peer/keys/find: the peer
+	// side of the keys-query channel, answering another node's
+	// owner-state query for one key. nil (cluster disabled) leaves
+	// the route unmounted.
+	PeerKeysFindHandler fasthttp.RequestHandler
+	DrainFn             func()
+	RefreshFn           func(key api.Key) error
+	ConditionsFn        func() []Condition
+	PeerBanHandler      fasthttp.RequestHandler
+	PeerRefreshHandler  fasthttp.RequestHandler
 	// PeerPurgeBatchHandler serves POST /v1/peer/purge/batch (ADR-0044).
 	PeerPurgeBatchHandler fasthttp.RequestHandler
 	// PeerRefreshBatchHandler serves POST /v1/peer/refresh/batch (ADR-0044).
@@ -450,6 +466,10 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 		return servePeer(ctx, peerMetrics)
 	case "/v1/peer/config/hot":
 		return servePeer(ctx, peerHotSet)
+	case "/v1/peer/keys/find":
+		// Reads Config directly, following the batch-route precedent:
+		// the positional buildPeerHandlers returns predate these.
+		return servePeer(ctx, s.cfg.PeerKeysFindHandler)
 	}
 	return false
 }
@@ -514,6 +534,21 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 	case "/v1/debug/cachecheck":
 		if s.cfg.CacheCheckFn != nil {
 			s.cacheCheck(ctx)
+			return true
+		}
+	case "/v1/keys/find":
+		if s.cfg.KeysFindFn != nil {
+			s.keysFind(ctx)
+			return true
+		}
+	case "/v1/keys/top":
+		if s.cfg.KeysTopFn != nil {
+			s.keysTop(ctx, "top")
+			return true
+		}
+	case "/v1/keys/recent":
+		if s.cfg.KeysTopFn != nil {
+			s.keysTop(ctx, "recent")
 			return true
 		}
 	}
@@ -873,6 +908,7 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
 		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
 		"/v1/peer/config/hot": true,
+		"/v1/peer/keys/find":  true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {

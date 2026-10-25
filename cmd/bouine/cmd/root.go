@@ -39,6 +39,7 @@ func Root() *cobra.Command {
 	root.AddCommand(newPurgeCmd())
 	root.AddCommand(newBanCmd())
 	root.AddCommand(newRefreshCmd())
+	root.AddCommand(newKeysCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newCompletionCmd())
 	return root

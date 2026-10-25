@@ -1384,6 +1384,17 @@ func (h *Handler) KeyPolicy() *KeyPolicy {
 	return h.policy
 }
 
+// VariantCount returns the number of tracked variant store keys for
+// primary key — the live entries reserved for the key's Vary dimension
+// (see variantSets). The admin keys-query surface (bouine keys find,
+// issue #816) reports it so an operator can see a variant resolver's
+// fan-out without enumerating the store.
+func (h *Handler) VariantCount(key api.Key) int {
+	h.variantMu.Lock()
+	defer h.variantMu.Unlock()
+	return len(h.variantSets[key])
+}
+
 // RefreshEnabled reports whether this handler was configured with
 // refresh-before-expiry. Used by the engine to filter handlers for
 // shutdown drain and refresh-metric polling without maintaining a

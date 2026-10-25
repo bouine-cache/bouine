@@ -864,13 +864,51 @@ func (s *Store) Delete(key api.Key) (segID int, err error) {
 // Get returns the raw body bytes stored for key, or nil if the key
 // is not in the warm tier.
 //
-// Lock ordering: s.mu.RLock (held for the full operation to prevent
+// Lock ordering: s.mu.RLock (held for the full read to prevent
 // Compact from swapping segments) → idxMu.RLock (read index) →
 // seg.mu.Lock (read record) → idxMu.RLock (set SIEVE visited bit).
 // The visited bit is an atomic.Bool, so it is set under RLock without
 // a lock upgrade. The re-check of segID + offset prevents marking a
 // stale entry that was evicted and reused during the TOCTOU window.
 func (s *Store) Get(key api.Key) ([]byte, error) {
+	body, loc, err := s.readRecord(key)
+	if err != nil || body == nil {
+		return nil, err
+	}
+
+	// Mark the entry as visited for SIEVE eviction. The visited bit is
+	// an atomic.Bool, safe to set under RLock — no write lock needed.
+	// Re-check identity (segID + offset) to avoid marking a stale entry
+	// that was evicted and reused between the initial RLock and now.
+	// s.mu is no longer held here: the marking touches only idxMu and
+	// the evict list, never the segment set.
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	if cur, ok := s.index[key]; ok && cur.segID == loc.segID && cur.offset == loc.offset && cur.entry != nil {
+		cur.entry.MarkVisited()
+	}
+
+	return body, nil
+}
+
+// Peek returns the raw body bytes stored for key like Get, but with
+// no side effects: the SIEVE visited bit is not set, so the read does
+// not influence warm-tier eviction. Used by the storage probe surface
+// (bouine keys find, issue #816), which must observe without
+// disturbing.
+func (s *Store) Peek(key api.Key) ([]byte, error) {
+	body, _, err := s.readRecord(key)
+	return body, err
+}
+
+// readRecord locates and reads the raw record body for key without
+// side effects. Returns a nil body for a miss, a tombstone, a stale
+// index entry, or a torn record (all self-healed to a miss exactly
+// like Get), plus the index location used, so Get can re-check
+// identity before marking the visited bit. s.mu.RLock is held for
+// the full read; the caller's visited-bit marking happens after its
+// release.
+func (s *Store) readRecord(key api.Key) ([]byte, warmLoc, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -878,7 +916,7 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 	loc, ok := s.index[key]
 	s.idxMu.RUnlock()
 	if !ok {
-		return nil, nil
+		return nil, warmLoc{}, nil
 	}
 
 	// O(1) segment lookup by ID via the segByID index.
@@ -902,7 +940,7 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 		// path below does — drop the entry and treat it as a miss so
 		// the caller refetches instead of spamming WARN logs forever.
 		s.dropStaleIndex(key, loc)
-		return nil, nil
+		return nil, warmLoc{}, nil
 	}
 
 	// readers.Add(1) before ensureOpen to prevent fdCache eviction from
@@ -911,7 +949,7 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 	seg.readers.Add(1)
 	defer seg.readers.Add(-1)
 	if err := seg.ensureOpen(); err != nil {
-		return nil, fmt.Errorf("warm: open segment %d: %w", seg.ID, err)
+		return nil, warmLoc{}, fmt.Errorf("warm: open segment %d: %w", seg.ID, err)
 	}
 	// Lazy mmap init for segments that did not go through newSegment
 	// (e.g., created by compaction or startup WAL replay). The active
@@ -924,25 +962,14 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
 			s.dropStaleIndex(key, loc)
-			return nil, nil
+			return nil, warmLoc{}, nil
 		}
-		return nil, err
+		return nil, warmLoc{}, err
 	}
 	if rec.IsTomb {
-		return nil, nil
+		return nil, warmLoc{}, nil
 	}
-
-	// Mark the entry as visited for SIEVE eviction. The visited bit is
-	// an atomic.Bool, safe to set under RLock — no write lock needed.
-	// Re-check identity (segID + offset) to avoid marking a stale entry
-	// that was evicted and reused between the initial RLock and now.
-	s.idxMu.RLock()
-	defer s.idxMu.RUnlock()
-	if cur, ok := s.index[key]; ok && cur.segID == loc.segID && cur.offset == loc.offset && cur.entry != nil {
-		cur.entry.MarkVisited()
-	}
-
-	return rec.Body, nil
+	return rec.Body, loc, nil
 }
 
 // SetIndex adds or replaces an index entry. Called during WAL replay
@@ -1306,6 +1333,16 @@ func (s *Store) Unprotect(key api.Key) {
 // verifies no protected entries are stranded after Fix A).
 func (s *Store) ProtectedCount() int {
 	return int(s.protectedCount.Load())
+}
+
+// Protected reports whether key's warm entry is currently marked
+// protected (backed by a live hot entry). Read-only; used by the
+// storage probe surface (bouine keys find, issue #816).
+func (s *Store) Protected(key api.Key) bool {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	loc, ok := s.index[key]
+	return ok && loc.protected
 }
 
 // writeTombstoneLocked writes a tombstone record for key to the active

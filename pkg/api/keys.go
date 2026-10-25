@@ -29,6 +29,18 @@ type KeyState struct {
 	// (remaining lifetime at store time, per RFC 9111 §5.1 age
 	// accounting).
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// SWRSeconds is the stale-while-revalidate window stamped at fill
+	// time (RFC 5861 §3). 0 when the response carried none. Filled by
+	// the explain plane's lifecycle gauge (issue #814).
+	SWRSeconds int64 `json:"swr_seconds,omitempty"`
+	// SIESeconds is the stale-if-error window stamped at fill time
+	// (RFC 5861 §4). 0 when the response carried none.
+	SIESeconds int64 `json:"sie_seconds,omitempty"`
+	// CacheControl is the merged Cache-Control header from the origin
+	// response, stored verbatim at cache-fill time (the same string
+	// the codec carries, ADR-0053). The explain plane re-derives the
+	// cacheability verdict from it (issue #814).
+	CacheControl string `json:"cache_control,omitempty"`
 	// StatusCode is the origin status the object was stored from.
 	StatusCode int `json:"status_code,omitempty"`
 	// Hits is the object's lifetime access counter (SIEVE slow path

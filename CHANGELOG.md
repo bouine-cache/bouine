@@ -69,6 +69,29 @@ the curated, human-readable summary.
   to recover the verdict. Raw output is already persisted to
   `bench/results/current.txt`.
 
+- **`bouine explain <url>` and `GET /v1/explain` (#814).** The
+  structured cache-decision tree for one URL: key derivation (with
+  the query policy's stripped parameter names, computed by the same
+  predicate the key builder uses), route, variant bucket under the
+  pinned nominal request (browser-dialect Accept-Encoding), the
+  fill path's own cacheability verdict, the freshness lifecycle,
+  the stored view with live variant enumeration (the handler's
+  variant index, never a store scan), matched lazy bans with
+  descriptors, and the ring owner. Read-only by construction: it
+  reads through the side-effect-free store `Probe` (the surface
+  `bouine keys` opened in #816, extended here with the stamped swr
+  and sie windows and the merged Cache-Control the codec carries —
+  `Store.Get` keeps its data-plane contract untouched), asks the
+  lazy ban registry for descriptors instead of applying the bans,
+  and is O(this key), never O(store). Text mode renders the why-chain headline plus a
+  fixed 28-cell freshness lifecycle bar (remaining fuel per zone,
+  eighth-block edge, hand-rolled truecolor gradient that degrades
+  through colorprofile to ANSI-free bytes when piped); a TTY gets a
+  ~300 ms fill ease-in whose final frame is byte-identical to the
+  static render, and everything else — pipes, `NO_COLOR`,
+  `TERM=dumb`, `--format json` — never sees an escape code. The
+  freshness bar is the only decoration; rows stay plain and always
+  present so output shape is stable across verdicts and diffable.
 - **`bouine config get/set/diff` and `GET|POST /v1/config/hot`
   (#815).** The hot-config knob surface: a registry of genuinely
   hot-appliable fields that change on a running daemon without a

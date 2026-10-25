@@ -90,6 +90,16 @@ type Object struct {
 	StatusCode int `json:"status_code"`
 	// Key is the primary cache key.
 	Key Key `json:"key"`
+	// PairedKey links the two entries of a Vary family (ADR-0065).
+	// On a resolver (the primary-key entry): the variant key whose
+	// body the resolver mirrors. On a variant: the primary key the
+	// variant belongs to, so a node storing the variant via the
+	// write-to-owner RPC can register it in the primary's variant set
+	// — without it, a cluster-wide URL purge would miss peer-put
+	// variants (RFC 9111 §4.4). Zero for plain objects and for legacy
+	// entries stored before this field existed (legacy resolvers may
+	// still carry their own Body, which is served directly).
+	PairedKey Key `json:"paired_key,omitempty"`
 	// HasConnectionList indicates whether the stored response has a
 	// Connection header listing per-connection headers that must be
 	// stripped before forwarding (RFC 9110 §7.6.1). Pre-computed at
@@ -205,6 +215,7 @@ func (o *Object) StoreComposedHead(now time.Time, cacheResult string, src Source
 func (o *Object) CloneForReturn(body []byte) *Object {
 	clone := &Object{
 		Key:                  o.Key,
+		PairedKey:            o.PairedKey,
 		VaryKey:              o.VaryKey,
 		StatusCode:           o.StatusCode,
 		Header:               o.Header,
@@ -286,6 +297,7 @@ func (o *Object) CloneForStorage(body []byte) *Object {
 func (o *Object) CloneForRefresh() *Object {
 	return &Object{
 		Key:                  o.Key,
+		PairedKey:            o.PairedKey,
 		VaryKey:              o.VaryKey,
 		StatusCode:           o.StatusCode,
 		Header:               o.Header.Clone(),
@@ -318,6 +330,16 @@ func (o *Object) CloneForRefresh() *Object {
 		KeepGrace:          o.KeepGrace,
 		Pool:               o.Pool,
 	}
+}
+
+// IsVaryResolver reports whether o is the primary-key Vary resolver
+// entry (ADR-0065): it carries the stored Vary list so lookup() can
+// select variants, and a blank VaryKey by protocol so the peer-fetch
+// and fast-path gates classify it as never-a-variant. True for legacy
+// resolvers (which may still carry their own body) and for the
+// metadata-only resolvers this codebase stores.
+func (o *Object) IsVaryResolver() bool {
+	return o.VaryValue != "" && o.VaryKey == ""
 }
 
 // Fresh reports whether the object is still within its freshness lifetime

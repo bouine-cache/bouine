@@ -15,17 +15,31 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-// Version 6 adds the transient-field block after Pool: the pre-merged
-// CacheControl string, OriginAge, and the gate/serialization flags
-// (HasDate, RespNoCache, RespMustRevalidate, HasConnectionList,
-// HasNoCacheFields). They MUST survive the wire: the peer-put path
-// stored v5-decoded objects with all five flags false, which served a
-// duplicate Date header on every fast-path hit and silently disabled
-// RFC 9111 §5.2.2 revalidation for no-cache/must-revalidate responses
-// (ADR-0053). v5 blobs backfill HasDate and the gate flags from the
-// header map at decode time; v4 and v3 blobs decode as before with
-// KeepGrace=false, Pool="" and an empty VaryValue (v3 only).
-const objCodecVersion byte = 6
+// Version 7 adds PairedKey (16 raw bytes, zero when absent) after the
+// transient-field block (ADR-0065): the Vary resolver's pointer to the
+// variant key whose body it mirrors. It MUST survive the wire — a
+// peer-put of a metadata-only resolver without it stores a resolver
+// that can never serve its mirror. Version 6 added the transient-field
+// block after Pool: the pre-merged CacheControl string, OriginAge, and
+// the gate/serialization flags (HasDate, RespNoCache, RespMustRevalidate,
+// HasConnectionList, HasNoCacheFields). They MUST survive the wire: the
+// peer-put path stored v5-decoded objects with all five flags false,
+// which served a duplicate Date header on every fast-path hit and
+// silently disabled RFC 9111 §5.2.2 revalidation for
+// no-cache/must-revalidate responses (ADR-0053). v5 blobs backfill
+// HasDate and the gate flags from the header map at decode time; v4 and
+// v3 blobs decode as before with KeepGrace=false, Pool="" and an empty
+// VaryValue (v3 only). v6-and-older blobs decode with a zero PairedKey
+// — such resolvers are legacy entries that may still carry their own
+// body.
+const objCodecVersion byte = 7
+
+// objCodecVersionV6 is the transient-field-block encoding version,
+// still accepted by the decoder so warm-tier blobs and peer-wire frames
+// written before PairedKey survive a rolling deploy. The v6 layout is
+// identical to v5 plus the transient block; the v7 PairedKey bytes are
+// simply absent.
+const objCodecVersionV6 byte = 6
 
 // objCodecVersionV5 is the grace-stamps encoding version, still
 // accepted by the decoder so warm-tier blobs and peer-wire frames
@@ -164,6 +178,10 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	}
 	buf = append(buf, flags)
 
+	// PairedKey (codec v7, ADR-0065): fixed 16 bytes, zero when absent.
+	// Written for every object so the field position is version-stable.
+	buf = append(buf, obj.PairedKey[:]...)
+
 	// Header map: count, then (key, value) per entry.
 	buf = binary.AppendUvarint(buf, uint64(obj.Header.Len())) //nolint:gosec // Len() returns int len of a slice, always non-negative and bounded by memory
 	obj.Header.Range(func(k, v string) bool {
@@ -205,7 +223,10 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	// v6 adds the transient-field block after Pool (ADR-0053); v5-and
 	// older blobs backfill HasDate and the gate flags from the header
 	// map below.
-	if ver != objCodecVersion && ver != objCodecVersionV5 && ver != objCodecVersionV4 && ver != objCodecVersionV3 {
+	// v7 adds PairedKey after the flags byte (ADR-0065); v6-and-older
+	// blobs decode with a zero PairedKey — a resolver without one is a
+	// legacy entry whose own Body may still be present.
+	if ver != objCodecVersion && ver != objCodecVersionV6 && ver != objCodecVersionV5 && ver != objCodecVersionV4 && ver != objCodecVersionV3 {
 		return nil, fmt.Errorf("storage: unknown object codec version %d", ver)
 	}
 
@@ -227,7 +248,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 		obj.KeepGrace = r.byte() == 1
 		obj.Pool = r.str()
 	}
-	if ver >= objCodecVersion {
+	if ver >= objCodecVersionV6 {
 		obj.CacheControl = r.str()
 		obj.OriginAge = time.Duration(r.varint())
 		flags := r.byte()
@@ -237,6 +258,9 @@ func decodeObject(blob []byte) (*api.Object, error) {
 		obj.HasConnectionList = flags&objFlagHasConnectionList != 0
 		obj.HasNoCacheFields = flags&objFlagHasNoCacheFields != 0
 	}
+	if ver >= objCodecVersion {
+		copy(obj.PairedKey[:], r.bytes(16))
+	}
 
 	obj.Header = decodeHeaderMap(&r, r.count())
 
@@ -245,7 +269,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	// does not synthesize a second Date header on top of the stored one
 	// (the duplicate-Date bug) and the RFC 9111 §5.2.2 gate is restored
 	// for no-cache/must-revalidate responses.
-	if ver < objCodecVersion {
+	if ver < objCodecVersionV6 {
 		backfillPreV6Flags(obj)
 	}
 

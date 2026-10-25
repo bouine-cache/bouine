@@ -122,30 +122,7 @@ func renderStatusText(b *strings.Builder, r *bouineapi.StatusReport) {
 	renderTierLine(b, "warm", r.Cache.Warm)
 
 	if len(r.Origins) > 0 {
-		b.WriteString("origins\n")
-		type originRow struct{ head, change string }
-		var rows []originRow
-		maxw := 0
-		for _, pool := range r.Origins {
-			for _, t := range pool.Targets {
-				state := "healthy"
-				if !t.Healthy {
-					state = "SICK"
-				}
-				head := fmt.Sprintf("    %s/%s  %s", pool.Name, t.Addr, state)
-				if cs := targetCounterSignals(t); cs != "" {
-					head += "  " + cs
-				}
-				if w := lipgloss.Width(head); w > maxw {
-					maxw = w
-				}
-				rows = append(rows, originRow{head: head, change: statusRelTime(r, t.LastChange)})
-			}
-		}
-		for _, row := range rows {
-			fmt.Fprintf(b, "%s%s  last change %s\n",
-				row.head, strings.Repeat(" ", maxw-lipgloss.Width(row.head)), row.change)
-		}
+		renderOriginsText(b, r)
 	}
 
 	b.WriteString("cluster\n")
@@ -201,6 +178,37 @@ func renderTierLine(b *strings.Builder, name string, t bouineapi.StatusTier) {
 		line += fmt.Sprintf("  disk %s", humanBytes(t.DiskBytes))
 	}
 	b.WriteString(line + "\n")
+}
+
+// renderOriginsText writes the origins section with the two-pass
+// last-change column alignment: collect the rows, measure the widest
+// head, then emit. Split from renderStatusText so both stay under
+// the complexity budget.
+func renderOriginsText(b *strings.Builder, r *bouineapi.StatusReport) {
+	b.WriteString("origins\n")
+	type originRow struct{ head, change string }
+	var rows []originRow
+	maxw := 0
+	for _, pool := range r.Origins {
+		for _, t := range pool.Targets {
+			state := "healthy"
+			if !t.Healthy {
+				state = "SICK"
+			}
+			head := fmt.Sprintf("    %s/%s  %s", pool.Name, t.Addr, state)
+			if cs := targetCounterSignals(t); cs != "" {
+				head += "  " + cs
+			}
+			if w := lipgloss.Width(head); w > maxw {
+				maxw = w
+			}
+			rows = append(rows, originRow{head: head, change: statusRelTime(r, t.LastChange)})
+		}
+	}
+	for _, row := range rows {
+		fmt.Fprintf(b, "%s%s  last change %s\n",
+			row.head, strings.Repeat(" ", maxw-lipgloss.Width(row.head)), row.change)
+	}
 }
 
 func hitPct(p bouineapi.StatusPeer) float64 {

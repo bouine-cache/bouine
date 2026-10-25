@@ -286,7 +286,7 @@ func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respH
 	if hasVaryStar(respHeader) {
 		return true
 	}
-	if isBlockedBySetCookie(respCC, respHeader) {
+	if isBlockedByClientState(respCC, respHeader) {
 		return true
 	}
 	if reqHeader.Get(header.Authorization) != "" {
@@ -315,13 +315,39 @@ func hasVaryStar(h header.Map) bool {
 	return varyContainsStar(h.GetAll(header.Vary))
 }
 
-func isBlockedBySetCookie(respCC Directives, h header.Map) bool {
-	if h.Get(header.SetCookie) == "" {
+func isBlockedByClientState(respCC Directives, h header.Map) bool {
+	if !clientStateInMap(h) {
 		return false
 	}
 	// A shared cache MAY store responses with Set-Cookie if the
-	// response has explicit freshness (max-age or s-maxage).
+	// response has explicit freshness (max-age or s-maxage); Set-Login
+	// (WICG Sign-In Cookies) carries the same per-user session state and
+	// follows the same rule (ADR-0067).
 	return !respCC.MaxAgeSet && !respCC.SMaxAgeSet
+}
+
+// clientStateInMap reports whether a header.Map carries a client-state
+// header (ADR-0067): Set-Cookie (RFC 6265 §4.1) or Set-Login (WICG
+// Sign-In Cookies). Such a response is minted for the requester's
+// session — it may be served only to the client whose request produced
+// it: never stored unstripped, never handed to another caller in-flight.
+func clientStateInMap(m header.Map) bool {
+	return m.Get(header.SetCookie) != "" || m.Get(header.SetLogin) != ""
+}
+
+// clientStateInFastHTTP is clientStateInMap over a raw fasthttp
+// response header (Peek-based, zero allocation). Multiple Set-Cookie
+// field lines are covered by Peek's any-value semantics.
+func clientStateInFastHTTP(hdr *fasthttp.ResponseHeader) bool {
+	return len(hdr.Peek(header.SetCookie)) > 0 || len(hdr.Peek(header.SetLogin)) > 0
+}
+
+// carriesClientState is clientStateInMap over a headerLookup (either
+// raw fasthttp response headers or an owned header.Map). The in-flight
+// sharing gates read it before handing a fetchResult to another caller
+// (ADR-0067).
+func carriesClientState(hl headerLookup) bool {
+	return hl.Has(header.SetCookie) || hl.Has(header.SetLogin)
 }
 
 // isUnderstoodStatus reports whether this cache understands the given

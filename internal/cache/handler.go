@@ -391,7 +391,7 @@ type Handler struct {
 	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
 	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
 	logCacheKeys   bool
-	allowSetCookie bool // when false (default), Set-Cookie blocks caching
+	allowSetCookie bool // when false (default), client-state headers (Set-Cookie, Set-Login) block caching
 	// bypassOnCookie routes cookied requests entirely around the cache
 	// (ADR-0054, cache.bypass_on_cookie): no lookup, no storage, no
 	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
@@ -665,13 +665,15 @@ type HandlerConfig struct {
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
 	RefreshBeforeExpiry bool
-	// AllowSetCookie controls caching of responses with Set-Cookie.
-	// Default (false): Set-Cookie in the response blocks caching
+	// AllowSetCookie controls caching of responses with client-state
+	// headers: Set-Cookie, and Set-Login (WICG Sign-In Cookies,
+	// ADR-0067) — both carry per-user session state.
+	// Default (false): such a response blocks caching
 	// unconditionally, matching nginx's safe default and preventing
-	// session-cookie replay across users. When true: caching is
-	// permitted per RFC 9111, but Set-Cookie is stripped from the
-	// stored object so subsequent HITs do not replay another user's
-	// cookies.
+	// session-state replay across users. When true: caching is
+	// permitted per RFC 9111, but the client-state header is stripped
+	// from the stored object so subsequent HITs do not replay another
+	// user's session state.
 	AllowSetCookie bool
 	// BypassOnCookie routes requests carrying a non-empty Cookie
 	// header entirely around the cache (ADR-0054): no lookup, no
@@ -1290,7 +1292,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	resMap := res.Header.ToMap()
 	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && clientStateInMap(resMap) {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
 		}
@@ -2304,6 +2306,9 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 // request parks under collapseFlightKey: the variant key on a warm
 // flight, the dimension-extended key on a cold include_headers route,
 // and no shared flight at all on a cold include-free miss (ADR-0057).
+// A response carrying client-state headers (Set-Cookie / Set-Login) is
+// never handed to a second caller: every shared caller fetches its own
+// (ADR-0067).
 func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) fetchResult {
 	if collapseDenied(ri) {
 		res := h.doFetch(ctx)
@@ -2320,11 +2325,24 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, lookupKey, primaryKey
 	if bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		suffix = headRevalKeySuffix
 	}
-	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
+	v, _, shared := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
 	})
 	res := v.(fetchResult)
+	if shared && res.Err == nil && carriesClientState(res.Header) {
+		// ADR-0067: the flight's response carries client-state headers
+		// (Set-Cookie / Set-Login) minted for whichever caller fetched
+		// it — they must not be served to any other caller. x/sync
+		// cannot distinguish the leader from a follower (both see
+		// shared=true when the value was handed to others), so every
+		// shared caller fetches its own; a solo caller (shared=false)
+		// keeps its own response. The cost — one extra origin fetch when
+		// a client-state origin meets concurrent anonymous misses —
+		// mirrors ADR-0052's refusal to collapse what cannot be proven
+		// shareable.
+		res = h.doFetch(ctx)
+	}
 	res.Header = res.Header.ownedClone()
 	return res
 }
@@ -2390,11 +2408,20 @@ func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Reque
 	if req.Header.IsHead() {
 		suffix = headRevalKeySuffix
 	}
-	v, _, _ := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
+	v, _, shared := h.flight.Do(sfKey.SingleFlightKey(suffix), func() (any, error) {
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
 	res := v.(fetchResult)
+	if shared && res.Err == nil && res.StatusCode != fasthttp.StatusNotModified && carriesClientState(res.Header) {
+		// ADR-0067: a full 200 revalidation response carrying client
+		// state (Set-Cookie / Set-Login) is per-caller; every shared
+		// caller re-issues its own conditional fetch. A 304 never leaks
+		// client state: MergeHeaders304 excludes it from the merged
+		// stored object, and the follower's client response is served
+		// from that object.
+		res = h.doFetchBg(ctx, req)
+	}
 	res.Header = res.Header.ownedClone()
 	return res
 }
@@ -3130,7 +3157,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
 	if bgParsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && bgResMap.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && clientStateInMap(bgResMap) {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
@@ -3215,7 +3242,7 @@ func (h *Handler) writeAndMaybeStore(
 	}
 
 	if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && clientStateInMap(resMap) {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
@@ -3487,8 +3514,9 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 	if resp.StatusCode() == fasthttp.StatusNotModified {
 		return
 	}
-	// Responses with Set-Cookie are client-specific and never stored.
-	if resp.Header.Peek(header.SetCookie) != nil {
+	// Responses with client-state headers (Set-Cookie, Set-Login) are
+	// per-user and never stored from a POST response.
+	if clientStateInFastHTTP(&resp.Header) {
 		return
 	}
 	loc := string(resp.Header.Peek(header.ContentLocation)) // RFC 7234 §3
@@ -3744,7 +3772,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	resMap := res.Header.ToMap()
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 	if !parsed.isCacheableWithDefault(h.neg, h.defaultTTL) ||
-		(!h.allowSetCookie && resMap.Get(header.SetCookie) != "") ||
+		(!h.allowSetCookie && clientStateInMap(resMap)) ||
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
@@ -4127,12 +4155,14 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// storage.
 	obj.Header.SetEntryRaw(header.XBouinePath, ri.GetPath())
 	obj.Header.SetEntryRaw(header.XBouineHost, ri.GetHost())
-	// Set-Cookie is always stripped from cached objects: joining multiple
-	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
-	// and serving stale cookies to a different client is a security risk.
-	// AllowSetCookie controls whether responses with Set-Cookie are cached
-	// at all (gated above); it does not preserve Set-Cookie in the cache.
+	// Client-state headers are always stripped from cached objects:
+	// joining multiple Set-Cookie values with ", " is non-conformant per
+	// RFC 9110 §5.2, and serving another client's session state
+	// (Set-Cookie, Set-Login) is a security risk. AllowSetCookie controls
+	// whether responses carrying them are cached at all (gated above);
+	// it does not preserve them in the cache (ADR-0012, ADR-0067).
 	obj.Header.Del(header.SetCookie)
+	obj.Header.Del(header.SetLogin)
 	// Ensure Content-Length is set so cache hits don't fall back to chunked
 	// transfer encoding. Origins that use chunked encoding have their
 	// Transfer-Encoding stripped by Go's HTTP client, leaving no

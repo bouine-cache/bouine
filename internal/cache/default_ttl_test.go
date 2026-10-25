@@ -47,6 +47,7 @@ func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 		{"no-store", 200, header.Map{}, headerMap(header.CacheControl, "no-store"), false},
 		{"private", 200, header.Map{}, headerMap(header.CacheControl, "private"), false},
 		{"set-cookie", 200, header.Map{}, headerMap(header.SetCookie, "sid=abc"), false},
+		{"set-login", 200, header.Map{}, headerMap(header.SetLogin, "logged-in"), false},
 		{"vary-star", 200, header.Map{}, headerMap(header.Vary, "*"), false},
 		{"pragma-no-cache", 200, header.Map{}, headerMap(header.Pragma, "no-cache"), false},
 		{"authorization", 200, headerMap(header.Authorization, "Bearer x"), header.Map{}, false},

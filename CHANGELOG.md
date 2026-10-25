@@ -12,6 +12,22 @@ the curated, human-readable summary.
 
 ### Changed
 
+- **Client-state responses (`Set-Cookie`, `Set-Login`) are never served to
+  a second client through collapse (ADR-0067).** ADR-0012 blocked their
+  *storage*; the in-flight collapse surfaces were ungated: byte-handoff
+  flight followers (warm and declared-dimension misses) and shared
+  revalidation/stayin-alive fetches received the leader's full response
+  headers — including its session cookie. A leader response carrying
+  either header now publishes the unshareable sentinel: byte-handoff
+  followers and every shared singleflight caller fetch their own, and
+  fill followers keep the store-mediated serve (own fetch under the
+  default gate; the stripped stored copy under `allow_set_cookie`).
+  `Set-Login` (WICG Sign-In Cookies) joins `Set-Cookie` in every storage
+  gate, the stored-object strip, and the 304-merge exclusion — it was
+  previously cached unstripped and replayed to other clients. Cost: one
+  extra origin fetch per shared caller when a client-state origin meets
+  concurrent anonymous misses on one key.
+
 - **Cold include-free misses collapse onto one fill flight (ADR-0066).**
   A burst of concurrent anonymous cold misses on a route without
   `include_headers` previously issued one origin fetch per caller

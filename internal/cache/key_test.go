@@ -257,6 +257,19 @@ func TestIsCacheable_SetCookie(t *testing.T) {
 	require.True(t, IsCacheable(200, header.NewMap(0), resp2, nil))
 }
 
+func TestIsCacheable_SetLogin(t *testing.T) {
+	t.Parallel()
+	// Set-Login (WICG Sign-In Cookies) carries the same per-user session
+	// state as Set-Cookie and follows the identical MAY-store rule
+	// (ADR-0067): without explicit freshness it blocks caching; with
+	// explicit max-age it is storable for a shared cache (the handler
+	// gate still refuses it unless allow_set_cookie is set).
+	resp := headerMap(header.SetLogin, "logged-in")
+	require.False(t, IsCacheable(200, header.NewMap(0), resp, nil))
+	resp2 := headerMap(header.CacheControl, "max-age=60", header.SetLogin, "logged-in")
+	require.True(t, IsCacheable(200, header.NewMap(0), resp2, nil))
+}
+
 func TestIsCacheable_Authorization(t *testing.T) {
 	t.Parallel()
 	req := headerMap(header.Authorization, "Bearer tok")

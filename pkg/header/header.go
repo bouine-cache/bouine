@@ -107,6 +107,14 @@ const (
 	// times.
 	SetCookie = "Set-Cookie"
 
+	// SetLogin — WICG Sign-In Cookies proposal (wicg/sign-in-cookies).
+	// Response header (`logged-in` / `logged-out`) announcing the
+	// requester's login state in a credentialed fetch. Like Set-Cookie,
+	// the value is per-user session state: a shared cache must never
+	// serve one client's Set-Login to another (ADR-0067). Canonical
+	// MIME form, as SetCookie.
+	SetLogin = "Set-Login"
+
 	// Warning — obsoleted by RFC 9111 §5.5 (formerly RFC 7234 §5.5). Additional information about
 	// the status of a message.
 	Warning = "Warning"

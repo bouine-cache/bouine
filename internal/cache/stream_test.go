@@ -524,6 +524,7 @@ func TestIsResponseCacheableBytes_Equivalence(t *testing.T) {
 		{"vary star spaced", map[string]string{"Vary": "Accept, *", "Cache-Control": "max-age=60"}, 200, false},
 		{"vary normal", map[string]string{"Vary": "Accept-Encoding", "Cache-Control": "max-age=60"}, 200, false},
 		{"set-cookie", map[string]string{"Set-Cookie": "a=b", "Cache-Control": "max-age=60"}, 200, false},
+		{"set-login", map[string]string{"Set-Login": "logged-in", "Cache-Control": "max-age=60"}, 200, false},
 		{"pragma no-cache", map[string]string{"Pragma": "no-cache"}, 200, false},
 		{"pragma no-cache + max-age", map[string]string{"Pragma": "no-cache", "Cache-Control": "max-age=60"}, 200, false},
 		{"404 no negative ttl", map[string]string{}, 404, false},

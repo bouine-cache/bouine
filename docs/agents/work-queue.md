@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — internal/cache, docs — fill flights: collapse anonymous cold include-free misses via the store (ADR-0066, follower never receives leader bytes, sequential-equivalence proof suite, burst benchmarks) — started: 2026-10-23 — ETA: same day
+- [WIP] crush — internal/cache, docs — fill flights: collapse anonymous cold include-free misses via the store (ADR-0066, follower never receives leader bytes, sequential-equivalence proof suite, burst benchmarks) + client-state safety (ADR-0067: Set-Cookie/Set-Login never handed to a second caller in-flight or stored unstripped) — started: 2026-10-23 — ETA: same day
 - [WIP] opencode — internal/storage — rebase + slim #745 onto main: unset-`created_at` bans permanently poison later fills (exemptAfter normalization + opaque-walk `subjectTo` gate; cluster callback-race half already landed in c671699c and is dropped) — started: 2026-10-15 06:43 UTC — ETA: same day
 - [WIP] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_cookie` per-route cookie bypass (#762: slow path + fast path + builder wiring, tests, ADR-0054, runbook 56, changelog) — started: 2026-10-04 — ETA: same day
 - [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day

@@ -2478,28 +2478,49 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	}
 }
 
+// fillReentryUserKey is the fasthttp user-value key marking a request
+// re-entering the pipeline after waiting on a fill flight (ADR-0066):
+// its own fetch — taken when the fill stored nothing usable for it —
+// must never park on a fill flight again, or the completed leader's
+// not-yet-deleted table entry would spin the follower between wake and
+// re-lookup. Scoped to internal/cache: set and read only by
+// fetchAndStore/serveFillFollower.
+const fillReentryUserKey = "bouine.fill_reentry"
+
+// fetchAndStore fills a miss, parking concurrent misses for the same
+// key on one leader flight when the collapse rules allow it. Personal
+// requests (Authorization, Cookie) and unsafe methods never share a
+// flight (ADR-0052/ADR-0054): unchanged. Every other request parks
+// under fetchFlightKey (ADR-0057 + ADR-0066): the lookup/dimension key
+// on warm and declared-dimension flights, whose followers receive the
+// leader's buffered result (the flight key provably encodes the
+// origin's declared variation surface); and the fill-flight key on an
+// anonymous cold include-free miss, whose followers never receive the
+// leader's bytes — they wait for the fill to settle in the store and
+// re-enter the request pipeline (serveFillFollower, ADR-0066).
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) {
-	// Authorized requests never share an in-flight response
-	// (collapseDenied, ADR-0052). Every other request parks under
-	// collapseFlightKey (ADR-0057): lookup key on a warm flight,
-	// dimension-extended key on a cold include_headers route, no
-	// shared flight on a cold include-free miss. A refused request
-	// fetches its own copy outside the inflight table.
-	sfKey := api.Key{}
-	if !collapseDenied(ri) {
-		sfKey = collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
+	if ctx.UserValue(fillReentryUserKey) == true {
+		// A fill follower fetching its own: the pipeline has already
+		// decided this request's fetch — never re-park.
+		h.streamMiss(ctx, primaryKey, ri, newInflightStream())
+		return
 	}
+	sfKey, fillFlight := fetchFlightKey(h, primaryKey, lookupKey, obj, ri)
 	if sfKey == (api.Key{}) {
-		h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+		h.streamMiss(ctx, primaryKey, ri, newInflightStream())
 		return
 	}
 	// Try to become the streaming leader for this key.
 	// If another request is already streaming, wait for its buffered result.
-	inflight := &inflightStream{done: make(chan struct{})}
+	inflight := newInflightStream()
 	if actual, loaded := h.inflightStreams.loadOrStore(sfKey, inflight); loaded {
 		// Follower: wait for the leader's buffered result.
 		existing := actual
 		existing.followers.Add(1)
+		if fillFlight {
+			h.serveFillFollower(ctx, lookupKey, ri, existing)
+			return
+		}
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
@@ -2509,7 +2530,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 				// the leader released us at header time. Fetch our own
 				// response — outside singleflight, since a live stream
 				// cannot be replayed to a second client (ADR-0042).
-				h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+				h.streamMiss(ctx, primaryKey, ri, newInflightStream())
 				return
 			}
 			if errors.Is(res.Err, ErrFetchShed) {
@@ -2532,6 +2553,54 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 	// Leader: remove from inflight map when done.
 	defer h.inflightStreams.delete(sfKey)
 	h.streamMiss(ctx, primaryKey, ri, inflight)
+}
+
+// serveFillFollower resolves a fill-flight follower (ADR-0066): a
+// concurrent anonymous cold include-free miss that parked on a leader's
+// fill. The follower NEVER reads the leader's response bytes. It waits
+// for the fill to settle in the store (inflight.stored closes after the
+// leader's store attempt, or at the leader's verdict when nothing will
+// be stored), then re-enters ServeRequest as a freshly-arrived request:
+// every response it can receive passes the same gates a sequential
+// request passes — Vary variant selection (a follower whose variant is
+// absent from the fill fetches its own), RFC 9111 §3.5 storage (the
+// fill only hands the follower a stored object when the origin's
+// response was storable for a shared cache), freshness, conditionals —
+// pinned byte-for-byte by TestFetchAndStore_FillFollowerSequentialEquivalence.
+//
+// The re-entry guard (fillReentryUserKey) bounds the re-entry: the
+// follower's own fetch, taken when the fill stored nothing usable for
+// it, never parks on a fill flight again.
+func (h *Handler) serveFillFollower(ctx *fasthttp.RequestCtx, lookupKey api.Key, ri RequestInfo, existing *inflightStream) {
+	<-existing.stored
+	res := existing.res
+	if res.Err != nil {
+		if errors.Is(res.Err, ErrStreamUnshareable) {
+			// The leader's response is delivered unbuffered (SSE,
+			// variant overflow): re-enter the pipeline so this request
+			// gets its own fetch with full request semantics.
+			ctx.SetUserValue(fillReentryUserKey, true)
+			h.ServeRequest(ctx)
+			return
+		}
+		if errors.Is(res.Err, ErrFetchShed) {
+			h.writeShed503(ctx, "MISS")
+			// The leader shed without fetching: schedule the bounded
+			// background refill so this shed is not a lost re-warm.
+			h.triggerShedRefill(ri, lookupKey)
+			return
+		}
+		writeUpstreamError(ctx, res.Err)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
+		return
+	}
+	// The fill settled in the store (or was definitively unstorable).
+	// Behave as a freshly-arrived request: identical gates, identical
+	// variant selection, identical freshness and conditional handling.
+	ctx.SetUserValue(fillReentryUserKey, true)
+	h.ServeRequest(ctx)
 }
 
 // writeShed503 writes the 503 + Retry-After response for a shed request

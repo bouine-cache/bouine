@@ -54,8 +54,17 @@ type streamFetchResult struct {
 // wait for the leader's body to be fully buffered and then serve
 // the buffered result instead of issuing a duplicate origin fetch.
 type inflightStream struct {
-	done chan struct{} // closed when the fetch finished or shed
-	res  fetchResult   // set by leader before closing done; Err set on failure/shed
+	done   chan struct{} // closed when the fetch finished or shed
+	stored chan struct{} // closed when the fill settled in the store (ADR-0066)
+	res    fetchResult   // set by leader before closing done; Err set on failure/shed
+	// stored closes when the fill has settled in the store: after the
+	// leader's store attempt on a cacheable fill, or at the leader's
+	// verdict when nothing will be stored (fetch error, shed, SSE
+	// unshareable, oversize, non-cacheable). Fill-flight followers
+	// (ADR-0066) wait on stored and then re-enter the request pipeline;
+	// byte-handoff followers keep waiting on done only (unchanged).
+	// Every path that closes done also closes stored, exactly once —
+	// pinned by TestFetchAndStore_FillFollowerTerminatesForEachVerdict.
 	// followers counts callers that loaded this stream from the
 	// inflight table (i.e. parked as followers). Written only by
 	// loadOrStore's follower branch (under the shard lock) before the
@@ -63,6 +72,15 @@ type inflightStream struct {
 	// close-adjacent publication. atomic so the leader's read is
 	// race-detector-clean without holding the shard lock.
 	followers atomic.Int32
+}
+
+// newInflightStream returns a fresh, unpublished inflight stream. The
+// leader paths in stream.go close both channels on every verdict.
+func newInflightStream() *inflightStream {
+	return &inflightStream{
+		done:   make(chan struct{}),
+		stored: make(chan struct{}),
+	}
 }
 
 // doFetchStream starts an origin fetch with response body streaming
@@ -359,8 +377,7 @@ func (h *Handler) streamMiss(
 ) {
 	sf, err := h.doFetchStream(ctx)
 	if err != nil {
-		inflight.res = fetchResult{Err: err}
-		close(inflight.done)
+		publishInflightErr(inflight, err)
 		if errors.Is(err, ErrFetchShed) {
 			h.writeShed503(ctx, "MISS")
 			// The shed must not be a lost re-warm: schedule the bounded
@@ -818,6 +835,7 @@ func (h *Handler) streamMissBuffered(
 	if h.maxResponseBytes > 0 && sf.resp != nil && int64(len(sf.resp.Body())) > h.maxResponseBytes {
 		inflight.res = fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 		close(inflight.done)
+		close(inflight.stored)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
@@ -876,6 +894,12 @@ func (h *Handler) streamMissBuffered(
 	}
 	inflight.res = res
 	close(inflight.done)
+	// stored closes at function exit: after the store attempt below on
+	// the cacheable path (covering the maxObjectSize early return and
+	// the variant-slot-refusal return via this defer), and immediately
+	// after the release on the non-cacheable path — nothing will be
+	// stored, so the settlement verdict is already final.
+	defer close(inflight.stored)
 
 	if !isHEAD {
 		ctx.Response.SetBodyRaw(res.Body)
@@ -1060,6 +1084,10 @@ func (h *Handler) teeStreamToClient(
 		Delay:      sf.Delay,
 	}
 	close(inflight.done)
+	// stored closes at callback exit: after the store attempt below
+	// (skipped on cacheExceeded / clientDisconnected / maxObjectSize —
+	// the settlement verdict is then already final).
+	defer close(inflight.stored)
 
 	if !cacheExceeded && !clientDisconnected && !(h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) { //nolint:staticcheck // QF1001: readability
 		res := inflight.res
@@ -1091,6 +1119,18 @@ func (h *Handler) teeStreamToClient(
 func publishStreamUnshareable(inflight *inflightStream) {
 	inflight.res = fetchResult{Err: ErrStreamUnshareable}
 	close(inflight.done)
+	close(inflight.stored)
+}
+
+// publishInflightErr resolves the leader's inflight stream with a
+// fetch verdict: the error is published and both settlement channels
+// close (done for byte-handoff followers, stored for fill-flight
+// followers, ADR-0066). Nothing will be stored after an error
+// verdict, so closing stored here is the settlement.
+func publishInflightErr(inflight *inflightStream, err error) {
+	inflight.res = fetchResult{Err: err}
+	close(inflight.done)
+	close(inflight.stored)
 }
 
 // streamMissNoCache streams the origin response to the client without

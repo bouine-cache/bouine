@@ -151,15 +151,21 @@ vary-key hash and could leak through those gates.
 - The hit path is untouched (resolver construction is fill-path only;
   the fast path never reads resolvers beyond handing the metadata
   answer to the slow path).
-- Known limitation (pre-existing, out of scope here): cache keys are
-  URL-scoped and the store is shared across routes, but `variantSets`
-  is per-handler and `purgeKey` stops at the first handler reporting
-  `owned` — a variant filled locally under route k's handler can
-  survive a URL purge when handler 0 also reports the key owned. The
-  peer-put registration (items 8-9) is internally consistent (purge
-  consults handlers in order and peer-put variants land in handler
-  0), but the local-fill half of the split predates this ADR and needs
-  its own fix.
+- The per-handler variant-set split is real but closed: keys are
+  URL-scoped and the store is shared across routes, while `variantSets`
+  is per-handler and peer-put registrations land on handlers[0] — so a
+  purge that stopped at the first handler reporting `owned` could
+  leave a locally-tracked variant of another handler alive (the
+  poisoning e2e suite caught exactly this, reachable-but-unkillable
+  again). `purgeKey`/`softPurgeKey` now consult every handler; the
+  shared store makes the deletes idempotent. The cluster-mode
+  reconciliation also had to change shape: a node may store a primary's
+  variants without the primary itself (independent ring assignments),
+  so the stale-incarnation probe cannot wipe wholesale there — liveness
+  is decided per tracked variant (pruneDeadVariants), and the wholesale
+  wipe remains only in single-node mode, where an absent primary really
+  does retire the whole set. Both fixed with the e2e suite
+  (`TestStrong_PurgePeerPutVariantsPastCap`).
 
 ## Notes
 

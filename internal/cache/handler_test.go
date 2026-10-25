@@ -6504,3 +6504,71 @@ func TestHandler_PurgeDeletesPeerPutVariantsPastCap(t *testing.T) {
 		}
 	}
 }
+
+// TestReserveVariantSlot_ClusterReconcileKeepsLiveVariants pins the
+// ADR-0068 cluster-mode reconciliation semantics that the past-cap e2e
+// (TestStrong_PurgePeerPutVariantsPastCap) caught being wrong: on a
+// node that stores a primary's VARIANTS but not the PRIMARY itself
+// (the ring assigns them independently), a later local fill must not
+// wipe the variant set wholesale — the stored, purge-trackable variants
+// would become untracked and survive a cluster-wide URL purge. Only
+// variants gone from the local store may be pruned. Single-node mode
+// keeps the wholesale wipe (an absent primary there really does retire
+// the whole set) — pinned by TestMaxVariants_PrimaryKeyEvictionResetsSet.
+func TestReserveVariantSlot_ClusterReconcileKeepsLiveVariants(t *testing.T) {
+	t.Parallel()
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	remoteOwner := func(api.Key) (api.PeerInfo, bool) {
+		return api.PeerInfo{Addr: "owner:1"}, false
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
+		Store:      store,
+		Logger:     slog.Default(),
+		OwnerFn:    remoteOwner,
+	})
+
+	req := testCtx("GET", "http://example.com/reconcile")
+	req.Request.Header.Set("X-Test-Variant", "a")
+	primaryKey := h.buildKey(req)
+	hdr := headerFromCtx(req)
+	liveA := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+	liveB := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+	liveB[15] ^= 0xFF
+	dead := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+	dead[15] ^= 0xAA
+
+	// Two variants LIVE in this node's store (it owns their keys), one
+	// set entry stale (its variant was evicted). The primary is NOT
+	// stored here — this node is not the primary's owner.
+	objA := &api.Object{Key: liveA, StatusCode: 200, TTL: time.Hour, StoredAt: time.Now(), Header: header.Map{}}
+	require.NoError(t, store.Put(context.Background(), liveA, objA))
+	objB := &api.Object{Key: liveB, StatusCode: 200, TTL: time.Hour, StoredAt: time.Now(), Header: header.Map{}}
+	require.NoError(t, store.Put(context.Background(), liveB, objB))
+
+	h.variantMu.Lock()
+	h.variantSets[primaryKey] = map[api.Key]struct{}{liveA: {}, liveB: {}, dead: {}}
+	h.variantMu.Unlock()
+
+	// A local fill for a fourth variant triggers the reconciliation.
+	// The primary is absent locally, but the two LIVE variants must
+	// survive the sweep; only the dead entry goes.
+	fourth := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+	fourth[15] ^= 0x55
+	require.True(t, h.reserveVariantSlot(context.Background(), primaryKey, fourth))
+
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	h.variantMu.Unlock()
+	require.Contains(t, set, liveA, "a live stored variant must stay purge-tracked in cluster mode")
+	require.Contains(t, set, liveB, "a live stored variant must stay purge-tracked in cluster mode")
+	require.NotContains(t, set, dead, "an evicted variant must be pruned")
+	require.Contains(t, set, fourth)
+}

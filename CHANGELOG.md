@@ -495,7 +495,16 @@ the curated, human-readable summary.
   variant, so an untracked one would be purge-proof; the set may
   exceed `max_variants` via peer-put registrations, bounded by SIEVE
   eviction and the dead-variant sweep, while local fills keep the
-  cap as a storage refusal.
+  cap as a storage refusal. The cluster-mode reconciliation now
+  prunes per-variant liveness instead of wiping the set when the
+  primary is locally absent (a node may store a primary's variants
+  without the primary — independent ring assignments; a wholesale
+  wipe there deleted live purge registrations), and a URL purge now
+  consults every route handler's tracked variants instead of
+  stopping at the first that reports the key owned — a locally
+  tracked variant under another route survived the purge before
+  (RFC 9111 §4.4). Both were caught by the new cluster poisoning
+  e2e suite in `test/integration`.
 - **Peer-put objects were registered for a refresh that could never
   run.** The write-to-owner RPC delivers an `api.Object`, which
   carries no URL, yet its store-side callback registered the object

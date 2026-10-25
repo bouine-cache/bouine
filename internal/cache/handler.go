@@ -2582,6 +2582,23 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 	h.streamMiss(ctx, primaryKey, ri, inflight)
 }
 
+// dropStaleOwnerHints invalidates the H1 fast path's peer hints
+// (api.OwnerMiss / api.OwnerGateReject / api.OwnerShed) before a fill
+// follower re-enters ServeRequest. The hints prove the owner was
+// already asked exactly this (nil-policy, plain-key) question — BEFORE
+// the leader's fill settled. The fill may have changed the owner's
+// answer (the leader stored locally or forwarded the object via
+// peerPut), so the re-entry must ask again like any freshly-arrived
+// request; with a stale hint, a non-owner follower skips the peer
+// lookup and fetches its own origin copy instead of serving the fill's
+// object from the owner — losing the store-mediated serve ADR-0066
+// promises in strong cluster mode.
+func dropStaleOwnerHints(ctx *fasthttp.RequestCtx) {
+	ctx.SetUserValue(api.OwnerMissContextKey, false)
+	ctx.SetUserValue(api.OwnerGateRejectContextKey, false)
+	ctx.SetUserValue(api.OwnerShedContextKey, false)
+}
+
 // serveFillFollower resolves a fill-flight follower (ADR-0066): a
 // concurrent anonymous cold include-free miss that parked on a leader's
 // fill. The follower NEVER reads the leader's response bytes. It waits
@@ -2599,6 +2616,9 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 // follower's own fetch, taken when the fill stored nothing usable for
 // it, never parks on a fill flight again.
 func (h *Handler) serveFillFollower(ctx *fasthttp.RequestCtx, lookupKey api.Key, ri RequestInfo, existing *inflightStream) {
+	// The re-entry re-asks the owner: the pre-fill hints are stale once
+	// the leader's fill has (or will) populated the owner.
+	dropStaleOwnerHints(ctx)
 	<-existing.stored
 	res := existing.res
 	if res.Err != nil {

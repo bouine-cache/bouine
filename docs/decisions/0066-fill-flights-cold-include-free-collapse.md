@@ -94,6 +94,17 @@ Unchanged, bit-for-bit:
   counter increments once on the original lookup and once after
   re-entry). `bouine_requests_total` is unaffected (middleware counts
   requests, not lookups).
+- **Cluster: the follower's re-entry re-asks the owner.** The H1 fast
+  path's peer hints (OwnerMiss / OwnerGateReject / OwnerShed) prove the
+  owner was asked exactly this question — *before the leader's fill
+  settled*. The fill may have changed the owner's answer (the leader
+  stored locally or forwarded the object via peerPut), so
+  `serveFillFollower` drops the hints before re-entering and the
+  follower peer-fetches like any freshly-arrived request: the
+  store-mediated serve holds on non-owner nodes, instead of the
+  follower silently skipping the owner lookup and fetching its own
+  origin copy (pinned by
+  `TestFetchAndStore_FillFollowerReentryReasksOwner`).
 - **Open question (not decided here)**: whether personal requests
   (Authorization/Cookie) may park fill flights gated by the §3.5
   storage certification (`public`/`s-maxage`/`must-revalidate`). The

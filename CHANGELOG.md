@@ -38,7 +38,11 @@ the curated, human-readable summary.
   fetched bytes** — through the same gates as a sequential request
   (Vary variant selection, RFC 9111 §3.5 storage, freshness,
   conditionals), or fetches its own when the fill stored nothing usable
-  for it. Pinned by a byte-for-byte sequential-equivalence test. The
+  for it. Pinned by a byte-for-byte sequential-equivalence test. In
+  cluster mode the follower's re-entry re-asks the owner (the fast
+  path's pre-fill owner-miss hint is dropped — the fill may have
+  populated the owner since), so the store-mediated serve holds on
+  non-owner nodes too. The
   ADR-0052/ADR-0054 refusals (Authorization, Cookie, unsafe methods)
   are unchanged: those requests still never share any flight.
   Measured (32 concurrent cold misses, 2 ms origin RTT, 4 fetch slots):

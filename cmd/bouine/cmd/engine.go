@@ -87,7 +87,7 @@ type runState struct {
 	headerRing   *observability.OriginHeaderRing
 	snapshotPath string
 	token        string
-	handlers     []*cache.Handler // all cache.Handler instances; refresh-enabled ones filtered via RefreshEnabled()
+	handlers     []*cache.Handler // all cache.Handler instances; per-route knobs filtered via accessor methods
 
 	// fastPathHandlers holds one FastPathHandler per cache-enabled
 	// route (proxied and cached-static), built from that route's
@@ -1048,16 +1048,15 @@ func (e *engine) clusterDisabledReason(rs *runState) string {
 }
 
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore
-// callback to the first refresh-enabled cache handler so forwarded
-// objects get refresh-before-expiry scheduling (issue #509). The store
-// is shared across all routes, so any handler can schedule the refresh.
+// callback to the first cache handler (issue #509). StoreFromPeer is
+// needed regardless of refresh config: it registers Vary variants in
+// the owner's variant set (ADR-0065), without which a cluster-wide URL
+// purge would miss peer-put variants. The store is shared across all
+// routes, so any handler can do the registration.
 func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {
 	h := cluster.NewPeerPutHandler(rs.store, e.logger)
-	for _, ch := range rs.handlers {
-		if ch.RefreshEnabled() {
-			h.SetOnStore(ch.StoreFromPeer)
-			break
-		}
+	if len(rs.handlers) > 0 {
+		h.SetOnStore(rs.handlers[0].StoreFromPeer)
 	}
 	return h
 }

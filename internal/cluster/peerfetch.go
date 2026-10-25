@@ -919,6 +919,18 @@ func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 	return req, true
 }
 
+// withholdsResolverBody reports whether the stored primary-key entry is
+// a bodyful Vary resolver that must not be served over peer fetch.
+// ADR-0065 exception: the metadata-only resolver (no body) answers a
+// blank-assertion ask with its METADATA — the Vary list the requester
+// could not compute locally — so it can derive its variant key and
+// re-ask the variant's owner with a real assertion. Metadata only,
+// never a body: the cross-variant leak stays closed, and legacy
+// resolvers (own body present) are still withheld outright.
+func withholdsResolverBody(obj *api.Object, reqVaryKey string) bool {
+	return obj.VaryKey == "" && obj.VaryValue != "" && (len(obj.Body) != 0 || reqVaryKey != "")
+}
+
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
 func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if !bytes.Equal(ctx.Method(), []byte(fasthttp.MethodPost)) {
@@ -982,7 +994,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// with a miss and let the requester fill (and assert) its own
 	// variant. A peer fetch for a REAL variant key never lands here:
 	// variant entries carry a non-empty VaryKey.
-	if obj.VaryKey == "" && obj.VaryValue != "" {
+	if withholdsResolverBody(obj, req.VaryKey) {
 		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
 			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)

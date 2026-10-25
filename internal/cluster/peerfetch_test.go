@@ -227,6 +227,45 @@ func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
 	require.Equal(t, "market=fr", string(obj.Body))
 }
 
+// TestPeerFetchHandler_ResolverMetadataAnsweredOnBlankAssertion pins the
+// ADR-0065 answer class: the owner of a primary key whose only entry is
+// the METADATA-ONLY Vary resolver answers a blank-assertion ask with the
+// resolver's metadata — the Vary list the requester could not compute
+// locally — so it can derive its variant key and re-ask the variant's
+// owner with a real assertion. Metadata only, never a body: legacy
+// resolvers (own body present, TestPeerFetchHandler_ResolverBodyNeverServed)
+// stay withheld, and a variant-asserted ask still misses.
+func TestPeerFetchHandler_ResolverMetadataAnsweredOnBlankAssertion(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(16)
+	resolver := &api.Object{
+		Key:        key,
+		PairedKey:  testkey.Key(17),
+		StatusCode: 200,
+		VaryValue:  "X-Region",
+		VaryKey:    "",
+	}
+	resolver.Header = header.NewMap(1)
+	resolver.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: resolver}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"a blank-assertion ask on a metadata-only resolver must answer with the metadata")
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "X-Region", obj.VaryValue, "the Vary list is the point of the answer")
+	require.Empty(t, obj.Body, "metadata only — never a body")
+	require.Equal(t, resolver.PairedKey, obj.PairedKey, "PairedKey rides the peer wire (codec v7)")
+
+	// A variant-asserted ask is still withheld — the resolver is never a
+	// variant answer (gate 1 fires on the VaryKey mismatch).
+	ctx2 := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "8873fe11e21573d7"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx2.Response.StatusCode(),
+		"a variant-asserted ask must still miss on the resolver")
+}
+
 // TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion pins the
 // non-variant case that must keep working: an object WITHOUT Vary
 // (VaryValue == "") stored under its primary key is served to a

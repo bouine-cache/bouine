@@ -584,7 +584,13 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		return err
 	}
 
-	if t.warm != nil && (obj.BodySize > t.bodyThreshold || obj.KeepGrace) {
+	// ADR-0065: resolvers always warm-back regardless of body size.
+	// lookup() finds warm variants only through the entry at the
+	// primary key — the resolver IS the routing metadata — so a
+	// bodyless resolver that skips the warm tier would strand every
+	// warm variant of that URL after a restart until re-fill. The
+	// metadata blob is a few hundred bytes.
+	if t.warm != nil && (obj.BodySize > t.bodyThreshold || obj.KeepGrace || obj.IsVaryResolver()) {
 		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(key, body) //nolint:gosec // segID fits int32
 		if err != nil {

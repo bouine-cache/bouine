@@ -922,10 +922,12 @@ func (h *Handler) streamMissBuffered(
 				}
 			}
 		}
-		obj := h.storeStreamedObject(ctx, storeKey, ri, res, resMap, fillTTL)
+		obj := h.storeStreamedObject(ctx, storeKey, primaryKey, ri, res, resMap, fillTTL)
 		if storeKey != primaryKey {
-			primaryObj := obj.CloneForReturn(obj.Body)
-			primaryObj.Key = primaryKey
+			// The primary-key entry is the metadata-only Vary resolver
+			// (ADR-0065, #824) — buildResolver blanks the VaryKey the
+			// previous ad-hoc clone left set here.
+			primaryObj := buildResolver(obj, primaryKey)
 			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
 			h.forwardToOwnerIfRemote(ctx, primaryObj)
 		}
@@ -1140,10 +1142,12 @@ func (h *Handler) settleTeeFill(
 		return
 	}
 	bgCtx := context.Background()
-	obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap, fillTTL)
+	obj := h.storeStreamedObject(bgCtx, storeKey, primaryKey, ri, res, resMap, fillTTL)
 	if storeKey != primaryKey {
-		primaryObj := obj.CloneForReturn(obj.Body)
-		primaryObj.Key = primaryKey
+		// The primary-key entry is the metadata-only Vary resolver
+		// (ADR-0066, #824) — buildResolver blanks the VaryKey the
+		// previous ad-hoc clone left set here.
+		primaryObj := buildResolver(obj, primaryKey)
 		h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0)
 		h.forwardToOwnerIfRemote(bgCtx, primaryObj)
 	}
@@ -1241,6 +1245,7 @@ func (h *Handler) shouldStopBuffering(buf *bytes.Buffer, chunkLen int64, totalBy
 func (h *Handler) storeStreamedObject(
 	ctx context.Context,
 	key api.Key,
+	primaryKey api.Key,
 	ri RequestInfo,
 	res fetchResult,
 	resMap header.Map,
@@ -1250,6 +1255,10 @@ func (h *Handler) storeStreamedObject(
 	// time (ADR-0063) so the stored clock equals the advertised cap;
 	// nil (passthrough) computes the TTL in buildObject as before.
 	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
+	// ADR-0065: the variant carries its primary key so a node storing
+	// it via the write-to-owner RPC can register it in the primary's
+	// variant set (cluster-wide purge reachability).
+	obj.PairedKey = primaryKey
 	h.storeObject(ctx, key, obj, ri, false, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj

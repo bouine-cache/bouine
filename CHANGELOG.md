@@ -445,6 +445,48 @@ the curated, human-readable summary.
   for pool-less routes (e.g. static files), keeping log records
   joinable with the `bouine_requests_total` series.
 
+### Performance
+
+- **Vary pages no longer sit in RAM twice (ADR-0065, #824).** Every
+  cacheable response with `Vary` was stored with its full body under
+  the variant key AND as a byte-for-byte clone under the primary key
+  (the "Vary resolver") — measured at 2.03x the hot-tier bytes of an
+  identical no-`Vary` workload, plus a second disk copy above the warm
+  threshold. The resolver is now metadata-only: it keeps the stored
+  `Vary` list and validators but no body, and links its mirror variant
+  via the new `PairedKey` (warm codec v7; v6-and-older blobs decode as
+  legacy resolvers that still serve their own body). The resolver-304
+  path serves the mirror's bytes, falling back to the ordinary fill
+  when the mirror is gone from both tiers; resolvers no longer
+  register for proactive refresh (one fewer origin fetch per `Vary`
+  URL per TTL) and always warm-back so restarts restore variant
+  routing. In strong mode, a node with no local Vary context now
+  resolves variants legitimately: the primary key's owner answers the
+  bare ask with the resolver metadata, and the requester re-asks the
+  variant's owner with a real vary-key assertion — where it previously
+  converged only through the resolver-body leak closed by this change.
+
+### Fixed
+
+- **Streaming fills stored the Vary resolver with a non-blank
+  `VaryKey`.** The slow path blanks the primary-key resolver's
+  `VaryKey` by protocol — the peer-fetch and fast-path gates classify
+  resolvers by it — but the streaming fill path (the default cold-miss
+  route) skipped the blanking, so streamed resolvers carried the
+  variant's vary-key hash and could leak through those gates. Every
+  fill now goes through one `buildResolver` constructor that blanks
+  `VaryKey` (ADR-0065).
+- **Cluster-wide URL purges missed peer-put variants (RFC 9111
+  §4.4).** A variant stored on its owner via the write-to-owner RPC
+  never entered the owner's variant set — the fill ran on another
+  node, and the registration callback was only wired when some route
+  enabled refresh-before-expiry — so the broadcast purge deleted the
+  primary entry but left the variant alive. Variants now carry their
+  primary key (`PairedKey`) and are registered on the owner
+  regardless of refresh config; the registration's stale-incarnation
+  reconciliation no longer wipes variant sets on nodes that own the
+  variant but not the primary (ADR-0065).
+
 ## [0.5.29] - 2026-10-19
 
 ### Performance

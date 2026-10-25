@@ -2112,15 +2112,18 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	h.variantMu.Unlock()
 }
 
-// TestHandler_VaryFill_StoresPageTwiceInHot proves the hot-tier RAM cost
-// of a Vary response end to end. A cold fill streams through streamMiss
-// (fetchAndStore's leader path), which stores the variant under the
-// variant key (storeStreamedObject) and a clone under the primary key as
-// the Vary resolver (stream.go); writeAndMaybeStore does the same on the
-// slow-path fills. The handler-side resolver aliases the variant's Body
-// slice, but the hot store deep-copies on every Put, so 200 pages fill
-// 400 hot entries holding ~2x the bytes of an identical no-Vary origin.
-func TestHandler_VaryFill_StoresPageTwiceInHot(t *testing.T) {
+// TestHandler_VaryFill_ResolverMetadataOnly is the acceptance test for
+// ADR-0065 (issue #824): a Vary fill stores the variant with its body
+// and a metadata-only Vary resolver at the primary key — no second body
+// copy. 200 pages still fill 400 hot entries (variant + resolver each),
+// but at ~1x the per-page hot bytes of an identical no-Vary origin: the
+// resolver accounts only headers and struct overhead. The fill here
+// streams through streamMiss (fetchAndStore's leader path), the site
+// that previously stored the resolver as a full body clone AND left
+// its VaryKey set — the blank VaryKey below pins that drift fixed.
+// The store's per-Put body ownership stays pinned separately
+// (TestHotStore_Put_VaryResolverBodyDuplicated).
+func TestHandler_VaryFill_ResolverMetadataOnly(t *testing.T) {
 	t.Parallel()
 
 	const pages = 200
@@ -2161,12 +2164,10 @@ func TestHandler_VaryFill_StoresPageTwiceInHot(t *testing.T) {
 
 	varyPerPage := float64(varyStats.HotBytes) / float64(pages)
 	plainPerPage := float64(plainStats.HotBytes) / float64(pages)
-	require.InDelta(t, 2.0, varyPerPage/plainPerPage, 0.1,
-		"per-page hot bytes: vary=%.0f plain=%.0f — a Vary page sits in RAM twice",
+	require.InDelta(t, 1.1, varyPerPage/plainPerPage, 0.1,
+		"per-page hot bytes: vary=%.0f plain=%.0f — the resolver must hold only metadata, not a body copy",
 		varyPerPage, plainPerPage)
 
-	// The resolver entry holds the same bytes as the variant: the primary
-	// key resolves to a stored duplicate, not a shared reference.
 	req0 := testCtx("GET", "http://example.com/page-0")
 	req0.Request.Header.Set("X-Test-Variant", "a")
 	primaryKey := varyH.buildKey(req0)
@@ -2175,10 +2176,14 @@ func TestHandler_VaryFill_StoresPageTwiceInHot(t *testing.T) {
 	require.NoError(t, err)
 	vObj, _, err := varyH.store.Get(t.Context(), variantKey)
 	require.NoError(t, err)
-	require.Equal(t, vObj.Body, pkObj.Body,
-		"the resolver holds the same page bytes as the variant; the two buffers are proven disjoint at the storage level (TestHotStore_Put_VaryResolverBodyDuplicated)")
-	t.Logf("200 vary pages: %d hot entries, %.0f bytes/page; 200 plain pages: %d entries, %.0f bytes/page (body %d); resolver VaryKey observed: %q",
-		varyStats.HotEntries, varyPerPage, plainStats.HotEntries, plainPerPage, bodyLen, pkObj.VaryKey)
+	require.Empty(t, pkObj.Body, "the resolver stores no body bytes")
+	require.Zero(t, pkObj.BodySize)
+	require.Equal(t, "", pkObj.VaryKey,
+		"the resolver's VaryKey must be blank by protocol, including on the streaming fill path")
+	require.Equal(t, variantKey, pkObj.PairedKey, "the resolver points at the variant it mirrors")
+	require.Len(t, vObj.Body, bodyLen, "the variant keeps the full body")
+	t.Logf("200 vary pages: %d hot entries, %.0f bytes/page; 200 plain pages: %d entries, %.0f bytes/page (body %d); resolver metadata overhead: %.0f bytes",
+		varyStats.HotEntries, varyPerPage, plainStats.HotEntries, plainPerPage, bodyLen, varyPerPage-plainPerPage)
 }
 
 // TestHandler_PurgeDeletesVariants pins RFC 9111 §4.2.4: purging a primary
@@ -2333,8 +2338,11 @@ func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
 	primaryKey := h.buildKey(reqA)
 	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 
-	// Both the primary and the variant should be in the refresh registry.
-	require.NotNil(t, h.refreshRegistry.Lookup(primaryKey))
+	// ADR-0065: the primary-key Vary resolver is metadata-only and never
+	// registers for proactive refresh — a background refresh of the
+	// primary key would re-store a full body there. Only the variant
+	// registers.
+	require.Nil(t, h.refreshRegistry.Lookup(primaryKey))
 	require.NotNil(t, h.refreshRegistry.Lookup(keyA))
 
 	owned, err := h.Purge(context.Background(), primaryKey)
@@ -6354,4 +6362,84 @@ func TestExcludeHost_HostStillForwarded(t *testing.T) {
 	h.ServeRequest(ctx)
 	require.Equal(t, "kept.example.com", seenHost.Load().(string),
 		"include_host: false must not rewrite the origin-bound Host")
+}
+
+// TestHandler_PurgeDeletesPeerPutVariants pins the ADR-0065 purge
+// reachability fix (issue #824): a variant that lands on the owner via
+// the write-to-owner RPC (StoreFromPeer) must be tracked in the
+// primary's variant set, so a cluster-wide URL purge deletes it too.
+// Before the fix the owner never tracked peer-put variants — the fill
+// ran on another node — and the purge left them live.
+func TestHandler_PurgeDeletesPeerPutVariants(t *testing.T) {
+	t.Parallel()
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("peer-variant-body"))
+	}
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
+		Store:      store,
+		Logger:     slog.Default(),
+	})
+
+	req := testCtx("GET", "http://example.com/vary")
+	req.Request.Header.Set("X-Test-Variant", "peer")
+	primaryKey := h.buildKey(req)
+	hdr := headerFromCtx(req)
+	varyKey := BuildVaryKey("X-Test-Variant", hdr, nil)
+	variantKey := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+
+	obj := &api.Object{
+		Key:        variantKey,
+		VaryKey:    varyKey,
+		VaryValue:  "X-Test-Variant",
+		PairedKey:  primaryKey,
+		StatusCode: 200,
+		TTL:        time.Hour,
+		StoredAt:   time.Now(),
+		Header:     header.Map{},
+	}
+	h.StoreFromPeer(context.Background(), obj)
+
+	// A second variant of the same primary arrives on a later peer-put.
+	// This is where the purge hole lived: the registration probe saw no
+	// local primary (the resolver lives on the primary's owner, a
+	// different node), read the set as a stale incarnation, and wiped
+	// the first variant out of the set — leaving it invisible to the
+	// cluster-wide URL purge.
+	objB := &api.Object{
+		Key:        variantKey,
+		VaryKey:    varyKey,
+		VaryValue:  "X-Test-Variant",
+		PairedKey:  primaryKey,
+		StatusCode: 200,
+		TTL:        time.Hour,
+		StoredAt:   time.Now(),
+		Header:     header.Map{},
+	}
+	objB.Key[0] ^= 0xFF
+	h.StoreFromPeer(context.Background(), objB)
+
+	// Registration precondition: BOTH peer-put variants must be tracked
+	// under the primary key even though this handler holds no primary.
+	h.variantMu.Lock()
+	tracked := len(h.variantSets[primaryKey])
+	h.variantMu.Unlock()
+	require.Equal(t, 2, tracked, "both peer-put variants must be registered under their primary key")
+
+	owned, err := h.Purge(context.Background(), primaryKey)
+	require.NoError(t, err)
+	require.True(t, owned, "purge must own the key with tracked peer-put variants")
+
+	if obj2, _, _ := store.Get(context.Background(), variantKey); obj2 != nil {
+		t.Fatal("peer-put variant still in store after Purge")
+	}
+	if obj2, _, _ := store.Get(context.Background(), objB.Key); obj2 != nil {
+		t.Fatal("second peer-put variant still in store after Purge")
+	}
 }

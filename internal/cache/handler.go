@@ -287,6 +287,10 @@ type Handler struct {
 	// onPeerVariantMismatch is called when servePeerHit rejects a
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
+	// onResolverTwoStep is called when serveResolverPeerVariant completes
+	// the ADR-0066 two-step resolution and serves the variant. Nil in
+	// single-node mode.
+	onResolverTwoStep func()
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -497,7 +501,14 @@ type HandlerConfig struct {
 	// receipt). Wired to the peer-fetch variant-mismatch metric
 	// (consumer side) by the engine; nil in single-node mode.
 	OnPeerVariantMismatch func()
-	Upstream              fasthttp.RequestHandler
+	// OnResolverTwoStep, if non-nil, is called when the handler completes
+	// the ADR-0066 two-step variant resolution: it fetched the
+	// metadata-only resolver from the primary key's owner, derived this
+	// request's variant key from the learned Vary list, and served the
+	// variant. Wired to the peer-fetch resolver-answers metric
+	// (consumer side) by the engine; nil in single-node mode.
+	OnResolverTwoStep func()
+	Upstream          fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -881,6 +892,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
+		onResolverTwoStep:       cfg.OnResolverTwoStep,
 		peerPut:                 cfg.PeerPut,
 		purgeBroadcast:          cfg.PurgeBroadcast,
 		allowSetCookie:          cfg.AllowSetCookie,
@@ -1424,7 +1436,7 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 	if obj == nil || obj.Key == (api.Key{}) {
 		return
 	}
-	// ADR-0065: a peer-put VARIANT must land in this handler's variant
+	// ADR-0066: a peer-put VARIANT must land in this handler's variant
 	// set under its primary key, or a cluster-wide URL purge would miss
 	// it (RFC 9111 §4.4) — the fill ran on another node, so the owner
 	// never tracked it. The variant carries its primary as PairedKey.
@@ -1738,24 +1750,35 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
 	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
-				if isPeerResolverMetadata(peerObj) {
-					// ADR-0065: the owner answered the bare
-					// primary-key ask with the metadata-only
-					// resolver — the Vary list this node could
-					// not compute locally. Derive THIS request's
-					// variant key and re-ask the variant's owner
-					// with a real assertion.
-					if h.serveResolverPeerVariant(ctx, primaryKey, peerObj, now, ri) {
-						return
-					}
-				} else if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
-					return
-				}
-			} else if err != nil {
+			// ADR-0066: the fast path may have already asked this exact
+			// blank question and fetched the metadata-only resolver —
+			// reuse it instead of repeating the identical bare ask.
+			// transferredResolver verifies the identity proof the
+			// boolean hints cannot carry: the object's own Key.
+			peerObj := transferredResolver(ctx, obj, lookupKey)
+			var err error
+			if peerObj == nil {
+				peerObj, err = h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj))
+			}
+			switch {
+			case err != nil:
 				h.logger.Debug("peer fetch error, falling back to origin",
 					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 					"peer", owner.Addr, "key", lookupKey, "error", err)
+			case peerObj != nil && isPeerResolverMetadata(peerObj):
+				// ADR-0066: the owner answered the bare
+				// primary-key ask with the metadata-only
+				// resolver — the Vary list this node could
+				// not compute locally. Derive THIS request's
+				// variant key and re-ask the variant's owner
+				// with a real assertion.
+				if h.serveResolverPeerVariant(ctx, primaryKey, peerObj, now, ri) {
+					return
+				}
+			case peerObj != nil:
+				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
+					return
+				}
 			}
 		}
 	}
@@ -1956,9 +1979,9 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 	// response, as updated by the 304 response metadata"); the stored
 	// resolver keeps its own clock (see the doc comment above).
 	//
-	// ADR-0065: the resolver is metadata-only — the bytes it serves are
+	// ADR-0066: the resolver is metadata-only — the bytes it serves are
 	// the mirror variant's, fetched here. Legacy resolvers (stored
-	// before ADR-0065, e.g. warm-tier reload of a pre-upgrade blob)
+	// before ADR-0066, e.g. warm-tier reload of a pre-upgrade blob)
 	// carry no PairedKey and their own body; serve that directly. If
 	// the mirror is gone from both tiers (purged, or hot- and
 	// warm-evicted), the 304 proves nothing servable for a bodyless
@@ -3172,7 +3195,7 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 // the same key. The stored/registry URI stays original; only the
 // origin-bound request URI is stripped.
 func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, key api.Key, stale *api.Object) {
-	// ADR-0065: resolvers never register for refresh; a stale resolver
+	// ADR-0066: resolvers never register for refresh; a stale resolver
 	// here is a pre-upgrade registry entry. Its mirror variant refreshes
 	// on its own cycle, and a full-200 refresh of the primary key would
 	// re-store a body there — resurrecting the duplicate body #824
@@ -3345,7 +3368,7 @@ func (h *Handler) writeAndMaybeStore(
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
 				return
 			}
-			// ADR-0065: the variant carries its primary key so a node
+			// ADR-0066: the variant carries its primary key so a node
 			// storing it via the write-to-owner RPC can register it in
 			// the primary's variant set (cluster-wide purge
 			// reachability). Plain objects keep a zero PairedKey.
@@ -3359,7 +3382,7 @@ func (h *Handler) writeAndMaybeStore(
 		h.forwardToOwnerIfRemote(ctx, obj)
 		if storeKey != primaryKey {
 			// The primary-key entry is the Vary resolver: metadata-only,
-			// pointing at the variant it mirrors (ADR-0065, #824). The old
+			// pointing at the variant it mirrors (ADR-0066, #824). The old
 			// clone shared the body slice with the variant object, but the
 			// hot store deep-copies per Put, so the alias stored a second
 			// private copy of every page and Vary URLs cost 2x their body
@@ -3381,18 +3404,50 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 }
 
 // reserveVariantSlotFromPeer registers a variant that landed on this
-// handler via the write-to-owner RPC (ADR-0065). The fill ran on another
+// handler via the write-to-owner RPC (ADR-0066). The fill ran on another
 // node, so this node may not hold the primary-key resolver even though
 // the variant set is live — the primary's owner and the variant's owner
 // are independent hash-ring assignments. Skip the local primary probe:
 // treating the absent primary as a stale incarnation here wipes live
 // variants out of the set and makes a cluster-wide URL purge miss them.
-func (h *Handler) reserveVariantSlotFromPeer(reqCtx context.Context, primaryKey, storeKey api.Key) bool {
-	return h.reserveVariantSlotMode(reqCtx, primaryKey, storeKey, true)
+// Registration ALWAYS succeeds, including past the MaxVariants cap:
+// PeerPutHandler.Handle stores the object BEFORE the onStore callback
+// runs, so a refused registration would leave a stored-but-untracked
+// variant — servable via the two-step resolution yet invisible to the
+// cluster-wide URL purge (RFC 9111 §4.4), the exact reachable-but-
+// unkillable shape ADR-0066 exists to close. The set may therefore
+// exceed the cap via peer-put registrations; growth is bounded by SIEVE
+// evicting the stored variants (the dead-variant sweep prunes them on
+// later registrations) and by Purge deleting the set. The cap stays a
+// storage refusal on the local-fill path, where the object has not been
+// stored yet and refusal is enforceable.
+func (h *Handler) reserveVariantSlotFromPeer(reqCtx context.Context, primaryKey, storeKey api.Key) {
+	h.reserveVariantSlotMode(reqCtx, primaryKey, storeKey, true)
 }
 
-// reserveVariantSlotMode is the shared implementation; fromPeer skips the
-// stale-incarnation reconciliation (see reserveVariantSlotFromPeer).
+// reconcileStaleIncarnation probes the local primary key and resets
+// the variant set when the probe misses: the set then belongs to a
+// prior incarnation of the primary key that was since evicted by SIEVE
+// or TTL, and its tracked variants are stale. Returns the (possibly
+// reset) set for primaryKey. Called with variantMu held; releases it
+// around the store probe — a lock must never span an I/O call — and
+// reacquires before returning.
+func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey api.Key) map[api.Key]struct{} {
+	h.variantMu.Unlock()
+	probeCtx := context.WithoutCancel(reqCtx)
+	pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	if set == nil || pkObj == nil {
+		set = make(map[api.Key]struct{})
+		h.variantSets[primaryKey] = set
+	}
+	return set
+}
+
+// reserveVariantSlotMode is the shared implementation; fromPeer skips
+// the stale-incarnation reconciliation (see reserveVariantSlotFromPeer)
+// and registers past the cap — the peer-put object is already stored.
 // Reconciliation exists for the local-fill path, where a node always
 // holds the resolver it created alongside the variants it tracks.
 func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, storeKey api.Key, fromPeer bool) bool {
@@ -3408,24 +3463,11 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 	}
 	// If the set exists from a prior incarnation of this primary key that
 	// was since evicted by SIEVE or TTL, the tracked variants are stale.
-	// Probe the primary key and reset the set if it is gone from the
-	// store. Without this, variantSets grows without bound as primary
-	// keys are evicted, and stale entries can cause incorrect MaxVariants
+	// Without the probe, variantSets grows without bound as primary keys
+	// are evicted, and stale entries can cause incorrect MaxVariants
 	// enforcement.
 	if len(set) > 0 && !fromPeer {
-		h.variantMu.Unlock()
-		probeCtx := context.WithoutCancel(reqCtx)
-		pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
-		h.variantMu.Lock()
-		set = h.variantSets[primaryKey]
-		if set == nil {
-			set = make(map[api.Key]struct{})
-			h.variantSets[primaryKey] = set
-		}
-		if pkObj == nil {
-			set = make(map[api.Key]struct{})
-			h.variantSets[primaryKey] = set
-		}
+		set = h.reconcileStaleIncarnation(reqCtx, primaryKey)
 	}
 	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
@@ -3458,7 +3500,10 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 	for _, k := range dead {
 		delete(set, k)
 	}
-	if len(set) < h.maxVariants {
+	if len(set) < h.maxVariants || fromPeer {
+		// fromPeer tracks past the cap (see reserveVariantSlotFromPeer):
+		// the object is already in the store — an untracked variant would
+		// be purge-proof. Local fills fall through to the refusal below.
 		set[storeKey] = struct{}{}
 		return true
 	}

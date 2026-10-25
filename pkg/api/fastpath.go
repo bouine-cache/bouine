@@ -29,6 +29,11 @@ const OwnerGateRejectContextKey = "bouine.owner_gate_reject"
 // on a fast-path fall-through (see RawRequest.OwnerShed).
 const OwnerShedContextKey = "bouine.owner_shed"
 
+// OwnerResolverContextKey is the fasthttp user-value key under which the
+// h1parser transfers RawRequest.OwnerResolver to the fallback RequestCtx
+// on a fast-path fall-through (see RawRequest.OwnerResolver).
+const OwnerResolverContextKey = "bouine.owner_resolver"
+
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
 // from a pooled read buffer — all string fields are slices of that buffer,
 // so they are valid only until the buffer is reused. The FastPathHandler
@@ -108,6 +113,20 @@ type RawRequest struct {
 	// and goes straight to origin (protected by origin singleflight).
 	// Reset to false by the parser's per-request soft reset; zero value = unset.
 	OwnerShed bool
+	// OwnerResolver carries the metadata-only Vary resolver the fast
+	// path fetched when the owner answered its bare primary-key ask
+	// (ADR-0066). The h1parser transfers it to the fallback RequestCtx
+	// under OwnerResolverContextKey so handleCacheMiss runs the two-step
+	// variant resolution WITHOUT repeating the identical bare ask.
+	// Unlike the boolean owner hints, the identity proof needs no
+	// nil-policy route restriction: the object carries its own Key, and
+	// the slow path reuses it only when that Key equals the key it would
+	// have asked for. The pointer is heap-owned (decoded from the peer
+	// wire) and is read only within the request's fall-through iteration;
+	// the parser's per-request soft reset clears it, so no stale pointer
+	// crosses into the next keep-alive request. Nil unless the fast path
+	// fetched a resolver-shaped answer.
+	OwnerResolver *Object
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

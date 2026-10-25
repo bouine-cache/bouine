@@ -48,8 +48,25 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	assert.Equal(t, "second.example.com", req2.Host)
 	assert.Equal(t, "HTTP/1.0", req2.HTTPVersion)
 	assert.Equal(t, 1, req2.NHeaders)
-	// Aliasing: both returned requests point at the scratch struct.
+	// The fast-path peer hints set on a previous request's iteration must
+	// not leak into a later one: parseBuffer's soft reset clears them all,
+	// including the OwnerResolver pointer (ADR-0066) — a stale resolver
+	// handed to the next request's slow path would resolve variants with
+	// the previous request's Vary metadata.
+	scratch.OwnerMiss = true
+	scratch.OwnerGateReject = true
+	scratch.OwnerShed = true
+	scratch.OwnerResolver = &api.Object{Key: api.Key{0x01}}
+	req3, fallThrough3, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
+	require.NoError(t, err)
+	require.False(t, fallThrough3)
+	assert.False(t, req3.OwnerMiss)
+	assert.False(t, req3.OwnerGateReject)
+	assert.False(t, req3.OwnerShed)
+	assert.Nil(t, req3.OwnerResolver)
+	// Aliasing: all returned requests point at the scratch struct.
 	assert.Same(t, req, req2)
+	assert.Same(t, req, req3)
 }
 
 // TestParseRequest_MalformedSecondRequest resets scratch correctly when

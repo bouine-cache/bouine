@@ -1,4 +1,4 @@
-# ADR-0065: Metadata-only Vary resolver
+# ADR-0066: Metadata-only Vary resolver
 
 - **Status**: Accepted
 - **Date**: 2026-10-25
@@ -76,9 +76,16 @@ vary-key hash and could leak through those gates.
    with the metadata-only resolver (new peer answer class, blank
    assertion only), the requester derives its variant key from the
    learned Vary list and re-asks the variant's owner with a real
-   vary-key assertion. The fast path punts resolver-shaped answers to
-   the slow path without a hint so the resolution runs. On main this
-   convergence path did not exist — streamed resolvers leaked through
+   vary-key assertion. The fast path hands resolver-shaped answers to
+   the slow path (`RawRequest.OwnerResolver`, transferred by the h1parser
+   under `OwnerResolverContextKey`) so the slow path runs the two-step
+   WITHOUT repeating the identical bare ask — the same question-identity
+   proof the boolean owner hints carry, but stronger: the transferred
+   object carries its own `Key`, so the slow path reuses it only when
+   `Key == lookupKey` (no nil-policy restriction needed). The answer
+   class is observable: `bouine_peer_fetch_resolver_answers_total{side}`
+   counts owner answers ("server") and completed two-step resolutions
+   ("consumer"). On main this convergence path did not exist — streamed resolvers leaked through
    the owner's withhold gate (non-blank `VaryKey`) and were served as
    primary-key hits carrying the first variant's body; closing the leak
    made the legitimate path mandatory.
@@ -93,7 +100,18 @@ vary-key hash and could leak through those gates.
    when some route enabled refresh-before-expiry — in a default config
    the callback stayed nil and peer-put variants were stored bare.
    The callback still calls `storeObject`, so the issue-#509 refresh
-   scheduling is preserved when the route opts in.
+   scheduling is preserved when the route opts in. Peer-put registration
+   always succeeds, including at the `MaxVariants` cap: the write-to-owner
+   RPC (`PeerPutHandler.Handle`) stores the object BEFORE the
+   registration callback runs, so a refused registration would leave a
+   stored-but-untracked variant — reachable via the two-step, invisible
+   to the cluster-wide URL purge, i.e. the exact reachable-but-unkillable
+   shape items 8 and 9 exist to close. Peer-put registrations may
+   therefore exceed the cap in the set; growth is bounded by SIEVE
+   evicting the stored variants (the dead-variant sweep prunes them on
+   later registrations) and by `Purge` deleting the set. Local fills
+   keep the cap as a storage refusal, where refusal is enforceable
+   (the local fill has not stored yet).
 9. **Peer-put registration skips the stale-incarnation primary
    probe.** `reserveVariantSlot`'s reconciliation probes for the local
    primary and wipes the variant set when absent — sound for local
@@ -101,8 +119,9 @@ vary-key hash and could leak through those gates.
    primary's owner are independent hash-ring assignments (the probe
    would wipe live registrations on a node that owns the variant but
    not the primary). `reserveVariantSlotMode(..., fromPeer)` skips the
-   probe for peer-puts; the MaxVariants cap and dead-variant sweep are
-   retained. Caught by the integration test
+   probe for peer-puts; the dead-variant sweep is retained and the cap
+   remains a storage refusal on the local-fill path only (item 8).
+   Caught by the integration test
    `TestStrong_PurgeVariantIsolation`.
 
 ## Consequences
@@ -124,8 +143,17 @@ vary-key hash and could leak through those gates.
   `lookup()` found a local resolver, which (via the owner gate) also
   stored the variant locally.
 - The hit path is untouched (resolver construction is fill-path only;
-  the fast path never reads resolvers beyond punting the metadata
+  the fast path never reads resolvers beyond handing the metadata
   answer to the slow path).
+- Known limitation (pre-existing, out of scope here): cache keys are
+  URL-scoped and the store is shared across routes, but `variantSets`
+  is per-handler and `purgeKey` stops at the first handler reporting
+  `owned` — a variant filled locally under route k's handler can
+  survive a URL purge when handler 0 also reports the key owned. The
+  peer-put registration (items 8-9) is internally consistent (purge
+  consults handlers in order and peer-put variants land in handler
+  0), but the local-fill half of the split predates this ADR and needs
+  its own fix.
 
 ## Notes
 

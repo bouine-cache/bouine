@@ -61,7 +61,7 @@ func TestEvictionLogging_BackedSkipped(t *testing.T) {
 	var buf bytes.Buffer
 	// Each object with 100-byte body costs ~604 bytes (struct overhead:
 	// 100 body + 352 object + 32 hotEntry + 40 sieve + 32 map + 48 map
-	// slices, ADR-0065's PairedKey included). Budget fits 2 objects;
+	// slices, ADR-0066's PairedKey included). Budget fits 2 objects;
 	// the 3rd triggers inline eviction.
 	h := NewHotStore(HotConfig{
 		MaxBytes:       1300,

@@ -99,8 +99,14 @@ vary-key hash and could leak through those gates.
    unconditionally, whereas it previously wired `StoreFromPeer` only
    when some route enabled refresh-before-expiry — in a default config
    the callback stayed nil and peer-put variants were stored bare.
-   The callback still calls `storeObject`, so the issue-#509 refresh
-   scheduling is preserved when the route opts in. Peer-put registration
+   The callback still calls `storeObject`, but peer-put objects never
+   join the proactive refresh registry: the write-to-owner RPC carries
+   an `api.Object` and the object codec has no URL field, and the
+   refresh executor rebuilds its fetch from the registry entry's url —
+   a URI-less registration would schedule a fetch that fails on every
+   attempt and retries until the TTL lapses. Peer-put objects keep
+   request-driven revalidation (SWR/SIE/stale-on-hit), the strong-mode
+   refresh path (issue #509). Peer-put registration
    always succeeds, including at the `MaxVariants` cap: the write-to-owner
    RPC (`PeerPutHandler.Handle`) stores the object BEFORE the
    registration callback runs, so a refused registration would leave a

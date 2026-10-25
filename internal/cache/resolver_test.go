@@ -292,3 +292,53 @@ func TestResolverPeerVariant_ReusesTransferredResolver(t *testing.T) {
 	require.Len(t, asks, 2,
 		"a transferred resolver with a mismatched Key answers a different question and must not be reused")
 }
+
+// TestStoreFromPeer_NoRefreshRegistrationWithoutURI pins the URI gate
+// of shouldRegisterRefresh (ADR-0066 review): a refresh-enabled handler
+// must NOT register a peer-put object for proactive refresh.
+// StoreFromPeer is the one storeObject site whose RequestInfo carries
+// no URI — the write-to-owner RPC delivers an api.Object, and the
+// object codec has no URL field — and the refresh executor rebuilds
+// its fetch from the registry entry's url (refresh_registry.go), so
+// such a registration schedules a fetch that fails locally on every
+// attempt and retries until the TTL lapses: a scheduled failure
+// loop, never a refresh. Peer-put objects keep request-driven
+// revalidation (SWR/SIE/stale-on-hit).
+func TestStoreFromPeer_NoRefreshRegistrationWithoutURI(t *testing.T) {
+	t.Parallel()
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		_, _ = ctx.Write([]byte("body"))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:            orig,
+		FastClient:          &testFastClient{handler: orig},
+		Store:               store,
+		RefreshBeforeExpiry: true,
+	})
+
+	// Contrast: a URI-bearing local fill joins the refresh registry —
+	// the gate must not over-suppress ordinary registration.
+	req := testCtx("GET", "http://example.com/refresh-pin")
+	h.ServeRequest(req)
+	require.NotNil(t, h.refreshRegistry.Lookup(h.buildKey(req)),
+		"sanity: an ordinary fill registers for proactive refresh")
+
+	// The peer-put shape: stored, never registered.
+	key := BuildKey(requestInfoFromCtx(testCtx("GET", "http://example.com/peer-put-refresh")), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		TTL:        time.Hour,
+		StoredAt:   time.Now(),
+		Header:     header.Map{},
+	}
+	h.StoreFromPeer(context.Background(), obj)
+
+	stored, _, err := store.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.NotNil(t, stored, "the peer-put object is stored")
+	require.Nil(t, h.refreshRegistry.Lookup(key),
+		"a peer-put object carries no URL on the wire — registering it would schedule a guaranteed-failing refresh")
+}

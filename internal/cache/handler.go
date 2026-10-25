@@ -3728,7 +3728,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		}
 	}
 	_ = h.store.Put(ctx, key, obj)
-	if h.shouldRegisterRefresh(obj) {
+	if h.shouldRegisterRefresh(obj, ri) {
 		// An error status covered by the negative-caching policy skips
 		// proactive refresh: re-fetching an origin already returning
 		// errors amplifies the outage.

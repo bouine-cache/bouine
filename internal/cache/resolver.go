@@ -57,8 +57,20 @@ func buildResolver(variant *api.Object, primaryKey api.Key) *api.Object {
 // fill. Resolver identity is the protocol invariant (blank VaryKey
 // with a Vary list), not PairedKey: variants carry PairedKey too (the
 // primary they belong to), so the field cannot discriminate.
-func (h *Handler) shouldRegisterRefresh(obj *api.Object) bool {
-	return h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL && !obj.IsVaryResolver()
+//
+// A request without a URI never registers either: the refresh executor
+// rebuilds its fetch from the registry entry's url (refresh_registry
+// stores ri.GetURI()), and an empty url schedules a fetch that fails
+// locally on every attempt and retries until the TTL lapses — a
+// scheduled failure loop, never a refresh. The one URI-less site is
+// the peer-put callback (StoreFromPeer): the write-to-owner RPC
+// carries an api.Object and the object codec has no URL field, so the
+// owner cannot reconstruct the fetch. Peer-put objects keep
+// request-driven revalidation (SWR/SIE/stale-on-hit), the strong-mode
+// refresh path (issue #509).
+func (h *Handler) shouldRegisterRefresh(obj *api.Object, ri RequestInfo) bool {
+	return h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL && !obj.IsVaryResolver() &&
+		ri.GetURI() != ""
 }
 
 // isPeerResolverMetadata reports whether a peer-fetched object is the

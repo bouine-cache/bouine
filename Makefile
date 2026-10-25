@@ -114,6 +114,10 @@ pgo-verify: ## Build with/without default.pgo and compare binary sizes (sanity, 
 conformance: build ## Run the http-tests/cache-tests conformance harness.
 	bash test/cachetests/run.sh
 
+.PHONY: conformance-cluster
+conformance-cluster: build ## Run cache-tests conformance against a 3-node strong-mode cluster (min score across nodes).
+	bash test/cachetests/run-cluster.sh
+
 .PHONY: conformance-fastpath
 conformance-fastpath: build ## Run cache-tests conformance with H1 fast path enabled.
 	BOUINE_FAST_PATH=true bash test/cachetests/run.sh

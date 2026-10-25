@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 type originControl struct {
 	latencyMs atomic.Int64 // injected latency per request (0 = none)
 	forceErr  atomic.Bool  // when true, all requests return 503
+	varyDrift atomic.Bool  // /vary-drift generation: false = Vary X-A (gen 1), true = Vary X-B (gen 2)
 	requests  atomic.Int64 // total handled requests (cacheable or not)
 }
 
@@ -58,7 +60,7 @@ func startOriginWithControl() (*fasthttpTestServer, *originControl) {
 		if ms := ctrl.latencyMs.Load(); ms > 0 {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-		originRouteHandler(ctx)
+		originRouteHandler(ctx, ctrl)
 	}
 
 	var lc net.ListenConfig
@@ -84,8 +86,9 @@ func startOrigin() *fasthttpTestServer {
 }
 
 // originRouteHandler dispatches based on path, mirroring the endpoints
-// in test/integration/origin/main.go.
-func originRouteHandler(ctx *fasthttp.RequestCtx) {
+// in test/integration/origin/main.go. ctrl carries the runtime knobs the
+// drift routes read (varyDrift); it is never nil.
+func originRouteHandler(ctx *fasthttp.RequestCtx, ctrl *originControl) {
 	path := string(ctx.Path())
 	switch path {
 	case "/healthz":
@@ -119,6 +122,57 @@ func originRouteHandler(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("Vary", "Accept-Encoding")
 		enc := string(ctx.Request.Header.Peek("Accept-Encoding"))
 		fmt.Fprintf(ctx, "vary enc=%s", enc)
+	case "/vary-drift":
+		// Vary-declaration rotation for drift tests (ADR-0058 e2e): the
+		// Vary list and the body generation both flip with the control,
+		// so a served body identifies which world's declaration cached
+		// it. Short TTL so the post-rotation revalidation that triggers
+		// drift detection happens within test time.
+		ctx.Response.Header.Set("Cache-Control", "max-age=1")
+		if ctrl.varyDrift.Load() {
+			ctx.Response.Header.Set("Vary", "X-B")
+			fmt.Fprintf(ctx, "drift gen=2 a=%s b=%s",
+				ctx.Request.Header.Peek("X-A"), ctx.Request.Header.Peek("X-B"))
+		} else {
+			ctx.Response.Header.Set("Vary", "X-A")
+			fmt.Fprintf(ctx, "drift gen=1 a=%s b=%s",
+				ctx.Request.Header.Peek("X-A"), ctx.Request.Header.Peek("X-B"))
+		}
+	case "/vary-etag":
+		// Per-variant validators for the resolver-304 e2e: each
+		// Accept-Language selects its own ETag, and a matching
+		// If-None-Match answers 304 — a spec-honest origin for the
+		// union/304 machinery (RFC 9111 §4.3).
+		lang := string(ctx.Request.Header.Peek("Accept-Language"))
+		tag := fmt.Sprintf(`"ve-%s"`, lang)
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.Response.Header.Set("ETag", tag)
+		ctx.Response.Header.Set("Vary", "Accept-Language")
+		if strings.Contains(string(ctx.Request.Header.Peek("If-None-Match")), tag) {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		fmt.Fprintf(ctx, "etag lang=%s", lang)
+	case "/vary-big":
+		// Warm-tier Vary route: bodies exceed the 64 KiB hot/warm
+		// admission threshold (tiered.go default), so the VARIANTS — not
+		// just the resolver, which always warm-backs — are written to
+		// the warm tier. Fleet-restart tests rely on this to prove
+		// warm reload restores variant routing (ADR-0068).
+		lang := string(ctx.Request.Header.Peek("Accept-Language"))
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "Accept-Language")
+		ctx.Response.Header.Set("Content-Type", "application/octet-stream")
+		ctx.Write(DeterministicPayload("varybig-"+lang, 96))
+	case "/vary-legacy":
+		// Fill target for the legacy-resolver immunity e2e: a plain
+		// Vary route whose responses differ from the poisoned body the
+		// injected pre-upgrade resolver blob carries, so a leaked
+		// resolver body is distinguishable from a legitimate fill.
+		lang := string(ctx.Request.Header.Peek("Accept-Language"))
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "Accept-Language")
+		fmt.Fprintf(ctx, "legacy lang=%s", lang)
 	case "/vary-multiline":
 		// Multi-line Vary across two field lines, mirroring the
 		// production cross-variant incident shape.

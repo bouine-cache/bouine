@@ -2112,6 +2112,75 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	h.variantMu.Unlock()
 }
 
+// TestHandler_VaryFill_StoresPageTwiceInHot proves the hot-tier RAM cost
+// of a Vary response end to end. A cold fill streams through streamMiss
+// (fetchAndStore's leader path), which stores the variant under the
+// variant key (storeStreamedObject) and a clone under the primary key as
+// the Vary resolver (stream.go); writeAndMaybeStore does the same on the
+// slow-path fills. The handler-side resolver aliases the variant's Body
+// slice, but the hot store deep-copies on every Put, so 200 pages fill
+// 400 hot entries holding ~2x the bytes of an identical no-Vary origin.
+func TestHandler_VaryFill_StoresPageTwiceInHot(t *testing.T) {
+	t.Parallel()
+
+	const pages = 200
+	const bodyLen = 4096
+	fill := func(vary bool) (*Handler, api.Stats) {
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			if vary {
+				ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+			}
+			_, _ = ctx.WriteString(strings.Repeat("x", bodyLen))
+		}
+		store := storage.NewHotStore(storage.HotConfig{
+			MaxBytes:       512 << 20,
+			NumShards:      4,
+			ReaperInterval: -1,
+		})
+		h := NewHandler(HandlerConfig{
+			Upstream:   upstream,
+			FastClient: &testFastClient{handler: upstream},
+			Store:      store,
+			Logger:     slog.Default(),
+		})
+		for i := range pages {
+			rr := testCtx("GET", "http://example.com/page-"+strconv.Itoa(i))
+			rr.Request.Header.Set("X-Test-Variant", "a")
+			h.ServeRequest(rr)
+		}
+		return h, h.store.Stats()
+	}
+
+	varyH, varyStats := fill(true)
+	_, plainStats := fill(false)
+
+	require.Equal(t, int64(2*pages), varyStats.HotEntries,
+		"each Vary page fills a variant entry plus a primary-key resolver entry")
+	require.Equal(t, int64(pages), plainStats.HotEntries)
+
+	varyPerPage := float64(varyStats.HotBytes) / float64(pages)
+	plainPerPage := float64(plainStats.HotBytes) / float64(pages)
+	require.InDelta(t, 2.0, varyPerPage/plainPerPage, 0.1,
+		"per-page hot bytes: vary=%.0f plain=%.0f — a Vary page sits in RAM twice",
+		varyPerPage, plainPerPage)
+
+	// The resolver entry holds the same bytes as the variant: the primary
+	// key resolves to a stored duplicate, not a shared reference.
+	req0 := testCtx("GET", "http://example.com/page-0")
+	req0.Request.Header.Set("X-Test-Variant", "a")
+	primaryKey := varyH.buildKey(req0)
+	variantKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(req0), nil)
+	pkObj, _, err := varyH.store.Get(t.Context(), primaryKey)
+	require.NoError(t, err)
+	vObj, _, err := varyH.store.Get(t.Context(), variantKey)
+	require.NoError(t, err)
+	require.Equal(t, vObj.Body, pkObj.Body,
+		"the resolver holds the same page bytes as the variant; the two buffers are proven disjoint at the storage level (TestHotStore_Put_VaryResolverBodyDuplicated)")
+	t.Logf("200 vary pages: %d hot entries, %.0f bytes/page; 200 plain pages: %d entries, %.0f bytes/page (body %d); resolver VaryKey observed: %q",
+		varyStats.HotEntries, varyPerPage, plainStats.HotEntries, plainPerPage, bodyLen, pkObj.VaryKey)
+}
+
 // TestHandler_PurgeDeletesVariants pins RFC 9111 §4.2.4: purging a primary
 // key MUST invalidate every Vary variant stored under composite keys.
 // Before the fix, Purge deleted only the primary key and left all variant

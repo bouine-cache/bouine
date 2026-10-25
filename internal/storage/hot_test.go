@@ -105,6 +105,58 @@ func TestHotStore_PutOwnsCallerHeaders(t *testing.T) {
 	require.Equal(t, "yes", got.Header.Get("X-Original"), "stored headers must be cache-owned, not aliased to the caller's map")
 }
 
+// TestHotStore_Put_VaryResolverBodyDuplicated pins the storage-level fact
+// behind the doubled hot-tier RAM of a Vary response. The cache handler
+// builds the primary-key Vary resolver as a shallow copy sharing the
+// variant's Body slice, but Put deep-copies the body on every store
+// (TestHotStore_PutOwnsCallerBody), so the two entries the handler stores
+// end up holding two independent copies of the same bytes: the
+// handler-side "share the body" alias never reaches storage.
+func TestHotStore_Put_VaryResolverBodyDuplicated(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+
+	variantKey := testkey.Hash([]byte("vary-dup/variant"))
+	primaryKey := testkey.Hash([]byte("vary-dup/primary"))
+	body := []byte("<html>the page</html>")
+	variant := obj(variantKey, 0)
+	variant.Body = body
+	variant.BodySize = int64(len(body))
+
+	// The handler's clone shape: resolver aliases the variant's Body slice
+	// and differs in Key (and on the slow path, VaryKey).
+	resolver := variant.CloneForReturn(variant.Body)
+	resolver.Key = primaryKey
+
+	require.NoError(t, s.Put(context.Background(), variantKey, variant))
+	require.NoError(t, s.Put(context.Background(), primaryKey, resolver))
+
+	vShard := s.shard(variantKey)
+	vShard.mu.RLock()
+	storedVariant := vShard.entries[variantKey].obj
+	vShard.mu.RUnlock()
+	rShard := s.shard(primaryKey)
+	rShard.mu.RLock()
+	storedResolver := rShard.entries[primaryKey].obj
+	rShard.mu.RUnlock()
+
+	require.Equal(t, body, storedVariant.Body)
+	require.Equal(t, body, storedResolver.Body, "the resolver entry holds a full byte copy of the variant body")
+	//nolint:gosec // test-only pointer identity, no dereference
+	require.NotSame(t, unsafe.SliceData(storedVariant.Body), unsafe.SliceData(storedResolver.Body),
+		"the two stored entries must not share a backing array")
+	//nolint:gosec // test-only pointer identity, no dereference
+	require.NotSame(t, unsafe.SliceData(body), unsafe.SliceData(storedVariant.Body),
+		"stored bytes must be cache-owned (TestHotStore_PutOwnsCallerBody)")
+
+	stats := s.Stats()
+	require.Equal(t, int64(2), stats.HotEntries)
+	require.Equal(t, objSize(storedVariant)+objSize(storedResolver), stats.HotBytes,
+		"each entry accounts a full body copy — len(body) is charged twice")
+	require.GreaterOrEqual(t, stats.HotBytes, int64(2*len(body)),
+		"the same page bytes sit in the hot tier twice")
+}
+
 func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})

@@ -21,6 +21,9 @@ func keyStateFromObject(st *api.KeyState, obj *api.Object) {
 		st.StoredAt = obj.StoredAt.UTC().Format(time.RFC3339)
 	}
 	st.TTLSeconds = int64(obj.TTL / time.Second)
+	st.SWRSeconds = int64(obj.StaleWhileRevalidate / time.Second)
+	st.SIESeconds = int64(obj.StaleIfError / time.Second)
+	st.CacheControl = obj.CacheControl
 	st.StatusCode = obj.StatusCode
 	st.Hits = atomic.LoadUint64(&obj.Hits)
 	st.Vary = obj.VaryValue
@@ -85,6 +88,7 @@ func (t *TieredStore) Probe(key api.Key) (api.KeyState, bool) {
 	if err != nil {
 		return api.KeyState{}, false
 	}
+	t.rederiveTransients(loaded)
 	var st api.KeyState
 	st.Present = true
 	st.Tier = "warm"

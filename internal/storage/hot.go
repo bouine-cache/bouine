@@ -1027,6 +1027,17 @@ func (h *HotStore) MatchesActiveBan(obj *api.Object) bool {
 	return h.matchesActiveBan(obj)
 }
 
+// MatchingBans returns the active lazy bans obj is subject to, in
+// registration (oldest-first) order (issue #814). Read-only: no
+// pruning, no eviction, no ban-list mutation. It asks the same list
+// the hit path enforces, so the explain plane's answers cannot drift
+// from the data plane's decisions.
+//
+// Unstable.
+func (h *HotStore) MatchingBans(obj *api.Object) []BanDescriptor {
+	return h.bans.descriptors(obj, time.Now())
+}
+
 // matchesActiveBan reports whether obj is subject to any active lazy
 // ban. It reads the compiled ban snapshot and applies the O(1)
 // rejection: literal host/path/surrogate set lookups first, anchored

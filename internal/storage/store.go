@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -33,8 +34,30 @@ type Store interface {
 	// lazy ban eviction. ok=false when the key is in no tier. Has
 	// remains the zero-cost boolean form for the data plane; Probe is
 	// the metadata-rich form for the admin keys-query surface
-	// (bouine keys find, issue #816).
+	// (bouine keys find, issue #816) and the explain plane (issue
+	// #814).
 	Probe(key api.Key) (api.KeyState, bool)
+	// MatchingBans returns the active lazy bans obj is subject to, in
+	// registration (oldest-first) order. Read-only: no pruning, no
+	// eviction, no ban-list mutation. A nil obj never matches. Probe
+	// reports the boolean; the explain plane asks for the
+	// descriptors (issue #814).
+	MatchingBans(obj *api.Object) []BanDescriptor
+}
+
+// BanDescriptor describes one active lazy ban, as returned by
+// Store.MatchingBans. Identity is the pattern triple plus the
+// registration time — the lazy ban list carries no separate id.
+// ExpiresAt is the registration instant plus the store's configured
+// ban TTL, the same deadline the reaper prunes by.
+//
+// Unstable.
+type BanDescriptor struct {
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	HostRegex    string    `json:"host_regex,omitempty"`
+	PathRegex    string    `json:"path_regex,omitempty"`
+	SurrogateKey string    `json:"surrogate_key,omitempty"`
 }
 
 // KeyLister returns all cache keys in the store. Implemented by HotStore

@@ -532,34 +532,7 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		t.evictWarm(key)
 		return nil, "", nil
 	}
-	// Re-derive the pre-v6 transient fields (tagged json:"-"): pre-v6
-	// blobs carry no CacheControl/OriginAge on the wire, so they are
-	// recalculated here so Evaluate and ComputeAge work without
-	// re-parsing headers on every hit. Codec v6 blobs (ADR-0053) already
-	// carry both values — including the multi-line-merged CacheControl
-	// and the apparent-age-adjusted OriginAge that buildObject computed
-	// at fill time — and MUST NOT be overwritten by these single-header
-	// approximations. SerializedHead is left nil — the H1 fast-path
-	// falls back to appendResponseHeaders (header iteration) for
-	// warm-tier objects until they are re-stored via buildObject on a
-	// subsequent cache fill.
-	if loaded.CacheControl == "" {
-		if cc := loaded.Header.Get(header.CacheControl); cc != "" {
-			loaded.CacheControl = cc
-		}
-	}
-	if loaded.OriginAge == 0 {
-		if age := loaded.Header.Get(header.Age); age != "" {
-			var secs int64
-			for _, b := range []byte(age) {
-				if b < '0' || b > '9' {
-					break
-				}
-				secs = secs*10 + int64(b-'0')
-			}
-			loaded.OriginAge = time.Duration(secs) * time.Second
-		}
-	}
+	t.rederiveTransients(loaded)
 	// Promote to hot tier (best-effort: ignore error).
 	_ = t.hot.Put(ctx, key, loaded)
 	// Check lazy bans before serving: Ban() only touches the hot tier,
@@ -634,6 +607,49 @@ func (t *TieredStore) Has(key api.Key) bool {
 	}
 	_, _, ok := t.warm.Lookup(key)
 	return ok
+}
+
+// rederiveTransients backfills the pre-v6 transient fields (tagged
+// json:"-") on a warm-tier load: pre-v6 blobs carry no
+// CacheControl/OriginAge on the wire, so they are recalculated so
+// Evaluate and ComputeAge work without re-parsing headers on every
+// hit. Codec v6 blobs (ADR-0053) already carry both values — including
+// the multi-line-merged CacheControl and the apparent-age-adjusted
+// OriginAge that buildObject computed at fill time — and MUST NOT be
+// overwritten by these single-header approximations. SerializedHead is
+// left nil — the H1 fast-path falls back to appendResponseHeaders
+// (header iteration) for warm-tier objects until they are re-stored
+// via buildObject on a subsequent cache fill. Shared by Get and the
+// side-effect-free Peek (issue #814) so both agree on what a loaded
+// object says.
+func (t *TieredStore) rederiveTransients(loaded *api.Object) {
+	if loaded.CacheControl == "" {
+		if cc := loaded.Header.Get(header.CacheControl); cc != "" {
+			loaded.CacheControl = cc
+		}
+	}
+	if loaded.OriginAge == 0 {
+		if age := loaded.Header.Get(header.Age); age != "" {
+			var secs int64
+			for _, b := range []byte(age) {
+				if b < '0' || b > '9' {
+					break
+				}
+				secs = secs*10 + int64(b-'0')
+			}
+			loaded.OriginAge = time.Duration(secs) * time.Second
+		}
+	}
+}
+
+// MatchingBans returns the active lazy bans obj is subject to, in
+// registration order. Delegates to the hot tier's ban list: the same
+// list Get enforces on warm hits, so explain and the data plane read
+// one source of truth.
+//
+// Unstable.
+func (t *TieredStore) MatchingBans(obj *api.Object) []BanDescriptor {
+	return t.hot.MatchingBans(obj)
 }
 
 // Delete removes from both tiers.

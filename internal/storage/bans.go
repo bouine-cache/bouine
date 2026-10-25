@@ -506,3 +506,34 @@ func (b *banListState) len() int {
 	defer b.mu.Unlock()
 	return len(b.list)
 }
+
+// descriptors returns the active bans obj is subject to, in
+// registration (oldest-first) order, shaped for the wire (issue #814's
+// explain plane). Read-only: no pruning, no eviction, no dirty
+// marking — the same exemption rule and predicates the hit path
+// enforces, asked as a question instead of applied as an action.
+func (b *banListState) descriptors(obj *api.Object, now time.Time) []BanDescriptor {
+	if obj == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ttl := b.ttlOrDefault()
+	var out []BanDescriptor
+	for _, ban := range b.list {
+		if now.Sub(ban.created) >= ttl {
+			continue
+		}
+		if !subjectTo(obj, ban.exemptAfter) || !ban.pred(obj) {
+			continue
+		}
+		out = append(out, BanDescriptor{
+			HostRegex:    ban.pattern.hostRegex,
+			PathRegex:    ban.pattern.pathRegex,
+			SurrogateKey: ban.pattern.surrogateKey,
+			CreatedAt:    ban.created,
+			ExpiresAt:    ban.created.Add(ttl),
+		})
+	}
+	return out
+}

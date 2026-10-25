@@ -714,6 +714,30 @@ func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheChe
 	return result
 }
 
+// adminPurgeFn builds the admin purge closure: one local purge pass
+// plus the cluster broadcast. Split from swapAdminHandler to keep
+// that builder under the line budget.
+func (e *engine) adminPurgeFn(rs *runState, ctx context.Context) func(key api.Key) error {
+	return func(key api.Key) error {
+		if err := rs.purgeKey(ctx, key); err != nil {
+			return err
+		}
+		if rs.broadcaster != nil {
+			rs.broadcaster.BroadcastPurge(ctx, key, "")
+		}
+		return nil
+	}
+}
+
+// explainFn builds the admin explain closure (issue #814): the
+// decision-tree document for one URL, recomputed read-only. Split
+// from swapAdminHandler to keep that builder under the line budget.
+func explainFn(rs *runState) func(ctx context.Context, rawURL string) admin.ExplainResult {
+	return func(ctx context.Context, rawURL string) admin.ExplainResult {
+		return explainURL(ctx, rawURL, rs)
+	}
+}
+
 // purgeKey purges a key and its Vary variants from the local store,
 // consulting EVERY cache handler. Keys are URL-scoped and the store is
 // shared across routes, but variant tracking is per-handler: a variant
@@ -882,6 +906,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		},
 		KeysFindFn:         e.keysFindFn(rs),
 		KeysTopFn:          e.keysTopFn(rs),
+		ExplainFn:          explainFn(rs),
 		ReadyFn:            rs.seq.IsReady,
 		ConditionsFn:       conditionsFn,
 		DrainFn:            drainFn,
@@ -896,15 +921,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
 			rs.cfProp.PropagateForBan(bCtx, expr)
 		},
-		PurgeFn: func(key api.Key) error {
-			if err := rs.purgeKey(ctx, key); err != nil {
-				return err
-			}
-			if rs.broadcaster != nil {
-				rs.broadcaster.BroadcastPurge(ctx, key, "")
-			}
-			return nil
-		},
+		PurgeFn:      e.adminPurgeFn(rs, ctx),
 		PurgeBatchFn: e.purgeBatchFn(rs, ctx),
 		BanFn: func(expr api.BanExpr) (int, error) {
 			n, err := rs.store.Ban(ctx, expr)

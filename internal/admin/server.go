@@ -40,8 +40,12 @@ type Config struct {
 	PurgeBatchFn func(urls []string) (purged int, failed int)
 	BanFn        func(expr api.BanExpr) (int, error)
 	CacheCheckFn func(ctx context.Context, rawURL string) CacheCheckResult
-	ConfigFn     func() any
-	StatsFn      func() api.Stats
+	// ExplainFn builds the decision-tree document for GET /v1/explain
+	// (bouine explain, issue #814). Read-only: side-effect-free store
+	// reads only. nil disables the endpoint.
+	ExplainFn func(ctx context.Context, rawURL string) ExplainResult
+	ConfigFn  func() any
+	StatsFn   func() api.Stats
 	// StatusFn builds the node-status document for GET /v1/status
 	// (bouine status, issue #813). cluster=true asks for the
 	// one-round-trip peer aggregation; the default is node-local data
@@ -531,11 +535,6 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 			s.hotKnobs(ctx)
 			return true
 		}
-	case "/v1/debug/cachecheck":
-		if s.cfg.CacheCheckFn != nil {
-			s.cacheCheck(ctx)
-			return true
-		}
 	case "/v1/keys/find":
 		if s.cfg.KeysFindFn != nil {
 			s.keysFind(ctx)
@@ -549,6 +548,27 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 	case "/v1/keys/recent":
 		if s.cfg.KeysTopFn != nil {
 			s.keysTop(ctx, "recent")
+			return true
+		}
+	}
+	return s.handleInspectionRoutes(ctx, p)
+}
+
+// handleInspectionRoutes serves the read-only inspection endpoints:
+// the flat cachecheck (back-compat) and the decision-tree explain
+// (issue #814). Split from handleDataRoutes so the /v1 route table
+// stays under the complexity budget — these two share the
+// url-parameter shape and nothing else.
+func (s *Server) handleInspectionRoutes(ctx *fasthttp.RequestCtx, p string) bool {
+	switch p {
+	case "/v1/debug/cachecheck":
+		if s.cfg.CacheCheckFn != nil {
+			s.cacheCheck(ctx)
+			return true
+		}
+	case "/v1/explain":
+		if s.cfg.ExplainFn != nil {
+			s.explain(ctx)
 			return true
 		}
 	}
@@ -1027,4 +1047,16 @@ func (s *Server) cacheCheck(ctx *fasthttp.RequestCtx) {
 	}
 	result := s.cfg.CacheCheckFn(context.Background(), rawURL)
 	writeJSON(ctx, fasthttp.StatusOK, result)
+}
+
+// explain serves GET /v1/explain?url=... (issue #814): the full
+// decision tree for one URL, recomputed read-only. cachecheck stays
+// unchanged for back-compat; explain is additive.
+func (s *Server) explain(ctx *fasthttp.RequestCtx) {
+	rawURL := string(ctx.QueryArgs().Peek("url"))
+	if rawURL == "" {
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]string{"error": "missing url query parameter"})
+		return
+	}
+	writeJSON(ctx, fasthttp.StatusOK, s.cfg.ExplainFn(context.Background(), rawURL))
 }

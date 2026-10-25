@@ -677,6 +677,18 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }
 
+// SetBanTTL replaces the lazy-ban TTL at runtime (the hot-config
+// surface, `bouine config set cluster.ban_ttl`).
+func (t *TieredStore) SetBanTTL(d time.Duration) {
+	t.hot.SetBanTTL(d)
+}
+
+// BanTTL reports the configured lazy-ban TTL; zero means the built-in
+// default applies.
+func (t *TieredStore) BanTTL() time.Duration {
+	return t.hot.BanTTL()
+}
+
 // Keys returns the union of hot-tier and warm-tier cache keys.
 // Reporting only hot-tier keys (as this method once did) caused a
 // feedback loop with SIEVE eviction: evicted

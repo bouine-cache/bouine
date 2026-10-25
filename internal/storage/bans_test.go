@@ -231,7 +231,7 @@ func TestBanReaper_PrunesExpiredBans(t *testing.T) {
 	s.bans.mu.Lock()
 	for i := range s.bans.list {
 		if s.bans.list[i].pattern.hostRegex == "dead.example.com" {
-			s.bans.list[i].created = time.Now().Add(-defaultBanTTL - time.Minute)
+			s.bans.list[i].created = time.Now().Add(-DefaultBanTTL - time.Minute)
 		}
 	}
 	s.bans.mu.Unlock()

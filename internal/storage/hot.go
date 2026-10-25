@@ -129,7 +129,7 @@ func patternOf(expr api.BanExpr) banPattern {
 	}
 }
 
-// defaultBanTTL is how long a lazy ban stays in the active list by
+// DefaultBanTTL is how long a lazy ban stays in the active list by
 // default. Bans older than this cannot match any live object: objects
 // stored after the ban are exempt (StoredAt > ban.created), and objects
 // stored before it have either been re-cached or expired by now. This is
@@ -140,7 +140,11 @@ func patternOf(expr api.BanExpr) banPattern {
 // a minutes-scale window is sufficient for external invalidation surrogate
 // invalidations — the default stays conservative (24h) for behavioral
 // compatibility (ADR-0045).
-const defaultBanTTL = 24 * time.Hour
+//
+// Exported because the hot-config knob surface (bouine config
+// get/set/diff) reports it as the value a restart restores when the
+// boot config leaves ban_ttl at zero. Unstable.
+const DefaultBanTTL = 24 * time.Hour
 
 // banListCap bounds the lazy ban list. A storm of distinct bans must
 // not degrade every cache hit linearly (matchesActiveBan walks the
@@ -362,7 +366,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	if cfg.ReaperInterval > 0 {
 		reaperInterval = cfg.ReaperInterval
 	}
-	banTTL := defaultBanTTL
+	banTTL := DefaultBanTTL
 	if cfg.BanTTL > 0 {
 		banTTL = cfg.BanTTL
 	}
@@ -1084,6 +1088,20 @@ func (h *HotStore) Close(_ context.Context) error {
 // under memory pressure (#175).
 func (h *HotStore) OverBudget() bool {
 	return h.Stats().HotBytes > h.maxBytes
+}
+
+// SetBanTTL replaces the lazy-ban TTL at runtime (the hot-config
+// surface, `bouine config set cluster.ban_ttl`). Zero restores the
+// built-in default. The change applies to bans registered after the
+// swap and re-bounds existing bans on their next prune pass.
+func (h *HotStore) SetBanTTL(d time.Duration) {
+	h.bans.setTTL(d)
+}
+
+// BanTTL reports the configured lazy-ban TTL; zero means the built-in
+// default applies.
+func (h *HotStore) BanTTL() time.Duration {
+	return h.bans.currentTTL()
 }
 
 // SetBacked marks the entry for key as having a backup in a slower tier.

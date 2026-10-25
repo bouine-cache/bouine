@@ -138,6 +138,26 @@ lookup.
 - Excessive bans (>10 k) can impact lookup latency — prefer purge for
   single-URL invalidation.
 
+### Ban TTL (hot config)
+
+The ban lifetime is the `cluster.ban_ttl` hot-config knob
+(`GET|POST /v1/config/hot`, `bouine config get/set`). Default 24h
+(`0` in config = default). When an over-broad ban is poisoning the
+hit ratio, shorten the window live instead of waiting it out:
+
+```bash
+bouine config get cluster.ban_ttl          # current value + source
+bouine config set cluster.ban_ttl 30m --dry-run   # validate first
+bouine config set cluster.ban_ttl 30m      # apply live; not persisted
+```
+
+Runtime changes are **ephemeral** — a restart restores the boot
+config value (`bouine config diff` shows the drift). Persist the
+recovery value in your YAML only if you want to keep it. Every
+attempt is audited in the ops log and counted in
+`bouine_config_hot_sets_total{result}`; the admin write rate limit
+applies.
+
 ---
 
 ## Refresh (soft-purge)

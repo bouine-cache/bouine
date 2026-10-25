@@ -37,13 +37,17 @@ func hotStub(t *testing.T, knobs *[]bouineapi.HotKnob) (string, func() []map[str
 			mu.Lock()
 			posts = append(posts, req)
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(bouineapi.HotSetResult{
+			res := bouineapi.HotSetResult{
 				Key:      req["key"].(string),
 				OldValue: "24h0m0s",
 				NewValue: "1h30m0s",
 				Applied:  !applied,
 				Warning:  "not persisted; add to your YAML before the next deploy",
-			})
+			}
+			if res.Applied {
+				res.Peers = 2
+			}
+			_ = json.NewEncoder(w).Encode(res)
 		default:
 			http.NotFound(w, r)
 		}
@@ -109,7 +113,7 @@ func TestConfigSetPrintsWarning(t *testing.T) {
 	server, posts := hotStub(t, &knobs)
 	stdout, _, err := run(t, "config", "set", "cluster.ban_ttl", "90m", "--server", server)
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "cluster.ban_ttl: 24h0m0s -> 1h30m0s")
+	assert.Contains(t, stdout, "cluster.ban_ttl: 24h0m0s -> 1h30m0s (broadcast to 2 peers)")
 	assert.Contains(t, stdout, "warning: not persisted; add to your YAML before the next deploy")
 	sent := posts()
 	require.Len(t, sent, 1)

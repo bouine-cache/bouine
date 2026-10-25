@@ -221,9 +221,14 @@ lost at the next restart — so every `set` prints a warning and
 bouine config get                          # every knob: value + source (file/default/runtime)
 bouine config set cluster.ban_ttl 90m     # validated point mutation, applied live
 bouine config set cluster.ban_ttl 90m --dry-run   # validate and report, change nothing
+bouine config set pool:api.health.passive.consecutive_5xx 10   # per-pool scoped knob
 bouine config diff                         # knobs a restart would lose
 bouine config diff prod.yaml staging.yaml  # deploy preview: effective-config diff
 ```
+
+On a strong-mode cluster an applied set is broadcast to every live
+peer (the CLI reports the acknowledged count), so runtime overrides
+stay identical across the fleet.
 
 **Targeting a pod in Kubernetes.** The admin port is deliberately never
 exposed by a LoadBalancer (the admin Service is ClusterIP, and the image

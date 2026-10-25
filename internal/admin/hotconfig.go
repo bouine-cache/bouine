@@ -43,6 +43,10 @@ type HotSetResult struct {
 	NewValue string `json:"new_value"`
 	// Applied is false exactly when DryRun was requested.
 	Applied bool `json:"applied"`
+	// Peers is the number of cluster peers that acknowledged the
+	// fan-out of an applied set (strong mode HTTP fan-out; 0 on a
+	// single node, dry run, or eventual-mode cluster).
+	Peers int `json:"peers,omitempty"`
 	// Warning is the ephemeral-change notice the CLI must surface:
 	// a runtime override is lost at the next restart.
 	Warning string `json:"warning,omitempty"`

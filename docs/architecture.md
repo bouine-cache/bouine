@@ -662,9 +662,15 @@ and `--format json` never take the TUI path.
 
 `bouine config get/set/diff` is the hot-config knob surface behind
 `GET|POST /v1/config/hot` (#815): a small registry of genuinely
-hot-appliable fields (`cluster.ban_ttl`, `url_ring_sample_rate`;
-grown additively) that can change on a running daemon without a
-restart. `get` shows each knob's live value and source (`file`,
+hot-appliable fields that can change on a running daemon without a
+restart. Global knobs (`cluster.ban_ttl`, `url_ring_sample_rate`) sit
+beside per-pool scoped keys — `pool:<name>.health.passive.
+consecutive_5xx` and `pool:<name>.health.passive.eject_for` — grown
+additively. Per-route keys are cold-only and rejected with the
+explanation. Applied sets fan out to every live peer over the
+strong-mode HTTP fan-out (`POST /v1/peer/config/hot`; the peer route
+applies locally and never re-broadcasts, so it cannot loop) and
+report the acknowledged count; eventual-mode clusters do not fan out. `get` shows each knob's live value and source (`file`,
 `default`, or `runtime`); `set` applies a validated point mutation
 and prints the not-persisted warning — runtime overrides are
 deliberately ephemeral (pods are cattle), so `diff` shows what is

@@ -848,3 +848,153 @@ func TestRevalidate_SameCredentialAlsoNeverCollapses(t *testing.T) {
 	require.Equal(t, int64(3), fetches.Load(),
 		"identical Authorization must still not share a revalidation flight")
 }
+
+// headMixHandler builds a declared-dimension handler whose origin answers
+// GET with a body and HEAD without one (a faithful origin: HEAD responses
+// carry headers only), holding the first fetch open until release fires.
+func headMixHandler(t *testing.T) (*Handler, *atomic.Int64, chan struct{}) {
+	t.Helper()
+
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false)
+	fetches := &atomic.Int64{}
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		if fetches.Add(1) == 1 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		if string(ctx.Method()) == "GET" {
+			_, _ = ctx.WriteString("full-body")
+		}
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin,
+		FastClient: &testFastClient{handler: origin},
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		Policy:     policy,
+	})
+	return h, fetches, release
+}
+
+// TestCollapse_HeadLedByteHandoffNeverPoisonsGetFollower pins the
+// method-split of byte-handoff flights (issue #752's shape in the
+// inflight table): a HEAD leader's buffered result carries no body, so
+// it must never be handed to a GET follower — the GET parks elsewhere
+// and fetches its own full response. HEAD-led flights still collapse
+// with HEAD (the dedup is preserved), and a HEAD follower of a GET-led
+// flight fetches its own headers-only answer rather than parking on it.
+func TestCollapse_HeadLedByteHandoffNeverPoisonsGetFollower(t *testing.T) {
+	t.Parallel()
+
+	h, fetches, release := headMixHandler(t)
+
+	headDone := make(chan string, 1)
+	go func() {
+		ctx := testCtx("HEAD", "http://example.com/head-mix")
+		ctx.Request.Header.Set("X-Tenant-Id", "14")
+		serveRequest(h, ctx)
+		headDone <- respBody(ctx)
+	}()
+	for fetches.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	getDone := make(chan string, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/head-mix")
+		ctx.Request.Header.Set("X-Tenant-Id", "14")
+		serveRequest(h, ctx)
+		getDone <- respBody(ctx)
+	}()
+	time.Sleep(50 * time.Millisecond) // let the GET park
+	close(release)
+
+	require.Equal(t, "", <-headDone, "the HEAD leader serves headers only")
+	select {
+	case got := <-getDone:
+		require.Equal(t, int64(2), fetches.Load(),
+			"a GET must never receive a HEAD-led flight's bodyless result: it fetches its own")
+		require.Equal(t, "full-body", got,
+			"a GET follower of a HEAD-led flight must receive its own full body, never an empty one")
+	case <-time.After(5 * time.Second):
+		t.Fatal("GET follower did not terminate")
+	}
+}
+
+// TestCollapse_HeadFollowersStillCollapseWithHead pins that the method
+// split keeps HEAD↔HEAD dedup: two concurrent HEAD cold misses on the
+// same declared dimension share one flight.
+func TestCollapse_HeadFollowersStillCollapseWithHead(t *testing.T) {
+	t.Parallel()
+
+	h, fetches, release := headMixHandler(t)
+
+	bodies := make([]string, 2)
+	var wg sync.WaitGroup
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("HEAD", "http://example.com/head-mix")
+			ctx.Request.Header.Set("X-Tenant-Id", "14")
+			serveRequest(h, ctx)
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	for fetches.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(1), fetches.Load(),
+		"HEAD-led byte-handoff flights still collapse HEAD with HEAD")
+	require.Equal(t, "", bodies[0])
+	require.Equal(t, "", bodies[1])
+}
+
+// TestCollapse_GetLedFlightServesItsOwnHeadAnswer pins the symmetric
+// half of the method split: a HEAD follower of a GET-led flight does
+// not park on it (a GET-led result is not a HEAD representation); it
+// fetches its own headers-only answer.
+func TestCollapse_GetLedFlightServesItsOwnHeadAnswer(t *testing.T) {
+	t.Parallel()
+
+	h, fetches, release := headMixHandler(t)
+
+	getDone := make(chan string, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/head-mix")
+		ctx.Request.Header.Set("X-Tenant-Id", "14")
+		serveRequest(h, ctx)
+		getDone <- respBody(ctx)
+	}()
+	for fetches.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	headDone := make(chan string, 1)
+	go func() {
+		ctx := testCtx("HEAD", "http://example.com/head-mix")
+		ctx.Request.Header.Set("X-Tenant-Id", "14")
+		serveRequest(h, ctx)
+		headDone <- respBody(ctx)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	require.Equal(t, "full-body", <-getDone)
+	select {
+	case got := <-headDone:
+		require.Equal(t, int64(2), fetches.Load(),
+			"a HEAD follower of a GET-led flight fetches its own answer: a GET-led result is not a HEAD representation")
+		require.Equal(t, "", got, "the HEAD answer serves headers only")
+	case <-time.After(5 * time.Second):
+		t.Fatal("HEAD follower did not terminate")
+	}
+}

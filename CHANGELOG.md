@@ -241,6 +241,18 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **A HEAD-led collapse flight could hand an empty body to a GET
+  follower.** Byte-handoff flights (warm and declared-dimension misses)
+  in the inflight table were not method-split: the leader's HEAD fetch
+  answers headers-only, and a concurrent GET parked on the same flight
+  received the bodyless result — a truncated 200 (the issue #752
+  poisoning shape, in the second flight table). Byte-handoff flight keys
+  are now XOR-suffixed by leading method (`headFlightKey`, the same
+  split `headRevalKeySuffix` applies in the singleflight table): HEAD
+  collapses with HEAD, GET with GET, and neither parks on the other.
+  Fill flights stay method-mixed — they are store-mediated and the
+  follower never receives the leader's bytes (ADR-0066).
+
 - **`bouine cluster peers` on a local-mode daemon answered a bare
   404 (#815 follow-up).** The admin server now explains itself:
   `GET /v1/cluster/peers` returns 503 with the reason — "set

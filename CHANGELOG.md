@@ -12,6 +12,22 @@ the curated, human-readable summary.
 
 ### Changed
 
+- **Cold include-free misses collapse onto one fill flight (ADR-0066).**
+  A burst of concurrent anonymous cold misses on a route without
+  `include_headers` previously issued one origin fetch per caller
+  (ADR-0057 §3 refused the collapse because the origin's Vary is
+  unknowable before the first response). The callers now park on one
+  leader fill; each follower waits for the fill to settle in the store
+  and is then served **from the store — never from the leader's
+  fetched bytes** — through the same gates as a sequential request
+  (Vary variant selection, RFC 9111 §3.5 storage, freshness,
+  conditionals), or fetches its own when the fill stored nothing usable
+  for it. Pinned by a byte-for-byte sequential-equivalence test. The
+  ADR-0052/ADR-0054 refusals (Authorization, Cookie, unsafe methods)
+  are unchanged: those requests still never share any flight.
+  Measured (32 concurrent cold misses, 2 ms origin RTT, 4 fetch slots):
+  origin fetches 32 → 1; p50 9.1 ms → 2.3 ms; p99 18.2 ms → 2.3 ms.
+
 - **Default `cluster.peer_fetch_concurrency` raised from 16 to 64.**
   The semaphore bounds concurrent peer-fetch RPCs per node; too small a
   pool queues peer hits behind in-flight fetches and adds tail latency

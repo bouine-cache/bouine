@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"encoding/binary"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -149,4 +151,51 @@ func flightHeaders(h *Handler, ri RequestInfo) header.Map {
 		m.Set(header.Cookie, ri.Header.CookieAll())
 	}
 	return m
+}
+
+// fillFlightSuffix XORs a cache key into the fill-flight key space so a
+// fill flight can never collide with a byte-handoff flight (warm and
+// declared-dimension flights, keyed by lookup/variant keys). The value
+// is "fill" in ASCII; the XOR is a bijection on the key space, so a fill
+// key colliding with a handoff key is exactly as likely as any two
+// cache keys colliding — the same argument revalKeySuffix makes for the
+// singleflight key space.
+const fillFlightSuffix uint64 = 0x66696c6c // "fill" in ASCII
+
+// fillFlightKey moves primaryKey into the fill-flight key space.
+func fillFlightKey(primaryKey api.Key) api.Key {
+	k := primaryKey
+	binary.BigEndian.PutUint64(k[:8], binary.BigEndian.Uint64(k[:8])^fillFlightSuffix)
+	return k
+}
+
+// fetchFlightKey derives the inflightStreams flight key for a miss and
+// reports whether the flight is a fill flight (ADR-0066). Exactly one
+// case differs from the pre-ADR-0066 rules: the anonymous, safe-method,
+// cold include-free miss, which ADR-0057 §3 refused outright, now parks
+// a fill flight on the primary key instead of fetching alone. Every
+// other case keeps its ADR-0052/0054/0057 behavior bit-for-bit:
+// personal requests (Authorization, Cookie) and unsafe methods never
+// share any flight; warm and declared-dimension flights keep the
+// byte-handoff keys.
+func fetchFlightKey(h *Handler, primaryKey, lookupKey api.Key, obj *api.Object, ri RequestInfo) (api.Key, bool) {
+	if collapseDenied(ri) {
+		// Personal requests and unsafe methods never share a flight
+		// (ADR-0052/ADR-0054): unchanged.
+		return api.Key{}, false
+	}
+	sfKey := collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
+	if sfKey != (api.Key{}) {
+		// Warm or declared-dimension flight: byte hand-off under the
+		// ADR-0057 proven-key rule: unchanged.
+		return sfKey, false
+	}
+	// Anonymous, safe-method, cold include-free miss. The origin's Vary
+	// is still unknowable at park time — which is why the follower NEVER
+	// receives the leader's bytes on this flight (ADR-0066): it waits
+	// for the fill to settle in the store, then re-enters the request
+	// pipeline and is served through the same gates as a sequential
+	// request — variant selection, RFC 9111 §3.5 storage, freshness,
+	// conditionals — or fetches its own.
+	return fillFlightKey(primaryKey), true
 }

@@ -716,21 +716,26 @@ func TestFetchAndStore_IncludeHeaderRouteSameDimensionsStillCollapse(t *testing.
 }
 
 // TestFetchAndStore_UndeclaredRouteColdMissNeverCollapses pins the
-// refusal half of the composite rule: on a route with NO include_headers,
-// a cold miss never shares a flight — the origin's Vary is unknowable at
-// flight time, so no shared key can be proven to encode the origin's
-// variation surface. The two requests differ only in a header the route
-// never declared (the undeclared-selector shape). Once the first fill
-// stores the Vary resolver, warm traffic collapses on the variant key as
-// before (covered by the revalidate/stayin-alive suites).
+// safety half of the fill-flight rule (ADR-0066) for a Vary-declaring
+// origin: on a route with NO include_headers, two concurrent cold
+// misses that differ in a header the route never declared (the
+// undeclared-selector shape) must each receive their own variant. The
+// second request parks on the leader's fill flight but never receives
+// the leader's bytes: it re-enters the pipeline, finds its variant
+// absent from the store, and fetches its own. Once the first fill
+// stores the Vary resolver, warm traffic collapses on the variant key
+// as before (covered by the revalidate/stayin-alive suites).
 func TestFetchAndStore_UndeclaredRouteColdMissNeverCollapses(t *testing.T) {
 	t.Parallel()
 
 	var fetches atomic.Int64
 	release := make(chan struct{})
 	origin := func(ctx *fasthttp.RequestCtx) {
-		n := fetches.Add(1)
-		if n <= 2 {
+		if fetches.Add(1) == 1 {
+			// Hold the leader's fetch open until the follower has parked
+			// on the fill flight (the follower only fetches its own after
+			// the leader's fill settles, so the old both-held gate would
+			// deadlock on the 2s escape).
 			select {
 			case <-release:
 			case <-time.After(2 * time.Second):
@@ -755,14 +760,15 @@ func TestFetchAndStore_UndeclaredRouteColdMissNeverCollapses(t *testing.T) {
 			bodies[i] = respBody(ctx)
 		}()
 	}
-	for fetches.Load() < 2 {
+	for fetches.Load() < 1 {
 		time.Sleep(5 * time.Millisecond)
 	}
+	time.Sleep(50 * time.Millisecond) // let the follower park on the fill flight
 	close(release)
 	wg.Wait()
 
 	require.Equal(t, int64(2), fetches.Load(),
-		"a cold miss on an undeclared route must never share a flight: the origin's Vary is unknowable at flight time")
+		"a cold miss on an undeclared route with a Vary-declaring origin must still fetch each variant: the fill follower re-enters the pipeline, finds its variant absent, and fetches its own")
 	require.Equal(t, "tenant:14", bodies[0])
 	require.Equal(t, "tenant:66", bodies[1])
 }

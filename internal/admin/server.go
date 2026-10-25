@@ -45,7 +45,14 @@ type Config struct {
 	// (bouine status, issue #813). cluster=true asks for the
 	// one-round-trip peer aggregation; the default is node-local data
 	// only. nil disables the endpoint.
-	StatusFn           func(ctx context.Context, cluster bool) StatusReport
+	StatusFn func(ctx context.Context, cluster bool) StatusReport
+	// HotKnobsFn serves GET /v1/config/hot (bouine config get/diff,
+	// issue #815). nil disables the endpoint.
+	HotKnobsFn func() []HotKnob
+	// HotSetFn serves POST /v1/config/hot (bouine config set): a
+	// validated point mutation on one hot knob. DryRun validates and
+	// reports without applying. nil disables the endpoint.
+	HotSetFn           func(ctx context.Context, req HotSetRequest) (HotSetResult, error)
 	DrainFn            func()
 	RefreshFn          func(key api.Key) error
 	ConditionsFn       func() []Condition
@@ -277,7 +284,7 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 		if s.handlePeerRoutes(ctx, p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics) {
 			return
 		}
-		if s.handleDataRoutes(ctx, p) {
+		if s.handleDataRoutes(ctx, p, m) {
 			return
 		}
 		if pprofMap != nil && strings.HasPrefix(p, "/debug/pprof/") {
@@ -379,6 +386,19 @@ func (s *Server) handleWriteRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 		return requirePost(s.ban, s.cfg.BanFn != nil)
 	case "/v1/refresh":
 		return requirePost(s.refresh, s.cfg.RefreshFn != nil)
+	case "/v1/config/hot":
+		// Two methods share this path: POST sets (write table, here),
+		// GET lists knobs (data table). Fall through for GET so
+		// handleDataRoutes serves it; anything else is a 405.
+		switch m {
+		case "POST":
+			return requirePost(s.hotSet, s.cfg.HotSetFn != nil)
+		case "GET":
+			return false
+		default:
+			ctx.Error("method not allowed", fasthttp.StatusMethodNotAllowed)
+			return true
+		}
 	case "/v1/cloudflare/propagate":
 		return requirePost(s.cloudflarePropagate, s.cfg.CFPropagateFn != nil)
 	}
@@ -444,7 +464,7 @@ func (s *Server) handlePeerBatchRoute(ctx *fasthttp.RequestCtx, p string) bool {
 	return false
 }
 
-func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p string) bool {
+func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 	switch p {
 	case "/v1/cloudflare/status":
 		if s.cfg.CFStatusFn != nil {
@@ -466,6 +486,12 @@ func (s *Server) handleDataRoutes(ctx *fasthttp.RequestCtx, p string) bool {
 			s.status(ctx)
 			return true
 		}
+	case "/v1/config/hot":
+		// The write table claims POST; only GET belongs here.
+		if m == "GET" && s.cfg.HotKnobsFn != nil {
+			s.hotKnobs(ctx)
+			return true
+		}
 	case "/v1/debug/cachecheck":
 		if s.cfg.CacheCheckFn != nil {
 			s.cacheCheck(ctx)
@@ -482,6 +508,32 @@ func (s *Server) healthz(ctx *fasthttp.RequestCtx) {
 func (s *Server) status(ctx *fasthttp.RequestCtx) {
 	v := string(ctx.QueryArgs().Peek("cluster"))
 	writeJSON(ctx, fasthttp.StatusOK, s.cfg.StatusFn(ctx, v == "1" || v == "true"))
+}
+
+func (s *Server) hotKnobs(ctx *fasthttp.RequestCtx) {
+	writeJSON(ctx, fasthttp.StatusOK, s.cfg.HotKnobsFn())
+}
+
+func (s *Server) hotSet(ctx *fasthttp.RequestCtx) {
+	var req HotSetRequest
+	if !decodeJSON(ctx, &req) {
+		return
+	}
+	if req.Key == "" {
+		ctx.Error("bad request: key is required", fasthttp.StatusBadRequest)
+		return
+	}
+	res, err := s.cfg.HotSetFn(ctx, req)
+	if err != nil {
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result := "applied"
+	if req.DryRun {
+		result = "dry-run"
+	}
+	s.recordOp("config set", req.Key+"="+req.Value, result)
+	writeJSON(ctx, fasthttp.StatusOK, res)
 }
 
 func (s *Server) readyz(ctx *fasthttp.RequestCtx) {

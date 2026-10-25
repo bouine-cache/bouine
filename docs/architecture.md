@@ -642,6 +642,9 @@ bouine refresh <url>
 bouine cluster peers
 bouine cluster join <addr>
 bouine stats
+bouine config get [key]           # live hot-config knobs, with source
+bouine config set <key> <value>   # [--dry-run] runtime change
+bouine config diff [<a.yaml> <b.yaml>]
 bouine config validate <file>
 bouine config schema
 bouine bench [--profile canonical]
@@ -656,6 +659,21 @@ counters via one peer-metrics fan-out), and the evaluated insight
 rules. On a terminal, `--watch` renders a fullscreen alternate-screen
 TUI (ADR-0065, charmbracelet/bubbletea) with live keys; piped output
 and `--format json` never take the TUI path.
+
+`bouine config get/set/diff` is the hot-config knob surface behind
+`GET|POST /v1/config/hot` (#815): a small registry of genuinely
+hot-appliable fields (`cluster.ban_ttl`, `url_ring_sample_rate`;
+grown additively) that can change on a running daemon without a
+restart. `get` shows each knob's live value and source (`file`,
+`default`, or `runtime`); `set` applies a validated point mutation
+and prints the not-persisted warning — runtime overrides are
+deliberately ephemeral (pods are cattle), so `diff` shows what is
+lost at the next restart, and `--dry-run` validates without
+applying. `diff <a.yaml> <b.yaml>` previews a deploy by diffing two
+effective configs. Unknown and cold-only keys are rejected with
+precise errors; every attempt is audited (slog +
+`bouine_config_hot_sets_total`) and rate-limited like every admin
+write.
 
 All admin-plane subcommands honor the global `--server`, `--token`, and
 `--format text|json` flags. Values resolve flag > environment

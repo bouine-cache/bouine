@@ -864,6 +864,14 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		},
 		StatsFn:  func() api.Stats { return rs.store.Stats() },
 		StatusFn: e.statusFn(rs, dash),
+		HotKnobsFn: e.hotKnobsFn(func() []hotKnob {
+			hotKnobs := e.hotKnobList(rs)
+			return hotKnobs
+		}),
+		HotSetFn: e.hotSetFn(func() []hotKnob {
+			hotKnobs := e.hotKnobList(rs)
+			return hotKnobs
+		}, e.hotSetsMetric()),
 		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)

@@ -349,7 +349,7 @@ type banListState struct {
 	snap atomic.Pointer[banSnapshot]
 	list []activeBan
 	// ttl is how long a ban stays in the list before prune paths drop
-	// it. Zero applies defaultBanTTL. Configured per store via
+	// it. Zero applies DefaultBanTTL. Configured per store via
 	// HotConfig.BanTTL (invalidation.ban_ttl) so operators can bound the
 	// blast radius of an over-broad ban.
 	ttl time.Duration
@@ -361,8 +361,26 @@ type banListState struct {
 
 func (b *banListState) ttlOrDefault() time.Duration {
 	if b.ttl <= 0 {
-		return defaultBanTTL
+		return DefaultBanTTL
 	}
+	return b.ttl
+}
+
+// setTTL replaces the configured ban TTL at runtime (the hot-config
+// surface, `bouine config set cluster.ban_ttl`). The mutex makes the
+// swap atomic with the prune and register paths that read it; a new
+// TTL also re-bounds bans already in the list on their next prune.
+func (b *banListState) setTTL(d time.Duration) {
+	b.mu.Lock()
+	b.ttl = d
+	b.mu.Unlock()
+}
+
+// currentTTL reports the configured TTL; zero means the built-in
+// default (DefaultBanTTL) applies.
+func (b *banListState) currentTTL() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.ttl
 }
 

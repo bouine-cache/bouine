@@ -12,6 +12,30 @@ the curated, human-readable summary.
 
 ### Added
 
+- **`bouine config get/set/diff` and `GET|POST /v1/config/hot`
+  (#815).** The hot-config knob surface: a registry of genuinely
+  hot-appliable fields that change on a running daemon without a
+  restart. First two knobs: `cluster.ban_ttl` (lazy-ban lifetime;
+  both prune sites hold the ban mutex, so the swap is race-free) and
+  `url_ring_sample_rate` (dashboard URL-ring sampling). `get`
+  lists every knob with its live value and source — `file` when it
+  matches the boot config, `default` when the boot config left it to
+  built-in defaults (reported with the effective value, e.g. 24h,
+  not "0"), `runtime` when it drifted. `set` applies a validated
+  point mutation and always prints the not-persisted warning:
+  runtime overrides are deliberately ephemeral (pods are cattle,
+  no sidecar state) and lost at restart — drift is visible, never
+  silent. `--dry-run` validates and reports server-side without
+  touching live state, so a dry run predicts the real outcome
+  exactly (same validation, same capability errors). `diff` with
+  no arguments lists the knobs a restart would lose; `diff <a.yaml>
+  <b.yaml>` previews a deploy by diffing two effective configs
+  (durations humanized, YAML-key paths). Unknown and cold-only
+  keys are rejected with precise errors; every attempt is audited
+  (slog key/old→new/dry-run + `bouine_config_hot_sets_total`)
+  and rides the existing admin write rate limit. The bouineapi
+  SDK gained `Client.HotConfig` and `Client.HotSet`.
+
 - **`bouine status` and `GET /v1/status` (#813).** A one-glance
   node overview with five sections: node (version, uptime,
   readiness — a drained pod reports NOT-READY), cache (hit ratio,
@@ -99,6 +123,14 @@ the curated, human-readable summary.
   file exactly once; the renumbered files carry Renumbered notes
   resolving the stale references in already-released entries. The
   downstream freshness sync ADR (this PR) takes number **0063**.
+
+### Fixed
+
+- **Data race on the URL-ring sample rate (#815).** The sample rate
+  was a plain `int64` written by `SetSampleRate` while the data
+  plane read it in `RecordURL`; it is now an `atomic.Int64`, making
+  the hot-config surface race-free (and the knob swap safe under
+  load).
 
 ## [0.5.30] - 2026-10-21
 

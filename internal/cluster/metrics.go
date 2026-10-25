@@ -57,6 +57,15 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
+	// PeerFetchResolverAnswers counts the ADR-0066 resolver-metadata
+	// answer class, labelled by side: "server" (the owner answered a
+	// blank-assertion ask with the metadata-only Vary resolver so the
+	// requester can derive the Vary list it could not compute locally)
+	// or "consumer" (the requester completed the two-step variant
+	// resolution and served the variant the resolver routed it to).
+	// Zero means Vary cold misses on non-owners go to origin instead of
+	// converging through the owner — e.g. a mixed-version fleet.
+	PeerFetchResolverAnswers *prometheus.CounterVec
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -120,6 +129,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "peer_fetch_variant_mismatch_total",
 			Help:      "Peer-fetch RPCs rejected by the RFC 9111 variant-assertion gate, by side (server, consumer). Sustained non-zero rate indicates a mixed-version fleet or a peer serving wrong-variant content.",
 		}, []string{"side"}),
+		PeerFetchResolverAnswers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "peer_fetch_resolver_answers_total",
+			Help:      "Metadata-only Vary resolver answers served over peer fetch, by side (server, consumer). Zero consumer-side means Vary cold misses on non-owners bypass owner convergence (ADR-0066).",
+		}, []string{"side"}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -131,6 +145,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.BroadcastOverflows,
 		m.GossipOversizedDrops,
 		m.PeerFetchVariantMismatch,
+		m.PeerFetchResolverAnswers,
 	)
 	return m
 }
@@ -222,6 +237,16 @@ func (m *Metrics) PeerFetchVariantMismatchCount() int64 {
 		return 0
 	}
 	return m.peerFetchVariantMismatchTotal.Load()
+}
+
+// IncPeerFetchResolverAnswer increments the resolver-answer counter for
+// the given side ("server" or "consumer"). Nil-safe: single-node mode
+// never registers the vec.
+func (m *Metrics) IncPeerFetchResolverAnswer(side string) {
+	if m == nil || m.PeerFetchResolverAnswers == nil {
+		return
+	}
+	m.PeerFetchResolverAnswers.WithLabelValues(side).Inc()
 }
 
 // IncRingEmpty increments the ring-empty counter. Called when Owner

@@ -501,7 +501,7 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 352 (PairedKey, ADR-0065), hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
+	// objectStructSize: 352 (PairedKey, ADR-0066), hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32

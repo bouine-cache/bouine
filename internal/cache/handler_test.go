@@ -2113,7 +2113,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 }
 
 // TestHandler_VaryFill_ResolverMetadataOnly is the acceptance test for
-// ADR-0065 (issue #824): a Vary fill stores the variant with its body
+// ADR-0066 (issue #824): a Vary fill stores the variant with its body
 // and a metadata-only Vary resolver at the primary key — no second body
 // copy. 200 pages still fill 400 hot entries (variant + resolver each),
 // but at ~1x the per-page hot bytes of an identical no-Vary origin: the
@@ -2338,7 +2338,7 @@ func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
 	primaryKey := h.buildKey(reqA)
 	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 
-	// ADR-0065: the primary-key Vary resolver is metadata-only and never
+	// ADR-0066: the primary-key Vary resolver is metadata-only and never
 	// registers for proactive refresh — a background refresh of the
 	// primary key would re-store a full body there. Only the variant
 	// registers.
@@ -6364,7 +6364,7 @@ func TestExcludeHost_HostStillForwarded(t *testing.T) {
 		"include_host: false must not rewrite the origin-bound Host")
 }
 
-// TestHandler_PurgeDeletesPeerPutVariants pins the ADR-0065 purge
+// TestHandler_PurgeDeletesPeerPutVariants pins the ADR-0066 purge
 // reachability fix (issue #824): a variant that lands on the owner via
 // the write-to-owner RPC (StoreFromPeer) must be tracked in the
 // primary's variant set, so a cluster-wide URL purge deletes it too.
@@ -6441,5 +6441,66 @@ func TestHandler_PurgeDeletesPeerPutVariants(t *testing.T) {
 	}
 	if obj2, _, _ := store.Get(context.Background(), objB.Key); obj2 != nil {
 		t.Fatal("second peer-put variant still in store after Purge")
+	}
+}
+
+// TestHandler_PurgeDeletesPeerPutVariantsPastCap pins the second half of
+// ADR-0066's purge-reachability fix: peer-put registration ALWAYS
+// succeeds, including past the MaxVariants cap. PeerPutHandler.Handle
+// stores the object before the registration callback runs, so a
+// refused registration would leave a stored-but-untracked variant —
+// servable via the two-step resolution, invisible to the cluster-wide
+// URL purge (RFC 9111 §4.4). Before the fix, StoreFromPeer discarded
+// the reservation result and a past-cap variant fell through exactly
+// that hole. Local fills keep the cap as a storage refusal (pinned by
+// TestMaxVariants_CapIsEnforced); only the peer-put path tracks past
+// it, because only there the store is already fait accompli.
+func TestHandler_PurgeDeletesPeerPutVariantsPastCap(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:    func(ctx *fasthttp.RequestCtx) {},
+		Store:       store,
+		Logger:      slog.Default(),
+		MaxVariants: 2, // three peer-put variants must exceed it
+	})
+
+	req := testCtx("GET", "http://example.com/cap")
+	primaryKey := h.buildKey(req)
+	hdr := headerFromCtx(req)
+	varyKey := BuildVaryKey("X-Test-Variant", hdr, nil)
+
+	keys := make([]api.Key, 3)
+	for i := range keys {
+		variantKey := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+		variantKey[15] = byte(i) //nolint:gosec // loop index < 3
+		keys[i] = variantKey
+		h.StoreFromPeer(context.Background(), &api.Object{
+			Key:        variantKey,
+			VaryKey:    varyKey,
+			VaryValue:  "X-Test-Variant",
+			PairedKey:  primaryKey,
+			StatusCode: 200,
+			TTL:        time.Hour,
+			StoredAt:   time.Now(),
+			Header:     header.Map{},
+		})
+	}
+
+	h.variantMu.Lock()
+	tracked := len(h.variantSets[primaryKey])
+	h.variantMu.Unlock()
+	require.Equal(t, 3, tracked,
+		"all three peer-put variants must be tracked even past the MaxVariants cap of 2")
+
+	owned, err := h.Purge(context.Background(), primaryKey)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	for i, k := range keys {
+		if obj, _, _ := store.Get(context.Background(), k); obj != nil {
+			t.Fatalf("past-cap peer-put variant %d still in store after Purge", i)
+		}
 	}
 }

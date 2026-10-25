@@ -299,13 +299,18 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err == nil && peerObj != nil && isPeerResolverMetadata(peerObj) {
-		// ADR-0065: the owner answered the bare primary-key ask with
+		// ADR-0066: the owner answered the bare primary-key ask with
 		// the metadata-only resolver — the Vary list this node could
 		// not compute locally. Not servable here and not a rejection
-		// either: punt WITHOUT a hint so the slow path's two-step
-		// variant resolution runs (handleCacheMiss →
-		// serveResolverPeerVariant) instead of skipping its peer RPC
-		// and going straight to origin.
+		// either. Hand the resolver to the slow path
+		// (RawRequest.OwnerResolver, transferred by the h1parser under
+		// OwnerResolverContextKey) so its two-step variant resolution
+		// (handleCacheMiss → serveResolverPeerVariant) runs WITHOUT
+		// repeating this identical bare ask — the duplicate-ask the
+		// OwnerMiss/OwnerGateReject hints exist to prevent. No boolean
+		// hint: the object itself is the hint, and its Key is the
+		// identity proof the slow path verifies.
+		req.OwnerResolver = peerObj
 		return nil, false
 	}
 	if err != nil || peerObj == nil {

@@ -1921,6 +1921,46 @@ func TestFastPathHandler_PeerMissFlagsOwnerMiss(t *testing.T) {
 	assert.True(t, req.OwnerMiss, "definitive owner miss must flag RawRequest.OwnerMiss")
 }
 
+// TestFastPathHandler_ResolverAnswerSetsOwnerResolver pins the ADR-0066
+// transfer: when the owner answers the fast path's bare primary-key ask
+// with the metadata-only resolver, the fast path hands it to the slow
+// path via RawRequest.OwnerResolver so the two-step variant resolution
+// runs WITHOUT repeating the identical bare ask. No boolean hint is
+// set — the object itself is the hint, and its Key is the identity
+// proof the slow path verifies before reuse.
+func TestFastPathHandler_ResolverAnswerSetsOwnerResolver(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/resolver-transfer",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(req, nil)
+	resolver := &api.Object{
+		Key:        key,
+		PairedKey:  api.Key{0x2a},
+		VaryValue:  "X-Test-Variant",
+		StatusCode: 200,
+		StoredAt:   time.Now(),
+		TTL:        time.Minute,
+	}
+	resolver.Header = header.NewMap(1)
+	resolver.Header.AppendEntry("Cache-Control", "max-age=60")
+	stub := newPeerFetchStub(resolver)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok, "a metadata-only resolver is never servable from the fast path")
+	assert.Nil(t, resp)
+	require.NotNil(t, req.OwnerResolver, "the fetched resolver must be handed to the slow path")
+	assert.Same(t, resolver, req.OwnerResolver)
+	assert.True(t, isPeerResolverMetadata(req.OwnerResolver))
+	assert.False(t, req.OwnerMiss, "a resolver answer is not a definitive miss")
+	assert.False(t, req.OwnerGateReject, "a resolver answer is not a gate rejection")
+	assert.False(t, req.OwnerShed)
+}
+
 // TestFastPathHandler_PeerErrorDoesNotFlagOwnerMiss pins that a
 // peer-fetch error never sets the hint: the slow path's second attempt
 // is a legitimate retry for transient failures.

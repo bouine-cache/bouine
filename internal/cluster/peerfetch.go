@@ -921,14 +921,20 @@ func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 
 // withholdsResolverBody reports whether the stored primary-key entry is
 // a bodyful Vary resolver that must not be served over peer fetch.
-// ADR-0065 exception: the metadata-only resolver (no body) answers a
+// ADR-0066 exception: the metadata-only resolver (no body) answers a
 // blank-assertion ask with its METADATA — the Vary list the requester
 // could not compute locally — so it can derive its variant key and
 // re-ask the variant's owner with a real assertion. Metadata only,
 // never a body: the cross-variant leak stays closed, and legacy
 // resolvers (own body present) are still withheld outright.
-func withholdsResolverBody(obj *api.Object, reqVaryKey string) bool {
-	return obj.VaryKey == "" && obj.VaryValue != "" && (len(obj.Body) != 0 || reqVaryKey != "")
+//
+// Only blank-assertion asks reach this gate: an asserted ask on a
+// resolver-shaped entry is already 404'd by the variant-mismatch gate
+// above it in Handle (the resolver's blank VaryKey never equals a
+// non-empty request assertion), so the request's VaryKey plays no
+// part in this decision.
+func withholdsResolverBody(obj *api.Object) bool {
+	return obj.VaryKey == "" && obj.VaryValue != "" && len(obj.Body) != 0
 }
 
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
@@ -994,14 +1000,19 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// with a miss and let the requester fill (and assert) its own
 	// variant. A peer fetch for a REAL variant key never lands here:
 	// variant entries carry a non-empty VaryKey.
-	if withholdsResolverBody(obj, req.VaryKey) {
+	if withholdsResolverBody(obj) {
 		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
 			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
 
-	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
+	// The ADR-0066 answer class gets its own log line and counter: a
+	// resolver-metadata answer is not a hit (no servable content) and
+	// not a miss either (the requester will follow up with a real
+	// variant ask). Without the distinction the two-step resolution is
+	// invisible in logs and metrics.
+	h.logPeerFetchAnswer(obj, req, hops)
 	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
 
 	bufp := peerFetchEncodePool.Get().(*[]byte)
@@ -1011,6 +1022,22 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		*bufp = encoded[:0]
 		peerFetchEncodePool.Put(bufp)
 	}
+}
+
+// logPeerFetchAnswer records the answer class of a served peer fetch:
+// the ADR-0066 resolver-metadata answer (blank-assertion ask against
+// the metadata-only resolver) is neither a hit (no servable content)
+// nor a miss (the requester will follow up with a real variant ask) and
+// gets its own log line and server-side counter; every other answer
+// logs as the ordinary peer hit.
+func (h *PeerFetchHandler) logPeerFetchAnswer(obj *api.Object, req api.PeerFetchRequest, hops int) {
+	if req.VaryKey == "" && obj.IsVaryResolver() && len(obj.Body) == 0 {
+		h.metrics.IncPeerFetchResolverAnswer("server")
+		h.logger.Info("served peer fetch resolver metadata",
+			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
+		return
+	}
+	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
 }
 
 // Put forwards obj to the owner peer via the write-to-owner RPC. Used in

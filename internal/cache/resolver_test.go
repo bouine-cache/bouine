@@ -16,7 +16,7 @@ import (
 )
 
 // TestResolver304_MirrorEvictedFallsBackToFill pins the fallback leg of
-// ADR-0065: the metadata-only resolver serves its mirror variant's body
+// ADR-0066: the metadata-only resolver serves its mirror variant's body
 // after a validating 304 — but when the mirror is gone from both tiers
 // (evicted or purged), the 304 proves nothing servable and the request
 // must fall through to the ordinary unconditional fill. Correctness
@@ -49,7 +49,7 @@ func TestResolver304_MirrorEvictedFallsBackToFill(t *testing.T) {
 	primaryKey := h.buildKey(reqA)
 	variantKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 	// Simulate SIEVE pressure evicting the fat variant while the tiny
-	// resolver survives — ADR-0065's pressure shape.
+	// resolver survives — ADR-0066's pressure shape.
 	require.NoError(t, h.store.Delete(t.Context(), variantKey))
 
 	reqB := testCtx("GET", "http://example.com/mirror-gone")
@@ -63,7 +63,7 @@ func TestResolver304_MirrorEvictedFallsBackToFill(t *testing.T) {
 		"conditional resolver fetch (304) + full miss fill; the resolver's validators are an optimization, never a requirement")
 }
 
-// TestDoBackgroundRevalidate_SkipsResolver pins ADR-0065: resolvers
+// TestDoBackgroundRevalidate_SkipsResolver pins ADR-0066: resolvers
 // never register for proactive refresh, and a resolver reaching
 // doBackgroundRevalidate anyway (a pre-upgrade registry entry surviving
 // an upgrade) must be skipped — a full-200 refresh of the primary key
@@ -95,7 +95,7 @@ func TestDoBackgroundRevalidate_SkipsResolver(t *testing.T) {
 		"only the initial fill may fetch — a resolver must never be background-refreshed; its mirror variant refreshes on its own cycle")
 }
 
-// TestResolverPeerVariant_TwoStepResolution pins the ADR-0065
+// TestResolverPeerVariant_TwoStepResolution pins the ADR-0066
 // convergence path for a node with no local Vary context: the owner
 // answers the bare primary-key ask with the metadata-only resolver, and
 // this node must derive ITS variant key from the learned Vary list and
@@ -140,7 +140,7 @@ func TestResolverPeerVariant_TwoStepResolution(t *testing.T) {
 			switch key {
 			case primaryKey:
 				// The metadata-only resolver, as the primary key's
-				// owner would answer it (ADR-0065).
+				// owner would answer it (ADR-0066).
 				res := &api.Object{
 					Key:        primaryKey,
 					PairedKey:  variantKey,
@@ -188,4 +188,107 @@ func TestResolverPeerVariant_TwoStepResolution(t *testing.T) {
 	require.Equal(t, variantKey, asks[1].key)
 	require.Equal(t, wantAssertion, asks[1].assertion,
 		"the second ask must assert THIS request's variant dimension")
+}
+
+// TestResolverPeerVariant_ReusesTransferredResolver pins the ADR-0066
+// fast-path transfer end to end at the slow path: when the H1 fast path
+// already fetched the metadata-only resolver for the identical bare
+// ask (h1parser transfers it under api.OwnerResolverContextKey),
+// handleCacheMiss must reuse it and run the two-step WITHOUT asking the
+// primary key's owner again — one variant-key ask, no bare ask. A
+// transferred resolver whose Key does not match the lookup key is a
+// different question and must NOT be reused.
+func TestResolverPeerVariant_ReusesTransferredResolver(t *testing.T) {
+	t.Parallel()
+
+	newCase := func(t *testing.T, transferKeyMismatch bool) (asks []api.Key, wantVariantKey api.Key, served string, code int) {
+		t.Helper()
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			_, _ = ctx.Write([]byte("origin-fill"))
+		}
+		req := testCtx("GET", "http://example.com/transfer")
+		req.Request.Header.Set("X-Test-Variant", "a")
+		primaryKey := BuildKey(requestInfoFromCtx(req), nil)
+		variantKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(req), nil)
+		wantAssertion := BuildVaryKey("X-Test-Variant", headerFromCtx(req), nil)
+
+		resolver := &api.Object{
+			Key:        primaryKey,
+			PairedKey:  variantKey,
+			StatusCode: 200,
+			VaryValue:  "X-Test-Variant",
+			StoredAt:   time.Now(),
+			TTL:        time.Minute,
+		}
+		resolver.Header = header.NewMap(1)
+		resolver.Header.AppendEntry("Cache-Control", "max-age=60")
+		if transferKeyMismatch {
+			// The fast path fetched this resolver for a DIFFERENT key —
+			// e.g. a variant miss, where the slow path asks the variant
+			// key, not the primary. The identity check must reject it.
+			other := &api.Object{
+				Key:        api.Key{0x99},
+				PairedKey:  variantKey,
+				StatusCode: 200,
+				VaryValue:  "X-Test-Variant",
+				StoredAt:   time.Now(),
+				TTL:        time.Minute,
+			}
+			other.Header = header.NewMap(1)
+			other.Header.AppendEntry("Cache-Control", "max-age=60")
+			req.SetUserValue(api.OwnerResolverContextKey, other)
+		} else {
+			req.SetUserValue(api.OwnerResolverContextKey, resolver)
+		}
+
+		h := NewHandler(HandlerConfig{
+			Upstream:   upstream,
+			FastClient: &testFastClient{handler: upstream},
+			Store: storage.NewHotStore(storage.HotConfig{
+				MaxBytes:       1 << 20,
+				NumShards:      2,
+				ReaperInterval: -1,
+			}),
+			OwnerFn: func(api.Key) (api.PeerInfo, bool) {
+				return api.PeerInfo{Addr: "owner:1"}, false
+			},
+			PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, _ string) (*api.Object, error) {
+				asks = append(asks, key)
+				switch key {
+				case primaryKey:
+					return resolver, nil
+				case variantKey:
+					variant := &api.Object{
+						Key:        variantKey,
+						VaryKey:    wantAssertion,
+						VaryValue:  "X-Test-Variant",
+						StatusCode: 200,
+						Body:       []byte("variant-a"),
+						BodySize:   9,
+						StoredAt:   time.Now(),
+						TTL:        time.Minute,
+					}
+					variant.Header = header.NewMap(1)
+					variant.Header.AppendEntry("Cache-Control", "max-age=60")
+					return variant, nil
+				}
+				return nil, nil
+			},
+		})
+		h.ServeRequest(req)
+		return asks, variantKey, respBody(req), respCode(req)
+	}
+
+	asks, wantVariant, body, code := newCase(t, false)
+	require.Equal(t, 200, code)
+	require.Equal(t, "variant-a", body, "the two-step must serve the variant")
+	require.Len(t, asks, 1,
+		"only the variant-key ask: the transferred resolver must spare the identical bare ask")
+	require.Equal(t, wantVariant, asks[0],
+		"the single ask must be the variant-key ask with a real assertion")
+
+	asks, _, _, _ = newCase(t, true)
+	require.Len(t, asks, 2,
+		"a transferred resolver with a mismatched Key answers a different question and must not be reused")
 }

@@ -90,7 +90,7 @@ type Object struct {
 	StatusCode int `json:"status_code"`
 	// Key is the primary cache key.
 	Key Key `json:"key"`
-	// PairedKey links the two entries of a Vary family (ADR-0065).
+	// PairedKey links the two entries of a Vary family (ADR-0066).
 	// On a resolver (the primary-key entry): the variant key whose
 	// body the resolver mirrors. On a variant: the primary key the
 	// variant belongs to, so a node storing the variant via the
@@ -333,7 +333,7 @@ func (o *Object) CloneForRefresh() *Object {
 }
 
 // IsVaryResolver reports whether o is the primary-key Vary resolver
-// entry (ADR-0065): it carries the stored Vary list so lookup() can
+// entry (ADR-0066): it carries the stored Vary list so lookup() can
 // select variants, and a blank VaryKey by protocol so the peer-fetch
 // and fast-path gates classify it as never-a-variant. True for legacy
 // resolvers (which may still carry their own body) and for the

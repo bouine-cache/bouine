@@ -447,25 +447,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
-			cfg.OwnerFn = ownerFn
-			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
-			// Write-to-owner RPC: a non-owner that fetches from origin
-			// forwards the object to the owner so subsequent peer-fetches
-			// hit (issue #509). Fire-and-forget in a bounded goroutine so
-			// the response path is never blocked on the RPC.
-			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
-				go func() {
-					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
-					defer cancel()
-					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
-						e.logger.Debug("peer put error (non-fatal)",
-							"owner", owner.Name, "key", obj.Key, "error", err)
-					}
-				}()
-			}
-		}
+		applyClusterClosures(&cfg, e, rs)
 		// Data-plane invalidation fan-out (issue #753).
 		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
 		cached := cache.NewHandler(cfg)
@@ -617,25 +599,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
-			cfg.OwnerFn = ownerFn
-			cfg.PeerFetch = peerFetchFn
-			cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
-			// Write-to-owner RPC: a non-owner that fetches from origin
-			// forwards the object to the owner so subsequent peer-fetches
-			// hit (issue #509). Fire-and-forget in a bounded goroutine so
-			// the response path is never blocked on the RPC.
-			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
-				go func() {
-					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
-					defer cancel()
-					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
-						e.logger.Debug("peer put error (non-fatal)",
-							"owner", owner.Name, "key", obj.Key, "error", err)
-					}
-				}()
-			}
-		}
+		applyClusterClosures(&cfg, e, rs)
 		// Data-plane invalidation fan-out for cache-enabled static routes;
 		// same rationale as the proxied-route wiring (issue #753).
 		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
@@ -659,6 +623,38 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	}
 
 	e.addRoute(router, rc, handler, cacheFP)
+}
+
+// applyClusterClosures wires the strong-mode cluster surfaces onto a
+// cache handler config: the ownerFn/peerFetch pair (same closures the
+// fast path uses), the consumer-side peer-fetch counters, and the
+// write-to-owner RPC. Shared by the proxied-route and static-route
+// builders — the wiring is identical and was duplicated inline before
+// the ADR-0066 counter made it drift-prone. No-op when clustering is
+// not in strong mode.
+func applyClusterClosures(cfg *cache.HandlerConfig, e *engine, rs *runState) {
+	ownerFn, peerFetchFn := clusterFastPathClosures(e, rs)
+	if ownerFn == nil || peerFetchFn == nil {
+		return
+	}
+	cfg.OwnerFn = ownerFn
+	cfg.PeerFetch = peerFetchFn
+	cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
+	cfg.OnResolverTwoStep = func() { rs.clusterMetrics.IncPeerFetchResolverAnswer("consumer") }
+	// Write-to-owner RPC: a non-owner that fetches from origin
+	// forwards the object to the owner so subsequent peer-fetches
+	// hit (issue #509). Fire-and-forget in a bounded goroutine so
+	// the response path is never blocked on the RPC.
+	cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
+		go func() {
+			putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
+			defer cancel()
+			if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
+				e.logger.Debug("peer put error (non-fatal)",
+					"owner", owner.Name, "key", obj.Key, "error", err)
+			}
+		}()
+	}
 }
 
 // clusterFastPathClosures builds the ownerFn/peerFetch closures shared

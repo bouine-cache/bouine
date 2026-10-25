@@ -18,7 +18,7 @@ import (
 
 // encodeObjectV6 mirrors the pre-v7 wire format (v6 = v7 minus the
 // PairedKey bytes after the flags byte). Used to prove decodeObject's
-// rolling-deploy handling of blobs written by an older build (ADR-0065):
+// rolling-deploy handling of blobs written by an older build (ADR-0066):
 // they decode with a zero PairedKey — a legacy resolver whose own Body
 // may still be present.
 func encodeObjectV6(obj *api.Object) []byte {
@@ -75,7 +75,7 @@ func encodeObjectV6(obj *api.Object) []byte {
 	return buf
 }
 
-// TestCodec_PairedKeyRoundTrip pins codec v7 (ADR-0065): the Vary
+// TestCodec_PairedKeyRoundTrip pins codec v7 (ADR-0066): the Vary
 // resolver's PairedKey survives the warm tier and the peer wire, so a
 // resolver forwarded to its owner can still resolve its mirror variant.
 func TestCodec_PairedKeyRoundTrip(t *testing.T) {
@@ -127,7 +127,7 @@ func TestCodec_V6BlobDecodesZeroPairedKey(t *testing.T) {
 	assert.Equal(t, orig.Body, got.Body, "the legacy resolver keeps its own body")
 }
 
-// TestTiered_ResolverWarmReloadRestoresRouting pins ADR-0065's
+// TestTiered_ResolverWarmReloadRestoresRouting pins ADR-0066's
 // warm-back gate: a metadata-only resolver (BodySize 0, below any
 // threshold) must still be written to the warm tier and WAL, because
 // lookup() reaches warm variants only through the Vary list carried by

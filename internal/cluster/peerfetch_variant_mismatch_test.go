@@ -148,3 +148,92 @@ func TestMetrics_VariantMismatchCardinalityBudget(t *testing.T) {
 	}
 	require.Len(t, gatherVariantMismatch(t, reg), 2, fmt.Sprintf("expected 2 series, got %d", len(gatherVariantMismatch(t, reg))))
 }
+
+// gatherResolverAnswers returns the active label tuples for
+// bouine_peer_fetch_resolver_answers_total, formatted "side".
+func gatherResolverAnswers(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	out := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_peer_fetch_resolver_answers_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() == "side" {
+					out[l.GetValue()] = met.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestPeerFetchHandler_ResolverAnswerMetric pins the ADR-0066 answer
+// class counter: a blank-assertion ask answered with the metadata-only
+// resolver increments
+// bouine_peer_fetch_resolver_answers_total{side="server"}; a plain peer
+// hit and a legacy bodyful resolver's withheld miss do not.
+func TestPeerFetchHandler_ResolverAnswerMetric(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	key := testkey.Key(21)
+	resolver := &api.Object{
+		Key:        key,
+		PairedKey:  testkey.Key(22),
+		StatusCode: 200,
+		VaryValue:  "X-Region",
+	}
+	resolver.Header = header.NewMap(1)
+	resolver.Header.AppendEntry("Cache-Control", "max-age=60")
+	plain := &api.Object{
+		Key:        testkey.Key(23),
+		StatusCode: 200,
+		Body:       []byte("plain"),
+	}
+	plain.Header = header.NewMap(1)
+	plain.Header.AppendEntry("Cache-Control", "max-age=60")
+	h := NewPeerFetchHandlerWithMetrics(&stubStore{objects: map[api.Key]*api.Object{
+		key:             resolver,
+		testkey.Key(23): plain,
+	}}, nil, 0, m)
+
+	// The resolver-metadata answer counts server-side.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, 200, ctx.Response.StatusCode())
+	require.Equal(t, map[string]float64{"server": 1}, gatherResolverAnswers(t, reg))
+
+	// A plain peer hit must not count as a resolver answer.
+	ctx2 := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(23)}, 0)
+	require.Equal(t, 200, ctx2.Response.StatusCode())
+	require.Equal(t, map[string]float64{"server": 1}, gatherResolverAnswers(t, reg))
+}
+
+// TestMetrics_IncPeerFetchResolverAnswer pins the helper: nil-safe no-op
+// when metrics are disabled, labelled only by "side" (cardinality
+// budget, AGENTS.md §9 — no key or peer label).
+func TestMetrics_IncPeerFetchResolverAnswer(t *testing.T) {
+	t.Parallel()
+
+	// Nil metrics: must not panic.
+	var nilMetrics *Metrics
+	nilMetrics.IncPeerFetchResolverAnswer("server")
+
+	// Unregistered metrics (single-node): no-op without panic.
+	m := &Metrics{}
+	m.IncPeerFetchResolverAnswer("consumer")
+
+	reg := prometheus.NewRegistry()
+	m2 := RegisterMetrics(reg)
+	for i := 0; i < 2; i++ {
+		m2.IncPeerFetchResolverAnswer("server")
+	}
+	m2.IncPeerFetchResolverAnswer("consumer")
+	got := gatherResolverAnswers(t, reg)
+	require.Equal(t, map[string]float64{"server": 2, "consumer": 1}, got)
+	require.Len(t, got, 2, "only the side label may exist — no key/peer cardinality")
+}

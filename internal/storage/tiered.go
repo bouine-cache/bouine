@@ -584,7 +584,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		return err
 	}
 
-	// ADR-0065: resolvers always warm-back regardless of body size.
+	// ADR-0066: resolvers always warm-back regardless of body size.
 	// lookup() finds warm variants only through the entry at the
 	// primary key — the resolver IS the routing metadata — so a
 	// bodyless resolver that skips the warm tier would strand every

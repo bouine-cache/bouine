@@ -1269,7 +1269,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 352 // unsafe.Sizeof(api.Object{}) — 336 → 352: PairedKey, the Vary resolver's mirror pointer (ADR-0065). Update when fields are added.
+	objectStructSize    int64 = 352 // unsafe.Sizeof(api.Object{}) — 336 → 352: PairedKey, the Vary resolver's mirror pointer (ADR-0066). Update when fields are added.
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.

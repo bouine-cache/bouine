@@ -425,6 +425,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.OwnerMiss = false
 	req.OwnerGateReject = false
 	req.OwnerShed = false
+	req.OwnerResolver = nil
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -745,10 +746,10 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		}
 	}
 
-	// Transfer the fast path's definitive owner-miss hint (if any) to the
-	// fallback handler: handleCacheMiss reads it to skip the duplicate
-	// owner lookup + peer RPC (the fast path already got a definitive
-	// miss for the plain key). Cheap: only set when the peer branch ran.
+	// Transfer the fast path's peer-branch hints (if any) to the fallback
+	// handler: handleCacheMiss reads them to skip duplicate owner lookups
+	// and peer RPCs, and reuses the fetched resolver instead of repeating
+	// the identical bare ask. Cheap: only set when the peer branch ran.
 	transferOwnerMissHint(&ctx, req)
 
 	p.fallback(&ctx)
@@ -787,7 +788,10 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 // transferOwnerMissHint forwards the fast path's peer-branch hints
 // (api.RawRequest.OwnerMiss, OwnerGateReject, and OwnerShed) to the fallback
 // RequestCtx so handleCacheMiss can skip duplicate owner lookups, peer RPCs,
-// or shed peer retries. Cheap: only set when the fast-path peer branch ran.
+// or shed peer retries — and the fetched metadata-only Vary resolver
+// (api.RawRequest.OwnerResolver, ADR-0066) so the slow path runs the two-step
+// variant resolution without repeating the identical bare ask. Cheap: only
+// set when the fast-path peer branch ran.
 func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	if req.OwnerMiss {
 		ctx.SetUserValue(api.OwnerMissContextKey, true)
@@ -797,6 +801,9 @@ func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	}
 	if req.OwnerShed {
 		ctx.SetUserValue(api.OwnerShedContextKey, true)
+	}
+	if req.OwnerResolver != nil {
+		ctx.SetUserValue(api.OwnerResolverContextKey, req.OwnerResolver)
 	}
 }
 

@@ -164,25 +164,43 @@ func applyHotKnob(k hotKnob, req admin.HotSetRequest, sets *prometheus.CounterVe
 // hotKnobList builds the engine's hot knob set over the running
 // components (issue #815). Every knob added here is instantly
 // available to `bouine config get/set/diff`; knobs whose component is
-// missing report unavailable instead of failing the endpoint.
+// missing report unavailable instead of failing the endpoint. File
+// values come from the last-loaded config (see hotCfg), so drift
+// reporting stays truthful across config reloads.
 func (e *engine) hotKnobList(rs *runState) []hotKnob {
+	return e.hotKnobsFor(e.hotCfg.Load(), rs)
+}
+
+// hotKnobsFor builds the registry against an arbitrary config tree:
+// the get/set closures always bind the LIVE components, while
+// fileValue/fromFile come from cfg. config reload (issue #817) builds
+// the registry from the re-parsed file to apply its knob values.
+func (e *engine) hotKnobsFor(cfg *config.Config, rs *runState) []hotKnob {
 	knobs := []hotKnob{
-		banTTLKnob(e.cfg.Cluster.BanTTL, rs.store),
-		urlRingSampleRateKnob(e.cfg.URLRingSampleRate,
+		banTTLKnob(cfg.Cluster.BanTTL, rs.store),
+		urlRingSampleRateKnob(cfg.URLRingSampleRate,
 			rs.rings.URL.SampleRate, rs.rings.URL.SetSampleRate),
 	}
-	return append(knobs, poolKnobs(e.cfg, rs.pools)...)
+	return append(knobs, poolKnobs(cfg, e.cfg, rs.pools)...)
 }
 
 // poolKnobs builds the per-pool scoped knobs — bouine config
 // pool:<name>.<field> (issue #815 follow-up): every pool contributes
 // its hot-appliable health fields, sorted by name so the GET document
-// is deterministic. Boot file values come from upstream_pools in the
-// config; live values come from the pool itself.
-func poolKnobs(cfg *config.Config, pools map[string]*origin.Pool) []hotKnob {
+// is deterministic. File values come from cfg (the last-loaded config
+// on the admin GET path, the reloaded file during config reload);
+// live values come from the pool itself. bootCfg answers the
+// capability question only: which eject_for windows had a reaper
+// started at boot (issue #817 reloads must not claim to apply values
+// nothing will honor).
+func poolKnobs(cfg *config.Config, bootCfg *config.Config, pools map[string]*origin.Pool) []hotKnob {
 	fileValues := make(map[string]config.HealthPolicy, len(cfg.UpstreamPools))
 	for _, pool := range cfg.UpstreamPools {
 		fileValues[pool.Name] = pool.Health
+	}
+	bootValues := make(map[string]config.HealthPolicy, len(bootCfg.UpstreamPools))
+	for _, pool := range bootCfg.UpstreamPools {
+		bootValues[pool.Name] = pool.Health
 	}
 	names := make([]string, 0, len(pools))
 	for name := range pools {
@@ -191,10 +209,19 @@ func poolKnobs(cfg *config.Config, pools map[string]*origin.Pool) []hotKnob {
 	sort.Strings(names)
 	knobs := make([]hotKnob, 0, 2*len(names))
 	for _, name := range names {
-		health := fileValues[name]
+		health, present := fileValues[name]
+		if !present {
+			// Pool absent from this config (only possible when building
+			// the registry from a reloaded file): membership is cold-only,
+			// so no knob exists — the reload report lists the pool rows
+			// under needs_restart instead of applying zeros to a pool
+			// the file removed.
+			continue
+		}
+		bootHealth := bootValues[name]
 		knobs = append(knobs,
 			poolConsecutive5xxKnob(name, health.Passive.Consecutive5xx, pools[name]),
-			poolEjectForKnob(name, health.Passive.EjectFor, pools[name]),
+			poolEjectForKnob(name, health.Passive.EjectFor, bootHealth.Passive.EjectFor, pools[name]),
 		)
 	}
 	return knobs
@@ -322,8 +349,11 @@ func poolConsecutive5xxKnob(poolName string, fileValue int, p *origin.Pool) hotK
 // set eject_for — the reaper goroutine is started once at boot — so
 // both dry runs and real sets on a reaper-less pool fail with the
 // same precise error.
-func poolEjectForKnob(poolName string, fileValue time.Duration, p *origin.Pool) hotKnob {
-	reaperRuns := fileValue > 0
+func poolEjectForKnob(poolName string, fileValue, bootValue time.Duration, p *origin.Pool) hotKnob {
+	// The reaper goroutine is started once, at boot, for pools whose
+	// boot config set eject_for — so the capability is the BOOT value,
+	// never the (possibly reloaded) file value.
+	reaperRuns := bootValue > 0
 	return hotKnob{
 		key: "pool:" + poolName + ".health.passive.eject_for",
 		description: "how long a passively ejected target of this pool stays out before the reaper restores it; " +

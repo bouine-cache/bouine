@@ -239,3 +239,66 @@ func TestConfigDiffInvalidFileFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not_a_key", "both files must pass config validation")
 }
+
+// reloadStub serves POST /v1/config/reload with a canned report and
+// records the request body.
+func reloadStub(t *testing.T) (string, func() map[string]any) {
+	t.Helper()
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		require.Equal(t, "POST", r.Method)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		_ = json.NewEncoder(w).Encode(bouineapi.ConfigReloadResult{
+			Path:         "/etc/bouine/config.yaml",
+			Applied:      []bouineapi.ConfigReloadChange{{Key: "cluster.ban_ttl", Old: "24h0m0s", New: "1h30m0s"}},
+			Unchanged:    []string{"url_ring_sample_rate"},
+			NeedsRestart: []string{"listen.http: 127.0.0.1:1 -> 127.0.0.1:2"},
+		})
+	}))
+	t.Cleanup(ts.Close)
+	return strings.TrimPrefix(ts.URL, "http://"), func() map[string]any {
+		return body
+	}
+}
+
+func TestConfigReloadTextOutput(t *testing.T) {
+	server, body := reloadStub(t)
+	stdout, _, err := run(t, "config", "reload", "--server", server)
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "reloaded /etc/bouine/config.yaml")
+	assert.Contains(t, stdout, "applied   cluster.ban_ttl: 24h0m0s -> 1h30m0s")
+	assert.Contains(t, stdout, "unchanged url_ring_sample_rate")
+	assert.Contains(t, stdout, "NEEDS RESTART (restart required to activate):")
+	assert.Contains(t, stdout, "listen.http: 127.0.0.1:1 -> 127.0.0.1:2")
+	assert.Empty(t, body()["path"], "no --file means an empty path (daemon default)")
+}
+
+func TestConfigReloadFileFlag(t *testing.T) {
+	server, body := reloadStub(t)
+	_, _, err := run(t, "config", "reload", "--server", server, "--file", "/tmp/new.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/new.yaml", body()["path"])
+}
+
+func TestConfigReloadJSONOutput(t *testing.T) {
+	server, _ := reloadStub(t)
+	stdout, _, err := run(t, "config", "reload", "--server", server, "--format", "json")
+	require.NoError(t, err)
+	var res bouineapi.ConfigReloadResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &res))
+	assert.Equal(t, "/etc/bouine/config.yaml", res.Path)
+	require.Len(t, res.Applied, 1)
+	require.Len(t, res.NeedsRestart, 1)
+}
+
+func TestConfigReloadDisabledSurfacesServerMessage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"config reload is disabled: set experimental.config_reload to enable it"}`))
+	}))
+	t.Cleanup(ts.Close)
+	_, _, err := run(t, "config", "reload", "--server", strings.TrimPrefix(ts.URL, "http://"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "experimental.config_reload")
+}

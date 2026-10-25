@@ -15,6 +15,10 @@ import (
 // applying (bouine config set --dry-run).
 const flagDryRun = "dry-run"
 
+// flagFile points a subcommand at a specific config file
+// (bouine config reload --file).
+const flagFile = "file"
+
 func newConfigCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
@@ -30,6 +34,7 @@ func newConfigCmd() *cobra.Command {
 	c.AddCommand(newConfigGetCmd())
 	c.AddCommand(newConfigSetCmd())
 	c.AddCommand(newConfigDiffCmd())
+	c.AddCommand(newConfigReloadCmd())
 	return c
 }
 
@@ -188,6 +193,56 @@ func newConfigDiffCmd() *cobra.Command {
 			return runConfigRuntimeDiff(cmd)
 		},
 	}
+}
+
+func newConfigReloadCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "reload [--file <path>]",
+		Short: "Apply a config file to the running daemon without a restart",
+		Long: "reload re-parses and validates a config file, applies its hot-config " +
+			"knob values to the running daemon, and reports everything that needs a " +
+			"restart. A parse or validation failure changes nothing. Requires the " +
+			"daemon to run with experimental.config_reload. Rollback is operational: " +
+			"reload the previous (git-tracked) file.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			file, err := cmd.Flags().GetString(flagFile)
+			if err != nil {
+				return err
+			}
+			res, err := adminClient(cmd).ConfigReload(cmd.Context(), file)
+			if err != nil {
+				return err
+			}
+			return printResult(cmd, renderConfigReload(res), res)
+		},
+	}
+	c.Flags().String(flagFile, "", "config file to reload (default: the daemon's startup file)")
+	return c
+}
+
+// renderConfigReload prints the three-section report; needs_restart
+// is the section the operator must never miss, so it gets its own
+// shouting header.
+func renderConfigReload(res *bouineapi.ConfigReloadResult) string {
+	if len(res.Applied) == 0 && len(res.Unchanged) == 0 && len(res.NeedsRestart) == 0 {
+		return fmt.Sprintf("reloaded %s: no differences", res.Path)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "reloaded %s", res.Path)
+	for _, ch := range res.Applied {
+		fmt.Fprintf(&b, "\napplied   %s: %s -> %s", ch.Key, ch.Old, ch.New)
+	}
+	for _, key := range res.Unchanged {
+		fmt.Fprintf(&b, "\nunchanged %s", key)
+	}
+	if len(res.NeedsRestart) > 0 {
+		b.WriteString("\nNEEDS RESTART (restart required to activate):")
+		for _, item := range res.NeedsRestart {
+			fmt.Fprintf(&b, "\n  %s", item)
+		}
+	}
+	return b.String()
 }
 
 func runConfigRuntimeDiff(cmd *cobra.Command) error {

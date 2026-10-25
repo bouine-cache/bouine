@@ -230,6 +230,19 @@ On a strong-mode cluster an applied set is broadcast to every live
 peer (the CLI reports the acknowledged count), so runtime overrides
 stay identical across the fleet.
 
+**Reloading a whole file (experimental).** With
+`experimental.config_reload: true`, `bouine config reload [--file]`
+applies a config file's hot-appliable changes at once and reports
+what needs a restart — parse failures change nothing:
+
+```bash
+bouine config reload
+# reloaded /etc/bouine/config.yaml
+# applied   cluster.ban_ttl: 24h0m0s -> 45m0s
+# NEEDS RESTART (restart required to activate):
+#   listen.http: 127.0.0.1:9000 -> 127.0.0.1:9001
+```
+
 **Targeting a pod in Kubernetes.** The admin port is deliberately never
 exposed by a LoadBalancer (the admin Service is ClusterIP, and the image
 is distroless so there is no shell to `kubectl exec` into). Use

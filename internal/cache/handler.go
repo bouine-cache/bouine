@@ -3337,16 +3337,14 @@ func (h *Handler) writeAndMaybeStore(
 		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
-		// Enforce MaxVariants cap: skip storage if this primary key already
-		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
-		// variants are a DoS vector.
+		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
 		if storeKey != primaryKey {
+			// Enforce MaxVariants cap: skip storage if this primary key already
+			// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
+			// variants are a DoS vector.
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
 				return
 			}
-		}
-		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
-		if storeKey != primaryKey {
 			// ADR-0065: the variant carries its primary key so a node
 			// storing it via the write-to-owner RPC can register it in
 			// the primary's variant set (cluster-wide purge

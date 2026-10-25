@@ -98,7 +98,7 @@ func (h *Handler) serveResolverPeerVariant(ctx *fasthttp.RequestCtx, primaryKey 
 	if assertion == "" {
 		return false
 	}
-	variant, _ := h.getVariantForResolution(ctx, vk, assertion)
+	variant := h.getVariantForResolution(ctx, vk, assertion)
 	if variant == nil {
 		return false
 	}
@@ -110,15 +110,15 @@ func (h *Handler) serveResolverPeerVariant(ctx *fasthttp.RequestCtx, primaryKey 
 	return h.servePeerHit(ctx, vk, variant, now, ri)
 }
 
-func (h *Handler) getVariantForResolution(ctx context.Context, vk api.Key, assertion string) (*api.Object, bool) {
+func (h *Handler) getVariantForResolution(ctx context.Context, vk api.Key, assertion string) *api.Object {
 	owner, isLocal := h.ownerFn(vk)
 	if isLocal {
 		variant, _, _ := h.store.Get(ctx, vk)
-		return variant, true
+		return variant
 	}
 	variant, err := h.peerFetch(ctx, owner, vk, assertion)
 	if err != nil {
-		return nil, false
+		return nil
 	}
-	return variant, false
+	return variant
 }

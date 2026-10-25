@@ -83,6 +83,17 @@ Unchanged, bit-for-bit:
 - **A follower whose variant is absent fetches its own** (the ADR-0057
   incident shape now yields correct per-variant content instead of
   cross-variant bytes).
+- **Error verdicts are sequential-equivalent too**: a fill follower
+  whose leader failed with a transport error re-enters and fetches its
+  own — a transient leader failure is not the follower's response, and
+  nothing usable was stored for it (pinned by
+  `TestFetchAndStore_FillFollowerTransportErrorFetchesOwn`). The one
+  exception is `ErrFetchShed`: the shed proves the fetch semaphore is
+  saturated, and the follower's own acquire would wait on the same
+  saturated semaphore, so the follower is answered with the shed 503 —
+  the verdict a sequential request receives under the same load — plus
+  the bounded background refill (pinned by
+  `TestFetchAndStore_FillFollowerShedServes503`).
 - **Residual exposure equals the pre-existing sequential exposure**:
   an origin that varies on a selector header without declaring `Vary`
   already serves wrong content to sequential requests through the

@@ -24,6 +24,8 @@ code change that introduces a new failure mode.
 | [`57-ua-bypass.md`](57-ua-bypass.md) | User-Agent cache bypass: verified-bot / crawler freshness rules in layered deployments (ADR-0055). |
 | [`58-downstream-freshness-sync.md`](58-downstream-freshness-sync.md) | Capping downstream CDN (Cloudflare) freshness via synthesized CDN-Cache-Control (ADR-0063). |
 | [`61-pgo-profile-refresh.md`](61-pgo-profile-refresh.md) | PGO profile refresh and custom-profile builds. |
+| [`62-config-reload.md`](62-config-reload.md) | Config reload (experimental): apply a whole file's hot-appliable changes to a running daemon. |
+| [`63-keys-introspection.md`](63-keys-introspection.md) | Cache-key introspection: keys find/top/recent without storage enumeration (#816). |
 | [`gc-tuning-fasthttp.md`](gc-tuning-fasthttp.md) | GC tuning under fasthttp. |
 | [`native-histogram.md`](native-histogram.md) | Native-histogram latency metrics. |
 | [`static-files.md`](static-files.md) | Static file serving. |

@@ -529,18 +529,18 @@ func TestURLRing_SampleRateConcurrentSetAndRecord(t *testing.T) {
 		close(stop)
 	}()
 	wg.Wait()
-	assert.LessOrEqual(t, len(r.URLStats()), urlRingCap)
+	assert.LessOrEqual(t, len(r.URLStats()), URLRingCap)
 }
 
 func TestURLRing_CapReached(t *testing.T) {
 	t.Parallel()
 	r := &URLRing{}
 	// Fill to cap and beyond — should not panic or grow unbounded.
-	for i := range urlRingCap + 100 {
+	for i := range URLRingCap + 100 {
 		r.RecordURL("/path/"+strconv.Itoa(i), "test", "HIT")
 	}
 	stats := r.URLStats()
-	assert.LessOrEqual(t, len(stats), urlRingCap)
+	assert.LessOrEqual(t, len(stats), URLRingCap)
 }
 
 func TestRings_Summary(t *testing.T) {
@@ -580,4 +580,107 @@ func TestRings_Start(t *testing.T) {
 		cancel()
 	}()
 	ri.Start(ctx, "") // no snapshot path
+}
+
+func TestURLRing_TopURLs(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	var now time.Time
+	r.now = func() time.Time { return now }
+	for range 5 {
+		r.RecordURL("/a/one", "api", "MISS")
+	}
+	r.RecordURL("/a/one", "api", "STALE")
+	r.RecordURL("/b/two", "api", "BYPASS")
+	r.RecordURL("/b/two", "api", "REVALIDATED")
+	r.RecordURL("/b/two", "api", "MISS")
+	r.RecordURL("/c/three", "api", "MISS")
+
+	top := r.TopURLs(2, "")
+	require.Len(t, top, 2)
+	assert.Equal(t, "/a/one", top[0].Prefix)
+	assert.Equal(t, int64(6), top[0].Requests)
+	assert.Equal(t, int64(5), top[0].Misses)
+	assert.Equal(t, int64(1), top[0].Stale)
+	assert.Equal(t, int64(0), top[0].Revalidated)
+	assert.Equal(t, int64(0), top[0].Bypass)
+	assert.Equal(t, "api", top[0].Route)
+	assert.Equal(t, "/b/two", top[1].Prefix)
+	assert.Equal(t, int64(1), top[1].Revalidated)
+	assert.Equal(t, int64(1), top[1].Bypass)
+
+	// A class filter keeps only prefixes with traffic of that class
+	// and sorts by that class's count.
+	missTop := r.TopURLs(10, "miss")
+	require.Len(t, missTop, 3)
+	assert.Equal(t, "/a/one", missTop[0].Prefix)
+
+	bypassTop := r.TopURLs(10, "bypass")
+	require.Len(t, bypassTop, 1)
+	assert.Equal(t, "/b/two", bypassTop[0].Prefix)
+
+	// Unknown classes match nothing — the admin layer validates
+	// before calling, this pins the defensive behavior.
+	assert.Empty(t, r.TopURLs(10, "hit"))
+
+	// Tie-break determinism: equal class counts order by total
+	// requests, then prefix ascending.
+	tie := &URLRing{}
+	tie.now = func() time.Time { return now }
+	tie.RecordURL("/x/same", "api", "MISS")
+	tie.RecordURL("/y/same", "api", "MISS")
+	tied := tie.TopURLs(10, "")
+	require.Len(t, tied, 2)
+	assert.Equal(t, "/x/same", tied[0].Prefix)
+	assert.Equal(t, "/y/same", tied[1].Prefix)
+}
+
+func TestURLRing_RecentURLs(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base
+	r.now = func() time.Time { return now }
+	for range 10 {
+		r.RecordURL("/busy/old", "api", "MISS")
+	}
+	now = base.Add(time.Hour)
+	r.RecordURL("/mid/recent", "api", "MISS")
+	now = base.Add(2 * time.Hour)
+	r.RecordURL("/new/latest", "api", "MISS")
+
+	recent := r.RecentURLs(3, "")
+	require.Len(t, recent, 3)
+	// Recency wins over volume: /busy/old has 10 requests but the
+	// oldest timestamp.
+	assert.Equal(t, "/new/latest", recent[0].Prefix)
+	assert.Equal(t, "/mid/recent", recent[1].Prefix)
+	assert.Equal(t, "/busy/old", recent[2].Prefix)
+	// time.Unix reconstructs in the process zone, so compare instants.
+	assert.True(t, recent[0].LastSeen.Equal(base.Add(2*time.Hour)))
+
+	// Same timestamp: more requests first, then prefix ascending.
+	tie := &URLRing{}
+	tie.now = func() time.Time { return now }
+	tie.RecordURL("/a/tie", "api", "MISS")
+	tie.RecordURL("/a/tie", "api", "MISS")
+	tie.RecordURL("/b/tie", "api", "MISS")
+	tied := tie.RecentURLs(10, "")
+	require.Len(t, tied, 2)
+	assert.Equal(t, "/a/tie", tied[0].Prefix)
+	assert.Equal(t, "/b/tie", tied[1].Prefix)
+
+	// The class filter applies to recent too.
+	filtered := r.RecentURLs(10, "miss")
+	require.Len(t, filtered, 3)
+}
+
+func TestURLRing_TopURLs_EmptyPrefixRecorded(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	r.RecordURL("/", "root", "MISS")
+	top := r.TopURLs(10, "")
+	require.Len(t, top, 1)
+	assert.Equal(t, "/", top[0].Prefix)
+	assert.Equal(t, int64(1), top[0].Requests)
 }

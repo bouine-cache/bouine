@@ -161,6 +161,36 @@ the curated, human-readable summary.
   allocations on the hit path (`BenchmarkGate_FastPath_Hit_SyncCDC`,
   budget 0). Runbook 58; dashboard route badges surface the mode.
 
+- **`bouine keys find/top/recent` and `GET /v1/keys/*` (#816).** The
+  cache-key query surface: query-oriented verbs, never enumeration.
+  `find` computes the primary key for a URL exactly the way the data
+  plane does (the matched route's key policy via the same
+  first-match-wins router, falling back to the default host-ful
+  policy) and reports the object's local state through a new
+  side-effect-free storage probe (`Store.Probe`): tier, size, TTL,
+  hit counters, the stored Vary header plus the tracked variant
+  fan-out, protection flags, and lazy-ban status — with no hit
+  accounting, no SIEVE visit, no warm promotion, and no ban eviction,
+  so the observation cannot perturb what it observes. A URL alone
+  cannot select a Vary variant (that needs request headers), so find
+  reports the resolver's state plus the variant count. In cluster
+  mode `--peer` asks the ring owner over a new point-to-point peer
+  channel (`GET /v1/peer/keys/find`, token-exempt like every peer
+  route, strict JSON framing: unknown fields and trailing data are
+  rejected); a peer failure surfaces as `owner_error` and never
+  masks the local answer. `top`/`recent` serve the URL ring's
+  sampled non-HIT traffic with a per-cache-result breakdown
+  (`--class miss|stale|revalidated|bypass`) and answer what
+  operators actually want from a listing — what the node is missing
+  on — not a storage inventory; the ring keeps first-three-segment
+  prefixes, caps at 512, and records no HITs by design (the data
+  plane skips them before recording), so `hit` is not a filterable
+  class. No storage enumeration ships in v1 (`--scan` is deferred by
+  the issue itself): URL→key is deterministic, key→URL is impossible
+  (the XXH128 key is an irreversible hash), which is why bouine, like
+  Varnish, has no object listing. Runbook 63; the bouineapi SDK
+  gained `Client.KeysFind`, `Client.KeysTop`, and `Client.KeysRecent`.
+
 ### Documentation
 
 - **Renumbered three colliding ADRs so every ADR file has a unique

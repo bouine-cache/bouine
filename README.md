@@ -182,7 +182,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 ### Administering a cache with the CLI
 
 Every admin-plane subcommand (`status`, `purge`, `ban`, `refresh`,
-`cluster peers`, `config get/set/diff`) accepts the global flags
+`cluster peers`, `config get/set/diff`, `keys find/top/recent`)
+accepts the global flags
 `--server`, `--token`, and
 `--format text|json`. Values resolve **flag > environment > default**, so
 scripts usually export the connection once:
@@ -242,6 +243,28 @@ bouine config reload
 # NEEDS RESTART (restart required to activate):
 #   listen.http: 127.0.0.1:9000 -> 127.0.0.1:9001
 ```
+
+**Cache-key queries.** `bouine keys` answers cache questions without
+storage enumeration: `find` computes the key for a URL exactly the
+way the data plane does and reports the object's state on this node,
+and `top`/`recent` replay the URL ring's sampled non-HIT traffic —
+what the node is missing on lately:
+
+```bash
+bouine keys find http://example.com/pages/p?x=1    # key + tier/size/TTL/ban state
+bouine keys find http://example.com/pages/p --peer # cluster: also ask the ring owner
+bouine keys top --limit 20                          # most-requested prefixes, result breakdown
+bouine keys top --class miss                        # keep only prefixes with misses
+bouine keys recent                                  # latest-active prefixes
+```
+
+The listing is a request-traffic view, not a storage inventory: the
+ring samples non-HIT requests (`url_ring_sample_rate`), keeps the
+first three path segments per prefix, and holds at most 512
+prefixes. URL→key is deterministic; key→URL is impossible (the hash
+is irreversible), which is why there is no object listing. `find`
+and the listings are node-local — target named pods for per-node
+answers.
 
 **Targeting a pod in Kubernetes.** The admin port is deliberately never
 exposed by a LoadBalancer (the admin Service is ClusterIP, and the image

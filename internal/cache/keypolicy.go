@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -66,6 +67,38 @@ type KeyPolicy struct {
 // merely adds one constant field to the key, the same as any
 // never-present header).
 const cookiePresenceField = "x-bouine-cookie-presence"
+
+// QuerySummary returns a short description of the query-parameter
+// handling for admin key-derivation reporting (bouine keys find,
+// issue #816): "all" when every parameter participates in the key
+// (the default), otherwise the active filters joined by commas. A
+// nil policy (no route matched — the default policy) reports "all".
+// Admin path only; never called on the hot path.
+func (p *KeyPolicy) QuerySummary() string {
+	if p == nil {
+		return "all"
+	}
+	var parts []string
+	if n := len(p.keepParams); n > 0 {
+		parts = append(parts, fmt.Sprintf("allow:%d", n))
+	}
+	if n := len(p.stripParams); n > 0 {
+		parts = append(parts, fmt.Sprintf("strip:%d", n))
+	}
+	if n := len(p.stripPrefixes); n > 0 {
+		parts = append(parts, fmt.Sprintf("strip-prefix:%d", n))
+	}
+	if p.stripEmpty {
+		parts = append(parts, "strip-empty")
+	}
+	if p.dedup {
+		parts = append(parts, "dedup")
+	}
+	if len(parts) == 0 {
+		return "all"
+	}
+	return strings.Join(parts, ",")
+}
 
 // CookiePresenceVary returns the synthetic Vary field value that
 // carries the route's cookie-presence bits through effectiveVary: the

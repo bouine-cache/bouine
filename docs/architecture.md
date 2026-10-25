@@ -648,6 +648,9 @@ bouine config diff [<a.yaml> <b.yaml>]
 bouine config reload [--file <path>]   # experimental (config_reload)
 bouine config validate <file>
 bouine config schema
+bouine keys find <url>            # [--peer] key + local state, no storage scan
+bouine keys top [--limit N]        # [--class miss|stale|revalidated|bypass]
+bouine keys recent [--limit N]     # latest-active URL prefixes
 bouine bench [--profile canonical]
 bouine cachecheck <url>
 bouine version
@@ -687,6 +690,33 @@ effective configs. Unknown and cold-only keys are rejected with
 precise errors; every attempt is audited (slog +
 `bouine_config_hot_sets_total`) and rate-limited like every admin
 write.
+
+`bouine keys` is the cache-key query surface behind
+`GET /v1/keys/find` and `GET /v1/keys/top|recent` (#816):
+query-oriented verbs, never enumeration. `find` computes the
+primary key for a URL exactly the way the data plane does — the
+matched route's key policy via the same first-match-wins router,
+falling back to the default host-ful policy — then reports the
+object's local state through a side-effect-free storage probe
+(`Store.Probe`): tier, size, TTL, hit counters, variant fan-out
+(`Handler.VariantCount`), protection flags, and lazy-ban status,
+with no hit accounting, no SIEVE visit, and no warm promotion. A URL
+alone cannot select a Vary variant (that needs request headers), so
+find reports the resolver's state plus the tracked variant count.
+`--peer` in cluster mode asks the ring owner over a point-to-point
+peer channel (`GET /v1/peer/keys/find`, token-exempt like every peer
+route); the answer is advisory — a peer failure surfaces as
+`owner_error` beside the local state, never masking it. `top` and
+`recent` serve the URL ring's sampled non-HIT traffic
+(`url_ring_sample_rate`) with a per-cache-result breakdown
+(`?class=miss|stale|revalidated|bypass`): a request-traffic view of
+what the node is missing on, not a storage inventory — the ring
+keeps first-three-segment prefixes, caps at 512, and records no HITs
+by design, so `hit` is not a filterable class. The direction is the
+contract: URL→key is deterministic because the key policy is config;
+key→URL is impossible because the XXH128 key is an irreversible
+hash — which is why bouine, like Varnish, has no object listing, and
+why v1 ships without the deferred `--scan`.
 
 All admin-plane subcommands honor the global `--server`, `--token`, and
 `--format text|json` flags. Values resolve flag > environment

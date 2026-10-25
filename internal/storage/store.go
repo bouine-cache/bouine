@@ -27,6 +27,14 @@ type Store interface {
 	// effects. Unlike Get, it does not update access statistics or
 	// eviction state.
 	Has(key api.Key) bool
+	// Probe reports the storage state of key — tier, size, TTL,
+	// variant identity, protection and ban status — without side
+	// effects: no hit accounting, no SIEVE visit, no promotion, no
+	// lazy ban eviction. ok=false when the key is in no tier. Has
+	// remains the zero-cost boolean form for the data plane; Probe is
+	// the metadata-rich form for the admin keys-query surface
+	// (bouine keys find, issue #816).
+	Probe(key api.Key) (api.KeyState, bool)
 }
 
 // KeyLister returns all cache keys in the store. Implemented by HotStore

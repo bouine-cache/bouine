@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -749,8 +750,11 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 // ── URL ring ──────────────────────────────────────────────────────────
 
 const (
-	urlRingCap    = 512 // max distinct URL prefixes tracked
-	urlSuffixSegs = 3   // number of path segments kept as the key
+	// URLRingCap is the max distinct URL prefixes tracked. Exported so
+	// the admin keys listing (GET /v1/keys/top, issue #816) can bound
+	// its limit parameter by the same ceiling.
+	URLRingCap    = 512
+	urlSuffixSegs = 3 // number of path segments kept as the key
 )
 
 // URLStat is the per-URL-prefix cache result summary.
@@ -765,10 +769,17 @@ type URLStat struct {
 
 // urlCounters holds live atomic accumulators for one URL prefix.
 type urlCounters struct {
-	route    string
-	requests atomic.Int64
-	hits     atomic.Int64
-	misses   atomic.Int64
+	route       string
+	requests    atomic.Int64
+	hits        atomic.Int64
+	misses      atomic.Int64
+	stale       atomic.Int64
+	revalidated atomic.Int64
+	bypass      atomic.Int64
+	// lastSeen is the unix-nano timestamp of the most recent record;
+	// 0 until the prefix's first non-HIT request. Backs the recent
+	// listing (bouine keys recent, issue #816).
+	lastSeen atomic.Int64
 }
 
 // URLRing tracks per-URL-prefix hit/miss counters using a fixed-capacity
@@ -783,6 +794,11 @@ type URLRing struct {
 	// data plane; the RecordURL read is one atomic load, allocation-free.
 	sampleRate    atomic.Int64
 	sampleCounter atomic.Int64
+	// now supplies the timestamp stamped into lastSeen. Injectable so
+	// tests get deterministic recency ordering; nil means time.Now.
+	// Read once per recorded (sampled, in-cap) request — never on the
+	// sampling fast path.
+	now func() time.Time
 }
 
 // urlKey returns a stable cache key from a URL path: the first
@@ -838,7 +854,7 @@ func (r *URLRing) RecordURL(path, route, xCache string) {
 	key := urlKey(path)
 	v, ok := r.entries.Load(key)
 	if !ok {
-		if r.size.Load() >= urlRingCap {
+		if r.size.Load() >= URLRingCap {
 			return // cap reached, silently drop
 		}
 		nc := &urlCounters{route: route}
@@ -855,6 +871,17 @@ func (r *URLRing) RecordURL(path, route, xCache string) {
 		c.hits.Add(1)
 	case "MISS":
 		c.misses.Add(1)
+	case "STALE":
+		c.stale.Add(1)
+	case "REVALIDATED":
+		c.revalidated.Add(1)
+	case "BYPASS":
+		c.bypass.Add(1)
+	}
+	if r.now != nil {
+		c.lastSeen.Store(r.now().UnixNano())
+	} else {
+		c.lastSeen.Store(time.Now().UnixNano())
 	}
 }
 
@@ -882,4 +909,123 @@ func (r *URLRing) URLStats() []URLStat {
 		return true
 	})
 	return out
+}
+
+// URLTopStat is one URL prefix in the keys top/recent listing
+// (bouine keys top / bouine keys recent, issue #816): the recorded
+// request traffic with its cache-result breakdown. The ring records
+// non-HIT traffic by design (the data-plane middleware skips HITs
+// before calling RecordURL), so this is a request-traffic view of
+// what the node is missing on, not a storage inventory.
+//
+//nolint:govet // fieldalignment: field order mirrors the wire JSON order
+type URLTopStat struct {
+	Prefix      string
+	Route       string
+	Requests    int64
+	Misses      int64
+	Stale       int64
+	Revalidated int64
+	Bypass      int64
+	// LastSeen is the time of the prefix's most recent recorded
+	// request (zero before the first one).
+	LastSeen time.Time
+}
+
+// urlClassCount returns st's counter for a cache-result class.
+// Unknown classes match nothing, so a listing filtered by them is
+// empty; the admin layer validates the class before calling.
+func urlClassCount(st URLTopStat, class string) int64 {
+	switch class {
+	case "miss":
+		return st.Misses
+	case "stale":
+		return st.Stale
+	case "revalidated":
+		return st.Revalidated
+	case "bypass":
+		return st.Bypass
+	}
+	return 0
+}
+
+// urlTopSnapshot collects the recorded prefixes, keeping only those
+// with traffic of the requested cache-result class (empty class keeps
+// everything).
+func (r *URLRing) urlTopSnapshot(class string) []URLTopStat {
+	out := make([]URLTopStat, 0, 64)
+	r.entries.Range(func(k, v any) bool {
+		c := v.(*urlCounters)
+		reqs := c.requests.Load()
+		if reqs == 0 {
+			return true
+		}
+		st := URLTopStat{
+			Prefix:      k.(string),
+			Route:       c.route,
+			Requests:    reqs,
+			Misses:      c.misses.Load(),
+			Stale:       c.stale.Load(),
+			Revalidated: c.revalidated.Load(),
+			Bypass:      c.bypass.Load(),
+			LastSeen:    time.Unix(0, c.lastSeen.Load()),
+		}
+		if class != "" && urlClassCount(st, class) == 0 {
+			return true
+		}
+		out = append(out, st)
+		return true
+	})
+	return out
+}
+
+// TopURLs returns up to limit URL prefixes with the most recorded
+// requests, optionally filtered to prefixes with traffic of one
+// cache-result class ("miss", "stale", "revalidated", "bypass";
+// empty keeps all). With a class filter the sort key is that class's
+// count. A limit <= 0 returns every recorded prefix. Ties break by
+// total requests, then prefix ascending, so the order is
+// deterministic.
+func (r *URLRing) TopURLs(limit int, class string) []URLTopStat {
+	entries := r.urlTopSnapshot(class)
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		ka, kb := a.Requests, b.Requests
+		if class != "" {
+			ka, kb = urlClassCount(a, class), urlClassCount(b, class)
+		}
+		if ka != kb {
+			return ka > kb
+		}
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.Prefix < b.Prefix
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
+}
+
+// RecentURLs returns up to limit URL prefixes ordered by the time of
+// their most recent recorded request (newest first), with the same
+// cache-result class filter and limit semantics as TopURLs. Ties
+// break by total requests, then prefix ascending.
+func (r *URLRing) RecentURLs(limit int, class string) []URLTopStat {
+	entries := r.urlTopSnapshot(class)
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if !a.LastSeen.Equal(b.LastSeen) {
+			return a.LastSeen.After(b.LastSeen)
+		}
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.Prefix < b.Prefix
+	})
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
 }

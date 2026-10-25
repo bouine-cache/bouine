@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -676,23 +675,8 @@ func sanitizedConfig(cfg config.Config) config.Config {
 // false, strip_query_params, ...) would invalidate and inspect keys
 // that were never stored.
 func policyForURL(rs *runState, rawURL string) *cache.KeyPolicy {
-	if rs == nil || rs.router == nil {
-		return nil
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
-		return nil
-	}
-	label := rs.router.MatchByHostPath(u.Host, u.Path)
-	if label == "" {
-		return nil
-	}
-	for _, h := range rs.handlers {
-		if h.RouteName() == label {
-			return h.KeyPolicy()
-		}
-	}
-	return nil
+	_, _, policy := routeForURL(rs, rawURL)
+	return policy
 }
 
 // cacheCheck inspects the cache decision for a URL. It builds the
@@ -896,6 +880,8 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
 		},
+		KeysFindFn:         e.keysFindFn(rs),
+		KeysTopFn:          e.keysTopFn(rs),
 		ReadyFn:            rs.seq.IsReady,
 		ConditionsFn:       conditionsFn,
 		DrainFn:            drainFn,
@@ -945,6 +931,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
 		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
 		PeerHotSetHandler:       e.peerHotSetApply(rs),
+		PeerKeysFindHandler:     cluster.NewPeerKeysFindHandler(rs.store.Probe),
 		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
 		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),

@@ -78,6 +78,22 @@ func (k Key) Hash64() uint64 { return binary.BigEndian.Uint64(k[:8]) }
 // Hex returns the 32-char lowercase hex of all 16 key bytes.
 func (k Key) Hex() string { return hex.EncodeToString(k[:]) }
 
+// ParseKeyHex decodes the 32-char lowercase hex form produced by
+// Key.Hex back into a Key. Accepts uppercase hex characters too;
+// rejects any other length. The keys-query surfaces (GET
+// /v1/keys/find, GET /v1/peer/keys/find, issue #816) round-trip
+// keys through this form.
+func ParseKeyHex(s string) (Key, error) {
+	if len(s) != 2*len(Key{}) {
+		return Key{}, fmt.Errorf("api.Key: want %d hex chars, got %d", 2*len(Key{}), len(s))
+	}
+	var k Key
+	if _, err := hex.Decode(k[:], []byte(s)); err != nil {
+		return Key{}, fmt.Errorf("api.Key: invalid key hex: %w", err)
+	}
+	return k, nil
+}
+
 // String returns the 32-char lowercase hex, satisfying fmt.Stringer.
 func (k Key) String() string { return k.Hex() }
 

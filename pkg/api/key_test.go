@@ -110,3 +110,23 @@ func TestKeyIsZero_BothHalves(t *testing.T) {
 	binary.BigEndian.PutUint64(k[8:], 1)
 	require.False(t, k.IsZero())
 }
+
+func TestParseKeyHex_RoundTrip(t *testing.T) {
+	t.Parallel()
+	key := NewKeyFromBytes([16]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+
+	got, err := ParseKeyHex(key.Hex())
+	require.NoError(t, err)
+	require.Equal(t, key, got)
+
+	// Uppercase hex decodes to the same key.
+	got, err = ParseKeyHex("00112233445566778899AABBCCDDEEFF")
+	require.NoError(t, err)
+	require.Equal(t, key, got)
+
+	// Wrong length and non-hex input are rejected.
+	_, err = ParseKeyHex("0011")
+	require.Error(t, err)
+	_, err = ParseKeyHex("zz112233445566778899aabbccddeeff")
+	require.Error(t, err)
+}

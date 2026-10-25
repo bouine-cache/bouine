@@ -13,6 +13,7 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -570,5 +571,94 @@ func TestFetchAndStore_FillFollowerHITReportsHitFromStore(t *testing.T) {
 	for _, r := range results {
 		require.Equal(t, 200, r.status)
 		require.Equal(t, "ok", r.body)
+	}
+}
+
+// TestFetchAndStore_FillFollowerReentryReasksOwner pins the cluster half
+// of the store-mediated serve: the follower re-enters as a
+// freshly-arrived request, which on a non-owner node means re-asking
+// the owner. The H1 fast path's pre-fill owner hints
+// (api.OwnerMissContextKey and siblings) are stale once the leader's
+// fill has populated the owner — a sequential request arriving after
+// the fill peer-fetches and HITs, and the re-entering follower must do
+// the same instead of skipping the peer lookup and fetching its own
+// origin copy.
+func TestFetchAndStore_FillFollowerReentryReasksOwner(t *testing.T) {
+	t.Parallel()
+
+	var fetches atomic.Int64
+	release := make(chan struct{})
+	origin := func(ctx *fasthttp.RequestCtx) {
+		if fetches.Add(1) == 1 {
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("from-origin")
+	}
+	// The owner's post-fill state: what a peer-fetch returns once the
+	// leader's fill has been forwarded (peerPut is not wired here; the
+	// mock supplies the owner's answer directly).
+	ownerObj := &api.Object{
+		StatusCode: 200,
+		Body:       []byte("from-owner"),
+		Header:     headerMap(header.ContentType, "text/plain"),
+		StoredAt:   time.Now(),
+		TTL:        time.Minute,
+	}
+	var peerFetchCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin,
+		FastClient: &testFastClient{handler: origin},
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // this node is not the owner
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return ownerObj, nil
+		},
+	})
+
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		ctx := testCtx("GET", "http://example.com/reask")
+		// The fast path already asked the owner and got a definitive
+		// miss before this request reached the slow path.
+		ctx.SetUserValue(api.OwnerMissContextKey, true)
+		serveRequest(h, ctx)
+	}()
+	for fetches.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	followerDone := make(chan *fasthttp.RequestCtx, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/reask")
+		// The follower's own fast-path pass also got an owner miss —
+		// before the leader's fill settled.
+		ctx.SetUserValue(api.OwnerMissContextKey, true)
+		serveRequest(h, ctx)
+		followerDone <- ctx
+	}()
+	time.Sleep(50 * time.Millisecond) // let the follower park on the fill flight
+	close(release)
+	<-leaderDone
+	require.Equal(t, int32(0), peerFetchCalls.Load(),
+		"the hinted leader and the hinted first pass skip the owner RPC as before")
+
+	select {
+	case follower := <-followerDone:
+		require.Equal(t, int32(1), peerFetchCalls.Load(),
+			"the re-entry must re-ask the owner: the pre-fill miss hint is stale once the fill has populated the owner")
+		require.Equal(t, int64(1), fetches.Load(),
+			"the follower serves the fill's object from the owner instead of fetching its own origin copy")
+		require.Equal(t, "from-owner", respBody(follower))
+	case <-time.After(5 * time.Second):
+		t.Fatal("fill follower did not terminate")
 	}
 }

@@ -10,6 +10,17 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- **Default `cluster.peer_fetch_concurrency` raised from 16 to 64.**
+  The semaphore bounds concurrent peer-fetch RPCs per node; too small a
+  pool queues peer hits behind in-flight fetches and adds tail latency
+  on strong-mode clusters. Each in-flight fetch holds bounded decode
+  memory (up to the peer-fetch body cap), so the larger default trades
+  a bounded worst case for less queueing; the pipeline clients remain
+  the binding constraint. Explicit `peer_fetch_concurrency` values are
+  unaffected; the upper bound stays 128.
+
 ### Added
 
 - **`bouine config get/set/diff` and `GET|POST /v1/config/hot`

@@ -42,6 +42,32 @@ re-ejection after window restores means the origin is unhealthy, and the
 oscillation doubles origin traffic on the failing target (each restore
 sends one more request before the next ejection).
 
+### Tuning ejection live (hot config)
+
+Both passive-ejection knobs are hot-config, scoped per pool
+(`bouine config get/set pool:<name>.health.passive.…`):
+
+- `pool:<name>.health.passive.consecutive_5xx` — the ejection trigger.
+  Fully hot: the fetch path reads the atomic threshold per request.
+  Raise it when a flapping origin ejects too eagerly, drop to `0` to
+  disable passive ejection on that pool.
+- `pool:<name>.health.passive.eject_for` — the restore window. Hot-
+  changeable only when the boot config set `eject_for` (the reaper
+  goroutine starts once, at boot); shrinking it restores ejected
+  targets sooner, `0` pauses restores. A pool without a boot-time
+  `eject_for` rejects runtime sets with a precise error — set it in
+  YAML and restart.
+
+```bash
+bouine config set pool:api.health.passive.consecutive_5xx 10 --dry-run
+bouine config set pool:api.health.passive.consecutive_5xx 10
+```
+
+Applied sets fan out to every live peer (strong mode) and report the
+acknowledged count; they stay ephemeral — persist any recovery value
+in YAML before the next deploy (`bouine config diff` shows the
+drift).
+
 ## stayin_alive grace retention (ADR-0051)
 
 While every target of a pool is ejected, the TTL reaper withholds expired

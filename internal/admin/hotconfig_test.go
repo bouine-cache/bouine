@@ -166,3 +166,48 @@ func TestHotConfig_MethodRouting(t *testing.T) {
 	s.Handler()(ctx)
 	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "GET must not be claimed by the write table")
 }
+
+// TestClusterPeers_DisabledExplainsWhy pins the 503 contract: a
+// daemon without a cluster answers /v1/cluster/peers with the
+// operator-facing reason instead of a bare 404; an unconfigured
+// server keeps the historical 404.
+func TestClusterPeers_DisabledExplainsWhy(t *testing.T) {
+	t.Parallel()
+	s := hotConfigServer(t, nil, nil)
+	s.cfg.ClusterDisabledReason = "cluster is disabled: set listen.cluster to enable the gossip cluster"
+
+	ctx := testCtx("GET", "/v1/cluster/peers") // route is auth-exempt
+	s.Handler()(ctx)
+	require.Equal(t, fasthttp.StatusServiceUnavailable, ctx.Response.StatusCode(), "body: %s", ctx.Response.Body())
+	assert.Contains(t, string(ctx.Response.Body()), "set listen.cluster")
+
+	s.cfg.ClusterDisabledReason = ""
+	ctx = testCtx("GET", "/v1/cluster/peers")
+	s.Handler()(ctx)
+	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "no reason configured keeps the bare 404")
+}
+
+// TestPeerHotSetRoute mounts and dispatches like the other peer
+// routes: auth-exempt, one POST, JSON ack; an unmounted route 404s.
+func TestPeerHotSetRoute(t *testing.T) {
+	t.Parallel()
+	var got []byte
+	s := New(Config{
+		Token: "secret",
+		PeerHotSetHandler: func(ctx *fasthttp.RequestCtx) {
+			got = append([]byte(nil), ctx.PostBody()...)
+			writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "set"})
+		},
+	})
+
+	body := []byte(`{"key":"cluster.ban_ttl","value":"90m","issuer":"node-0","seq":1}`)
+	ctx := testCtxWithBody("POST", "/v1/peer/config/hot", body) // no Authorization: peer routes are exempt
+	s.Handler()(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "body: %s", ctx.Response.Body())
+	assert.Equal(t, body, got)
+
+	s2 := hotConfigServer(t, nil, nil)
+	ctx = testCtxWithBody("POST", "/v1/peer/config/hot", body)
+	s2.Handler()(ctx)
+	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "no handler mounted falls through to 404")
+}

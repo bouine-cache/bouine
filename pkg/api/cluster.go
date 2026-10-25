@@ -103,6 +103,29 @@ type RefreshEvent struct {
 	Key Key `json:"key"`
 }
 
+// HotSetEvent is broadcast when a hot-config knob is set at runtime
+// (bouine config set): peers apply the same point mutation so the
+// fleet's runtime overrides stay identical. Unlike invalidation
+// events it rides no gossip — strong-mode HTTP fan-out only — and
+// the receiving peer route applies locally without re-broadcasting,
+// so the fan-out cannot loop.
+//
+// Unstable: the knob surface is still growing (#815).
+type HotSetEvent struct {
+	// Key is the hot-config knob key (e.g. cluster.ban_ttl,
+	// pool:api.health.passive.consecutive_5xx).
+	Key string `json:"key"`
+	// Value is the raw operator-supplied value; the receiving peer
+	// validates and normalizes it through the same knob registry.
+	Value string `json:"value"`
+	// IssuedAt is the wall-clock time of the set.
+	IssuedAt time.Time `json:"issued_at"`
+	// Issuer is the node name that originated the set.
+	Issuer string `json:"issuer"`
+	// Seq is the monotonic sequence number from the issuer.
+	Seq uint64 `json:"seq"`
+}
+
 // PeerFetchRequest is the HTTP request body for a peer cache lookup.
 //
 // Stable.

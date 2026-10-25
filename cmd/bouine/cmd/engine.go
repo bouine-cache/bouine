@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/bouine-cache/bouine/internal/admin"
 	"github.com/bouine-cache/bouine/internal/buildinfo"
 	"github.com/bouine-cache/bouine/internal/cache"
@@ -103,6 +105,11 @@ type runState struct {
 	broadcaster    *cluster.Broadcaster
 	peersFn        func() []api.PeerInfo
 	clusterMetrics *cluster.Metrics
+
+	// hotSets is the hot-config audit counter
+	// (bouine_config_hot_sets_total), created once at startup so the
+	// admin surface and the peer fan-out route share one registration.
+	hotSets *prometheus.CounterVec
 
 	warmMetrics    *warm.Metrics
 	walMetrics     *wal.Metrics
@@ -343,6 +350,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		broadcaster:    broadcaster,
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
+		hotSets:        e.hotSetsMetric(),
 		warmMetrics:    warmMetrics,
 		walMetrics:     walMetrics,
 		startupMetrics: startupMetrics,
@@ -853,12 +861,13 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	dash, dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
 
 	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
-		Addr:       addr,
-		Token:      rs.token,
-		Logger:     e.logger,
-		Metrics:    e.metrics,
-		PeersFn:    rs.peersFn,
-		CFStatusFn: rs.cfProp.Status,
+		Addr:                  addr,
+		Token:                 rs.token,
+		Logger:                e.logger,
+		Metrics:               e.metrics,
+		PeersFn:               rs.peersFn,
+		ClusterDisabledReason: e.clusterDisabledReason(rs),
+		CFStatusFn:            rs.cfProp.Status,
 		CFPropagateFn: func(ctx context.Context, req admin.CFPropagateRequest) error {
 			return rs.cfProp.PropagateExternal(ctx, req)
 		},
@@ -871,7 +880,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		HotSetFn: e.hotSetFn(func() []hotKnob {
 			hotKnobs := e.hotKnobList(rs)
 			return hotKnobs
-		}, e.hotSetsMetric()),
+		}, rs.hotSets, e.hotBroadcastFn(rs)),
 		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
@@ -924,6 +933,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
 		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
 		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
+		PeerHotSetHandler:       e.peerHotSetApply(rs),
 		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
 		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
@@ -1009,6 +1019,34 @@ func (e *engine) peerRefreshBatchApply(rs *runState, ctx context.Context) fastht
 		}
 		return rs.softPurgeKey(ctx, evt.Key)
 	})
+}
+
+// peerHotSetApply returns the POST /v1/peer/config/hot applier: a
+// runtime knob set fanned out by a peer's broadcaster. Applies through
+// the shared registry — same validation, normalization, and audit as
+// the admin surface, with the issuing node attributed in the log —
+// and never re-broadcasts, so the fan-out cannot loop. Unlike the
+// invalidation events there is no gossip delivery, hence no seq
+// dedup: a set is idempotent (last value wins).
+func (e *engine) peerHotSetApply(rs *runState) fasthttp.RequestHandler {
+	return cluster.NewPeerHotSetHandler(func(evt api.HotSetEvent) error {
+		_, err := e.hotApplyLocal(func() []hotKnob { return e.hotKnobList(rs) }, rs.hotSets,
+			admin.HotSetRequest{Key: evt.Key, Value: evt.Value}, evt.Issuer)
+		return err
+	})
+}
+
+// clusterDisabledReason explains a nil peersFn on the admin surface so
+// GET /v1/cluster/peers can answer 503 with the cause instead of a
+// bare 404 (issue #815 follow-up). Empty when the cluster is live.
+func (e *engine) clusterDisabledReason(rs *runState) string {
+	if rs.peersFn != nil {
+		return ""
+	}
+	if e.cfg.Listen.Cluster == "" {
+		return "cluster is disabled: set listen.cluster to enable the gossip cluster"
+	}
+	return "cluster is disabled: cluster init failed (see daemon logs)"
 }
 
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore

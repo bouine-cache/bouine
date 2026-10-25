@@ -42,8 +42,10 @@ type Pool struct {
 
 	// ejectFor bounds how long a passively ejected target stays out.
 	// Zero (default) keeps the historical behavior: the target is out
-	// until an active probe or manual MarkHealthy restores it.
-	ejectFor time.Duration
+	// until an active probe or manual MarkHealthy restores it. Atomic
+	// (hot-config knob pool:<name>.health.passive.eject_for): the
+	// reaper reads it every tick, never under the pool mutex.
+	ejectFor atomic.Int64
 
 	// hedgeTimeout, when positive, fires a duplicate request against the
 	// pool after this delay for idempotent methods; the first response
@@ -58,7 +60,9 @@ type Pool struct {
 	// passive health exactly like the proxy FastHandler path does
 	// (ADR-0051: the ejection signal must be live on cached routes so
 	// grace retention can key on it). Zero disables passive health.
-	consecutive5xx int
+	// Atomic (hot-config knob pool:<name>.health.passive.consecutive_5xx):
+	// read per fetch on the data plane, so it swaps without locks.
+	consecutive5xx atomic.Int64
 }
 
 // Target is a single upstream endpoint.
@@ -368,12 +372,10 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 
 	p := &Pool{
-		Name:           cfg.Name,
-		logger:         cfg.Logger,
-		ejectFor:       cfg.EjectFor,
-		hedgeTimeout:   cfg.HedgeTimeout,
-		preserveHost:   cfg.PreserveHost,
-		consecutive5xx: cfg.Consecutive5xx,
+		Name:         cfg.Name,
+		logger:       cfg.Logger,
+		hedgeTimeout: cfg.HedgeTimeout,
+		preserveHost: cfg.PreserveHost,
 		clientConfig: clientConfig{
 			dialTimeout:           resolveDefault(cfg.DialTimeout, defaultDialTimeout),
 			keepAlive:             resolveDefault(cfg.KeepAlive, defaultKeepAlive),
@@ -383,6 +385,11 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 			dialControl:           cfg.DialControl,
 		},
 	}
+	// Atomically-typed hot knobs cannot be set in the struct literal;
+	// Store them immediately after construction (before the pool is
+	// shared with any goroutine).
+	p.ejectFor.Store(int64(cfg.EjectFor))
+	p.consecutive5xx.Store(int64(cfg.Consecutive5xx))
 	p.client = newOriginClient(p.clientConfig)
 	p.streamClient = newOriginStreamClient(p.clientConfig)
 
@@ -397,6 +404,33 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 
 	return p, nil
 }
+
+// SetConsecutive5xx swaps the passive-ejection threshold at runtime
+// (the hot-config knob pool:<name>.health.passive.consecutive_5xx).
+// Zero disables passive ejection. Atomic: the cache-path fetch reads
+// take effect on the very next request, no locks, no rebuild.
+//
+// Unstable: part of the hot-config knob surface (#815).
+func (p *Pool) SetConsecutive5xx(n int) { p.consecutive5xx.Store(int64(n)) }
+
+// Consecutive5xx returns the live passive-ejection threshold
+// (the hot-config knob read path).
+func (p *Pool) Consecutive5xx() int { return int(p.consecutive5xx.Load()) }
+
+// SetEjectFor swaps the passive-ejection restore window at runtime
+// (the hot-config knob pool:<name>.health.passive.eject_for). The
+// EjectReaper reads it every tick, so a shorter window restores
+// ejected targets sooner and zero pauses restores entirely. Note the
+// reaper only runs for pools whose boot config set eject_for: setting
+// this on a reaper-less pool has no effect until the next restart
+// (the knob layer rejects such sets with a precise error).
+//
+// Unstable: part of the hot-config knob surface (#815).
+func (p *Pool) SetEjectFor(d time.Duration) { p.ejectFor.Store(int64(d)) }
+
+// EjectFor returns the live passive-ejection restore window
+// (the hot-config knob read path).
+func (p *Pool) EjectFor() time.Duration { return time.Duration(p.ejectFor.Load()) }
 
 func newTarget(addr string) (*Target, error) {
 	if !strings.Contains(addr, "://") {
@@ -684,8 +718,8 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 		// FastHandler path, so the ejection signal — which the
 		// stayin_alive grace gate keys on — is live for cached
 		// routes too, and picks fail fast once every target is out.
-		if c.pool.consecutive5xx > 0 {
-			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "connection error", connErrReason)
+		if threshold := c.pool.consecutive5xx.Load(); threshold > 0 {
+			t.recordPassiveError(int(threshold), c.pool.logger, c.pool.Name, "connection error", connErrReason)
 		}
 		return err
 	}
@@ -694,9 +728,9 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// Passive health: eject on consecutive 5xx, reset on success. A
 	// 304 is a success here — a conditional hit means the origin is
 	// alive (it is the revalidation fast path).
-	if c.pool.consecutive5xx > 0 {
+	if threshold := c.pool.consecutive5xx.Load(); threshold > 0 {
 		if resp.StatusCode() >= 500 {
-			t.recordPassiveError(c.pool.consecutive5xx, c.pool.logger, c.pool.Name, "passive 5xx", statusStr)
+			t.recordPassiveError(int(threshold), c.pool.logger, c.pool.Name, "passive 5xx", statusStr)
 		} else {
 			t.passiveErrors.Store(0)
 		}
@@ -872,7 +906,7 @@ type EjectReaper struct {
 // NewEjectReaper creates a reaper for the pool. Returns nil when
 // ejectFor is unset: no reaper, no goroutine, historical behavior.
 func NewEjectReaper(pool *Pool) *EjectReaper {
-	if pool.ejectFor <= 0 {
+	if pool.ejectFor.Load() <= 0 {
 		return nil
 	}
 	return &EjectReaper{pool: pool, interval: defaultEjectReapInterval}
@@ -898,7 +932,8 @@ func (r *EjectReaper) Run(ctx context.Context) error {
 // exactly one wins and logs.
 func (r *EjectReaper) reap() {
 	p := r.pool
-	if p.ejectFor <= 0 {
+	ejectFor := time.Duration(p.ejectFor.Load())
+	if ejectFor <= 0 {
 		return
 	}
 	now := time.Now()
@@ -914,7 +949,7 @@ func (r *EjectReaper) reap() {
 		if ejectedAt == 0 {
 			continue
 		}
-		if now.Sub(time.Unix(0, ejectedAt)) < p.ejectFor {
+		if now.Sub(time.Unix(0, ejectedAt)) < ejectFor {
 			continue
 		}
 		t.passiveErrors.Store(0)

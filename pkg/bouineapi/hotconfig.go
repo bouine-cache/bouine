@@ -28,7 +28,11 @@ type HotSetResult struct {
 	OldValue string `json:"old_value"`
 	NewValue string `json:"new_value"`
 	// Applied is false exactly when the request asked for a dry run.
-	Applied bool   `json:"applied"`
+	Applied bool `json:"applied"`
+	// Peers is the number of cluster peers that acknowledged the
+	// fan-out of an applied set (0 on a single node, dry run, or
+	// eventual-mode cluster).
+	Peers   int    `json:"peers,omitempty"`
 	Warning string `json:"warning,omitempty"`
 }
 

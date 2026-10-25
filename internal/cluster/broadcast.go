@@ -313,6 +313,72 @@ func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
 	b.flushRefreshBatch([]api.RefreshEvent{evt})
 }
 
+// BroadcastHotSet propagates a hot-config point mutation
+// (bouine config set) to every live peer and returns the number that
+// acknowledged it. Strong mode only: runtime knobs ride no gossip, so
+// eventual-mode clusters do not fan out (the issuing node alone
+// carries the override — check `bouine config diff` per node). The
+// peer route applies locally without re-broadcasting, so this cannot
+// loop. Fan-out is synchronous within broadcastTimeout per peer so
+// the CLI can report honest coverage; failures are logged and
+// counted, never fatal — matching the invalidation precedent.
+func (b *Broadcaster) BroadcastHotSet(ctx context.Context, key, value string) int {
+	if b.mode != config.ClusterModeStrong {
+		return 0
+	}
+	evt := api.HotSetEvent{
+		Key:      key,
+		Value:    value,
+		Issuer:   b.cluster.cfg.NodeName,
+		IssuedAt: time.Now(),
+		Seq:      b.seq.Add(1),
+	}
+	body, err := EncodeHotSetHTTP(evt)
+	if err != nil {
+		b.metrics.IncBroadcastFailure("hot_set", "marshal")
+		b.logger.Error("hot set broadcast encode failed", "error", err)
+		return 0
+	}
+	fanoutCtx := context.WithoutCancel(ctx)
+
+	peers := b.cluster.Members()
+	var acknowledged atomic.Int64
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		if p.Name == b.cluster.cfg.NodeName {
+			continue
+		}
+		wg.Add(1)
+		go func(peer api.PeerInfo) { //nolint:contextcheck // fanoutCtx is a detached context created in this scope
+			defer wg.Done()
+			defer func() {
+				if v := recover(); v != nil {
+					b.logger.Error("hot set broadcast panicked", "peer", peer.Name, "panic", v)
+				}
+			}()
+			if err := b.postBinary(fanoutCtx, peer.AdminAddr, "/v1/peer/config/hot", body); err != nil {
+				b.logger.Warn("hot set broadcast failed",
+					"peer", peer.Name,
+					"key", key,
+					"error", err)
+				b.metrics.IncBroadcastFailure("hot_set", broadcastFailureReason(err))
+				return
+			}
+			acknowledged.Add(1)
+			b.metrics.IncHTTPInvalidation("hot_set")
+		}(p)
+	}
+	wg.Wait()
+	b.logger.Info("hot set broadcast to peers",
+		"key", key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"acknowledged", acknowledged.Load(),
+		"peers", countPeers(peers)-1,
+	)
+	return int(acknowledged.Load())
+}
+
 // flushPurgeBatch delivers one batch of purge events: a single batch
 // frame posted to each live peer (strong mode) plus one gossip batch
 // frame. Encoding happens once and the body is shared across peers.

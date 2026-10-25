@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
 	"github.com/bouine-cache/bouine/pkg/bouineapi"
@@ -116,53 +116,63 @@ func renderStatusText(b *strings.Builder, r *bouineapi.StatusReport) {
 	}
 	b.WriteString("\n")
 
-	fmt.Fprintf(b, "cache    hit ratio %.1f%%  (%d hits / %d misses)  evictions %d\n",
+	fmt.Fprintf(b, "cache\n    hit ratio %.1f%%  (%d hits / %d misses)  evictions %d\n",
 		r.Cache.HitRatio*100, r.Cache.Hits, r.Cache.Misses, r.Cache.Evictions)
 	renderTierLine(b, "hot", r.Cache.Hot)
 	renderTierLine(b, "warm", r.Cache.Warm)
 
 	if len(r.Origins) > 0 {
 		b.WriteString("origins\n")
-		tw := tabwriter.NewWriter(b, 2, 0, 2, ' ', 0)
 		for _, pool := range r.Origins {
 			for _, t := range pool.Targets {
 				state := "healthy"
 				if !t.Healthy {
 					state = "SICK"
 				}
-				_, _ = fmt.Fprintf(tw, "  %s/%s\t%s\tpe:%d pr:%d ps:%d\t%s\n",
-					pool.Name, t.Addr, state, t.PassiveErrors, t.ProbeErrors, t.ProbeSuccesses, t.LastChange)
+				fmt.Fprintf(b, "    %s/%s  %s  %s\n",
+					pool.Name, t.Addr, state, targetSignals(r, t))
 			}
 		}
-		_ = tw.Flush()
 	}
 
-	fmt.Fprintf(b, "cluster  peer-fetch %d hits / %d misses  hop-limit %d  avg %.1fms\n",
-		r.Cluster.PeerFetch.Hits, r.Cluster.PeerFetch.Misses,
-		r.Cluster.PeerFetch.HopLimitHits, r.Cluster.PeerFetch.AvgLatencyMs)
+	b.WriteString("cluster\n")
+	fmt.Fprintf(b, "    peer-fetch %d hits / %d misses  avg %.1fms\n",
+		r.Cluster.PeerFetch.Hits, r.Cluster.PeerFetch.Misses, r.Cluster.PeerFetch.AvgLatencyMs)
 	if len(r.Cluster.Peers) > 0 {
-		tw := tabwriter.NewWriter(b, 2, 0, 2, ' ', 0)
 		for _, p := range r.Cluster.Peers {
 			state := "live"
 			if p.Stale {
 				state = "stale"
 			}
-			line := fmt.Sprintf("  %s\t%s\t%s", p.Name, state, p.Version)
+			line := fmt.Sprintf("    %s  %s  %s", p.Name, state, p.Version)
 			if p.Requests > 0 {
-				line = fmt.Sprintf("  %s\t%s\t%s\t%d req  %.1f%% hit",
+				line = fmt.Sprintf("    %s  %s  %s  %d req  %.1f%% hit",
 					p.Name, state, p.Version, p.Requests, hitPct(p))
 			}
-			_, _ = fmt.Fprintln(tw, line)
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
-		_ = tw.Flush()
 	} else {
-		b.WriteString("cluster  no peers (single node)\n")
+		b.WriteString("    no peers (single node)\n")
 	}
 
 	if len(r.Insights) > 0 {
 		b.WriteString("insights\n")
-		for _, ins := range r.Insights {
-			fmt.Fprintf(b, "  [%s] %s - %s\n", strings.ToLower(ins.Severity), ins.Title, ins.Action)
+		head := make([]string, len(r.Insights))
+		maxw := 0
+		for i, ins := range r.Insights {
+			head[i] = fmt.Sprintf("[%s] %s", strings.ToLower(ins.Severity), ins.Title)
+			if w := lipgloss.Width(head[i]); w > maxw {
+				maxw = w
+			}
+		}
+		for i, ins := range r.Insights {
+			line := "  " + head[i]
+			if ins.Action != "" {
+				line += strings.Repeat(" ", maxw-lipgloss.Width(head[i])) + " - " + ins.Action
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 	} else {
 		b.WriteString("insights none\n")
@@ -170,7 +180,7 @@ func renderStatusText(b *strings.Builder, r *bouineapi.StatusReport) {
 }
 
 func renderTierLine(b *strings.Builder, name string, t bouineapi.StatusTier) {
-	line := fmt.Sprintf("         %s: %d entries, %s", name, t.Entries, humanBytes(t.Bytes))
+	line := fmt.Sprintf("    %s: %d entries, %s", name, t.Entries, humanBytes(t.Bytes))
 	if t.MaxBytes > 0 {
 		line += fmt.Sprintf(" / %s (%.1f%%)", humanBytes(t.MaxBytes), float64(t.Bytes)/float64(t.MaxBytes)*100)
 	}

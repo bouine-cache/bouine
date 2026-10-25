@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"encoding/binary"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -169,6 +170,33 @@ func fillFlightKey(primaryKey api.Key) api.Key {
 	return k
 }
 
+// headFlightKey XORs a byte-handoff flight key into the HEAD-led flight
+// key space — the inflight-table analogue of headRevalKeySuffix in the
+// singleflight table (same constant, different table; the XOR is a
+// bijection, and it cannot collide with fillFlightKey's space — the
+// constants differ). A HEAD-led byte-handoff flight's buffered result
+// carries no body (the origin answers HEAD without one), so a GET
+// follower parked on it would be served an empty 200 — the issue #752
+// poisoning shape, in the inflight table. HEAD-led flights collapse with
+// HEAD only.
+func headFlightKey(flightKey api.Key) api.Key {
+	k := flightKey
+	binary.BigEndian.PutUint64(k[:8], binary.BigEndian.Uint64(k[:8])^headRevalKeySuffix)
+	return k
+}
+
+// headFlightMethod is the byte form of "HEAD" for isHeadFlight.
+var headFlightMethod = []byte("HEAD")
+
+// isHeadFlight reports whether ri is a HEAD request, in whichever form
+// RequestInfo carries the method (see collapseDenied's method check).
+func isHeadFlight(ri RequestInfo) bool {
+	if ri.Method != "" {
+		return ri.Method == "HEAD"
+	}
+	return len(ri.methodBytes) > 0 && bytes.Equal(ri.methodBytes, headFlightMethod)
+}
+
 // fetchFlightKey derives the inflightStreams flight key for a miss and
 // reports whether the flight is a fill flight (ADR-0066). Exactly one
 // case differs from the pre-ADR-0066 rules: the anonymous, safe-method,
@@ -177,7 +205,10 @@ func fillFlightKey(primaryKey api.Key) api.Key {
 // other case keeps its ADR-0052/0054/0057 behavior bit-for-bit:
 // personal requests (Authorization, Cookie) and unsafe methods never
 // share any flight; warm and declared-dimension flights keep the
-// byte-handoff keys.
+// byte-handoff keys — now method-split (headFlightKey), because a
+// HEAD-led flight's bodyless result must never be handed to a GET
+// follower and symmetrically a HEAD follower never parks on a
+// GET-led flight (issue #752, singleflight precedent).
 func fetchFlightKey(h *Handler, primaryKey, lookupKey api.Key, obj *api.Object, ri RequestInfo) (api.Key, bool) {
 	if collapseDenied(ri) {
 		// Personal requests and unsafe methods never share a flight
@@ -186,8 +217,11 @@ func fetchFlightKey(h *Handler, primaryKey, lookupKey api.Key, obj *api.Object, 
 	}
 	sfKey := collapseFlightKey(h, primaryKey, lookupKey, obj, ri)
 	if sfKey != (api.Key{}) {
+		if isHeadFlight(ri) {
+			sfKey = headFlightKey(sfKey)
+		}
 		// Warm or declared-dimension flight: byte hand-off under the
-		// ADR-0057 proven-key rule: unchanged.
+		// ADR-0057 proven-key rule, split by leading method.
 		return sfKey, false
 	}
 	// Anonymous, safe-method, cold include-free miss. The origin's Vary
@@ -196,6 +230,10 @@ func fetchFlightKey(h *Handler, primaryKey, lookupKey api.Key, obj *api.Object, 
 	// for the fill to settle in the store, then re-enters the request
 	// pipeline and is served through the same gates as a sequential
 	// request — variant selection, RFC 9111 §3.5 storage, freshness,
-	// conditionals — or fetches its own.
+	// conditionals — or fetches its own. Fill flights stay method-mixed:
+	// no bytes are ever handed off, a HEAD-led fill simply stores
+	// nothing and the follower re-enters to its own fetch, and a HEAD
+	// follower of a GET-led fill serves the stored headers through
+	// serveObject's HEAD handling.
 	return fillFlightKey(primaryKey), true
 }

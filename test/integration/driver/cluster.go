@@ -82,6 +82,13 @@ type ClusterStack struct {
 	// preserveHost retains the pool's connect.preserve_host setting so
 	// RestartNode rebuilds the same config BootCluster originally wrote.
 	preserveHost bool
+	// warmEnabled retains the WarmTier option so RestartNode rebuilds
+	// the same config BootCluster originally wrote (warm_dir and the
+	// per-node warm directory persist across restarts under configDir).
+	warmEnabled bool
+	// maxVariants retains the MaxVariants option so RestartNode rebuilds
+	// the same config BootCluster originally wrote.
+	maxVariants int
 }
 
 // OriginRequests returns the total number of requests the stack's
@@ -116,6 +123,18 @@ type ClusterOptions struct {
 	// every node, so integration tests can cover the origin-bound Host
 	// header behaviour (the origin echoes its Host on /host-echo).
 	PreserveHost bool
+	// MaxVariants, when > 0, sets cache.max_variants on the default
+	// route of every node — the Vary DoS cap (RFC 9110 §12.5.5). Tests
+	// that spray more variants than this exercise the cap's storage
+	// refusal on local fills and the past-cap tracking of peer-puts
+	// (ADR-0068).
+	MaxVariants int
+	// WarmTier enables storage.warm_dir on every node (per-node warm
+	// directory under the stack's config dir, surviving RestartNode),
+	// so fleet-restart tests cover the warm-reload routing restoration
+	// ADR-0068 pins at storage level and legacy-blob tests can inject
+	// pre-upgrade warm blobs into a killed node.
+	WarmTier bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -200,6 +219,11 @@ type nodeConfigParams struct {
 	experimental []string
 	// preserveHost renders connect.preserve_host on the origin pool.
 	preserveHost bool
+	// maxVariants renders cache.max_variants on the default route when
+	// > 0 (0 = omit, engine default applies).
+	maxVariants int
+	// warmDir renders storage.warm_dir when non-empty.
+	warmDir string
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -212,13 +236,21 @@ func buildNodeConfig(p nodeConfigParams) string {
 	if p.tls != nil {
 		fmt.Fprintf(&b, "  https: \"127.0.0.1:%d\"\n", p.httpsPort)
 	}
+	warmLine := ""
+	if p.warmDir != "" {
+		warmLine = fmt.Sprintf("  warm_dir: %q\n", p.warmDir)
+	}
+	maxVariantsLine := ""
+	if p.maxVariants > 0 {
+		maxVariantsLine = fmt.Sprintf("      max_variants: %d\n", p.maxVariants)
+	}
 	fmt.Fprintf(&b, `  admin: "127.0.0.1:%d"
   cluster: "127.0.0.1:%d"
 admin:
   token: %s
 storage:
   hot_max_bytes: %s
-cluster:
+%scluster:
   node_name: %s
   mode: %s
   join: %s
@@ -253,9 +285,9 @@ routes:
     pool: origin
     cache:
       ttl_default: 60s
-`,
-		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
-		p.originAddr, p.preserveHost)
+%s`,
+		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), warmLine, p.name, p.mode, p.seedList,
+		p.originAddr, p.preserveHost, maxVariantsLine)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -340,6 +372,8 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		}
 	}
 	s.preserveHost = opts.PreserveHost
+	s.warmEnabled = opts.WarmTier
+	s.maxVariants = opts.MaxVariants
 
 	// Write configs and start each node.
 	for i := range 3 {
@@ -363,6 +397,8 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			tls:          tlsOpts,
 			experimental: s.experimentalYAML,
 			preserveHost: opts.PreserveHost,
+			maxVariants:  opts.MaxVariants,
+			warmDir:      s.warmDirFor(name),
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
@@ -453,6 +489,52 @@ func (s *ClusterStack) waitMembership(t *testing.T, timeout time.Duration, expec
 	})
 }
 
+// WaitNodeReady polls node n's admin /readyz until it reports healthy
+// or the timeout expires. Restarts do not wait for health themselves;
+// tests that KillNode + RestartNode must gate on this before driving
+// traffic, or the first request races the node's listeners.
+func (s *ClusterStack) WaitNodeReady(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+	RetryUntil(t, timeout, 50*time.Millisecond, func() bool {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+		req.SetRequestURI(s.Nodes[n].AdminAddr + "/readyz")
+		if err := fasthttp.Do(req, resp); err != nil {
+			return false
+		}
+		return resp.StatusCode() == 200
+	})
+}
+
+// warmDirFor returns node name's warm directory under the stack's
+// config dir, or "" when the WarmTier option is off. The path is
+// stable across restarts (configDir lives until Down), which is what
+// lets RestartNode reload the same warm tier.
+func (s *ClusterStack) warmDirFor(name string) string {
+	if !s.warmEnabled {
+		return ""
+	}
+	return filepath.Join(s.configDir, "warm-"+name)
+}
+
+// NodeWarmDir returns node n's warm directory ("" when the WarmTier
+// option is off). Tests use it to inject pre-upgrade blobs into a
+// KILLED node's warm tier before RestartNode reloads them.
+func (s *ClusterStack) NodeWarmDir(n int) string {
+	return s.warmDirFor(s.Nodes[n].Name)
+}
+
+// SetVaryDrift flips the shared origin's /vary-drift generation: the
+// route's Vary list rotates from X-A (gen 1) to X-B (gen 2) and back,
+// with the generation stamped into the body so tests can detect which
+// world a served variant came from. Drift tests use it to rotate the
+// origin's Vary declaration under a live cluster.
+func (s *ClusterStack) SetVaryDrift(on bool) {
+	s.originCtl.varyDrift.Store(on)
+}
+
 // Down stops all nodes and the origin.
 func (s *ClusterStack) Down() {
 	for i, cancel := range s.cancels {
@@ -524,6 +606,8 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		tls:          tlsOpts,
 		experimental: s.experimentalYAML,
 		preserveHost: s.preserveHost,
+		maxVariants:  s.maxVariants,
+		warmDir:      s.warmDirFor(name),
 	})
 
 	suffix := "-restart"
@@ -894,6 +978,45 @@ func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 		}
 		rest := line[len(metric):]
 		if rest == "" || rest[0] == '{' || rest[0] == ' ' {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				v, _ := strconv.ParseFloat(parts[len(parts)-1], 64)
+				total += v
+			}
+		}
+	}
+	return total
+}
+
+// MetricValueWithLabels reads the summed value of a Prometheus metric
+// from node n, counting only the series whose sample line contains
+// mustContain (e.g. `side="consumer"`). Label-agnostic series are
+// missed by MetricValue when a vec carries several sides; this variant
+// lets tests assert the resolver-answer counter per side (ADR-0068).
+func (s *ClusterStack) MetricValueWithLabels(t *testing.T, n int, metric, mustContain string) float64 {
+	t.Helper()
+	url := s.Nodes[n].AdminAddr + "/metrics"
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("metrics GET: %v", err)
+	}
+	var total float64
+	for _, line := range strings.Split(string(resp.Body()), "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, metric) {
+			continue
+		}
+		rest := line[len(metric):]
+		if rest == "" || rest[0] == '{' || rest[0] == ' ' {
+			if !strings.Contains(line, mustContain) {
+				continue
+			}
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				v, _ := strconv.ParseFloat(parts[len(parts)-1], 64)

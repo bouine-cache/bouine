@@ -50,7 +50,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	assert.Equal(t, 1, req2.NHeaders)
 	// The fast-path peer hints set on a previous request's iteration must
 	// not leak into a later one: parseBuffer's soft reset clears them all,
-	// including the OwnerResolver pointer (ADR-0066) — a stale resolver
+	// including the OwnerResolver pointer (ADR-0068) — a stale resolver
 	// handed to the next request's slow path would resolve variants with
 	// the previous request's Vary metadata.
 	scratch.OwnerMiss = true

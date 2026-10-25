@@ -789,7 +789,7 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 // (api.RawRequest.OwnerMiss, OwnerGateReject, and OwnerShed) to the fallback
 // RequestCtx so handleCacheMiss can skip duplicate owner lookups, peer RPCs,
 // or shed peer retries — and the fetched metadata-only Vary resolver
-// (api.RawRequest.OwnerResolver, ADR-0066) so the slow path runs the two-step
+// (api.RawRequest.OwnerResolver, ADR-0068) so the slow path runs the two-step
 // variant resolution without repeating the identical bare ask. Cheap: only
 // set when the fast-path peer branch ran.
 func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {

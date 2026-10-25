@@ -16,7 +16,7 @@ import (
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
 // Version 7 adds PairedKey (16 raw bytes, zero when absent) after the
-// transient-field block (ADR-0066): the Vary resolver's pointer to the
+// transient-field block (ADR-0068): the Vary resolver's pointer to the
 // variant key whose body it mirrors. It MUST survive the wire — a
 // peer-put of a metadata-only resolver without it stores a resolver
 // that can never serve its mirror. Version 6 added the transient-field
@@ -178,7 +178,7 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	}
 	buf = append(buf, flags)
 
-	// PairedKey (codec v7, ADR-0066): fixed 16 bytes, zero when absent.
+	// PairedKey (codec v7, ADR-0068): fixed 16 bytes, zero when absent.
 	// Written for every object so the field position is version-stable.
 	buf = append(buf, obj.PairedKey[:]...)
 
@@ -223,7 +223,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	// v6 adds the transient-field block after Pool (ADR-0053); v5-and
 	// older blobs backfill HasDate and the gate flags from the header
 	// map below.
-	// v7 adds PairedKey after the flags byte (ADR-0066); v6-and-older
+	// v7 adds PairedKey after the flags byte (ADR-0068); v6-and-older
 	// blobs decode with a zero PairedKey — a resolver without one is a
 	// legacy entry whose own Body may still be present.
 	if ver != objCodecVersion && ver != objCodecVersionV6 && ver != objCodecVersionV5 && ver != objCodecVersionV4 && ver != objCodecVersionV3 {

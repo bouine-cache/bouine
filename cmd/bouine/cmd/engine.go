@@ -1050,7 +1050,7 @@ func (e *engine) clusterDisabledReason(rs *runState) string {
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore
 // callback to the first cache handler (issue #509). StoreFromPeer is
 // needed regardless of refresh config: it registers Vary variants in
-// the owner's variant set (ADR-0066), without which a cluster-wide URL
+// the owner's variant set (ADR-0068), without which a cluster-wide URL
 // purge would miss peer-put variants. The store is shared across all
 // routes, so any handler can do the registration.
 func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {

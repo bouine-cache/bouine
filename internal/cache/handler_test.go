@@ -2113,7 +2113,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 }
 
 // TestHandler_VaryFill_ResolverMetadataOnly is the acceptance test for
-// ADR-0066 (issue #824): a Vary fill stores the variant with its body
+// ADR-0068 (issue #824): a Vary fill stores the variant with its body
 // and a metadata-only Vary resolver at the primary key — no second body
 // copy. 200 pages still fill 400 hot entries (variant + resolver each),
 // but at ~1x the per-page hot bytes of an identical no-Vary origin: the
@@ -2338,7 +2338,7 @@ func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
 	primaryKey := h.buildKey(reqA)
 	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 
-	// ADR-0066: the primary-key Vary resolver is metadata-only and never
+	// ADR-0068: the primary-key Vary resolver is metadata-only and never
 	// registers for proactive refresh — a background refresh of the
 	// primary key would re-store a full body there. Only the variant
 	// registers.
@@ -6364,7 +6364,7 @@ func TestExcludeHost_HostStillForwarded(t *testing.T) {
 		"include_host: false must not rewrite the origin-bound Host")
 }
 
-// TestHandler_PurgeDeletesPeerPutVariants pins the ADR-0066 purge
+// TestHandler_PurgeDeletesPeerPutVariants pins the ADR-0068 purge
 // reachability fix (issue #824): a variant that lands on the owner via
 // the write-to-owner RPC (StoreFromPeer) must be tracked in the
 // primary's variant set, so a cluster-wide URL purge deletes it too.
@@ -6445,7 +6445,7 @@ func TestHandler_PurgeDeletesPeerPutVariants(t *testing.T) {
 }
 
 // TestHandler_PurgeDeletesPeerPutVariantsPastCap pins the second half of
-// ADR-0066's purge-reachability fix: peer-put registration ALWAYS
+// ADR-0068's purge-reachability fix: peer-put registration ALWAYS
 // succeeds, including past the MaxVariants cap. PeerPutHandler.Handle
 // stores the object before the registration callback runs, so a
 // refused registration would leave a stored-but-untracked variant —

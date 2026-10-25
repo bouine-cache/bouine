@@ -925,7 +925,7 @@ func (h *Handler) streamMissBuffered(
 		obj := h.storeStreamedObject(ctx, storeKey, primaryKey, ri, res, resMap, fillTTL)
 		if storeKey != primaryKey {
 			// The primary-key entry is the metadata-only Vary resolver
-			// (ADR-0066, #824) — buildResolver blanks the VaryKey the
+			// (ADR-0068, #824) — buildResolver blanks the VaryKey the
 			// previous ad-hoc clone left set here.
 			primaryObj := buildResolver(obj, primaryKey)
 			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
@@ -1145,7 +1145,7 @@ func (h *Handler) settleTeeFill(
 	obj := h.storeStreamedObject(bgCtx, storeKey, primaryKey, ri, res, resMap, fillTTL)
 	if storeKey != primaryKey {
 		// The primary-key entry is the metadata-only Vary resolver
-		// (ADR-0066, #824) — buildResolver blanks the VaryKey the
+		// (ADR-0068, #824) — buildResolver blanks the VaryKey the
 		// previous ad-hoc clone left set here.
 		primaryObj := buildResolver(obj, primaryKey)
 		h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0)
@@ -1256,7 +1256,7 @@ func (h *Handler) storeStreamedObject(
 	// nil (passthrough) computes the TTL in buildObject as before.
 	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
 	if key != primaryKey {
-		// ADR-0066: the variant carries its primary key so a node
+		// ADR-0068: the variant carries its primary key so a node
 		// storing it via the write-to-owner RPC can register it in the
 		// primary's variant set (cluster-wide purge reachability).
 		// Plain objects keep a zero PairedKey.

@@ -447,7 +447,7 @@ the curated, human-readable summary.
 
 ### Performance
 
-- **Vary pages no longer sit in RAM twice (ADR-0066, #824).** Every
+- **Vary pages no longer sit in RAM twice (ADR-0068, #824).** Every
   cacheable response with `Vary` was stored with its full body under
   the variant key AND as a byte-for-byte clone under the primary key
   (the "Vary resolver") — measured at 2.03x the hot-tier bytes of an
@@ -480,7 +480,7 @@ the curated, human-readable summary.
   route) skipped the blanking, so streamed resolvers carried the
   variant's vary-key hash and could leak through those gates. Every
   fill now goes through one `buildResolver` constructor that blanks
-  `VaryKey` (ADR-0066).
+  `VaryKey` (ADR-0068).
 - **Cluster-wide URL purges missed peer-put variants (RFC 9111
   §4.4).** A variant stored on its owner via the write-to-owner RPC
   never entered the owner's variant set — the fill ran on another
@@ -490,7 +490,7 @@ the curated, human-readable summary.
   primary key (`PairedKey`) and are registered on the owner
   regardless of refresh config; the registration's stale-incarnation
   reconciliation no longer wipes variant sets on nodes that own the
-  variant but not the primary (ADR-0066). Peer-put registration
+  variant but not the primary (ADR-0068). Peer-put registration
   always succeeds — the write-to-owner RPC has already stored the
   variant, so an untracked one would be purge-proof; the set may
   exceed `max_variants` via peer-put registrations, bounded by SIEVE
@@ -505,7 +505,7 @@ the curated, human-readable summary.
   scheduler churn and error metrics, never a refresh. Registration
   now requires a request URI; peer-put objects keep request-driven
   revalidation (SWR/SIE/stale-on-hit), the strong-mode refresh path
-  (ADR-0066).
+  (ADR-0068).
 
 ## [0.5.29] - 2026-10-19
 

@@ -299,7 +299,7 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err == nil && peerObj != nil && isPeerResolverMetadata(peerObj) {
-		// ADR-0066: the owner answered the bare primary-key ask with
+		// ADR-0068: the owner answered the bare primary-key ask with
 		// the metadata-only resolver — the Vary list this node could
 		// not compute locally. Not servable here and not a rejection
 		// either. Hand the resolver to the slow path

@@ -57,7 +57,7 @@ type Metrics struct {
 	// request). A sustained non-zero rate indicates a mixed-version
 	// fleet or a peer serving wrong-variant content. See issue #633.
 	PeerFetchVariantMismatch *prometheus.CounterVec
-	// PeerFetchResolverAnswers counts the ADR-0066 resolver-metadata
+	// PeerFetchResolverAnswers counts the ADR-0068 resolver-metadata
 	// answer class, labelled by side: "server" (the owner answered a
 	// blank-assertion ask with the metadata-only Vary resolver so the
 	// requester can derive the Vary list it could not compute locally)
@@ -132,7 +132,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		PeerFetchResolverAnswers: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "peer_fetch_resolver_answers_total",
-			Help:      "Metadata-only Vary resolver answers served over peer fetch, by side (server, consumer). Zero consumer-side means Vary cold misses on non-owners bypass owner convergence (ADR-0066).",
+			Help:      "Metadata-only Vary resolver answers served over peer fetch, by side (server, consumer). Zero consumer-side means Vary cold misses on non-owners bypass owner convergence (ADR-0068).",
 		}, []string{"side"}),
 	}
 	reg.MustRegister(

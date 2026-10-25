@@ -715,16 +715,20 @@ func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheChe
 }
 
 // purgeKey purges a key and its Vary variants from the local store,
-// stopping after the first handler that owns the key. Cluster broadcast
-// is the caller's responsibility.
+// consulting EVERY cache handler. Keys are URL-scoped and the store is
+// shared across routes, but variant tracking is per-handler: a variant
+// locally filled under route k's handler is tracked there, while
+// peer-put registrations land on handlers[0] (the wired onStore
+// callback, ADR-0068). Stopping at the first handler that reports the
+// key owned — the old behaviour — let a variant tracked only by a
+// later handler survive the purge: stored, servable, unkillable
+// (RFC 9111 §4.4). Every handler's tracked variants are deleted from
+// the shared store; the primary delete is idempotent. Cluster
+// broadcast is the caller's responsibility.
 func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
 	for _, h := range rs.handlers {
-		owned, err := h.Purge(ctx, key)
-		if err != nil {
+		if _, err := h.Purge(ctx, key); err != nil {
 			return err
-		}
-		if owned {
-			return nil
 		}
 	}
 	return nil
@@ -767,12 +771,8 @@ func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
 // refreshes it in the background.
 func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
 	for _, h := range rs.handlers {
-		owned, err := h.SoftPurge(ctx, key)
-		if err != nil {
+		if _, err := h.SoftPurge(ctx, key); err != nil {
 			return err
-		}
-		if owned {
-			return nil
 		}
 	}
 	return nil

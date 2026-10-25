@@ -3425,22 +3425,68 @@ func (h *Handler) reserveVariantSlotFromPeer(reqCtx context.Context, primaryKey,
 	h.reserveVariantSlotMode(reqCtx, primaryKey, storeKey, true)
 }
 
-// reconcileStaleIncarnation probes the local primary key and resets
-// the variant set when the probe misses: the set then belongs to a
-// prior incarnation of the primary key that was since evicted by SIEVE
-// or TTL, and its tracked variants are stale. Returns the (possibly
-// reset) set for primaryKey. Called with variantMu held; releases it
-// around the store probe — a lock must never span an I/O call — and
-// reacquires before returning.
-func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey api.Key) map[api.Key]struct{} {
+// reconcileStaleIncarnation reconciles the variant set for a primary
+// key whose incarnation may have been evicted. Called with variantMu
+// held; releases it around the store probes — a lock must never span
+// an I/O call — and reacquires before returning the (possibly
+// pruned) set for primaryKey.
+//
+// Single-node (ownerFn nil): the node holds everything, so a primary
+// absent from the store means a prior evicted incarnation — its whole
+// set is stale and is wiped wholesale. The cheap, sound case.
+//
+// Cluster mode: the primary legitimately lives on ANOTHER node while
+// THIS one stores its variants (the primary's owner and each
+// variant's owner are independent ring assignments), so the primary's
+// LOCAL absence proves nothing about the tracked variants. ADR-0068:
+// a wholesale wipe here deleted LIVE registrations on
+// variant-owning nodes — stored, servable, invisible to the
+// cluster-wide URL purge, i.e. the exact reachable-but-unkillable
+// shape this ADR exists to close (caught by the e2e suite's past-cap
+// purge test). Liveness is decided per tracked variant instead: only
+// entries gone from the LOCAL store are pruned.
+func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey api.Key, set map[api.Key]struct{}) map[api.Key]struct{} {
 	h.variantMu.Unlock()
 	probeCtx := context.WithoutCancel(reqCtx)
 	pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
+	if pkObj != nil {
+		h.variantMu.Lock()
+		return set
+	}
+	if h.ownerFn == nil {
+		h.variantMu.Lock()
+		fresh := make(map[api.Key]struct{})
+		h.variantSets[primaryKey] = fresh
+		return fresh
+	}
+	keys := make([]api.Key, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	return h.pruneDeadVariants(reqCtx, primaryKey, keys)
+}
+
+// pruneDeadVariants removes tracked variants that are gone from the
+// local store (SIEVE/TTL eviction, explicit Delete, an already-run
+// purge) and returns the surviving set for primaryKey. Called WITHOUT
+// variantMu held; reacquires it before returning.
+func (h *Handler) pruneDeadVariants(reqCtx context.Context, primaryKey api.Key, keys []api.Key) map[api.Key]struct{} {
+	probeCtx := context.WithoutCancel(reqCtx)
+	dead := make([]api.Key, 0, len(keys))
+	for _, k := range keys {
+		obj, _, _ := h.store.Get(probeCtx, k)
+		if obj == nil {
+			dead = append(dead, k)
+		}
+	}
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
-	if set == nil || pkObj == nil {
+	if set == nil {
 		set = make(map[api.Key]struct{})
 		h.variantSets[primaryKey] = set
+	}
+	for _, k := range dead {
+		delete(set, k)
 	}
 	return set
 }
@@ -3448,8 +3494,10 @@ func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey a
 // reserveVariantSlotMode is the shared implementation; fromPeer skips
 // the stale-incarnation reconciliation (see reserveVariantSlotFromPeer)
 // and registers past the cap — the peer-put object is already stored.
-// Reconciliation exists for the local-fill path, where a node always
-// holds the resolver it created alongside the variants it tracks.
+// Reconciliation exists for the local-fill path; in cluster mode it
+// prunes per-variant liveness (a node may store variants of a primary
+// it does not hold), and wipes wholesale only in single-node mode,
+// where an absent primary really does retire the whole set.
 func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, storeKey api.Key, fromPeer bool) bool {
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
@@ -3461,50 +3509,34 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 		h.variantMu.Unlock()
 		return true
 	}
-	// If the set exists from a prior incarnation of this primary key that
-	// was since evicted by SIEVE or TTL, the tracked variants are stale.
-	// Without the probe, variantSets grows without bound as primary keys
-	// are evicted, and stale entries can cause incorrect MaxVariants
-	// enforcement.
+	// The set may hold entries from a prior incarnation of this
+	// primary key (evicted by SIEVE or TTL). Without reconciliation,
+	// variantSets grows without bound as primary keys are evicted and
+	// stale entries cause incorrect MaxVariants enforcement. What
+	// "stale" means depends on the deployment shape — see
+	// reconcileStaleIncarnation.
 	if len(set) > 0 && !fromPeer {
-		set = h.reconcileStaleIncarnation(reqCtx, primaryKey)
+		set = h.reconcileStaleIncarnation(reqCtx, primaryKey, set)
 	}
 	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}
 		h.variantMu.Unlock()
 		return true
 	}
-	// Cap reached: snapshot keys, release lock, probe store, reacquire.
+	// Cap reached: snapshot keys, release lock, probe store for
+	// liveness, reacquire. pruneDeadVariants locks on return.
 	keys := make([]api.Key, 0, len(set))
 	for k := range set {
 		keys = append(keys, k)
 	}
 	h.variantMu.Unlock()
-
-	probeCtx := context.WithoutCancel(reqCtx)
-	dead := make([]api.Key, 0, len(keys))
-	for _, k := range keys {
-		obj, _, _ := h.store.Get(probeCtx, k)
-		if obj == nil {
-			dead = append(dead, k)
-		}
-	}
-
-	h.variantMu.Lock()
-	defer h.variantMu.Unlock()
-	set = h.variantSets[primaryKey]
-	if set == nil {
-		set = make(map[api.Key]struct{})
-		h.variantSets[primaryKey] = set
-	}
-	for _, k := range dead {
-		delete(set, k)
-	}
+	set = h.pruneDeadVariants(reqCtx, primaryKey, keys)
 	if len(set) < h.maxVariants || fromPeer {
 		// fromPeer tracks past the cap (see reserveVariantSlotFromPeer):
 		// the object is already in the store — an untracked variant would
 		// be purge-proof. Local fills fall through to the refusal below.
 		set[storeKey] = struct{}{}
+		h.variantMu.Unlock()
 		return true
 	}
 	h.logger.Warn("vary cap exceeded, skipping variant storage",
@@ -3513,6 +3545,7 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 	if h.VaryCapHits != nil {
 		h.VaryCapHits.Inc()
 	}
+	h.variantMu.Unlock()
 	return false
 }
 

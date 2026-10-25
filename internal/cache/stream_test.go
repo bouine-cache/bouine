@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -702,4 +705,134 @@ func TestIsResponseCacheableBytes_MultiLineHeaders(t *testing.T) {
 			fasthttp.ReleaseResponse(resp)
 		})
 	}
+}
+
+// errAfterReader yields data in chunks and then fails with a non-EOF
+// error — an origin connection that breaks mid-body.
+type errAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+// deadClientWriter fails every Write — the leader's client connection is
+// dead before the first body chunk is flushed (failingWriter is taken
+// in sse_test.go).
+type deadClientWriter struct{}
+
+func (deadClientWriter) Write([]byte) (int, error) { return 0, errors.New("client hung up") }
+
+// runTee drives teeStreamToClient directly (no fetch, no client conn):
+// the handler serves only as the store owner; the origin body and the
+// client writer are the test's. Returns the handler (for store
+// assertions), the flight the verdict was published to, and the fill's
+// store key.
+func runTee(t *testing.T, w *bufio.Writer, body io.Reader) (*Handler, *inflightStream, api.Key) {
+	t.Helper()
+
+	h := testHandler(t, func(*fasthttp.RequestCtx) {})
+	key := BuildKeyFromURL("http://example.com/tee-probe", nil)
+
+	rh := &fasthttp.ResponseHeader{}
+	rh.Set(header.CacheControl, "max-age=60")
+	rh.Set(header.ContentType, "text/plain")
+	sf := &streamFetchResult{
+		StatusCode: 200,
+		Header:     fromFastHTTPHeader(rh),
+	}
+	inflight := newInflightStream()
+	buf := streamBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	ri := requestInfoFromCtx(testCtx("GET", "http://example.com/tee-probe"))
+	resMap := headerMap(header.CacheControl, "max-age=60", header.ContentType, "text/plain")
+	h.teeStreamToClient(w, body, buf, sf, inflight, key, key, ri, resMap, nil)
+	_ = w.Flush()
+	return h, inflight, key
+}
+
+// TestTeeStreamToClient_IncompleteBodyNeverSharedOrStored pins the
+// incomplete-body rule for the tee publish site: a body that did not
+// read to a clean EOF — the leader's client hung up mid-stream, or the
+// origin connection broke mid-body — is a prefix, not a response. It
+// must never be handed to a byte-handoff follower (a truncated 200
+// whose headers claim the full Content-Length) and never stored (the
+// truncation would replay to every later request). The flight publishes
+// the unshareable sentinel and stores nothing; both settlement channels
+// close so no follower can hang.
+func TestTeeStreamToClient_IncompleteBodyNeverSharedOrStored(t *testing.T) {
+	t.Parallel()
+
+	// Several 32 KiB chunks, so an early write failure truncates mid-body.
+	const bodyLen = 128 << 10
+
+	t.Run("clean EOF publishes and stores", func(t *testing.T) {
+		t.Parallel()
+		var client bytes.Buffer
+		w := bufio.NewWriter(&client)
+		h, inflight, key := runTee(t, w, bytes.NewReader(make([]byte, bodyLen)))
+
+		require.NoError(t, inflight.res.Err,
+			"a body read to a clean EOF is the shareable verdict")
+		require.Len(t, inflight.res.Body, bodyLen)
+		require.True(t, h.store.Has(key),
+			"a cleanly completed body is stored")
+	})
+
+	t.Run("leader client disconnect publishes the sentinel and stores nothing", func(t *testing.T) {
+		t.Parallel()
+		w := bufio.NewWriter(deadClientWriter{})
+		h, inflight, key := runTee(t, w, bytes.NewReader(make([]byte, bodyLen)))
+
+		require.ErrorIs(t, inflight.res.Err, ErrStreamUnshareable,
+			"the leader's client hung up mid-body: the partial copy must never reach a follower")
+		require.Less(t, len(inflight.res.Body), bodyLen)
+		require.False(t, h.store.Has(key),
+			"a partial copy must never be stored")
+		select {
+		case <-inflight.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("done was not closed: byte-handoff followers would hang")
+		}
+		select {
+		case <-inflight.stored:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stored was not closed: fill followers would hang")
+		}
+	})
+
+	t.Run("origin mid-body error publishes the sentinel and stores nothing", func(t *testing.T) {
+		t.Parallel()
+		var client bytes.Buffer
+		w := bufio.NewWriter(&client)
+		body := &errAfterReader{data: make([]byte, bodyLen), err: errors.New("connection reset mid-body")}
+		h, inflight, key := runTee(t, w, body)
+
+		require.ErrorIs(t, inflight.res.Err, ErrStreamUnshareable,
+			"the origin connection broke before confirming EOF: even a fully buffered copy is unproven and must never reach a follower")
+		require.False(t, h.store.Has(key),
+			"an unproven body must never be stored")
+		select {
+		case <-inflight.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("done was not closed: byte-handoff followers would hang")
+		}
+		select {
+		case <-inflight.stored:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stored was not closed: fill followers would hang")
+		}
+	})
 }

@@ -475,6 +475,37 @@ func (c *blockingErrFastClient) DoDeadline(*fasthttp.Request, *fasthttp.Response
 	return errors.New("origin unreachable")
 }
 
+// failFirstFastClient is a FastClient whose first fetch blocks on the
+// release channel and then fails with a transport error; every later
+// fetch succeeds — a transiently failing origin, for pinning that a
+// fill follower does not inherit the leader's error verdict.
+type failFirstFastClient struct {
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func (c *failFirstFastClient) do(resp *fasthttp.Response) error {
+	if c.calls.Add(1) == 1 {
+		select {
+		case <-c.release:
+		case <-time.After(2 * time.Second):
+		}
+		return errors.New("transient origin failure")
+	}
+	resp.SetStatusCode(200)
+	resp.Header.Set(header.CacheControl, "max-age=60")
+	resp.SetBodyRaw([]byte("recovered"))
+	return nil
+}
+
+func (c *failFirstFastClient) Do(_ context.Context, _ *fasthttp.Request, resp *fasthttp.Response) error {
+	return c.do(resp)
+}
+
+func (c *failFirstFastClient) DoDeadline(_ *fasthttp.Request, resp *fasthttp.Response, _ time.Time) error {
+	return c.do(resp)
+}
+
 // TestFetchAndStore_FillFollowerDoesNotRepark pins the re-entry guard:
 // when a fill follower's variant is absent (unstorable fill or foreign
 // variant), its own fetch must not park on the (already completed)
@@ -646,10 +677,16 @@ func TestFetchAndStore_FillFollowerReentryReasksOwner(t *testing.T) {
 		followerDone <- ctx
 	}()
 	time.Sleep(50 * time.Millisecond) // let the follower park on the fill flight
-	close(release)
-	<-leaderDone
+	// Asserted BEFORE close(release): once the leader resolves it closes
+	// inflight.stored (inside streamMissBuffered, before this test can
+	// observe leaderDone), the parked follower wakes, drops the hints,
+	// re-enters — and re-asks the owner. Reading the counter after
+	// close(release) races that re-entry (observed: ~1 failure in 20
+	// under -race).
 	require.Equal(t, int32(0), peerFetchCalls.Load(),
 		"the hinted leader and the hinted first pass skip the owner RPC as before")
+	close(release)
+	<-leaderDone
 
 	select {
 	case follower := <-followerDone:
@@ -658,6 +695,119 @@ func TestFetchAndStore_FillFollowerReentryReasksOwner(t *testing.T) {
 		require.Equal(t, int64(1), fetches.Load(),
 			"the follower serves the fill's object from the owner instead of fetching its own origin copy")
 		require.Equal(t, "from-owner", respBody(follower))
+	case <-time.After(5 * time.Second):
+		t.Fatal("fill follower did not terminate")
+	}
+}
+
+// TestFetchAndStore_FillFollowerTransportErrorFetchesOwn pins the
+// error-verdict half of ADR-0066's sequential equivalence: a fill
+// follower parked on a leader whose fetch fails transiently must not
+// inherit the leader's 502 — nothing usable was stored for it, so it
+// re-enters and fetches its own, exactly like a request arriving after
+// the failed fill (which succeeds). Inheriting the leader's error would
+// answer a concurrent request with another request's verdict.
+func TestFetchAndStore_FillFollowerTransportErrorFetchesOwn(t *testing.T) {
+	t.Parallel()
+
+	client := &failFirstFastClient{release: make(chan struct{})}
+	h := NewHandler(HandlerConfig{
+		FastClient: client,
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+	})
+
+	leaderDone := make(chan *fasthttp.RequestCtx, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/fill-error")
+		serveRequest(h, ctx)
+		leaderDone <- ctx
+	}()
+	for client.calls.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	followerDone := make(chan *fasthttp.RequestCtx, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/fill-error")
+		serveRequest(h, ctx)
+		followerDone <- ctx
+	}()
+	time.Sleep(50 * time.Millisecond) // let the follower park on the fill flight
+	close(client.release)
+
+	leader := <-leaderDone
+	require.Equal(t, 502, respCode(leader),
+		"the leader keeps its own error verdict")
+
+	select {
+	case follower := <-followerDone:
+		require.Equal(t, 200, respCode(follower),
+			"a transport-error verdict stored nothing usable: the follower fetches its own, never inheriting the leader's 502")
+		require.Equal(t, "recovered", respBody(follower))
+		require.Equal(t, "MISS", respHeader(follower, header.XCache))
+		require.Equal(t, int64(2), client.calls.Load(),
+			"leader fill + the follower's own fetch — sequential equivalence on error verdicts")
+	case <-time.After(5 * time.Second):
+		t.Fatal("fill follower did not terminate")
+	}
+}
+
+// TestFetchAndStore_FillFollowerShedServes503 pins the one error
+// verdict that must NOT re-fetch: ErrFetchShed. The shed proves the
+// fetch semaphore is saturated — the follower's own acquire would wait
+// on the same saturated semaphore — so the follower is answered with
+// the shed 503 (the verdict a sequential request receives under the
+// same load), plus the bounded background refill.
+func TestFetchAndStore_FillFollowerShedServes503(t *testing.T) {
+	t.Parallel()
+
+	var originCalls atomic.Int64
+	h := testHandler(t, func(_ *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+	})
+	// One fetch slot, held for the whole test: the leader's acquire
+	// waits fetchWaitTimeout and sheds. rewarmSem is filled so the
+	// bounded shed refill is dropped (default branch) — otherwise its
+	// background fetch would race the originCalls assertion.
+	h.fetchWaitTimeout = 50 * time.Millisecond
+	h.fetchSem = make(chan struct{}, 1)
+	h.fetchSem <- struct{}{}
+	defer func() { <-h.fetchSem }()
+	for range cap(h.rewarmSem) {
+		h.rewarmSem <- struct{}{}
+	}
+	defer func() {
+		for range cap(h.rewarmSem) {
+			<-h.rewarmSem
+		}
+	}()
+
+	leaderDone := make(chan *fasthttp.RequestCtx, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/fill-shed")
+		serveRequest(h, ctx)
+		leaderDone <- ctx
+	}()
+	time.Sleep(5 * time.Millisecond) // the leader registers the flight, then blocks on the slot
+
+	followerDone := make(chan *fasthttp.RequestCtx, 1)
+	go func() {
+		ctx := testCtx("GET", "http://example.com/fill-shed")
+		serveRequest(h, ctx)
+		followerDone <- ctx
+	}()
+
+	leader := <-leaderDone
+	require.Equal(t, 503, respCode(leader), "the leader sheds")
+
+	select {
+	case follower := <-followerDone:
+		require.Equal(t, 503, respCode(follower),
+			"a shed fill resolves to the follower's own shed verdict, not an origin re-fetch")
+		require.Equal(t, "MISS", respHeader(follower, header.XCache))
+		require.NotEmpty(t, respHeader(follower, header.RetryAfter))
+		require.Equal(t, int64(0), originCalls.Load(),
+			"the shed happens before any fetch: neither the leader nor the follower reaches the origin")
 	case <-time.After(5 * time.Second):
 		t.Fatal("fill follower did not terminate")
 	}

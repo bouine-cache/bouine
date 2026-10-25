@@ -60,7 +60,8 @@ type inflightStream struct {
 	// stored closes when the fill has settled in the store: after the
 	// leader's store attempt on a cacheable fill, or at the leader's
 	// verdict when nothing will be stored (fetch error, shed, SSE
-	// unshareable, oversize, non-cacheable). Fill-flight followers
+	// unshareable, oversize, non-cacheable, incomplete body — client
+	// disconnect or origin mid-body error). Fill-flight followers
 	// (ADR-0066) wait on stored and then re-enter the request pipeline;
 	// byte-handoff followers keep waiting on done only (unchanged).
 	// Every path that closes done also closes stored, exactly once —
@@ -1023,7 +1024,13 @@ func (h *Handler) teeStreamToClient(
 ) {
 	var totalBytes int64
 	cacheExceeded := false
-	clientDisconnected := false
+	// bodyComplete reports whether the origin body was read to a clean
+	// EOF. A write error (the leader's client hung up) breaks the loop
+	// mid-body and leaves it false; a non-EOF read error (the origin
+	// connection broke mid-body) sets it false explicitly. Either way
+	// the buffered copy is a prefix, not a response — see the publish
+	// below.
+	bodyComplete := false
 
 	bufCap := h.maxResponseBytes
 	if bufCap <= 0 {
@@ -1043,7 +1050,9 @@ func (h *Handler) teeStreamToClient(
 
 			_, wErr := w.Write(chunk[:n])
 			if wErr != nil {
-				clientDisconnected = true
+				// The leader's client hung up mid-body: stop streaming
+				// and buffering. The partial copy must never reach a
+				// sharing surface — the publish below makes it unshareable.
 				break
 			}
 			_ = w.Flush()
@@ -1060,6 +1069,7 @@ func (h *Handler) teeStreamToClient(
 			}
 		}
 		if readErr != nil {
+			bodyComplete = errors.Is(readErr, io.EOF)
 			break
 		}
 	}
@@ -1084,22 +1094,7 @@ func (h *Handler) teeStreamToClient(
 		Body:       bodyCopy,
 		Delay:      sf.Delay,
 	}
-	publishFillVerdict(inflight, res, sf.Header)
-	// stored closes at callback exit: after the store attempt below
-	// (skipped on cacheExceeded / clientDisconnected / maxObjectSize —
-	// the settlement verdict is then already final).
-	defer close(inflight.stored)
-
-	if !cacheExceeded && !clientDisconnected && !(h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) { //nolint:staticcheck // QF1001: readability
-		bgCtx := context.Background()
-		obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap, fillTTL)
-		if storeKey != primaryKey {
-			primaryObj := obj.CloneForReturn(obj.Body)
-			primaryObj.Key = primaryKey
-			h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0)
-			h.forwardToOwnerIfRemote(bgCtx, primaryObj)
-		}
-	}
+	h.settleTeeFill(inflight, res, sf, storeKey, primaryKey, ri, resMap, fillTTL, bodyComplete, cacheExceeded, totalBytes)
 
 	if buf.Cap() <= maxStreamBufRetain {
 		buf.Reset()
@@ -1109,12 +1104,59 @@ func (h *Handler) teeStreamToClient(
 	releaseStreamFetch(sf)
 }
 
+// settleTeeFill publishes the tee fill's verdict to the flight and
+// performs the store attempt on the shareable path. A body that did
+// not complete cleanly — the leader's client hung up mid-stream, or
+// the origin connection broke mid-body — leaves a buffered copy that
+// is a prefix, or at best a full body the origin never confirmed:
+// publishing it would hand a byte-handoff follower a truncated 200
+// (the leader's headers claim Content-Length N, the body carries
+// M < N bytes), and storing it would replay that truncation to every
+// later request. The leader's own truncation is inherent to streaming
+// — its head was already sent — but no follower inherits it and
+// nothing is stored: the unshareable sentinel releases every follower
+// to its own fetch (ADR-0042) and closes both settlement channels
+// (ADR-0066). On the shareable path stored closes at settle exit:
+// after the store attempt (skipped on cacheExceeded / maxObjectSize —
+// the settlement verdict is then already final).
+func (h *Handler) settleTeeFill(
+	inflight *inflightStream,
+	res fetchResult,
+	sf *streamFetchResult,
+	storeKey, primaryKey api.Key,
+	ri RequestInfo,
+	resMap header.Map,
+	fillTTL *time.Duration,
+	bodyComplete, cacheExceeded bool,
+	totalBytes int64,
+) {
+	if !bodyComplete {
+		publishStreamUnshareable(inflight)
+		return
+	}
+	publishFillVerdict(inflight, res, sf.Header)
+	defer close(inflight.stored)
+	if cacheExceeded || (h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) {
+		return
+	}
+	bgCtx := context.Background()
+	obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap, fillTTL)
+	if storeKey != primaryKey {
+		primaryObj := obj.CloneForReturn(obj.Body)
+		primaryObj.Key = primaryKey
+		h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0)
+		h.forwardToOwnerIfRemote(bgCtx, primaryObj)
+	}
+}
+
 // publishStreamUnshareable resolves singleflight followers for a
 // response that is streamed to the leader unbuffered (non-hinted SSE,
-// Vary variant overflow): no complete body is ever buffered, so there is
-// no result to hand over. Followers are released at header time — not
-// stream end — and fetch their own response via fetchAndStore's
-// ErrStreamUnshareable branch; a live stream is per-connection by
+// Vary variant overflow) or whose body did not complete cleanly
+// (teeStreamToClient: leader client disconnect, origin mid-body
+// error): no complete body was ever buffered, so there is no result to
+// hand over. Followers are released at header time — not stream end —
+// and fetch their own response via fetchAndStore's ErrStreamUnshareable
+// branch; a live stream is per-connection by
 // design (ADR-0042). Nothing will be stored from such a stream, so
 // closing stored here is the settlement verdict (ADR-0066).
 func publishStreamUnshareable(inflight *inflightStream) {

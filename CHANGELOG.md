@@ -38,9 +38,12 @@ the curated, human-readable summary.
   fetched bytes** — through the same gates as a sequential request
   (Vary variant selection, RFC 9111 §3.5 storage, freshness,
   conditionals), or fetches its own when the fill stored nothing usable
-  for it. Pinned by a byte-for-byte sequential-equivalence test. In
-  cluster mode the follower's re-entry re-asks the owner (the fast
-  path's pre-fill owner-miss hint is dropped — the fill may have
+  for it — including a transport-error verdict: a transient leader
+  failure is not the follower's response (only the shed verdict keeps
+  its 503, since a re-fetch would queue behind the same saturated
+  fetch semaphore). Pinned by a byte-for-byte sequential-equivalence
+  test. In cluster mode the follower's re-entry re-asks the owner (the
+  fast path's pre-fill owner-miss hint is dropped — the fill may have
   populated the owner since), so the store-mediated serve holds on
   non-owner nodes too. The
   ADR-0052/ADR-0054 refusals (Authorization, Cookie, unsafe methods)
@@ -244,6 +247,19 @@ the curated, human-readable summary.
   downstream freshness sync ADR (this PR) takes number **0063**.
 
 ### Fixed
+
+- **A collapse flight could hand a truncated body to a follower, and
+  an origin connection that broke mid-body could store the truncated
+  copy.** The streaming tee published whatever it had buffered when the
+  body did not complete cleanly: if the leader's client hung up
+  mid-stream, byte-handoff followers received the partial bytes as a
+  complete 200 (headers claiming the full Content-Length, fewer bytes
+  delivered); if the origin connection broke mid-body, the partial copy
+  was also *stored*, replaying the truncation to every later request
+  until the TTL expired. A body that does not read to a clean EOF is now
+  published as the unshareable sentinel — every follower fetches its
+  own — and never stored (`teeStreamToClient`, pinned by
+  `TestTeeStreamToClient_IncompleteBodyNeverSharedOrStored`).
 
 - **A HEAD-led collapse flight could hand an empty body to a GET
   follower.** Byte-handoff flights (warm and declared-dimension misses)

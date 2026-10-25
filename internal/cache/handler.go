@@ -2611,6 +2611,11 @@ func dropStaleOwnerHints(ctx *fasthttp.RequestCtx) {
 // fill only hands the follower a stored object when the origin's
 // response was storable for a shared cache), freshness, conditionals —
 // pinned byte-for-byte by TestFetchAndStore_FillFollowerSequentialEquivalence.
+// Error verdicts follow the same rule: a transport failure re-enters
+// to the follower's own fetch — a transient leader failure is not the
+// follower's response. Only ErrFetchShed keeps its direct 503: the
+// shed signals fetch-semaphore saturation, and a re-fetch would queue
+// behind the same saturated semaphore.
 //
 // The re-entry guard (fillReentryUserKey) bounds the re-entry: the
 // follower's own fetch, taken when the fill stored nothing usable for
@@ -2622,25 +2627,25 @@ func (h *Handler) serveFillFollower(ctx *fasthttp.RequestCtx, lookupKey api.Key,
 	<-existing.stored
 	res := existing.res
 	if res.Err != nil {
-		if errors.Is(res.Err, ErrStreamUnshareable) {
-			// The leader's response is delivered unbuffered (SSE,
-			// variant overflow): re-enter the pipeline so this request
-			// gets its own fetch with full request semantics.
-			ctx.SetUserValue(fillReentryUserKey, true)
-			h.ServeRequest(ctx)
-			return
-		}
 		if errors.Is(res.Err, ErrFetchShed) {
 			h.writeShed503(ctx, "MISS")
 			// The leader shed without fetching: schedule the bounded
-			// background refill so this shed is not a lost re-warm.
+			// background refill so this shed is not a lost re-warm. The
+			// follower does not re-fetch: its own acquire would wait on
+			// the same saturated fetch semaphore, so the 503 is the
+			// verdict a sequential request receives under the same load.
 			h.triggerShedRefill(ri, lookupKey)
 			return
 		}
-		writeUpstreamError(ctx, res.Err)
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-		h.applyResponseRewrites(&ctx.Response.Header)
+		// Every other error verdict — a transport failure, or the
+		// leader's response being unshareable (SSE, variant overflow) —
+		// means nothing usable was stored for this follower. It
+		// fetches its own through the pipeline like a freshly-arrived
+		// request (ADR-0066 sequential equivalence; the re-entry guard
+		// bounds it to one fetch): inheriting the leader's error would
+		// answer a concurrent request with another request's verdict.
+		ctx.SetUserValue(fillReentryUserKey, true)
+		h.ServeRequest(ctx)
 		return
 	}
 	// The fill settled in the store (or was definitively unstorable).

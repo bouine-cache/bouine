@@ -44,7 +44,7 @@ func newTuiPalette(r *lipgloss.Renderer) tuiPalette {
 		stale:    r.NewStyle().Foreground(lipgloss.Color("220")),
 		high:     r.NewStyle().Foreground(lipgloss.Color("196")),
 		med:      r.NewStyle().Foreground(lipgloss.Color("220")),
-		low:      r.NewStyle().Foreground(lipgloss.Color("250")),
+		low:      r.NewStyle().Foreground(lipgloss.Color("46")),
 		barFill:  r.NewStyle().Foreground(lipgloss.Color("46")),
 		barEmpty: r.NewStyle().Faint(true),
 	}

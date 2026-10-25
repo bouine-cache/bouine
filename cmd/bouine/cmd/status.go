@@ -123,15 +123,28 @@ func renderStatusText(b *strings.Builder, r *bouineapi.StatusReport) {
 
 	if len(r.Origins) > 0 {
 		b.WriteString("origins\n")
+		type originRow struct{ head, change string }
+		var rows []originRow
+		maxw := 0
 		for _, pool := range r.Origins {
 			for _, t := range pool.Targets {
 				state := "healthy"
 				if !t.Healthy {
 					state = "SICK"
 				}
-				fmt.Fprintf(b, "    %s/%s  %s  %s\n",
-					pool.Name, t.Addr, state, targetSignals(r, t))
+				head := fmt.Sprintf("    %s/%s  %s", pool.Name, t.Addr, state)
+				if cs := targetCounterSignals(t); cs != "" {
+					head += "  " + cs
+				}
+				if w := lipgloss.Width(head); w > maxw {
+					maxw = w
+				}
+				rows = append(rows, originRow{head: head, change: statusRelTime(r, t.LastChange)})
 			}
+		}
+		for _, row := range rows {
+			fmt.Fprintf(b, "%s%s  last change %s\n",
+				row.head, strings.Repeat(" ", maxw-lipgloss.Width(row.head)), row.change)
 		}
 	}
 

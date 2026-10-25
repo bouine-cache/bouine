@@ -117,6 +117,35 @@ func TestRenderStatusFrame_InsightActionAlignment(t *testing.T) {
 	}
 }
 
+// TestRenderStatusFrame_OriginLastChangeAlignment pins the aligned
+// last-change column: with targets carrying different counter
+// signals, every "last change" must start at the same column.
+func TestRenderStatusFrame_OriginLastChangeAlignment(t *testing.T) {
+	t.Parallel()
+	report := statusFixture()
+	report.Origins = []bouineapi.StatusPool{
+		{Name: "api", Targets: []bouineapi.StatusTarget{
+			{Addr: "10.0.0.1:80", Healthy: true, ProbeSuccesses: 3},
+			{Addr: "10.0.0.2:80", Healthy: false, PassiveErrors: 3, ProbeErrors: 8607,
+				LastChange: "2026-10-23T09:00:00Z"},
+		}},
+		{Name: "a-much-longer-pool-name", Targets: []bouineapi.StatusTarget{
+			{Addr: "10.0.0.3:80", Healthy: true},
+		}},
+	}
+	frame := renderStatusFrame(tuiPaletteFor(io.Discard), &report, nil, frameMeta{width: 120})
+	var cols []int
+	for _, line := range strings.Split(frame, "\n") {
+		if i := strings.Index(line, "last change"); i >= 0 {
+			cols = append(cols, i)
+		}
+	}
+	require.Len(t, cols, 3, "one last-change column per origin row")
+	for _, col := range cols[1:] {
+		require.Equal(t, cols[0], col, "all origin rows align their last-change column")
+	}
+}
+
 func TestRenderStatusFrame_NotReadyAndFetchError(t *testing.T) {
 	t.Parallel()
 	report := statusFixture()

@@ -125,28 +125,41 @@ func statusOriginsSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 	if len(r.Origins) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(" ORIGINS\n")
+	type originRow struct{ head, change string }
+	rows := make([]originRow, 0, len(r.Origins))
+	maxw := 0
 	for _, pool := range r.Origins {
 		for _, t := range pool.Targets {
 			state := p.healthy.Render("healthy")
 			if !t.Healthy {
 				state = p.sick.Render("SICK")
 			}
-			line := fmt.Sprintf("   %s/%s  %s  %s",
-				pool.Name, t.Addr, state, targetSignals(r, t))
-			b.WriteString(truncateLine(p, line, width))
-			b.WriteString("\n")
+			head := fmt.Sprintf("   %s/%s  %s", pool.Name, t.Addr, state)
+			if cs := targetCounterSignals(t); cs != "" {
+				head += "  " + cs
+			}
+			if w := lipgloss.Width(head); w > maxw {
+				maxw = w
+			}
+			rows = append(rows, originRow{head: head, change: statusRelTime(r, t.LastChange)})
 		}
+	}
+	var b strings.Builder
+	b.WriteString(" ORIGINS\n")
+	for _, row := range rows {
+		line := row.head + strings.Repeat(" ", maxw-lipgloss.Width(row.head)) +
+			"  last change " + row.change
+		b.WriteString(truncateLine(p, line, width))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-// targetSignals renders one target's non-zero health counters with
-// human-readable labels; zero counters stay hidden so a healthy target
-// reads as just its state and last change. The counters are
+// targetCounterSignals renders one target's non-zero health counters
+// with human-readable labels; zero counters stay hidden so a healthy
+// target reads as just its state and last change. The counters are
 // consecutive streaks since the last health transition, not totals.
-func targetSignals(r *bouineapi.StatusReport, t bouineapi.StatusTarget) string {
+func targetCounterSignals(t bouineapi.StatusTarget) string {
 	var parts []string
 	if t.PassiveErrors > 0 {
 		parts = append(parts, fmt.Sprintf("passive errors %d", t.PassiveErrors))
@@ -157,7 +170,6 @@ func targetSignals(r *bouineapi.StatusReport, t bouineapi.StatusTarget) string {
 	if t.ProbeSuccesses > 0 {
 		parts = append(parts, fmt.Sprintf("probe streak %d", t.ProbeSuccesses))
 	}
-	parts = append(parts, "last change "+statusRelTime(r, t.LastChange))
 	return strings.Join(parts, "  ")
 }
 

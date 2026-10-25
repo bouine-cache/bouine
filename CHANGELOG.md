@@ -496,6 +496,16 @@ the curated, human-readable summary.
   exceed `max_variants` via peer-put registrations, bounded by SIEVE
   eviction and the dead-variant sweep, while local fills keep the
   cap as a storage refusal.
+- **Peer-put objects were registered for a refresh that could never
+  run.** The write-to-owner RPC delivers an `api.Object`, which
+  carries no URL, yet its store-side callback registered the object
+  for proactive refresh; the refresh executor rebuilds its fetch from
+  the registry entry's URL, so every such refresh fired an empty-URI
+  fetch that failed locally and retried until the TTL lapsed —
+  scheduler churn and error metrics, never a refresh. Registration
+  now requires a request URI; peer-put objects keep request-driven
+  revalidation (SWR/SIE/stale-on-hit), the strong-mode refresh path
+  (ADR-0066).
 
 ## [0.5.29] - 2026-10-19
 

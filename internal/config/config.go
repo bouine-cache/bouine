@@ -118,6 +118,15 @@ type ExperimentalConfig struct {
 	// startup). Not wired under the epoll reactor, where TryHit must
 	// never block on network I/O. Default false.
 	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
+
+	// ConfigReload enables POST /v1/config/reload (bouine config
+	// reload, issue #817): re-parse and validate the config file,
+	// apply the hot-appliable subset (the hot-config knobs)
+	// atomically, and report the fields that need a restart. Parse or
+	// validation failure leaves the running config untouched.
+	// Default false; phase 2 (route table and pool target swap) lands
+	// separately under the same flag.
+	ConfigReload bool `yaml:"config_reload,omitempty" json:"config_reload,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

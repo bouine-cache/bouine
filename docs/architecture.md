@@ -645,6 +645,7 @@ bouine stats
 bouine config get [key]           # live hot-config knobs, with source
 bouine config set <key> <value>   # [--dry-run] runtime change
 bouine config diff [<a.yaml> <b.yaml>]
+bouine config reload [--file <path>]   # experimental (config_reload)
 bouine config validate <file>
 bouine config schema
 bouine bench [--profile canonical]
@@ -670,7 +671,13 @@ additively. Per-route keys are cold-only and rejected with the
 explanation. Applied sets fan out to every live peer over the
 strong-mode HTTP fan-out (`POST /v1/peer/config/hot`; the peer route
 applies locally and never re-broadcasts, so it cannot loop) and
-report the acknowledged count; eventual-mode clusters do not fan out. `get` shows each knob's live value and source (`file`,
+report the acknowledged count; eventual-mode clusters do not fan out.
+`bouine config reload` (behind `experimental.config_reload`, default
+off, issue #817) applies a whole config file the same way: re-parse
+and validate (failure changes nothing), apply the hot subset, report
+applied / unchanged / `needs_restart` loudly. Rollback is
+operational — reload the previous file. The route table and pool
+target swap are phase 2 and land under the same flag. `get` shows each knob's live value and source (`file`,
 `default`, or `runtime`); `set` applies a validated point mutation
 and prints the not-persisted warning — runtime overrides are
 deliberately ephemeral (pods are cattle), so `diff` shows what is

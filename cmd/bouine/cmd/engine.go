@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -48,16 +49,25 @@ type engine struct {
 	cfg        *config.Config
 	metrics    *observability.Metrics
 	configPath string
+
+	// hotCfg is the config the hot-knob registry reports file values
+	// from: the boot config at startup, swapped to each successfully
+	// reloaded config (issue #817) so drift reporting answers against
+	// the last-loaded file. The boot truth in cfg never changes —
+	// cold fields always describe what is actually running.
+	hotCfg atomic.Pointer[config.Config]
 }
 
 func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engine {
-	return &engine{
+	e := &engine{
 		cfg:        cfg,
 		configPath: configPath,
 		startTime:  time.Now(),
 		logger:     observability.NewSampledLogger(logger, observability.DefaultKeySampleRate),
 		metrics:    observability.NewMetrics(),
 	}
+	e.hotCfg.Store(cfg)
+	return e
 }
 
 // defaultJoinTimeout bounds the cluster join retry budget when
@@ -881,6 +891,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			hotKnobs := e.hotKnobList(rs)
 			return hotKnobs
 		}, rs.hotSets, e.hotBroadcastFn(rs)),
+		ReloadFn: e.reloadFn(rs, e.reloadMetrics()),
 		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)

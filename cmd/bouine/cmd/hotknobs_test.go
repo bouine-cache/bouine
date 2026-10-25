@@ -305,7 +305,7 @@ func TestPoolKnobsSortedAndKeyed(t *testing.T) {
 		"www": testPool(t, "www", 3, 0),
 	}
 
-	knobs := poolKnobs(&cfg, pools)
+	knobs := poolKnobs(&cfg, &cfg, pools)
 	require.Len(t, knobs, 4)
 	keys := []string{knobs[0].key, knobs[1].key, knobs[2].key, knobs[3].key}
 	assert.Equal(t, []string{
@@ -355,7 +355,7 @@ func TestPoolConsecutive5xxKnob(t *testing.T) {
 func TestPoolEjectForKnob(t *testing.T) {
 	t.Parallel()
 	p := testPool(t, "api", 0, 0)
-	knob := poolEjectForKnob("api", 0, p)
+	knob := poolEjectForKnob("api", 0, 0, p)
 	assert.Equal(t, "default", knob.source(knob.get()))
 
 	_, err := applyHotKnob(knob, admin.HotSetRequest{Key: knob.key, Value: "5m", DryRun: true}, testSetsCounter())
@@ -369,7 +369,7 @@ func TestPoolEjectForKnob(t *testing.T) {
 
 	// Boot-configured reaper: the knob is fully live.
 	p2 := testPool(t, "api", 0, time.Hour)
-	knob2 := poolEjectForKnob("api", time.Hour, p2)
+	knob2 := poolEjectForKnob("api", time.Hour, time.Hour, p2)
 	assert.Equal(t, "file", knob2.source(knob2.get()))
 	_, err = applyHotKnob(knob2, admin.HotSetRequest{Key: knob2.key, Value: "90s", DryRun: true}, testSetsCounter())
 	require.NoError(t, err)

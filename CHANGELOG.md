@@ -60,6 +60,24 @@ the curated, human-readable summary.
   Eventual-mode clusters intentionally do not fan out (runtime knobs
   ride no gossip); dry runs never fan out.
 
+- **`bouine config reload` and `POST /v1/config/reload` (#817,
+  phase 1, experimental).** Apply a config file to a running daemon
+  without a restart: re-parse and validate (any failure leaves the
+  running config untouched), apply the hot-appliable subset through
+  the #815 knob registry (which reverts runtime drift back to the
+  file), and report three sections — applied (old → new values),
+  unchanged, and `NEEDS RESTART` for cold-only fields and knobs that
+  refused, each with its reason. Off by default behind
+  `experimental.config_reload`; a disabled daemon answers 503 with
+  the opt-in instructions. The CLI prints `needs_restart` loudly;
+  rollback is operational (reload the previous git-tracked file).
+  The registry's notion of the file config swaps to the last-loaded
+  file so `bouine config diff` keeps answering truthfully after a
+  reload. Reload is per-node (cluster-coordinated switch and the
+  route/pool phase 2 land separately); audit rides slog +
+  `bouine_config_reloads_total{result}` and the admin write rate
+  limit.
+
 - **`bouine status` and `GET /v1/status` (#813).** A one-glance
   node overview with five sections: node (version, uptime,
   readiness — a drained pod reports NOT-READY), cache (hit ratio,

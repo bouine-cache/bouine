@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	jsonv2 "encoding/json/v2"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -52,7 +53,12 @@ type Config struct {
 	// HotSetFn serves POST /v1/config/hot (bouine config set): a
 	// validated point mutation on one hot knob. DryRun validates and
 	// reports without applying. nil disables the endpoint.
-	HotSetFn           func(ctx context.Context, req HotSetRequest) (HotSetResult, error)
+	HotSetFn func(ctx context.Context, req HotSetRequest) (HotSetResult, error)
+	// ReloadFn serves POST /v1/config/reload (bouine config reload,
+	// issue #817): re-parse and validate a config file, apply the
+	// hot-appliable subset, and report what needs a restart. nil
+	// disables the endpoint (experimental.config_reload off).
+	ReloadFn           func(ctx context.Context, req ConfigReloadRequest) (ConfigReloadResult, error)
 	DrainFn            func()
 	RefreshFn          func(key api.Key) error
 	ConditionsFn       func() []Condition
@@ -418,6 +424,8 @@ func (s *Server) handleWriteRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 		}
 	case "/v1/cloudflare/propagate":
 		return requirePost(s.cloudflarePropagate, s.cfg.CFPropagateFn != nil)
+	case "/v1/config/reload":
+		return requirePost(s.configReload, s.cfg.ReloadFn != nil)
 	}
 	return false
 }
@@ -544,6 +552,32 @@ func (s *Server) hotSet(ctx *fasthttp.RequestCtx) {
 		result = "dry-run"
 	}
 	s.recordOp("config set", req.Key+"="+req.Value, result)
+	writeJSON(ctx, fasthttp.StatusOK, res)
+}
+
+// configReload applies a re-parsed config file to the running daemon
+// (issue #817). Refusals are precise: disabled answers 503 with the
+// opt-in instructions, parse/validation failures answer 400 without
+// touching the running config.
+func (s *Server) configReload(ctx *fasthttp.RequestCtx) {
+	var req ConfigReloadRequest
+	if !decodeJSON(ctx, &req) {
+		return
+	}
+	res, err := s.cfg.ReloadFn(ctx, req)
+	if err != nil {
+		if errors.Is(err, ErrReloadDisabled) {
+			writeJSON(ctx, fasthttp.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result := "noop"
+	if len(res.Applied) > 0 {
+		result = "applied"
+	}
+	s.recordOp("config reload", req.Path, result)
 	writeJSON(ctx, fasthttp.StatusOK, res)
 }
 

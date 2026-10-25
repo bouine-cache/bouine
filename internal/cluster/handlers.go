@@ -59,6 +59,14 @@ func NewPeerRefreshHandler(fn func(api.RefreshEvent) error) fasthttp.RequestHand
 	return newPeerInvalidationHandler(DecodeRefreshHTTP, fn, "refreshed")
 }
 
+// NewPeerHotSetHandler returns a fasthttp.RequestHandler that decodes
+// HotSetEvent JSON frames and delegates to fn. Mounted at POST
+// /v1/peer/config/hot: the receiving node applies the runtime knob
+// locally and never re-broadcasts (loop-safe by construction).
+func NewPeerHotSetHandler(fn func(api.HotSetEvent) error) fasthttp.RequestHandler {
+	return newPeerInvalidationHandler(DecodeHotSetHTTP, fn, "set")
+}
+
 func writePeerError(ctx *fasthttp.RequestCtx, err error) {
 	ctx.Response.Header.Set(header.ContentType, "application/json")
 	ctx.SetStatusCode(fasthttp.StatusInternalServerError)

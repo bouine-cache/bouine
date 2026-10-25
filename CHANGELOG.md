@@ -36,6 +36,30 @@ the curated, human-readable summary.
   and rides the existing admin write rate limit. The bouineapi
   SDK gained `Client.HotConfig` and `Client.HotSet`.
 
+- **Per-pool hot-config scoping (#815 follow-up).** Runtime knobs
+  now include pool-scoped keys — `bouine config
+  pool:<name>.health.passive.consecutive_5xx` (the passive-ejection
+  trigger, fully hot: the cache-path fetch reads an atomic threshold
+  per request) and `pool:<name>.health.passive.eject_for` (the
+  restore window, hot-changeable only when the boot config set it —
+  the EjectReaper starts once, at boot, so reaper-less pools reject
+  runtime sets with a precise error). Per-route keys stay cold-only
+  and are rejected with an explanation instead of a bare unknown-key
+  error. `origin.Pool.consecutive5xx` and `ejectFor` became atomics —
+  fixing another latent data race (the fields were read per fetch
+  with no synchronization).
+
+- **Cluster fan-out for `bouine config set` (#815 follow-up).**
+  Applied sets now propagate to every live peer over the existing
+  strong-mode HTTP fan-out (`POST /v1/peer/config/hot`, JSON frames;
+  the peer route applies locally through the same registry and never
+  re-broadcasts, so the fan-out cannot loop). The CLI reports honest
+  coverage — `cluster.ban_ttl: 24h0m0s -> 45m0s (broadcast to 2
+  peers)` — with failures logged and counted in
+  `bouine_cluster_broadcast_failures_total{type="hot_set"}`.
+  Eventual-mode clusters intentionally do not fan out (runtime knobs
+  ride no gossip); dry runs never fan out.
+
 - **`bouine status` and `GET /v1/status` (#813).** A one-glance
   node overview with five sections: node (version, uptime,
   readiness — a drained pod reports NOT-READY), cache (hit ratio,
@@ -125,6 +149,12 @@ the curated, human-readable summary.
   downstream freshness sync ADR (this PR) takes number **0063**.
 
 ### Fixed
+
+- **`bouine cluster peers` on a local-mode daemon answered a bare
+  404 (#815 follow-up).** The admin server now explains itself:
+  `GET /v1/cluster/peers` returns 503 with the reason — "set
+  listen.cluster to enable the gossip cluster", or "cluster init
+  failed (see daemon logs)" — instead of `status 404: not found`.
 
 - **Data race on the URL-ring sample rate (#815).** The sample rate
   was a plain `int64` written by `SetSampleRate` while the data

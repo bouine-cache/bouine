@@ -139,12 +139,20 @@ func newConfigSetCmd() *cobra.Command {
 
 // renderHotSet renders from the wire result, not the request flag, so
 // the output can never claim an application the server did not make.
+// Applied sets report their cluster fan-out coverage.
 func renderHotSet(res *bouineapi.HotSetResult) string {
 	if !res.Applied {
 		return fmt.Sprintf("dry-run: would set %s: %s -> %s (not applied)",
 			res.Key, res.OldValue, res.NewValue)
 	}
 	line := fmt.Sprintf("%s: %s -> %s", res.Key, res.OldValue, res.NewValue)
+	if res.Peers > 0 {
+		if res.Peers == 1 {
+			line += " (broadcast to 1 peer)"
+		} else {
+			line += fmt.Sprintf(" (broadcast to %d peers)", res.Peers)
+		}
+	}
 	if res.Warning != "" {
 		line += "\nwarning: " + res.Warning
 	}

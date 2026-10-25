@@ -62,16 +62,26 @@ type Config struct {
 	PeerPurgeBatchHandler fasthttp.RequestHandler
 	// PeerRefreshBatchHandler serves POST /v1/peer/refresh/batch (ADR-0044).
 	PeerRefreshBatchHandler fasthttp.RequestHandler
-	ReadyFn                 func() bool
-	CFStatusFn              func() CloudflareStatus
-	DashboardHandler        fasthttp.RequestHandler
-	OnRefreshed             func(ctx context.Context, url string)
-	OnBanned                func(ctx context.Context, expr api.BanExpr)
-	PeerFetchHandler        fasthttp.RequestHandler
-	CFPropagateFn           func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler      fasthttp.RequestHandler
-	OnPurged                func(ctx context.Context, url string)
-	FaviconHandler          fasthttp.RequestHandler
+	// PeerHotSetHandler serves POST /v1/peer/config/hot: a runtime
+	// knob set fanned out by a peer's broadcaster. Applies locally,
+	// never re-broadcasts (loop-safe by construction). nil (cluster
+	// disabled) leaves the route unmounted.
+	PeerHotSetHandler fasthttp.RequestHandler
+	// ClusterDisabledReason, when set, explains why PeersFn is nil on
+	// a daemon that looks clustered from the outside: GET
+	// /v1/cluster/peers then returns 503 with this message instead of
+	// a bare 404 (issue #815 follow-up).
+	ClusterDisabledReason string
+	ReadyFn               func() bool
+	CFStatusFn            func() CloudflareStatus
+	DashboardHandler      fasthttp.RequestHandler
+	OnRefreshed           func(ctx context.Context, url string)
+	OnBanned              func(ctx context.Context, expr api.BanExpr)
+	PeerFetchHandler      fasthttp.RequestHandler
+	CFPropagateFn         func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler    fasthttp.RequestHandler
+	OnPurged              func(ctx context.Context, url string)
+	FaviconHandler        fasthttp.RequestHandler
 	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
 	// the ops history shown on the dashboard invalidation page. nil
 	// disables history recording. Set to OpsLogRing.Record by the engine.
@@ -268,7 +278,7 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 }
 
 func (s *Server) routeHandler() fasthttp.RequestHandler {
-	peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics := s.buildPeerHandlers()
+	peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics, peerHotSet := s.buildPeerHandlers()
 	pprofIndexHandler, pprofMap := s.buildPprofHandlers()
 
 	return func(ctx *fasthttp.RequestCtx) {
@@ -281,7 +291,7 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 		if s.handleWriteRoutes(ctx, p, m) {
 			return
 		}
-		if s.handlePeerRoutes(ctx, p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics) {
+		if s.handlePeerRoutes(ctx, p, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics, peerHotSet) {
 			return
 		}
 		if s.handleDataRoutes(ctx, p, m) {
@@ -301,7 +311,7 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 	}
 }
 
-func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics fasthttp.RequestHandler) {
+func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics, peerHotSet fasthttp.RequestHandler) {
 	if s.cfg.PeerPurgeHandler != nil {
 		peerPurge = s.cfg.PeerPurgeHandler
 	}
@@ -319,6 +329,9 @@ func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch
 	}
 	if s.cfg.PeerMetricsHandler != nil {
 		peerMetrics = s.cfg.PeerMetricsHandler
+	}
+	if s.cfg.PeerHotSetHandler != nil {
+		peerHotSet = s.cfg.PeerHotSetHandler
 	}
 	return
 }
@@ -354,6 +367,10 @@ func (s *Server) handleCoreRoutes(ctx *fasthttp.RequestCtx, p string) bool {
 	case "/v1/cluster/peers":
 		if s.cfg.PeersFn != nil {
 			s.clusterPeers(ctx)
+			return true
+		}
+		if s.cfg.ClusterDisabledReason != "" {
+			writeJSON(ctx, fasthttp.StatusServiceUnavailable, map[string]string{"error": s.cfg.ClusterDisabledReason})
 			return true
 		}
 	case "/v1/auth/check":
@@ -405,44 +422,38 @@ func (s *Server) handleWriteRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
 	return false
 }
 
-func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics fasthttp.RequestHandler) bool {
+func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics, peerHotSet fasthttp.RequestHandler) bool {
 	switch p {
 	case "/v1/peer/purge":
-		if peerPurge != nil {
-			peerPurge(ctx)
-			return true
-		}
+		return servePeer(ctx, peerPurge)
 	case "/v1/peer/purge/batch":
 		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/ban":
-		if peerBan != nil {
-			peerBan(ctx)
-			return true
-		}
+		return servePeer(ctx, peerBan)
 	case "/v1/peer/refresh":
-		if peerRefresh != nil {
-			peerRefresh(ctx)
-			return true
-		}
+		return servePeer(ctx, peerRefresh)
 	case "/v1/peer/refresh/batch":
 		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/fetch":
-		if peerFetch != nil {
-			peerFetch(ctx)
-			return true
-		}
+		return servePeer(ctx, peerFetch)
 	case "/v1/peer/put":
-		if peerPut != nil {
-			peerPut(ctx)
-			return true
-		}
+		return servePeer(ctx, peerPut)
 	case "/v1/peer/metrics":
-		if peerMetrics != nil {
-			peerMetrics(ctx)
-			return true
-		}
+		return servePeer(ctx, peerMetrics)
+	case "/v1/peer/config/hot":
+		return servePeer(ctx, peerHotSet)
 	}
 	return false
+}
+
+// servePeer dispatches to a wired peer handler; an unwired route
+// falls through to the next routing table.
+func servePeer(ctx *fasthttp.RequestCtx, h fasthttp.RequestHandler) bool {
+	if h == nil {
+		return false
+	}
+	h(ctx)
+	return true
 }
 
 // handlePeerBatchRoute dispatches the ADR-0044 batch endpoints, which
@@ -827,6 +838,7 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
 		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
 		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
+		"/v1/peer/config/hot": true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {

@@ -630,7 +630,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 // fast path uses), the consumer-side peer-fetch counters, and the
 // write-to-owner RPC. Shared by the proxied-route and static-route
 // builders — the wiring is identical and was duplicated inline before
-// the ADR-0066 counter made it drift-prone. No-op when clustering is
+// the ADR-0068 counter made it drift-prone. No-op when clustering is
 // not in strong mode.
 func applyClusterClosures(cfg *cache.HandlerConfig, e *engine, rs *runState) {
 	ownerFn, peerFetchFn := clusterFastPathClosures(e, rs)

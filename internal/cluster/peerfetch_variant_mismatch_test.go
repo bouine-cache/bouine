@@ -171,7 +171,7 @@ func gatherResolverAnswers(t *testing.T, reg *prometheus.Registry) map[string]fl
 	return out
 }
 
-// TestPeerFetchHandler_ResolverAnswerMetric pins the ADR-0066 answer
+// TestPeerFetchHandler_ResolverAnswerMetric pins the ADR-0068 answer
 // class counter: a blank-assertion ask answered with the metadata-only
 // resolver increments
 // bouine_peer_fetch_resolver_answers_total{side="server"}; a plain peer

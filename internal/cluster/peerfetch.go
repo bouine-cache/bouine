@@ -921,7 +921,7 @@ func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
 
 // withholdsResolverBody reports whether the stored primary-key entry is
 // a bodyful Vary resolver that must not be served over peer fetch.
-// ADR-0066 exception: the metadata-only resolver (no body) answers a
+// ADR-0068 exception: the metadata-only resolver (no body) answers a
 // blank-assertion ask with its METADATA — the Vary list the requester
 // could not compute locally — so it can derive its variant key and
 // re-ask the variant's owner with a real assertion. Metadata only,
@@ -1007,7 +1007,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// The ADR-0066 answer class gets its own log line and counter: a
+	// The ADR-0068 answer class gets its own log line and counter: a
 	// resolver-metadata answer is not a hit (no servable content) and
 	// not a miss either (the requester will follow up with a real
 	// variant ask). Without the distinction the two-step resolution is
@@ -1025,7 +1025,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 }
 
 // logPeerFetchAnswer records the answer class of a served peer fetch:
-// the ADR-0066 resolver-metadata answer (blank-assertion ask against
+// the ADR-0068 resolver-metadata answer (blank-assertion ask against
 // the metadata-only resolver) is neither a hit (no servable content)
 // nor a miss (the requester will follow up with a real variant ask) and
 // gets its own log line and server-side counter; every other answer

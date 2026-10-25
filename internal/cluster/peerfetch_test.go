@@ -228,7 +228,7 @@ func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
 }
 
 // TestPeerFetchHandler_ResolverMetadataAnsweredOnBlankAssertion pins the
-// ADR-0066 answer class: the owner of a primary key whose only entry is
+// ADR-0068 answer class: the owner of a primary key whose only entry is
 // the METADATA-ONLY Vary resolver answers a blank-assertion ask with the
 // resolver's metadata — the Vary list the requester could not compute
 // locally — so it can derive its variant key and re-ask the variant's

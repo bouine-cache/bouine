@@ -1921,7 +1921,7 @@ func TestFastPathHandler_PeerMissFlagsOwnerMiss(t *testing.T) {
 	assert.True(t, req.OwnerMiss, "definitive owner miss must flag RawRequest.OwnerMiss")
 }
 
-// TestFastPathHandler_ResolverAnswerSetsOwnerResolver pins the ADR-0066
+// TestFastPathHandler_ResolverAnswerSetsOwnerResolver pins the ADR-0068
 // transfer: when the owner answers the fast path's bare primary-key ask
 // with the metadata-only resolver, the fast path hands it to the slow
 // path via RawRequest.OwnerResolver so the two-step variant resolution

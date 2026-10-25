@@ -1,4 +1,4 @@
-# ADR-0066: Metadata-only Vary resolver
+# ADR-0068: Metadata-only Vary resolver
 
 - **Status**: Accepted
 - **Date**: 2026-10-25

@@ -10,7 +10,7 @@ import (
 )
 
 // buildResolver derives the primary-key Vary resolver from the freshly
-// stored variant (ADR-0066): the same headers and validators, no body.
+// stored variant (ADR-0068): the same headers and validators, no body.
 // The resolver exists so lookup() finds the stored Vary list to select a
 // variant and so revalidateResolverMiss can serve after a validating 304
 // — and the bytes it serves are the mirror variant's, fetched at serve
@@ -48,7 +48,7 @@ func buildResolver(variant *api.Object, primaryKey api.Key) *api.Object {
 }
 
 // shouldRegisterRefresh reports whether obj joins the proactive refresh
-// registry. Vary resolvers never do (ADR-0066): a background refresh of
+// registry. Vary resolvers never do (ADR-0068): a background refresh of
 // the primary key would re-store a full body there, resurrecting the
 // duplicate #824 removed, and the mirror variant refreshes on its own
 // cycle anyway. The resolver's validators therefore age with their
@@ -74,7 +74,7 @@ func (h *Handler) shouldRegisterRefresh(obj *api.Object, ri RequestInfo) bool {
 }
 
 // isPeerResolverMetadata reports whether a peer-fetched object is the
-// metadata-only Vary resolver (ADR-0066): the answer an owner gives to
+// metadata-only Vary resolver (ADR-0068): the answer an owner gives to
 // a bare primary-key ask so the requester can derive the Vary list it
 // could not compute locally. Legacy resolvers (pre-ADR blobs carrying
 // their own body) are never answered over the wire — the peer serve
@@ -84,7 +84,7 @@ func isPeerResolverMetadata(obj *api.Object) bool {
 }
 
 // transferredResolver returns the metadata-only Vary resolver the H1
-// fast path already fetched for THIS request (ADR-0066), or nil when
+// fast path already fetched for THIS request (ADR-0068), or nil when
 // the slow path must ask the owner itself. The fast path sets
 // RawRequest.OwnerResolver when the owner answers its bare primary-key
 // ask with resolver metadata; the h1parser transfers it to the
@@ -109,7 +109,7 @@ func transferredResolver(ctx *fasthttp.RequestCtx, obj *api.Object, lookupKey ap
 }
 
 // serveResolverPeerVariant completes the two-step variant resolution for
-// a node with no local Vary context (ADR-0066). Step one fetched the
+// a node with no local Vary context (ADR-0068). Step one fetched the
 // metadata-only resolver from the primary key's owner; this step derives
 // the variant key for THIS request's selecting headers and asks the
 // variant's owner with a real vary-key assertion. Both gates still
@@ -150,7 +150,7 @@ func (h *Handler) serveResolverPeerVariant(ctx *fasthttp.RequestCtx, primaryKey 
 	// Count completions only: a rejection or stale answer is not a
 	// converged two-step, and the consumer-side counter exists to
 	// prove the fleet's Vary cold misses converge through the owner
-	// (zero here means they go to origin instead, ADR-0066).
+	// (zero here means they go to origin instead, ADR-0068).
 	if h.onResolverTwoStep != nil {
 		h.onResolverTwoStep()
 	}

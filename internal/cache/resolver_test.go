@@ -16,7 +16,7 @@ import (
 )
 
 // TestResolver304_MirrorEvictedFallsBackToFill pins the fallback leg of
-// ADR-0066: the metadata-only resolver serves its mirror variant's body
+// ADR-0068: the metadata-only resolver serves its mirror variant's body
 // after a validating 304 — but when the mirror is gone from both tiers
 // (evicted or purged), the 304 proves nothing servable and the request
 // must fall through to the ordinary unconditional fill. Correctness
@@ -49,7 +49,7 @@ func TestResolver304_MirrorEvictedFallsBackToFill(t *testing.T) {
 	primaryKey := h.buildKey(reqA)
 	variantKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 	// Simulate SIEVE pressure evicting the fat variant while the tiny
-	// resolver survives — ADR-0066's pressure shape.
+	// resolver survives — ADR-0068's pressure shape.
 	require.NoError(t, h.store.Delete(t.Context(), variantKey))
 
 	reqB := testCtx("GET", "http://example.com/mirror-gone")
@@ -63,7 +63,7 @@ func TestResolver304_MirrorEvictedFallsBackToFill(t *testing.T) {
 		"conditional resolver fetch (304) + full miss fill; the resolver's validators are an optimization, never a requirement")
 }
 
-// TestDoBackgroundRevalidate_SkipsResolver pins ADR-0066: resolvers
+// TestDoBackgroundRevalidate_SkipsResolver pins ADR-0068: resolvers
 // never register for proactive refresh, and a resolver reaching
 // doBackgroundRevalidate anyway (a pre-upgrade registry entry surviving
 // an upgrade) must be skipped — a full-200 refresh of the primary key
@@ -95,7 +95,7 @@ func TestDoBackgroundRevalidate_SkipsResolver(t *testing.T) {
 		"only the initial fill may fetch — a resolver must never be background-refreshed; its mirror variant refreshes on its own cycle")
 }
 
-// TestResolverPeerVariant_TwoStepResolution pins the ADR-0066
+// TestResolverPeerVariant_TwoStepResolution pins the ADR-0068
 // convergence path for a node with no local Vary context: the owner
 // answers the bare primary-key ask with the metadata-only resolver, and
 // this node must derive ITS variant key from the learned Vary list and
@@ -140,7 +140,7 @@ func TestResolverPeerVariant_TwoStepResolution(t *testing.T) {
 			switch key {
 			case primaryKey:
 				// The metadata-only resolver, as the primary key's
-				// owner would answer it (ADR-0066).
+				// owner would answer it (ADR-0068).
 				res := &api.Object{
 					Key:        primaryKey,
 					PairedKey:  variantKey,
@@ -190,7 +190,7 @@ func TestResolverPeerVariant_TwoStepResolution(t *testing.T) {
 		"the second ask must assert THIS request's variant dimension")
 }
 
-// TestResolverPeerVariant_ReusesTransferredResolver pins the ADR-0066
+// TestResolverPeerVariant_ReusesTransferredResolver pins the ADR-0068
 // fast-path transfer end to end at the slow path: when the H1 fast path
 // already fetched the metadata-only resolver for the identical bare
 // ask (h1parser transfers it under api.OwnerResolverContextKey),
@@ -294,7 +294,7 @@ func TestResolverPeerVariant_ReusesTransferredResolver(t *testing.T) {
 }
 
 // TestStoreFromPeer_NoRefreshRegistrationWithoutURI pins the URI gate
-// of shouldRegisterRefresh (ADR-0066 review): a refresh-enabled handler
+// of shouldRegisterRefresh (ADR-0068 review): a refresh-enabled handler
 // must NOT register a peer-put object for proactive refresh.
 // StoreFromPeer is the one storeObject site whose RequestInfo carries
 // no URI — the write-to-owner RPC delivers an api.Object, and the

@@ -115,7 +115,7 @@ type RawRequest struct {
 	OwnerShed bool
 	// OwnerResolver carries the metadata-only Vary resolver the fast
 	// path fetched when the owner answered its bare primary-key ask
-	// (ADR-0066). The h1parser transfers it to the fallback RequestCtx
+	// (ADR-0068). The h1parser transfers it to the fallback RequestCtx
 	// under OwnerResolverContextKey so handleCacheMiss runs the two-step
 	// variant resolution WITHOUT repeating the identical bare ask.
 	// Unlike the boolean owner hints, the identity proof needs no

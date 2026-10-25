@@ -288,7 +288,7 @@ type Handler struct {
 	// foreign-variant object. Nil in single-node mode.
 	onPeerVariantMismatch func()
 	// onResolverTwoStep is called when serveResolverPeerVariant completes
-	// the ADR-0066 two-step resolution and serves the variant. Nil in
+	// the ADR-0068 two-step resolution and serves the variant. Nil in
 	// single-node mode.
 	onResolverTwoStep func()
 	// peerPut forwards a freshly origin-fetched object to the owner
@@ -502,7 +502,7 @@ type HandlerConfig struct {
 	// (consumer side) by the engine; nil in single-node mode.
 	OnPeerVariantMismatch func()
 	// OnResolverTwoStep, if non-nil, is called when the handler completes
-	// the ADR-0066 two-step variant resolution: it fetched the
+	// the ADR-0068 two-step variant resolution: it fetched the
 	// metadata-only resolver from the primary key's owner, derived this
 	// request's variant key from the learned Vary list, and served the
 	// variant. Wired to the peer-fetch resolver-answers metric
@@ -1436,7 +1436,7 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 	if obj == nil || obj.Key == (api.Key{}) {
 		return
 	}
-	// ADR-0066: a peer-put VARIANT must land in this handler's variant
+	// ADR-0068: a peer-put VARIANT must land in this handler's variant
 	// set under its primary key, or a cluster-wide URL purge would miss
 	// it (RFC 9111 §4.4) — the fill ran on another node, so the owner
 	// never tracked it. The variant carries its primary as PairedKey.
@@ -1750,7 +1750,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
 	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			// ADR-0066: the fast path may have already asked this exact
+			// ADR-0068: the fast path may have already asked this exact
 			// blank question and fetched the metadata-only resolver —
 			// reuse it instead of repeating the identical bare ask.
 			// transferredResolver verifies the identity proof the
@@ -1766,7 +1766,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 					"peer", owner.Addr, "key", lookupKey, "error", err)
 			case peerObj != nil && isPeerResolverMetadata(peerObj):
-				// ADR-0066: the owner answered the bare
+				// ADR-0068: the owner answered the bare
 				// primary-key ask with the metadata-only
 				// resolver — the Vary list this node could
 				// not compute locally. Derive THIS request's
@@ -1979,9 +1979,9 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 	// response, as updated by the 304 response metadata"); the stored
 	// resolver keeps its own clock (see the doc comment above).
 	//
-	// ADR-0066: the resolver is metadata-only — the bytes it serves are
+	// ADR-0068: the resolver is metadata-only — the bytes it serves are
 	// the mirror variant's, fetched here. Legacy resolvers (stored
-	// before ADR-0066, e.g. warm-tier reload of a pre-upgrade blob)
+	// before ADR-0068, e.g. warm-tier reload of a pre-upgrade blob)
 	// carry no PairedKey and their own body; serve that directly. If
 	// the mirror is gone from both tiers (purged, or hot- and
 	// warm-evicted), the 304 proves nothing servable for a bodyless
@@ -3195,7 +3195,7 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 // the same key. The stored/registry URI stays original; only the
 // origin-bound request URI is stripped.
 func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, key api.Key, stale *api.Object) {
-	// ADR-0066: resolvers never register for refresh; a stale resolver
+	// ADR-0068: resolvers never register for refresh; a stale resolver
 	// here is a pre-upgrade registry entry. Its mirror variant refreshes
 	// on its own cycle, and a full-200 refresh of the primary key would
 	// re-store a body there — resurrecting the duplicate body #824
@@ -3368,7 +3368,7 @@ func (h *Handler) writeAndMaybeStore(
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
 				return
 			}
-			// ADR-0066: the variant carries its primary key so a node
+			// ADR-0068: the variant carries its primary key so a node
 			// storing it via the write-to-owner RPC can register it in
 			// the primary's variant set (cluster-wide purge
 			// reachability). Plain objects keep a zero PairedKey.
@@ -3382,7 +3382,7 @@ func (h *Handler) writeAndMaybeStore(
 		h.forwardToOwnerIfRemote(ctx, obj)
 		if storeKey != primaryKey {
 			// The primary-key entry is the Vary resolver: metadata-only,
-			// pointing at the variant it mirrors (ADR-0066, #824). The old
+			// pointing at the variant it mirrors (ADR-0068, #824). The old
 			// clone shared the body slice with the variant object, but the
 			// hot store deep-copies per Put, so the alias stored a second
 			// private copy of every page and Vary URLs cost 2x their body
@@ -3404,7 +3404,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 }
 
 // reserveVariantSlotFromPeer registers a variant that landed on this
-// handler via the write-to-owner RPC (ADR-0066). The fill ran on another
+// handler via the write-to-owner RPC (ADR-0068). The fill ran on another
 // node, so this node may not hold the primary-key resolver even though
 // the variant set is live — the primary's owner and the variant's owner
 // are independent hash-ring assignments. Skip the local primary probe:
@@ -3415,7 +3415,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 // runs, so a refused registration would leave a stored-but-untracked
 // variant — servable via the two-step resolution yet invisible to the
 // cluster-wide URL purge (RFC 9111 §4.4), the exact reachable-but-
-// unkillable shape ADR-0066 exists to close. The set may therefore
+// unkillable shape ADR-0068 exists to close. The set may therefore
 // exceed the cap via peer-put registrations; growth is bounded by SIEVE
 // evicting the stored variants (the dead-variant sweep prunes them on
 // later registrations) and by Purge deleting the set. The cap stays a

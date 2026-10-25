@@ -3346,10 +3346,13 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
-		// ADR-0065: the variant carries its primary key so a node
-		// storing it via the write-to-owner RPC can register it in the
-		// primary's variant set (cluster-wide purge reachability).
-		obj.PairedKey = primaryKey
+		if storeKey != primaryKey {
+			// ADR-0065: the variant carries its primary key so a node
+			// storing it via the write-to-owner RPC can register it in
+			// the primary's variant set (cluster-wide purge
+			// reachability). Plain objects keep a zero PairedKey.
+			obj.PairedKey = primaryKey
+		}
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches

@@ -34,7 +34,7 @@ func renderStatusFrame(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi.
 	b.WriteString(statusCacheSection(p, r, prev, meta))
 	b.WriteString(statusOriginsSection(p, r, width))
 	b.WriteString(statusClusterSection(p, r, width))
-	b.WriteString(statusInsightsSection(p, r))
+	b.WriteString(statusInsightsSection(p, r, width))
 	if meta.keys {
 		b.WriteString("\n" + p.dim.Render(strings.Repeat("─", width-2)) + "\n")
 		clusterState := "off"
@@ -69,6 +69,7 @@ func statusHeader(p tuiPalette, r *bouineapi.StatusReport, meta frameMeta, width
 
 func statusCacheSection(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi.StatusReport, meta frameMeta) string {
 	var b strings.Builder
+	b.WriteString(" CACHE\n")
 	drift := ""
 	if prev != nil && meta.interval > 0 {
 		deltaReq := (r.Cache.Hits + r.Cache.Misses) - (prev.Cache.Hits + prev.Cache.Misses)
@@ -76,7 +77,7 @@ func statusCacheSection(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi
 		driftPoints := (r.Cache.HitRatio - prev.Cache.HitRatio) * 100
 		drift = fmt.Sprintf("  %s/s  %+.1f%% drift", humanCount(rate), driftPoints)
 	}
-	fmt.Fprintf(&b, " CACHE     hit %s  %s hits / %s misses%s  evictions %s\n",
+	fmt.Fprintf(&b, "    hit %s  %s hits / %s misses%s  evictions %s\n",
 		humanPct(r.Cache.HitRatio), humanCount(float64(r.Cache.Hits)),
 		humanCount(float64(r.Cache.Misses)), drift, humanCount(float64(r.Cache.Evictions)))
 	b.WriteString(renderTierBar(p, "hot", r.Cache.Hot))
@@ -91,7 +92,7 @@ func statusCacheSection(p tuiPalette, r *bouineapi.StatusReport, prev *bouineapi
 // measure against.
 func renderTierBar(p tuiPalette, name string, t bouineapi.StatusTier) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "           %-4s ", name)
+	fmt.Fprintf(&b, "    %-4s ", name)
 	frac := 0.0
 	detail := fmt.Sprintf(" %s", humanBytes(t.Bytes))
 	if t.MaxBytes > 0 {
@@ -132,12 +133,8 @@ func statusOriginsSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 			if !t.Healthy {
 				state = p.sick.Render("SICK")
 			}
-			change := "never"
-			if t.LastChange != "" {
-				change = t.LastChange
-			}
-			line := fmt.Sprintf("   %s/%s  %s  pe:%d pr:%d ps:%d  last change %s",
-				pool.Name, t.Addr, state, t.PassiveErrors, t.ProbeErrors, t.ProbeSuccesses, change)
+			line := fmt.Sprintf("   %s/%s  %s  %s",
+				pool.Name, t.Addr, state, targetSignals(r, t))
 			b.WriteString(truncateLine(p, line, width))
 			b.WriteString("\n")
 		}
@@ -145,14 +142,65 @@ func statusOriginsSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 	return b.String()
 }
 
+// targetSignals renders one target's non-zero health counters with
+// human-readable labels; zero counters stay hidden so a healthy target
+// reads as just its state and last change. The counters are
+// consecutive streaks since the last health transition, not totals.
+func targetSignals(r *bouineapi.StatusReport, t bouineapi.StatusTarget) string {
+	var parts []string
+	if t.PassiveErrors > 0 {
+		parts = append(parts, fmt.Sprintf("passive errors %d", t.PassiveErrors))
+	}
+	if t.ProbeErrors > 0 {
+		parts = append(parts, fmt.Sprintf("probe errors %d", t.ProbeErrors))
+	}
+	if t.ProbeSuccesses > 0 {
+		parts = append(parts, fmt.Sprintf("probe streak %d", t.ProbeSuccesses))
+	}
+	parts = append(parts, "last change "+statusRelTime(r, t.LastChange))
+	return strings.Join(parts, "  ")
+}
+
+// statusRelTime renders a report timestamp as a short human-relative
+// string ("just now", "42m ago", "7h ago", "3d ago"; "never" when
+// empty). It anchors to the server clock (StartedAt + UptimeSec, the
+// same clock that stamped the event) instead of the client's wall
+// clock, so a skewed or stepped client clock cannot distort the age
+// of a server-side transition.
+func statusRelTime(r *bouineapi.StatusReport, ts string) string {
+	if ts == "" {
+		return "never"
+	}
+	stamped, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	now := time.Now()
+	if started, perr := time.Parse(time.RFC3339, r.Node.StartedAt); perr == nil {
+		now = started.Add(time.Duration(r.Node.UptimeSec) * time.Second)
+	}
+	d := now.Sub(stamped)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
 func statusClusterSection(p tuiPalette, r *bouineapi.StatusReport, width int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, " CLUSTER   peer-fetch %s hits / %s misses  hop-limit %d  avg %.1fms\n",
+	b.WriteString(" CLUSTER\n")
+	fmt.Fprintf(&b, "    peer-fetch %s hits / %s misses  avg %.1fms\n",
 		humanCount(float64(r.Cluster.PeerFetch.Hits)),
 		humanCount(float64(r.Cluster.PeerFetch.Misses)),
-		r.Cluster.PeerFetch.HopLimitHits, r.Cluster.PeerFetch.AvgLatencyMs)
+		r.Cluster.PeerFetch.AvgLatencyMs)
 	if len(r.Cluster.Peers) == 0 {
-		b.WriteString("           no peers (single node)\n")
+		b.WriteString("    no peers (single node)\n")
 		return b.String()
 	}
 	for _, peer := range r.Cluster.Peers {
@@ -162,9 +210,9 @@ func statusClusterSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 			state = "stale"
 			style = p.stale
 		}
-		line := fmt.Sprintf("   %s  %s  %s", peer.Name, style.Render(state), peer.Version)
+		line := fmt.Sprintf("    %s  %s  %s", peer.Name, style.Render(state), peer.Version)
 		if peer.Requests > 0 {
-			line = fmt.Sprintf("   %s  %s  %s  %s req  %s hit",
+			line = fmt.Sprintf("    %s  %s  %s  %s req  %s hit",
 				peer.Name, style.Render(state), peer.Version,
 				humanCount(float64(peer.Requests)), humanPct(hitPeerRatio(peer)))
 		}
@@ -174,26 +222,46 @@ func statusClusterSection(p tuiPalette, r *bouineapi.StatusReport, width int) st
 	return b.String()
 }
 
-func statusInsightsSection(p tuiPalette, r *bouineapi.StatusReport) string {
+// statusInsightsSection aligns the " - action" column: every head
+// (severity + title) pads to the widest head so the dash column is
+// straight across rows.
+func statusInsightsSection(p tuiPalette, r *bouineapi.StatusReport, width int) string {
 	if len(r.Insights) == 0 {
 		return " INSIGHTS  none\n"
 	}
+	head := make([]string, len(r.Insights))
+	maxw := 0
+	for i, ins := range r.Insights {
+		head[i] = fmt.Sprintf("%s %s",
+			severityStyle(p, ins.Severity).Render(
+				fmt.Sprintf("[%s]", strings.ToLower(ins.Severity))),
+			ins.Title)
+		if w := lipgloss.Width(head[i]); w > maxw {
+			maxw = w
+		}
+	}
 	var b strings.Builder
 	b.WriteString(" INSIGHTS\n")
-	for _, ins := range r.Insights {
-		style := p.low
-		switch strings.ToLower(ins.Severity) {
-		case "high":
-			style = p.high
-		case "medium", "med":
-			style = p.med
+	for i, ins := range r.Insights {
+		line := "   " + head[i]
+		if ins.Action != "" {
+			line += strings.Repeat(" ", maxw-lipgloss.Width(head[i])) + " - " + ins.Action
 		}
-		line := fmt.Sprintf("   %s %s - %s",
-			style.Render(fmt.Sprintf("[%s]", strings.ToLower(ins.Severity))), ins.Title, ins.Action)
-		b.WriteString(line)
+		b.WriteString(truncateLine(p, line, width))
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func severityStyle(p tuiPalette, severity string) lipgloss.Style {
+	switch strings.ToLower(severity) {
+	case "high":
+		return p.high
+	case "medium", "med":
+		return p.med
+	default:
+		return p.low
+	}
 }
 
 func hitPeerRatio(p bouineapi.StatusPeer) float64 {

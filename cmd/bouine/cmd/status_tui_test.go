@@ -29,13 +29,16 @@ func TestRenderStatusFrame_InlineHasSectionsAndBars(t *testing.T) {
 	frame := renderStatusFrame(tuiPaletteFor(&buf), &report, nil, frameMeta{width: 100})
 	for _, want := range []string{
 		"bouine-0", "v0.6.0", "READY",
-		"CACHE", "hit 80.0%", "█", "░",
-		"ORIGINS", "10.0.0.1:80", "SICK", "last change 2026-10-23T09:00:00Z",
-		"CLUSTER", "peer-fetch", "bouine-0", "live",
+		" CACHE\n    hit 80.0%", "█", "░",
+		"ORIGINS", "10.0.0.1:80", "SICK",
+		"passive errors 3", "probe streak 3", "last change 1d ago",
+		" CLUSTER\n    peer-fetch", "bouine-0", "live",
 		"INSIGHTS", "[high] Hit rate is low",
 	} {
 		assert.Contains(t, frame, want)
 	}
+	assert.NotContains(t, frame, "pe:", "counter labels must be human-readable")
+	assert.NotContains(t, frame, "hop-limit", "hop-limit was dropped from the cluster line")
 	assert.NotContains(t, frame, "q quit", "inline frame has no key footer")
 	assert.NotContains(t, frame, "drift", "no deltas without a previous report")
 	assert.NotContains(t, frame, "\x1b[", "ascii profile emits no escape sequences")
@@ -88,6 +91,30 @@ func TestRenderStatusFrame_WatchFooterAndDeltas(t *testing.T) {
 	assert.Contains(t, frame, "+6.7% drift", "hit-ratio drift between frames")
 	assert.Contains(t, frame, "cluster on", "cluster toggle state in header")
 	assert.Contains(t, frame, "q quit · r refresh · c cluster (on)", "key footer")
+}
+
+// TestRenderStatusFrame_InsightActionAlignment pins the aligned
+// dash column: with insight titles of different lengths, every
+// " - action" must start at the same column.
+func TestRenderStatusFrame_InsightActionAlignment(t *testing.T) {
+	t.Parallel()
+	report := statusFixture()
+	report.Insights = []bouineapi.StatusInsight{
+		{ID: "one", Severity: "high", Title: "Pool api has 1/1 targets unhealthy", Action: "/dashboard/config"},
+		{ID: "two", Severity: "med", Title: "No default TTL", Action: "/dashboard/config"},
+		{ID: "three", Severity: "low", Title: "A considerably longer insight title than the rest", Action: "/act"},
+	}
+	frame := renderStatusFrame(tuiPaletteFor(io.Discard), &report, nil, frameMeta{width: 120})
+	var cols []int
+	for _, line := range strings.Split(frame, "\n") {
+		if i := strings.Index(line, " - "); i >= 0 {
+			cols = append(cols, i)
+		}
+	}
+	require.Len(t, cols, 3, "one dash column per insight row")
+	for _, col := range cols[1:] {
+		require.Equal(t, cols[0], col, "all insight rows align their dash column")
+	}
 }
 
 func TestRenderStatusFrame_NotReadyAndFetchError(t *testing.T) {

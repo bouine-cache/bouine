@@ -20,7 +20,7 @@ import (
 // five sections.
 func statusFixture() bouineapi.StatusReport {
 	return bouineapi.StatusReport{
-		Node: bouineapi.StatusNode{Name: "bouine-0", Version: "v0.6.0", UptimeSec: 3661, Ready: true},
+		Node: bouineapi.StatusNode{Name: "bouine-0", Version: "v0.6.0", StartedAt: "2026-10-24T10:00:00Z", UptimeSec: 3661, Ready: true},
 		Cache: bouineapi.StatusCache{
 			Hits: 80, Misses: 20, HitRatio: 0.8, Evictions: 4,
 			Hot:  bouineapi.StatusTier{Entries: 12, Bytes: 2048, MaxBytes: 8192},
@@ -62,16 +62,21 @@ func TestStatusTextOutput(t *testing.T) {
 	require.NoError(t, err)
 	for _, want := range []string{
 		"bouine-0",
-		"hit ratio 80.0%",
+		"cache\n    hit ratio 80.0%",
 		"origins",
 		"10.0.0.1:80",
 		"SICK",
-		"cluster",
+		"passive errors 3",
+		"probe streak 3",
+		"last change 1d ago",
+		"cluster\n    peer-fetch",
 		"insights",
 		"Hit rate is low",
 	} {
 		assert.Contains(t, stdout, want)
 	}
+	assert.NotContains(t, stdout, "hop-limit", "dropped from the plain cluster line")
+	assert.NotContains(t, stdout, "pe:", "counter labels must be human-readable")
 	assert.NotContains(t, stdout, "stale", "local mode has no request counters")
 }
 

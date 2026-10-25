@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -485,6 +486,50 @@ func TestURLRing_SampleRate(t *testing.T) {
 	if len(stats) > 0 {
 		assert.LessOrEqual(t, stats[0].Requests, int64(100))
 	}
+}
+
+// TestURLRing_SampleRateRoundTrip pins the hot-config knob read path
+// (`bouine config get url_ring_sample_rate`).
+func TestURLRing_SampleRateRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	assert.Equal(t, 0, r.SampleRate(), "default is record-everything")
+	r.SetSampleRate(100)
+	assert.Equal(t, 100, r.SampleRate())
+	r.SetSampleRate(0)
+	assert.Equal(t, 0, r.SampleRate())
+}
+
+// TestURLRing_SampleRateConcurrentSetAndRecord exercises the atomic
+// sample-rate slot under the race detector: RecordURL on the data
+// plane must never observe a torn read while the admin plane swaps
+// the rate (the pre-hot-config int64 field was a real data race).
+func TestURLRing_SampleRateConcurrentSetAndRecord(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // data plane
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				r.RecordURL("/api", "api", "MISS")
+			}
+		}
+	}()
+	go func() { // admin plane flipping the hot knob
+		defer wg.Done()
+		for i := range 200 {
+			r.SetSampleRate(i % 7)
+		}
+		close(stop)
+	}()
+	wg.Wait()
+	assert.LessOrEqual(t, len(r.URLStats()), urlRingCap)
 }
 
 func TestURLRing_CapReached(t *testing.T) {

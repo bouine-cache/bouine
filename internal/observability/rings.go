@@ -778,8 +778,10 @@ type URLRing struct {
 	entries sync.Map // urlKey → *urlCounters
 	size    atomic.Int64
 	// sampleRate controls 1-in-N sampling. 0 = record every call.
-	// Set by SetSampleRate; default 0 (no sampling) for backward compat.
-	sampleRate    int64
+	// Atomic so the hot-config surface (bouine config set
+	// url_ring_sample_rate) can change it live without stopping the
+	// data plane; the RecordURL read is one atomic load, allocation-free.
+	sampleRate    atomic.Int64
 	sampleCounter atomic.Int64
 }
 
@@ -815,15 +817,21 @@ func urlKey(path string) string {
 // 100 records 1 in 100 calls; 0 records every call. This reduces
 // sync.Map.Load overhead under high miss rates.
 func (r *URLRing) SetSampleRate(n int) {
-	r.sampleRate = int64(n)
+	r.sampleRate.Store(int64(n))
+}
+
+// SampleRate returns the current 1-in-N sampling rate (0 = record
+// every call). Read by the hot-config surface for reporting.
+func (r *URLRing) SampleRate() int {
+	return int(r.sampleRate.Load())
 }
 
 // RecordURL is called on the hot path. Zero allocs for known URLs.
 // When sampling is enabled (sampleRate > 0), only 1-in-N calls proceed
 // past the atomic counter check — the remaining calls return in ~5 ns.
 func (r *URLRing) RecordURL(path, route, xCache string) {
-	if r.sampleRate > 0 {
-		if r.sampleCounter.Add(1)%r.sampleRate != 0 {
+	if rate := r.sampleRate.Load(); rate > 0 {
+		if r.sampleCounter.Add(1)%rate != 0 {
 			return
 		}
 	}

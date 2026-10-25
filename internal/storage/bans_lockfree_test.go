@@ -243,7 +243,7 @@ func TestBanSnapshot_ReaperPrunePublishesNewSnapshot(t *testing.T) {
 	s.bans.mu.Lock()
 	for i := range s.bans.list {
 		if s.bans.list[i].pattern.hostRegex == `^old\.example\.com$` {
-			s.bans.list[i].created = time.Now().Add(-defaultBanTTL - time.Minute)
+			s.bans.list[i].created = time.Now().Add(-DefaultBanTTL - time.Minute)
 		}
 	}
 	s.bans.mu.Unlock()

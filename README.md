@@ -182,7 +182,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 ### Administering a cache with the CLI
 
 Every admin-plane subcommand (`status`, `purge`, `ban`, `refresh`,
-`cluster peers`) accepts the global flags `--server`, `--token`, and
+`cluster peers`, `config get/set/diff`) accepts the global flags
+`--server`, `--token`, and
 `--format text|json`. Values resolve **flag > environment > default**, so
 scripts usually export the connection once:
 
@@ -210,6 +211,19 @@ On a terminal, one-shot `status` prints the styled frame inline
 alternate-screen TUI with `q`/`Esc`/Ctrl-C (quit), `r` (refresh),
 and `c` (toggle cluster) keys. Piped output and `--format json`
 never take the TUI path, so scripts never see escape sequences.
+
+**Tuning a running daemon.** `bouine config` reads and changes
+hot-config knobs without a restart. Runtime changes are ephemeral —
+lost at the next restart — so every `set` prints a warning and
+`config diff` shows what is at risk:
+
+```bash
+bouine config get                          # every knob: value + source (file/default/runtime)
+bouine config set cluster.ban_ttl 90m     # validated point mutation, applied live
+bouine config set cluster.ban_ttl 90m --dry-run   # validate and report, change nothing
+bouine config diff                         # knobs a restart would lose
+bouine config diff prod.yaml staging.yaml  # deploy preview: effective-config diff
+```
 
 **Targeting a pod in Kubernetes.** The admin port is deliberately never
 exposed by a LoadBalancer (the admin Service is ClusterIP, and the image

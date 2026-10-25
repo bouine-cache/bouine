@@ -502,7 +502,7 @@ func (h *Handler) streamMiss(
 func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, resMap header.Map) bool {
 	parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
 	cacheable := parsed.isCacheableWithDefault(h.neg, h.defaultTTL)
-	if cacheable && !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
+	if cacheable && !h.allowSetCookie && clientStateInMap(resMap) {
 		return false
 	}
 	if cacheable && h.maxObjectSize > 0 {
@@ -566,8 +566,9 @@ func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo
 }
 
 // isBytesBlocked mirrors isCacheBlocked over raw header bytes: no-store
-// without must-understand, private, Vary:*, the Set-Cookie handler gate,
-// request Authorization without shared-cache opt-in, and Pragma: no-cache
+// without must-understand, private, Vary:*, the client-state handler
+// gate (Set-Cookie / Set-Login), request Authorization without
+// shared-cache opt-in, and Pragma: no-cache
 // without explicit freshness.
 func (h *Handler) isBytesBlocked(hdr *fasthttp.ResponseHeader, respCC Directives, ri RequestInfo, status int) bool {
 	if h.isBlockedByDirectives(hdr, respCC, status) {
@@ -585,7 +586,7 @@ func (h *Handler) isBytesBlocked(hdr *fasthttp.ResponseHeader, respCC Directives
 
 // isBlockedByDirectives covers the response-side blocking directives:
 // no-store without must-understand, private, Vary:*, and the handler's
-// Set-Cookie gate.
+// client-state gate (Set-Cookie / Set-Login).
 func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Directives, status int) bool {
 	if respCC.NoStore {
 		if !respCC.MustUnderstand || !isUnderstoodStatus(status) {
@@ -602,12 +603,13 @@ func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Dir
 	if varyContainsStarBytes(joinedVaryBytes(hdr, &varyBuf)) {
 		return true
 	}
-	// Set-Cookie: the handler gate is stricter than isBlockedBySetCookie —
-	// when allowSetCookie is false (default), ANY Set-Cookie response is
-	// not stored, even with explicit freshness (matches the Map-based
-	// handler gate in isResponseCacheable, which overrides the MAY-store
-	// reading in isBlockedBySetCookie).
-	return !h.allowSetCookie && len(hdr.Peek(header.SetCookie)) > 0
+	// Client-state headers (Set-Cookie, Set-Login): the handler gate is
+	// stricter than isBlockedByClientState — when allowSetCookie is
+	// false (default), ANY response carrying them is not stored, even
+	// with explicit freshness (matches the Map-based handler gate in
+	// isResponseCacheable, which overrides the MAY-store reading in
+	// isBlockedByClientState). ADR-0012 / ADR-0067.
+	return !h.allowSetCookie && clientStateInFastHTTP(hdr)
 }
 
 // isBlockedByPragmaBytes mirrors isBlockedByPragma over raw header bytes:
@@ -892,8 +894,7 @@ func (h *Handler) streamMissBuffered(
 		Body:       body,
 		Delay:      sf.Delay,
 	}
-	inflight.res = res
-	close(inflight.done)
+	publishFillVerdict(inflight, res, res.Header)
 	// stored closes at function exit: after the store attempt below on
 	// the cacheable path (covering the maxObjectSize early return and
 	// the variant-slot-refusal return via this defer), and immediately
@@ -1077,20 +1078,19 @@ func (h *Handler) teeStreamToClient(
 	// into that pooled response — raced with the pool release. Convert
 	// to an owned header.Map before publishing so followers never touch
 	// the pooled object. The conversion cost is miss-path only.
-	inflight.res = fetchResult{
+	res := fetchResult{
 		StatusCode: sf.StatusCode,
 		Header:     fromHeaderMap(sf.Header.ToMap()),
 		Body:       bodyCopy,
 		Delay:      sf.Delay,
 	}
-	close(inflight.done)
+	publishFillVerdict(inflight, res, sf.Header)
 	// stored closes at callback exit: after the store attempt below
 	// (skipped on cacheExceeded / clientDisconnected / maxObjectSize —
 	// the settlement verdict is then already final).
 	defer close(inflight.stored)
 
 	if !cacheExceeded && !clientDisconnected && !(h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) { //nolint:staticcheck // QF1001: readability
-		res := inflight.res
 		bgCtx := context.Background()
 		obj := h.storeStreamedObject(bgCtx, storeKey, ri, res, resMap, fillTTL)
 		if storeKey != primaryKey {
@@ -1115,11 +1115,35 @@ func (h *Handler) teeStreamToClient(
 // no result to hand over. Followers are released at header time — not
 // stream end — and fetch their own response via fetchAndStore's
 // ErrStreamUnshareable branch; a live stream is per-connection by
-// design (ADR-0042).
+// design (ADR-0042). Nothing will be stored from such a stream, so
+// closing stored here is the settlement verdict (ADR-0066).
 func publishStreamUnshareable(inflight *inflightStream) {
 	inflight.res = fetchResult{Err: ErrStreamUnshareable}
 	close(inflight.done)
 	close(inflight.stored)
+}
+
+// publishFillVerdict publishes a completed buffered/tee fill's verdict
+// to the flight's followers (ADR-0066/ADR-0067). A response carrying
+// client-state headers (Set-Cookie / Set-Login) is minted for THIS
+// caller's session and its bytes are never handed to another caller:
+// the flight publishes the unshareable sentinel, byte-handoff followers
+// are released at header time and fetch their own
+// (fetchAndStore's ErrStreamUnshareable branch). Only the published
+// verdict changes, never the settlement lifecycle — the CALLER closes
+// stored after its store attempt, so fill followers re-enter the
+// pipeline after the fill settled: under the default client-state gate
+// nothing is stored and the follower fetches its own, and under
+// allow_set_cookie it serves the stripped stored copy. The leader
+// always keeps serving its own response and stores the stripped object
+// when the gates allow.
+func publishFillVerdict(inflight *inflightStream, res fetchResult, hl headerLookup) {
+	if carriesClientState(hl) {
+		inflight.res = fetchResult{Err: ErrStreamUnshareable}
+	} else {
+		inflight.res = res
+	}
+	close(inflight.done)
 }
 
 // publishInflightErr resolves the leader's inflight stream with a

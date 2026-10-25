@@ -94,3 +94,5 @@ field to `Superseded by ADR-NNNN`.
 | 0062   | Changelog automation | Accepted |
 | 0063   | Downstream freshness sync via synthesized CDN-Cache-Control | Accepted |
 | 0064   | amd64 release artifacts build at the GOAMD64=v1 baseline | Accepted |
+| 0066   | Fill flights — collapse cold include-free misses via the store | Accepted |
+| 0067   | Client-state headers (Set-Cookie, Set-Login) never served to a second client | Accepted |

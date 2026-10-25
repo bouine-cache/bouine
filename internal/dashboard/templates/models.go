@@ -733,7 +733,7 @@ func routeFeatures(rc config.Route) []RouteFeature {
 	if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {
 		f = append(f, RouteFeature{
 			Label: "set-cookie",
-			Title: "allow_set_cookie: caches responses carrying Set-Cookie (the cookie is stripped from the stored copy). Security-relevant — only safe for non-user-specific cookies.",
+			Title: "allow_set_cookie: caches responses carrying client-state headers (Set-Cookie, Set-Login — always stripped from the stored copy). Security-relevant — only safe for non-user-specific cookies.",
 			Warn:  true,
 		})
 	}

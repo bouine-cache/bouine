@@ -74,7 +74,9 @@ func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	// Skipped headers are content-specific (RFC 9111 §3.2) and must not
 	// be updated from a 304. Set-Cookie is excluded because the joined
 	// multi-value form is non-conformant per RFC 9110
-	// §5.2 and serving stale cookies is a security risk.
+	// §5.2 and serving stale cookies is a security risk; Set-Login
+	// (WICG Sign-In Cookies) carries the same per-user session state
+	// and is excluded for the same reason (ADR-0067).
 	//
 	// Vary is replaced wholesale instead of Set per line: Set writes the
 	// first matching entry, so per-line Sets on a stored multi-line Vary
@@ -97,7 +99,7 @@ func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	resp304Header.Range(func(k, v string) bool {
 		switch k {
 		case header.ContentLength, header.ContentEncoding,
-			header.TransferEncoding, header.SetCookie, header.Vary:
+			header.TransferEncoding, header.SetCookie, header.SetLogin, header.Vary:
 			return true
 		}
 		stored.Header.Set(k, v)

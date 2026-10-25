@@ -111,11 +111,16 @@ func TestMergeHeaders304(t *testing.T) {
 		resp304.Set(header.ContentType, "application/json")
 		resp304.Set(header.ContentEncoding, "gzip")
 		resp304.Set(header.SetCookie, "new=cookie")
+		resp304.Set(header.SetLogin, "logged-in")
 		resp304.Set(header.TransferEncoding, "chunked")
 		resp304.Set(header.ETag, `"v2"`)
 		MergeHeaders304(stored, resp304)
 		// Content-specific headers must NOT be overwritten.
 		assert.Equal(t, "100", stored.Header.Get(header.ContentLength))
+		// Client-state headers (ADR-0067) must never be merged into the
+		// stored object from a 304.
+		assert.Empty(t, stored.Header.Get(header.SetCookie))
+		assert.Empty(t, stored.Header.Get(header.SetLogin))
 		// ContentType is NOT in the skip list, so it IS updated.
 		assert.Equal(t, "application/json", stored.Header.Get(header.ContentType))
 		// Other headers ARE updated.

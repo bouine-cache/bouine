@@ -644,17 +644,18 @@ func (m RouteMatch) PathLabel() string {
 //
 //nolint:govet // fieldalignment: fields follow the config-file order
 type RouteCache struct {
-	// AllowSetCookie controls whether responses containing a Set-Cookie
-	// header are eligible for caching.
+	// AllowSetCookie controls whether responses containing a client-state
+	// header — Set-Cookie, or Set-Login (WICG Sign-In Cookies; both carry
+	// per-user session state, ADR-0067) — are eligible for caching.
 	//
-	// Default (nil / false): Set-Cookie in the response blocks caching
+	// Default (nil / false): either header in the response blocks caching
 	// unconditionally, matching nginx's proxy_cache behaviour and
-	// preventing session-cookie replay across users.
+	// preventing session-state replay across users.
 	//
 	// When explicitly set to true: caching is permitted per RFC 9111
-	// (Set-Cookie + explicit freshness), but Set-Cookie is stripped from
-	// the stored object so subsequent cache HITs do not replay cookies
-	// intended for the first client.
+	// (explicit freshness), but both headers are stripped from the
+	// stored object so subsequent cache HITs do not replay session
+	// state intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie,omitempty" json:"allow_set_cookie,omitempty"`
 	Enabled        *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// BypassOnCookie, when true, routes any request carrying a

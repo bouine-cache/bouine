@@ -300,6 +300,49 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Hot no-store/private routes no longer pay the released-wave stagger
+  on every fill: unstorable fills memoize their key for 5s (ADR-0066
+  amendment #2).** PR #838's release stagger restored the arrival
+  spread a synchronized wave would otherwise hammer an origin with —
+  but on a hot route whose origin answers `no-store` or `private`
+  (the load-test `/miss` shape: one key, 1.5k rps), *every* fill
+  settles unstorable, so every wave of parked followers paid the
+  leader-fill wait plus a uniform-random slice of up to 100 ms before
+  its own fetch — a direct, sustained long-tail regression (the
+  #838 mixed-leg population). A fill that settles with a complete,
+  well-formed response refusing shared storage by its own directives
+  (RFC 9111 §5.2.2.3 no-store — with the must-understand escape — or
+  §5.2.2.7 private; CDN-Cache-Control precedence per RFC 9213) now
+  records the key in a bounded node-local memo (16 shards x 512 keys,
+  lazily swept, fail-open) for 5s: subsequent anonymous cold
+  include-free misses for that key skip the fill flight and fetch
+  their own immediately, exactly like a request that may not share a
+  flight — no fill wait, no stagger. Every other unstorable shape
+  keeps the settle-then-stagger flow: error statuses (transient — a
+  struggling origin needs collapse's dedup on recovery), responses
+  blocked by the client-state gate without a directive (ADR-0067's
+  surface), HEAD-led fills (nothing stored by method, not policy),
+  and size caps (capacity, not origin policy). **No content-sharing
+  surface changes**: a memoized request is a sequential request — it
+  fetches its own response through the same gates as before, so the
+  memo can only reduce cross-request exposure, never add it; the
+  memo's verdict is read from the origin's response directives, never
+  from the local store outcome, so it is identical on owner and
+  non-owner nodes in strong cluster mode. The first wave after the
+  window (or after boot) still collapses and staggers once — bounded
+  by the wave size, and invisible at p99 under the leg's traffic mix.
+  Sequential fetch counts are unchanged (nothing shareable was ever
+  stored for these keys); origin load returns to the sequential rate
+  the pre-ADR-0066 world and nginx both produce. Single-shot evidence
+  (`BenchmarkSingle_UnstorableBurstLatency`, 32 callers, 2 ms RTT):
+  wave-1 p99 36-45 ms → memoized wave-2 p99 ~2.4 ms, fetch counts
+  identical. New counter `bouine_fill_bypass_total` (one per bypassed
+  miss; a sustained non-zero rate on a route means its origins send
+  no-store/private and miss latency there is sequential, not
+  wave-shaped). Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass`,
+  `TestFetchAndStore_MemoExclusions`, `TestFetchAndStore_MemoExpiresRefillsCollapse`,
+  and `TestUnstorableMemo_BoundedFailOpen`.
+
 - **Passive 5xx ejection is success-windowed (#839): a healthy origin
   answering successes is never ejected by a 5xx burst (ADR-0051
   amendment).** An origin 5xx *response* only drove passive ejection

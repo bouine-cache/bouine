@@ -156,3 +156,162 @@ func BenchmarkSingle_CollapseColdBurstCapacity(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkSingle_UnstorableBurstLatency measures the steady-state tail
+// of a hot no-store route (the ADR-0066 /miss shape, the population the
+// #838 stagger regressed): after the first collapsed wave memoizes the
+// key (ADR-0066 amendment #2), every request in a simultaneous burst
+// fetches its own immediately — no leader-fill wait, no released-wave
+// stagger — so the burst tail is one origin RTT, the sequential
+// behavior, while the fetch count stays sequential (one per caller).
+// Pre-memo (or pre-amendment main), the same burst parked every caller
+// on one doomed fill and paid the fill wait plus a stagger slice of up
+// to min(n, 100) ms on top.
+func BenchmarkSingle_UnstorableBurstLatency(b *testing.B) {
+	first := true
+	b.ReportAllocs()
+	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
+
+		const (
+			callers = 32
+			slots   = 64
+			rtt     = 2 * time.Millisecond
+		)
+		var fetchCount atomic.Int64
+		origin := func(ctx *fasthttp.RequestCtx) {
+			fetchCount.Add(1)
+			time.Sleep(rtt)
+			ctx.Response.Header.Set(header.CacheControl, "no-store")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.WriteString("unstorable")
+		}
+		h := NewHandler(HandlerConfig{
+			Upstream:            origin,
+			FastClient:          &testFastClient{handler: origin},
+			Store:               storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+			MaxFetchConcurrency: slots,
+		})
+
+		// Wave 1 — the pre-amendment steady state: every wave on this
+		// route parked on one doomed fill (leader RTT wait) and then
+		// released into the stagger window (up to min(n, 100) ms)
+		// before its own fetch.
+		fetchCount.Store(0)
+		wave1 := benchmarkBurst(h, callers, "http://example.com/bench-nostore")
+		b.ReportMetric(float64(fetchCount.Load()), "wave1_fetches")
+		_, _, w1p99 := burstPercentiles(wave1)
+		b.ReportMetric(float64(w1p99.Nanoseconds())/1000, "wave1_p99_µs")
+
+		// Wave 2 — memoized (ADR-0066 amendment #2): every caller
+		// fetches its own immediately; the tail is one origin RTT.
+		fetchCount.Store(0)
+		wave2 := benchmarkBurst(h, callers, "http://example.com/bench-nostore")
+		b.ReportMetric(float64(fetchCount.Load()), "wave2_fetches")
+		_, _, w2p99 := burstPercentiles(wave2)
+		b.ReportMetric(float64(w2p99.Nanoseconds())/1000, "wave2_p99_µs")
+	}
+}
+
+// benchmarkBurst fires one simultaneous burst of identical requests
+// against h and returns their latencies.
+func benchmarkBurst(h *Handler, callers int, url string) []time.Duration {
+	latencies := make([]time.Duration, callers)
+	started := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("GET", url)
+			<-started
+			t0 := time.Now()
+			serveRequest(h, ctx)
+			latencies[i] = time.Since(t0)
+		}()
+	}
+	close(started)
+	wg.Wait()
+	return latencies
+}
+
+// BenchmarkSingle_UnstorableSteadyState measures the memoized steady
+// state of the exact /miss load-test shape: a single no-store key at a
+// fixed 1500 rps arrival rate against an origin with ~13 ms RTT (the
+// release runner's measured leg RTT), one 2 s window after the memo
+// has armed. The origin latency is a deliberate real sleep — it is the
+// quantity being measured; single-shot mode runs it once per
+// -benchtime=1x. Compare with the parked-wave world's per-follower
+// cost, wait-until-settle (uniform over one RTT) + stagger slice
+// (uniform over min(rate*RTT, 100 ms)) + own fetch (one RTT):
+// at 13 ms RTT and 1500 rps that is a ~29 ms mean / ~46 ms p99; the
+// memoized steady state below should read at one RTT.
+func BenchmarkSingle_UnstorableSteadyState(b *testing.B) {
+	first := true
+	b.ReportAllocs()
+	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
+
+		const (
+			rps      = 1500
+			rtt      = 13 * time.Millisecond
+			duration = 2 * time.Second
+		)
+		var fetchCount atomic.Int64
+		origin := func(ctx *fasthttp.RequestCtx) {
+			fetchCount.Add(1)
+			time.Sleep(rtt)
+			ctx.Response.Header.Set(header.CacheControl, "no-store")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.WriteString("unstorable")
+		}
+		h := NewHandler(HandlerConfig{
+			Upstream:            origin,
+			FastClient:          &testFastClient{handler: origin},
+			Store:               storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+			MaxFetchConcurrency: 64,
+		})
+
+		// Arm the memo with one request (the key proves unstorable).
+		seed := testCtx("GET", "http://example.com/bench-steady")
+		serveRequest(h, seed)
+
+		// Fixed-arrival-rate window: the steady state, not a burst.
+		total := int(rps * int(duration/time.Second))
+		latencies := make([]time.Duration, 0, total)
+		interval := duration / time.Duration(total)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		start := time.Now()
+		for range total {
+			<-ticker.C
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx := testCtx("GET", "http://example.com/bench-steady")
+				t0 := time.Now()
+				serveRequest(h, ctx)
+				mu.Lock()
+				latencies = append(latencies, time.Since(t0))
+				mu.Unlock()
+			}()
+		}
+		wg.Wait()
+		b.ReportMetric(float64(fetchCount.Load()), "fetches")
+		b.ReportMetric(float64(time.Since(start).Nanoseconds())/1e9, "wall_s")
+		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+		at := func(p float64) time.Duration { return latencies[int(p*float64(len(latencies)-1))] }
+		b.ReportMetric(float64(at(0.50).Nanoseconds())/1000, "p50_µs")
+		b.ReportMetric(float64(at(0.90).Nanoseconds())/1000, "p90_µs")
+		b.ReportMetric(float64(at(0.99).Nanoseconds())/1000, "p99_µs")
+		b.ReportMetric(float64(at(0.999).Nanoseconds())/1000, "p999_µs")
+	}
+}

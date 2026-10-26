@@ -32,6 +32,14 @@ type DataPlaneMetrics struct {
 	// rising shed rate during a purge storm no longer implies the hit
 	// ratio is pinned at the shed equilibrium.
 	RewarmFillTotal prometheus.Counter
+	// FillBypassTotal counts anonymous cold include-free misses that
+	// skipped the fill flight because the key's most recent fill
+	// settled unstorable by explicit origin directive (no-store /
+	// private) within the memo window (ADR-0066 amendment #2). A
+	// sustained non-zero rate on a route means its origins send
+	// no-store/private and miss latency there is sequential, not
+	// wave-shaped.
+	FillBypassTotal prometheus.Counter
 	// Streaming miss buffer metrics. The gauge tracks total bytes held
 	// in live SetBodyStreamWriter tee buffers; the counter tracks how
 	// many cacheable misses fell back to the synchronous buffered path
@@ -220,7 +228,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
 		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
-		m.RewarmFillTotal, m.VaryDriftTotal)
+		m.RewarmFillTotal, m.FillBypassTotal, m.VaryDriftTotal)
 	return m
 }
 
@@ -275,6 +283,11 @@ func (m *DataPlaneMetrics) initShedMetrics() {
 		Namespace: "bouine",
 		Name:      "rewarm_fill_total",
 		Help:      "Shed misses that scheduled a bounded background store refill. Compare with fetch_shed_total: sheds re-warm the store instead of being lost refills.",
+	})
+	m.FillBypassTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "fill_bypass_total",
+		Help:      "Cold include-free misses that skipped the fill flight because the key's last fill settled unstorable by explicit origin directive (no-store/private) within the memo window; these fetch their own immediately instead of parking on fills that store nothing (ADR-0066).",
 	})
 }
 

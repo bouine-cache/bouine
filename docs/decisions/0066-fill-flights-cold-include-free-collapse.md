@@ -158,3 +158,81 @@ ADR-0051 amendment: consecutive-5xx ejection is now success-windowed
 by 5xx adjacency — with or without waves. An origin whose *only*
 origin-bound path returns 5xx still ejects once the threshold
 completes: that is the operator's `consecutive_5xx` contract.
+
+## Amendment: the unstorable-fill memo (tail follow-up)
+
+The staggered release above fixed the ejection burst, but its cost
+landed on exactly one population and stayed there: a hot route whose
+origin answers **`no-store` or `private`** (the load-test `/miss`
+shape: one key, 1.5k rps) settles *every* fill unstorable, so every
+wave of parked followers paid the leader-fill wait plus a
+uniform-random slice of the stagger window before its own fetch — a
+sustained long-tail regression on ~20% of the mixed-leg traffic, the
+very tail PR #838 traded for origin protection.
+
+**A fill that settles with a complete, well-formed response refusing
+shared storage by its own directives — RFC 9111 §5.2.2.3 `no-store`
+(with the must-understand escape, mirrored from `isCacheBlocked`) or
+§5.2.2.7 `private`, under CDN-Cache-Control precedence (RFC 9213) —
+memoizes its primary key for 5 s (`unstorableMemoWindow`, the
+`passive5xxCountWindow` family; a fixed engineering default, not an
+operator knob). While memoized, an anonymous cold include-free miss
+for that key never parks on a fill flight: it fetches its own
+immediately** — the exact behavior of a request `collapseDenied`
+refuses, and of the pre-ADR-0066 world. Re-parking could only hand
+every follower one leader-fill wait plus the released-wave stagger
+before the same own-fetch, because such a fill provably stores
+nothing shareable.
+
+Correctness is unchanged by construction:
+
+- **A memoized request is a sequential request.** It fetches its own
+  response through the same gates as any non-collapsing request; no
+  bytes, verdicts, or partial bodies are ever shared on this path.
+  The memo can only *remove* collapse, never add sharing, so the
+  concurrent-observation exposure ADR-0066 pins cannot increase — a
+  per-request-varying origin now serves each caller its *own* answer
+  on memoized keys, which is strictly the sequential behavior.
+- **The verdict is directive-driven, never store-outcome-driven**: in
+  strong cluster mode a non-owner leader stores nothing locally even
+  for storable fills (the ownerFn gate), so memoizing on "nothing was
+  stored" would suppress fill flights on keys the owner holds. The
+  memo reads the origin's response directives — node-independent.
+- **Exclusions**: error statuses (transient — a struggling origin
+  needs collapse's dedup on recovery; negative caching covers the
+  operator's policy), responses blocked by the client-state gate
+  without a directive (ADR-0067's surface — minted per caller, so the
+  memo never encodes an assumption about session-minting origins;
+  a genuine `no-store` directive still memoizes even when Set-Cookie
+  rides along, since the outcome for every caller is its own fetch),
+  HEAD-led fills (nothing stored by method, not by policy), and size
+  caps (capacity, not origin policy) all keep the settle-then-stagger
+  flow.
+- **Bounded and fail-open**: 16 shards × 512 keys, lazily swept, no
+  reaper goroutine; a full shard refuses writes and falls back to
+  ADR-0066 collapse (a missing memo entry costs one collapsed wave).
+- **The memo expires in 5 s**, and the first wave after expiry (or
+  boot) still collapses and staggers once — bounded by the wave size
+  and invisible at p99 under the mixed-leg traffic mix. An origin
+  flipping unstorable to storable loses at most one window of dedup
+  on the flip and self-heals: memoized requests that receive a
+  storable response store it, so later requests hit the store and
+  never consult the memo.
+- **Fetch counts and origin load return to the sequential rate** —
+  nothing shareable was ever stored for these keys, so the
+  pre-ADR-0066 world, nginx, and a memoized bouine all issue one
+  fetch per request; only the *timing* changes (immediate, not
+  wave-serialized). Single-shot evidence
+  (`BenchmarkSingle_UnstorableBurstLatency`, 32 callers, 2 ms RTT):
+  parked-wave p99 36-45 ms → memoized p99 ~2.4 ms, fetch counts
+  identical (32).
+
+Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass` (the first
+wave still collapses + staggers, the second bursts immediately with
+per-caller unique bodies and zero arrival spread),
+`TestFetchAndStore_MemoExclusions` (directive-only memoization),
+`TestFetchAndStore_MemoExpiresRefillsCollapse` (collapse resumes when
+the window lapses), and `TestUnstorableMemo_BoundedFailOpen`.
+Observable as `bouine_fill_bypass_total`: a sustained non-zero rate on
+a route means its origins send `no-store`/`private` and miss latency
+there is sequential, not wave-shaped.

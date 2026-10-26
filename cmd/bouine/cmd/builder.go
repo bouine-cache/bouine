@@ -440,6 +440,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			FillBypass:              rs.dpMetrics.FillBypassTotal,
 			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
@@ -596,6 +597,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+			FillBypass:              rs.dpMetrics.FillBypassTotal,
 			VaryDrift:               rs.dpMetrics.VaryDriftTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)

@@ -216,3 +216,108 @@ func TestTieredProbe_WarmWithoutPromotion(t *testing.T) {
 	assert.Equal(t, api.SourceWarm, gsrc)
 	assert.True(t, ts.hot.Has(key), "Get promotes on warm hits")
 }
+
+// TestProbe_WindowHits pins the probe's window-hit passthrough: the
+// refresh gate's input is reported, not perturbed.
+func TestProbe_WindowHits(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+	key := api.Key{1, 2, 3}
+	require.NoError(t, s.Put(context.Background(), key, storedObject(key, "example.com", "/page").CloneForStorage(nil)))
+	for range 3 {
+		got, _, err := s.Get(context.Background(), key)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+	}
+	st, ok := s.Probe(key)
+	require.True(t, ok)
+	assert.Equal(t, s.WindowHits(key), st.WindowHits)
+}
+
+// TestMatchingBans_ConfiguredTTL pins the descriptor's expiry math
+// against the configured ban TTL, not just the default: expires_at
+// is the registration instant plus the store's own TTL.
+func TestMatchingBans_ConfiguredTTL(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+		BanTTL:    time.Minute,
+	})
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+
+	// Inside the configured TTL, with the object predating the ban.
+	banAt := time.Now().Add(-30 * time.Second)
+	_, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "short.example", CreatedAt: banAt})
+	require.NoError(t, err)
+	obj := storedObject(api.Key{4}, "short.example", "/x")
+	obj.StoredAt = banAt.Add(-10 * time.Second)
+	matches := s.MatchingBans(obj)
+	require.Len(t, matches, 1)
+	assert.Equal(t, matches[0].CreatedAt.Add(time.Minute), matches[0].ExpiresAt,
+		"the configured TTL bounds the descriptor's expiry")
+}
+
+// TestTieredMatchingBans_Delegates pins the tiered delegation: the
+// tiered store reports from the hot tier's lazy list — the same list
+// its own Get enforces on warm hits.
+func TestTieredMatchingBans_Delegates(t *testing.T) {
+	t.Parallel()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:          &warm.Config{Dir: t.TempDir(), MaxBytes: 1 << 30, SegMax: 64 << 20},
+		BodyThreshold: 1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	banAt := time.Now().Add(-time.Minute)
+	_, err = ts.Ban(context.Background(), api.BanExpr{HostRegex: "tier.example", CreatedAt: banAt})
+	require.NoError(t, err)
+	obj := storedObject(api.Key{6}, "tier.example", "/y")
+	obj.StoredAt = banAt.Add(-10 * time.Second)
+	assert.Len(t, ts.MatchingBans(obj), 1, "the tiered store reads the hot tier's list")
+	assert.Nil(t, ts.MatchingBans(nil))
+}
+
+// TestTieredProbe_WarmBanned pins the warm-path ban check: a warm-only
+// entry matching an active lazy ban reports Banned=true — the tiered
+// Get enforces the same list on warm hits, and the probe reports what
+// it would do.
+func TestTieredProbe_WarmBanned(t *testing.T) {
+	t.Parallel()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:          &warm.Config{Dir: t.TempDir(), MaxBytes: 1 << 30, SegMax: 64 << 20},
+		BodyThreshold: 1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	key := api.Key{7, 7}
+	obj := storedObject(key, "banned-warm.example", "/z")
+	obj.Body = make([]byte, 512)
+	obj.BodySize = 512
+	obj.StoredAt = time.Now().Add(-3 * time.Minute)
+	require.NoError(t, ts.Put(context.Background(), key, obj.CloneForStorage(nil)))
+	require.NoError(t, ts.hot.Delete(context.Background(), key))
+	st, ok := ts.Probe(key)
+	require.True(t, ok)
+	assert.Equal(t, "warm", st.Tier)
+	require.False(t, st.Banned, "sanity: not banned yet")
+
+	// Coalesced host ban: lazy-only, so the warm entry survives and
+	// the probe reports the match. CreatedAt predates the warm fill so
+	// the entry is subject to it.
+	banAt := time.Now().Add(-2 * time.Minute)
+	_, err = ts.Ban(context.Background(), api.BanExpr{HostRegex: "elsewhere.example", CreatedAt: banAt})
+	require.NoError(t, err)
+	require.NoError(t, err)
+	n, err := ts.Ban(context.Background(), api.BanExpr{HostRegex: "banned-warm.example", CreatedAt: banAt})
+	require.NoError(t, err)
+	require.Zero(t, n, "coalesced ban scans nothing; the warm entry survives")
+
+	st, ok = ts.Probe(key)
+	require.True(t, ok)
+	assert.True(t, st.Banned, "the warm path checks the hot tier's ban list")
+}

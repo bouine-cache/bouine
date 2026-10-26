@@ -466,7 +466,7 @@ func (h *Handler) streamMiss(
 	var fillTTL *time.Duration
 	if h.syncCDC {
 		parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
-		if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
+		if parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
 			ttl := h.fillFinalTTLFor(resMap, sf.Delay, parsed, time.Now())
 			var cdcBuf [88]byte
 			dst.SetCanonical(header.S2b(header.CDNCacheControl),
@@ -502,7 +502,7 @@ func (h *Handler) streamMiss(
 // isResponseCacheable checks whether the origin response should be cached.
 func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, resMap header.Map) bool {
 	parsed := newParsedResponse(sf.StatusCode, ri.Header, resMap)
-	cacheable := parsed.isCacheableWithDefault(h.neg, h.defaultTTL)
+	cacheable := parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL)
 	if cacheable && !h.allowSetCookie && clientStateInMap(resMap) {
 		return false
 	}
@@ -651,12 +651,12 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 	if respCC.NoCache && len(hdr.Peek(header.ETag)) > 0 && isHeuristicStatus(status) {
 		return true
 	}
-	if h.neg.Cacheable(status) {
+	if h.fp.neg.Cacheable(status) {
 		return true
 	}
 	// Operator default-TTL fallback: only heuristically-cacheable
 	// statuses qualify (mirrors isCacheableWithDefault).
-	return h.defaultTTL > 0 && isHeuristicStatus(status)
+	return h.fp.defaultTTL > 0 && isHeuristicStatus(status)
 }
 
 // joinedCacheControlBytes returns the effective Cache-Control value from

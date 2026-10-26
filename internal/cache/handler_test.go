@@ -3488,21 +3488,22 @@ func TestSourceSlice(t *testing.T) {
 func TestComputeTTL_NegativeTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 404, Directives{}, mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second)), 0, 0, 0, time.Now())
+	neg := mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
+	ttl := (&fillPolicy{neg: neg}).computeTTL(h, 404, Directives{}, 0, time.Now())
 	assert.Equal(t, 30*time.Second, ttl)
 }
 
 func TestComputeTTL_HeuristicTTL(t *testing.T) {
 	t.Parallel()
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
-	ttl := computeTTL(h, 200, Directives{}, nil, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := (&fillPolicy{}).computeTTL(h, 200, Directives{}, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl)
 }
 
 func TestComputeTTL_DefaultTTL(t *testing.T) {
 	t.Parallel()
 	h := header.Map{}
-	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
+	ttl := (&fillPolicy{defaultTTL: 60 * time.Second}).computeTTL(h, 200, Directives{}, 0, time.Now())
 	assert.Equal(t, 60*time.Second, ttl)
 }
 
@@ -3513,7 +3514,7 @@ func TestComputeTTL_StatusTTLOutranksDefaultTTL(t *testing.T) {
 	// 5xx past it (review finding: defaultTTL used to shadow the policy).
 	h := header.Map{}
 	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
-	ttl := computeTTL(h, 503, Directives{}, neg, 60*time.Second, 0, 0, time.Now())
+	ttl := (&fillPolicy{neg: neg, defaultTTL: 60 * time.Second}).computeTTL(h, 503, Directives{}, 0, time.Now())
 	assert.Equal(t, 10*time.Second, ttl)
 }
 
@@ -3523,7 +3524,7 @@ func TestComputeTTL_StatusTTLOutranksHeuristic(t *testing.T) {
 	// hours) when the operator pinned 10s for the range.
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
 	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
-	ttl := computeTTL(h, 503, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := (&fillPolicy{neg: neg}).computeTTL(h, 503, Directives{}, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 10*time.Second, ttl)
 }
 
@@ -3534,7 +3535,7 @@ func TestComputeTTL_HeuristicStillAppliesToHeuristicStatuses(t *testing.T) {
 	// the pre-existing resolution.
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
 	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
-	ttl := computeTTL(h, 404, Directives{}, neg, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := (&fillPolicy{neg: neg}).computeTTL(h, 404, Directives{}, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl, "uncovered status keeps heuristic TTL")
 }
 
@@ -3546,11 +3547,12 @@ func TestComputeTTL_HeuristicOutranksDefaultTTL(t *testing.T) {
 	// Without this pin, ttl_default silently flips ordinary 200s with
 	// Last-Modified from hours of heuristic TTL to the operator default.
 	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
-	ttl := computeTTL(h, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	ttl := (&fillPolicy{defaultTTL: 60 * time.Second}).computeTTL(h, 200, Directives{}, 0,
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl, "heuristic outranks ttl_default")
 
 	// No heuristic source at all: ttl_default applies.
-	ttl = computeTTL(header.Map{}, 200, Directives{}, nil, 60*time.Second, 0, 0, time.Now())
+	ttl = (&fillPolicy{defaultTTL: 60 * time.Second}).computeTTL(header.Map{}, 200, Directives{}, 0, time.Now())
 	assert.Equal(t, 60*time.Second, ttl, "ttl_default applies without heuristic freshness")
 }
 
@@ -3613,7 +3615,7 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := (&Handler{overrideTTL: 300 * time.Second}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
+	obj := (&Handler{fp: fillPolicy{overrideTTL: 300 * time.Second}}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -3774,7 +3776,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := (&Handler{defaultSWR: 30 * time.Second}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
+	obj := (&Handler{fp: fillPolicy{defaultSWR: 30 * time.Second}}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -3787,7 +3789,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
-	obj := (&Handler{defaultSIE: 60 * time.Second}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
+	obj := (&Handler{fp: fillPolicy{defaultSIE: 60 * time.Second}}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -4178,7 +4180,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	// caching) must still skip proactive refresh: re-fetching an origin
 	// that is already returning errors amplifies the outage.
 	h := testRefreshHandler(t, 1)
-	h.neg = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
+	h.fp.neg = mustStatusTTL(t, api.DefaultNegTTLMap(30*time.Second))
 	key := testkey.Key(11)
 	r := testCtx("GET", "http://example.com/404")
 	obj := &api.Object{
@@ -4224,7 +4226,7 @@ func TestStoreObject_StatusTTLCached5xxSkipRefresh(t *testing.T) {
 	// forever.
 	neg := mustStatusTTL(t, map[string]time.Duration{"5xx": 10 * time.Second})
 	h := testRefreshHandler(t, 1)
-	h.neg = neg
+	h.fp.neg = neg
 	key := testkey.Key(12)
 	r := testCtx("GET", "http://example.com/flaky")
 	obj := &api.Object{

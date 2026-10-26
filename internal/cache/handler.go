@@ -262,7 +262,6 @@ type Handler struct {
 	flight       singleflight.Group
 	logger       observability.Logger
 	fastClient   FastClient
-	neg          *StatusTTL
 	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
 	// is deliberately NOT the foreground fetchSem: the refill exists to
 	// clear the post-ban miss backlog, and sharing the foreground budget
@@ -355,12 +354,15 @@ type Handler struct {
 	// as bypassOnCookie, while requests with only unlisted cookies
 	// participate normally. Empty scanner (no names configured) pays
 	// a single bool read per request.
-	inflightStreams         inflightTable
-	bypassCookieNames       cookieNameScanner
+	inflightStreams   inflightTable
+	bypassCookieNames cookieNameScanner
+	// fp carries the route's freshness policy (fillPolicy): the TTL
+	// ladder knobs shared by buildObject, the sync-mode fill cap, and
+	// the 304-refresh override. A value, not a pointer, so zero-value
+	// Handlers in tests get the zero policy exactly as before.
+	fp                      fillPolicy
 	refreshWg               sync.WaitGroup
 	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
-	defaultTTL              time.Duration  // operator fallback when origin sends no freshness
-	defaultSIE              time.Duration  // operator-level stale-if-error floor
 	maxObjectSize           int64          // skip storage for responses larger than this; 0 = no limit
 	maxVariants             int            // cap on stored variants per primary key; DefaultMaxVariants when unset
 	maxStreamingBufferBytes int64
@@ -376,10 +378,7 @@ type Handler struct {
 	refreshMinScore      int64
 	refreshTimeout       time.Duration
 	refreshMargin        time.Duration
-	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
-	jitterPercent        int
-	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires on success/redirect responses (status < 400) when > 0; error statuses keep the negative-caching TTL ladder (ADR-0059)
+	maxResponseBytes     int64 // hard cap on body buffering; 0 = defaultMaxResponseBytes
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
 	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
@@ -867,6 +866,14 @@ func (h *Handler) applyResponseRewrites(dst *fasthttp.ResponseHeader) {
 //nolint:funlen,gocyclo // 81 lines: initialization is inherently sequential; the rewrite-directive blocks add four flat branches
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
+	fp := fillPolicy{
+		neg:         cfg.Negative,
+		defaultTTL:  cfg.DefaultTTL,
+		overrideTTL: cfg.OverrideTTL,
+		defaultSWR:  cfg.DefaultSWR,
+		defaultSIE:  cfg.DefaultSIE,
+		jitterPct:   cfg.JitterPercent,
+	}
 	h := &Handler{
 		upstream:                cfg.Upstream,
 		fastClient:              cfg.FastClient,
@@ -874,14 +881,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		pathRewrite:             cfg.PathRewrite,
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
-		neg:                     cfg.Negative,
-		jitterPercent:           cfg.JitterPercent,
+		fp:                      fp,
 		stayinAlive:             cfg.StayinAlive,
 		logCacheKeys:            cfg.LogCacheKeys,
-		defaultTTL:              cfg.DefaultTTL,
-		overrideTTL:             cfg.OverrideTTL,
-		defaultSWR:              cfg.DefaultSWR,
-		defaultSIE:              cfg.DefaultSIE,
 		variantSets:             make(map[api.Key]map[api.Key]struct{}),
 		VaryCapHits:             cfg.VaryCapHits,
 		VaryDriftInc:            cfg.VaryDrift,
@@ -1303,13 +1305,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	resMap := res.Header.ToMap()
-	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && clientStateInMap(resMap) {
-			h.refreshMetrics.IncSkips("set_cookie")
-			return
-		}
-		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
-			h.refreshMetrics.IncSkips("too_large")
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.fp.neg, h.fp.defaultTTL) {
+		if reason := h.skipStoreReason(resMap, len(res.Body)); reason != "" {
+			h.refreshMetrics.IncSkips(reason)
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
@@ -3000,8 +2998,8 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	// shorter) max-age. Error objects keep the ladder TTL from the merged
 	// headers (or their previous TTL) — refreshed.StatusCode is the stale
 	// object's status (ADR-0059).
-	if h.overrideTTL > 0 && refreshed.StatusCode < 400 {
-		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
+	if ttl := h.fp.overrideTTLFor(refreshed.StatusCode); ttl > 0 {
+		refreshed.TTL = ttl
 	}
 	// RFC 9111 §4.2.3: a 304 is an origin response too — its round-trip
 	// delay ages the freshened object exactly like a full response's
@@ -3256,11 +3254,8 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgResMap := res.Header.ToMap()
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
-	if bgParsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && clientStateInMap(bgResMap) {
-			return
-		}
-		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+	if bgParsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
+		if h.skipStoreReason(bgResMap, len(res.Body)) != "" {
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
@@ -3333,7 +3328,7 @@ func (h *Handler) writeAndMaybeStore(
 	// override an origin privacy marker at a shared downstream cache
 	// (RFC 9111 §5.2.2.5, §5.2.2.7).
 	var fillTTL *time.Duration
-	if h.syncCDC && parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
+	if h.syncCDC && parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
 		ttl := h.fillFinalTTLFor(resMap, res.Delay, parsed, time.Now())
 		var cdcBuf [88]byte
 		dst.SetCanonical(header.S2b(header.CDNCacheControl),
@@ -3341,11 +3336,8 @@ func (h *Handler) writeAndMaybeStore(
 		fillTTL = &ttl
 	}
 
-	if parsed.isCacheableWithDefault(h.neg, h.defaultTTL) {
-		if !h.allowSetCookie && clientStateInMap(resMap) {
-			return
-		}
-		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+	if parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
+		if h.skipStoreReason(resMap, len(res.Body)) != "" {
 			return
 		}
 		// Drift check inside the store gate (ADR-0058): only the
@@ -3764,7 +3756,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		// An error status covered by the negative-caching policy skips
 		// proactive refresh: re-fetching an origin already returning
 		// errors amplifies the outage.
-		if h.neg.Cacheable(obj.StatusCode) {
+		if h.fp.neg.Cacheable(obj.StatusCode) {
 			return
 		}
 		if !isRefresh && h.refreshReactiveFirst {
@@ -3934,9 +3926,8 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 	// path's store gate (no client response is written here).
 	resMap := res.Header.ToMap()
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
-	if !parsed.isCacheableWithDefault(h.neg, h.defaultTTL) ||
-		(!h.allowSetCookie && clientStateInMap(resMap)) ||
-		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
+	if !parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) ||
+		h.skipStoreReason(resMap, len(res.Body)) != "" {
 		return
 	}
 	obj := h.buildObject(key, ri, res, resMap, nil, time.Now())
@@ -4233,12 +4224,27 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 	return upstreamFetchResult(upstreamCtx)
 }
 
+// skipStoreReason reports why a cacheable fill response must not be
+// stored, or "" when it may be: client-state headers (Set-Cookie,
+// Set-Login) under the default gate, then the admission size cap. The
+// pair was repeated verbatim at every fill gate; the returned string is
+// also the refresh path's skip metric label.
+func (h *Handler) skipStoreReason(resMap header.Map, bodyLen int) string {
+	if !h.allowSetCookie && clientStateInMap(resMap) {
+		return "set_cookie"
+	}
+	if h.maxObjectSize > 0 && int64(bodyLen) > h.maxObjectSize {
+		return "too_large"
+	}
+	return ""
+}
+
 // buildObject assembles the stored api.Object for a fetched response.
-// Route knobs (negative-caching table, TTL defaults/override, jitter, key
-// policy, stayin-alive, upstream pool) are Handler fields: they never vary
-// per call, and keeping them off the parameter list removes the adjacent
-// time.Duration run whose transposition compiled and silently served wrong
-// grace windows.
+// Route knobs never vary per call: the freshness ladder lives on
+// h.fp (fillPolicy), the identity stamps (key policy, stayin-alive,
+// upstream pool) on the Handler itself. Keeping both off the parameter
+// list removes the adjacent time.Duration run whose transposition
+// compiled and silently served wrong grace windows.
 //
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
 func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, presetTTL *time.Duration, now time.Time) *api.Object {
@@ -4278,7 +4284,7 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 	if presetTTL != nil {
 		ttl = *presetTTL
 	} else {
-		ttl = fillFinalTTL(resMap, res.StatusCode, respCC, h.neg, h.defaultTTL, h.overrideTTL, h.jitterPercent, originAge, now)
+		ttl = h.fp.fillFinalTTL(resMap, res.StatusCode, respCC, originAge, now)
 	}
 
 	// res.Body is already an independently-owned copy: all production
@@ -4346,13 +4352,13 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
-	} else if h.defaultSWR > 0 {
-		obj.StaleWhileRevalidate = h.defaultSWR
+	} else if h.fp.defaultSWR > 0 {
+		obj.StaleWhileRevalidate = h.fp.defaultSWR
 	}
 	if respCC.StaleIfErrorSet {
 		obj.StaleIfError = respCC.StaleIfError
-	} else if h.defaultSIE > 0 {
-		obj.StaleIfError = h.defaultSIE
+	} else if h.fp.defaultSIE > 0 {
+		obj.StaleIfError = h.fp.defaultSIE
 	}
 	if lm := obj.Header.Get(header.LastModified); lm != "" {
 		if t, err := time.Parse(httpTimeFormat, lm); err == nil {
@@ -4404,23 +4410,48 @@ func serializeHead(obj *api.Object, skipCDC bool) []byte {
 	return buf
 }
 
+// fillPolicy owns the route's freshness knobs applied on every fill
+// path — the negative-caching table, the default/override TTLs, the
+// SWR/SIE floors stamped onto stored objects, and the TTL jitter.
+// buildObject, the ADR-0063 sync-mode fill cap, and the 304-refresh
+// override all consume it, so the stored clock, the advertised cap,
+// and the revalidated lifetime can never diverge. The knobs previously
+// rode call sites as adjacent time.Duration parameters — a transposed
+// pair compiled and silently served wrong grace windows.
+type fillPolicy struct {
+	neg         *StatusTTL
+	defaultTTL  time.Duration // operator fallback when origin sends no freshness
+	overrideTTL time.Duration // wins over origin freshness for content responses (status < 400); error statuses keep the negative-caching ladder (ADR-0059)
+	defaultSWR  time.Duration // operator-level stale-while-revalidate floor
+	defaultSIE  time.Duration // operator-level stale-if-error floor
+	jitterPct   int
+}
+
 // fillFinalTTL computes bouine's final TTL for a fill response: the
-// computeTTL ladder, then the route override (jittered from the override
-// value itself) for content statuses. Single definition — buildObject
-// and the ADR-0063 sync-mode fill cap both call it, so the cap
-// advertised downstream and the stored clock can never diverge.
-func fillFinalTTL(resMap header.Map, status int, respCC Directives,
-	neg *StatusTTL, defaultTTL, overrideTTL time.Duration, jitterPct int,
+// computeTTL ladder, then the route override for content statuses.
+// Single definition — buildObject and the ADR-0063 sync-mode fill cap
+// both call it, so the cap advertised downstream and the stored clock
+// can never diverge.
+func (fp *fillPolicy) fillFinalTTL(resMap header.Map, status int, respCC Directives,
 	originAge time.Duration, now time.Time) time.Duration {
-	ttl := computeTTL(resMap, status, respCC, neg, defaultTTL, jitterPct, originAge, now)
-	// Route-level override wins over the upstream's freshness directives
-	// for content responses (status < 400); error responses keep the
-	// negative-caching TTL ladder (ADR-0059). Applied after computeTTL so
-	// jitter is seeded from the override value, not the origin's max-age.
-	if overrideTTL > 0 && status < 400 {
-		ttl = JitterTTL(overrideTTL, jitterPct)
+	ttl := fp.computeTTL(resMap, status, respCC, originAge, now)
+	if ov := fp.overrideTTLFor(status); ov > 0 {
+		ttl = ov
 	}
 	return ttl
+}
+
+// overrideTTLFor returns the jittered route override for a content
+// status, or 0 when the route sets none. The route-level override wins
+// over the upstream's freshness directives for content responses
+// (status < 400); error responses keep the negative-caching TTL ladder
+// (ADR-0059). Applied after the ladder so jitter is seeded from the
+// override value, not the origin's max-age.
+func (fp *fillPolicy) overrideTTLFor(status int) time.Duration {
+	if fp.overrideTTL <= 0 || status >= 400 {
+		return 0
+	}
+	return JitterTTL(fp.overrideTTL, fp.jitterPct)
 }
 
 // computeTTL derives the freshness lifetime for a response. Precedence
@@ -4433,24 +4464,23 @@ func fillFinalTTL(resMap header.Map, status int, respCC Directives,
 // exists to prevent. Uncovered statuses fall through to the heuristic
 // and the operator default, in that order. Jitter and the origin Age
 // adjustment apply last.
-func computeTTL(hdr header.Map, status int, respCC Directives,
-	neg *StatusTTL, defaultTTL time.Duration, jitterPct int,
+func (fp *fillPolicy) computeTTL(hdr header.Map, status int, respCC Directives,
 	originAge time.Duration, now time.Time) time.Duration {
 	ttl, explicit := FreshnessLifetimeH(respCC, hdr)
 	if !explicit {
 		// Per-status negative caching outranks every other implicit
 		// source (Cloudflare's "Cache TTL by status code" semantics),
 		// but only for the statuses it covers.
-		if negTTL := neg.TTL(status); negTTL > 0 {
+		if negTTL := fp.neg.TTL(status); negTTL > 0 {
 			ttl = negTTL
 		} else {
 			ttl = HeuristicTTL(hdr, now)
-			if ttl == 0 && defaultTTL > 0 {
-				ttl = defaultTTL
+			if ttl == 0 && fp.defaultTTL > 0 {
+				ttl = fp.defaultTTL
 			}
 		}
 	}
-	ttl = JitterTTL(ttl, jitterPct)
+	ttl = JitterTTL(ttl, fp.jitterPct)
 	ttl -= originAge
 	if ttl < 0 {
 		ttl = 0

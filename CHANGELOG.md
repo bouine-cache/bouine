@@ -328,7 +328,11 @@ the curated, human-readable summary.
   memo can only reduce cross-request exposure, never add it; the
   memo's verdict is read from the origin's response directives, never
   from the local store outcome, so it is identical on owner and
-  non-owner nodes in strong cluster mode. The first wave after the
+  non-owner nodes in strong cluster mode; and only a request that was
+  itself eligible to share flights (anonymous, safe method) may arm
+  the memo — a cookied or authorized request's no-store response is
+  not evidence about the anonymous population's storage policy. The
+  first wave after the
   window (or after boot) still collapses and staggers once — bounded
   by the wave size, and invisible at p99 under the leg's traffic mix.
   Sequential fetch counts are unchanged (nothing shareable was ever
@@ -336,7 +340,10 @@ the curated, human-readable summary.
   the pre-ADR-0066 world and nginx both produce. Single-shot evidence
   (`BenchmarkSingle_UnstorableBurstLatency`, 32 callers, 2 ms RTT):
   wave-1 p99 36-45 ms → memoized wave-2 p99 ~2.4 ms, fetch counts
-  identical. New counter `bouine_fill_bypass_total` (one per bypassed
+  identical; steady state (`BenchmarkSingle_UnstorableSteadyState`,
+  the exact /miss leg shape — 1500 rps fixed arrivals, 13 ms RTT):
+  memoized p50 13.1 ms = RTT, p99 18.5 ms, against the parked-wave
+  world's analytic ~29 ms mean / ~45 ms p99. New counter `bouine_fill_bypass_total` (one per bypassed
   miss; a sustained non-zero rate on a route means its origins send
   no-store/private and miss latency there is sequential, not
   wave-shaped). Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass`,

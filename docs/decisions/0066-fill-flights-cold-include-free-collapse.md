@@ -198,6 +198,14 @@ Correctness is unchanged by construction:
   for storable fills (the ownerFn gate), so memoizing on "nothing was
   stored" would suppress fill flights on keys the owner holds. The
   memo reads the origin's response directives — node-independent.
+- **The evidence is flight-share-eligible evidence**: only a request
+  that was itself eligible to share flights (anonymous, safe method —
+  `collapseDenied`'s complement) may arm the memo. A cookied or
+  authorized request's no-store response is not evidence about the
+  anonymous population's storage policy — origins vary Cache-Control
+  by request state, and anonymous collapse behavior stays driven by
+  anonymous evidence, the same refusal ADR-0052/0054 make for content,
+  applied to the memo's control-plane signal.
 - **Exclusions**: error statuses (transient — a struggling origin
   needs collapse's dedup on recovery; negative caching covers the
   operator's policy), responses blocked by the client-state gate
@@ -225,7 +233,11 @@ Correctness is unchanged by construction:
   wave-serialized). Single-shot evidence
   (`BenchmarkSingle_UnstorableBurstLatency`, 32 callers, 2 ms RTT):
   parked-wave p99 36-45 ms → memoized p99 ~2.4 ms, fetch counts
-  identical (32).
+  identical (32); steady state
+  (`BenchmarkSingle_UnstorableSteadyState`, the exact /miss leg shape —
+  1500 rps fixed arrivals, 13 ms RTT, 2 s): memoized p50 13.1 ms =
+  RTT, p99 18.5 ms, against the parked-wave world's analytic
+  ~29 ms mean / ~45 ms p99.
 
 Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass` (the first
 wave still collapses + staggers, the second bursts immediately with

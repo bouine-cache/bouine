@@ -508,6 +508,129 @@ func TestFetchAndStore_MemoSelfHealsOnStorableFlip(t *testing.T) {
 	})
 }
 
+// TestFetchAndStore_CookiedNoStoreDoesNotArmMemo pins the memo's
+// evidence rule: only a request that was itself eligible to share
+// flights may arm it. A cookied or authorized request's no-store
+// response is not evidence about the anonymous population's storage
+// policy — origins vary Cache-Control by request state, and anonymous
+// collapse behavior stays driven by anonymous evidence.
+func TestFetchAndStore_CookiedNoStoreDoesNotArmMemo(t *testing.T) {
+	cases := []struct {
+		name string
+		hdr  [2]string
+	}{
+		{"cookie", [2]string{"Cookie", "sid=mine"}},
+		{"authorization", [2]string{"Authorization", "Bearer token"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "no-store")
+				ctx.SetStatusCode(200)
+				_, _ = ctx.WriteString("personal")
+			}
+			store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+			defer store.Close(context.Background())
+			h := NewHandler(HandlerConfig{
+				Upstream:   origin,
+				FastClient: &testFastClient{handler: origin},
+				Store:      store,
+			})
+			defer h.Close(context.Background())
+			ctx := testCtx("GET", "http://example.com/cookied")
+			ctx.Request.Header.Set(tc.hdr[0], tc.hdr[1])
+			serveRequest(h, ctx)
+			require.Equal(t, 200, respCode(ctx))
+			require.Equal(t, 0, memoEntries(&h.unstorableMemo),
+				"a personal request's no-store settle must not arm the memo")
+		})
+	}
+}
+
+// TestFetchAndStore_DeclaredDimensionsUnaffectedByMemo pins the memo's
+// read boundary: it is consulted only by COLD INCLUDE-FREE fill
+// flights. A declared-dimensions route's cold flight is a byte-handoff
+// flight under the proven-key rule (ADR-0057), so it keeps collapsing —
+// follower receives the leader's bytes — even while the same key's
+// memo entry is armed by the anonymous no-store settle.
+func TestFetchAndStore_DeclaredDimensionsUnaffectedByMemo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var fetches atomic.Int64
+		release1 := make(chan struct{})
+		release2 := make(chan struct{})
+		origin := func(ctx *fasthttp.RequestCtx) {
+			n := fetches.Add(1)
+			switch n {
+			case 1:
+				select {
+				case <-release1:
+				case <-time.After(5 * time.Second):
+				}
+			case 2:
+				select {
+				case <-release2:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			ctx.Response.Header.Set(header.CacheControl, "no-store")
+			ctx.SetStatusCode(200)
+			_, _ = fmt.Fprintf(ctx, "body-%d", n)
+		}
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+		defer store.Close(context.Background())
+		h := NewHandler(HandlerConfig{
+			Upstream:   origin,
+			FastClient: &testFastClient{handler: origin},
+			Store:      store,
+			Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Tenant-Id"}, false),
+		})
+		defer h.Close(context.Background())
+
+		// Pair 1: the leader's fetch is held open while the follower
+		// parks on the byte-handoff flight, then released — the
+		// follower must receive the leader's bytes (ADR-0057
+		// proven-key handoff, unchanged), and the anonymous settle
+		// arms the memo.
+		pair := func(release chan struct{}) (leader, follower string) {
+			leaderDone := make(chan string, 1)
+			go func() {
+				ctx := testCtx("GET", "http://example.com/tenant")
+				ctx.Request.Header.Set("X-Tenant-Id", "14")
+				serveRequest(h, ctx)
+				leaderDone <- respBody(ctx)
+			}()
+			synctest.Wait() // the leader is durably blocked in the origin
+			followerDone := make(chan string, 1)
+			go func() {
+				ctx := testCtx("GET", "http://example.com/tenant")
+				ctx.Request.Header.Set("X-Tenant-Id", "14")
+				serveRequest(h, ctx)
+				followerDone <- respBody(ctx)
+			}()
+			synctest.Wait() // the follower is durably parked on the flight
+			close(release)
+			return <-leaderDone, <-followerDone
+		}
+
+		l1, f1 := pair(release1)
+		synctest.Wait()
+		require.Equal(t, l1, f1,
+			"a declared-dimension cold flight keeps byte handoff: the follower receives the leader's bytes")
+		require.Equal(t, int64(1), fetches.Load(),
+			"the pair collapsed onto one fetch (leader held, follower parked on the handoff)")
+		require.Equal(t, 1, memoEntries(&h.unstorableMemo),
+			"the anonymous no-store settle arms the memo")
+
+		// Pair 2 on the same key, memo armed: still a byte-handoff
+		// cold flight — the memo is never consulted here.
+		l2, f2 := pair(release2)
+		synctest.Wait()
+		require.Equal(t, l2, f2)
+		require.Equal(t, int64(2), fetches.Load(),
+			"pair 2 collapses onto one fetch too: the memo never gates declared-dimension flights")
+	})
+}
+
 // uniqueBodies deduplicates response bodies; len == n proves every
 // caller received a distinct (own-fetched) response.
 func uniqueBodies(bodies []string) map[string]struct{} {

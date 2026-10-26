@@ -341,9 +341,11 @@ the curated, human-readable summary.
   (`BenchmarkSingle_UnstorableBurstLatency`, 32 callers, 2 ms RTT):
   wave-1 p99 36-45 ms → memoized wave-2 p99 ~2.4 ms, fetch counts
   identical; steady state (`BenchmarkSingle_UnstorableSteadyState`,
-  the exact /miss leg shape — 1500 rps fixed arrivals, 13 ms RTT):
-  memoized p50 13.1 ms = RTT, p99 18.5 ms, against the parked-wave
-  world's analytic ~29 ms mean / ~45 ms p99. New counter `bouine_fill_bypass_total` (one per bypassed
+  the exact /miss leg shape — 1500 rps fixed arrivals, 13 ms RTT),
+  measured on the same harness with the memo disabled for the
+  before-number: p50 28.7 → 13.1 ms (-54%), p99 ~44 → ~18 ms (-59%),
+  p999 ~46-49 → ~21 ms, fetch counts identical, miss-path
+  allocations -17% (wave parking removed). New counter `bouine_fill_bypass_total` (one per bypassed
   miss; a sustained non-zero rate on a route means its origins send
   no-store/private and miss latency there is sequential, not
   wave-shaped). Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass`,

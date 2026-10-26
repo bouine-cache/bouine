@@ -290,6 +290,12 @@ internal/observability, internal/config.
     `make bench-gate`; self-skips in `make bench-all`.
   - `Benchmark*` (no prefix) — regular time-driven benchmarks. Run in
     `make bench-all` only.
+  - Benchmark verdicts are pipe-proof: `bench/run.sh` prints
+    `>>> bench/run.sh (<mode>) exit: N` as its final output line and
+    persists the raw output to `bench/results/current.txt`. When wrapping
+    a run in a pipe (`| tail`, `| tee`, …), read the verdict from that
+    line — never re-run the suite to recover an exit code the pipe
+    swallowed.
 - **No flaky tests.** A test that flakes twice in a week is quarantined
   (`-skip` with a tracking issue) within one business day.
 - **Determinism**: no `time.Now()` and no sleeps in tests; use the

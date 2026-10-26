@@ -45,6 +45,7 @@ func explainURL(_ context.Context, rawURL string, rs *runState) admin.ExplainRes
 	st, present, banned := explainResolve(rs, key, policy, nominal, &result.Variant)
 	explainStoredVariants(rs, h, key, policy, &result.Variant)
 	result.Stored = explainStored(st, present)
+	result.Stored.VariantsPresent = len(result.Variant.StoredVariants)
 	result.Cacheable = explainCacheability(h, st, present, nominal)
 	result.Bans = explainBans(rs, rawURL, key, st, present)
 	result.Cluster = explainCluster(rs, key)

@@ -10,6 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/cluster"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -33,7 +36,7 @@ func explainTestState(t *testing.T) *runState {
 
 // explainObject builds a stored object at key with the given
 // lifecycle: the ban headers, status, and freshness windows.
-func explainObject(key api.Key, path string, storedAgo, ttl, swr time.Duration) *api.Object {
+func explainObject(key api.Key, path string, storedAgo, ttl, swr, sie time.Duration) *api.Object {
 	m := header.NewMap(2)
 	m.Set(header.XBouineHost, "example.com")
 	m.Set(header.XBouinePath, path)
@@ -44,6 +47,7 @@ func explainObject(key api.Key, path string, storedAgo, ttl, swr time.Duration) 
 		StoredAt:             time.Now().Add(-storedAgo),
 		TTL:                  ttl,
 		StaleWhileRevalidate: swr,
+		StaleIfError:         sie,
 		CacheControl:         fmt.Sprintf("max-age=%d", int(ttl.Seconds())),
 	}
 }
@@ -53,7 +57,7 @@ func TestExplain_FreshHit(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/hit"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/hit", 10*time.Minute, time.Hour, 0)
+	obj := explainObject(key, "/hit", 10*time.Minute, time.Hour, 0, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 
 	result := explainURL(context.Background(), url, rs)
@@ -75,7 +79,7 @@ func TestExplain_StaleHitWithinSWR(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/stale"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/stale", 2*time.Minute, time.Minute, 10*time.Minute)
+	obj := explainObject(key, "/stale", 2*time.Minute, time.Minute, 10*time.Minute, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 
 	result := explainURL(context.Background(), url, rs)
@@ -89,7 +93,7 @@ func TestExplain_MissByTTL(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/expired"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/expired", 2*time.Minute, time.Minute, 0)
+	obj := explainObject(key, "/expired", 2*time.Minute, time.Minute, 0, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 
 	result := explainURL(context.Background(), url, rs)
@@ -108,7 +112,7 @@ func TestExplain_MissByBan(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/banned"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/banned", time.Minute, time.Hour, 0)
+	obj := explainObject(key, "/banned", time.Minute, time.Hour, 0, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 
 	n, err := rs.store.Ban(context.Background(), api.BanExpr{PathRegex: "^/banned"})
@@ -134,7 +138,7 @@ func TestExplain_BannedButStillPresent(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/banned-fresh"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/banned-fresh", time.Minute, time.Hour, 0)
+	obj := explainObject(key, "/banned-fresh", time.Minute, time.Hour, 0, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 	// Open the coalesce window, then register the real ban lazily.
 	_, err := rs.store.Ban(context.Background(), api.BanExpr{HostRegex: "unrelated.example"})
@@ -216,7 +220,7 @@ func TestExplain_SideEffectFree(t *testing.T) {
 	rs := explainTestState(t)
 	url := "http://example.com/side-effect"
 	key := cache.BuildKeyFromURL(url, nil)
-	obj := explainObject(key, "/side-effect", 0, time.Hour, 0)
+	obj := explainObject(key, "/side-effect", 0, time.Hour, 0, 0)
 	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
 
 	before := rs.store.Stats()
@@ -247,4 +251,114 @@ func TestProbeVariantBucket(t *testing.T) {
 	langHeader.Set("Accept-Language", "fr-FR")
 	langKey := cache.BuildVaryKey("Accept-Language", langHeader, nil)
 	assert.Empty(t, probeVariantBucket("Accept-Language", langKey, nil))
+}
+
+// TestExplain_StaleHitWithinSIE pins the sie zone: the swr window is
+// exhausted, the sie grace is not — revalidation first, stale serve
+// only on origin error, and the bar's third zone is what remains.
+func TestExplain_StaleHitWithinSIE(t *testing.T) {
+	t.Parallel()
+	rs := explainTestState(t)
+	url := "http://example.com/sie"
+	key := cache.BuildKeyFromURL(url, nil)
+	obj := explainObject(key, "/sie", 5*time.Minute, time.Minute, 30*time.Second, 10*time.Minute)
+	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
+
+	result := explainURL(context.Background(), url, rs)
+	assert.Equal(t, "stale-hit", result.Verdict)
+	assert.Equal(t, "STALE", result.CacheResult)
+	assert.Equal(t, "stale-sie", result.TTL.Verdict)
+	assert.Contains(t, result.TTL.FreshFor, "5m", "the remaining sie grace window")
+}
+
+// TestExplain_BannedVariant pins the banned-variant resolution: the
+// resolver is live, the nominal bucket's variant is present but
+// lazily banned (a surrogate-key ban — the one predicate that can
+// distinguish variants), so the next request misses and the ban
+// descriptors carry the why.
+func TestExplain_BannedVariant(t *testing.T) {
+	t.Parallel()
+	rs := explainTestState(t)
+	url := "http://example.com/bv"
+	primary := cache.BuildKeyFromURL(url, nil)
+	brHeader := header.NewMap(1)
+	brHeader.Set(header.AcceptEncoding, "br")
+	brKey := cache.VariantKey(primary, header.AcceptEncoding, brHeader, nil)
+
+	primaryObj := &api.Object{
+		Key: primary, StatusCode: 200, StoredAt: time.Now().Add(-time.Minute),
+		TTL: time.Hour, VaryValue: header.AcceptEncoding,
+	}
+	require.NoError(t, rs.store.Put(context.Background(), primary, primaryObj.CloneForStorage(nil)))
+	brObj := &api.Object{
+		Key: brKey, StatusCode: 200, StoredAt: time.Now().Add(-time.Minute),
+		TTL: time.Hour, VaryValue: header.AcceptEncoding,
+		VaryKey:       cache.BuildVaryKey(header.AcceptEncoding, brHeader, nil),
+		SurrogateKeys: []string{"products"},
+	}
+	require.NoError(t, rs.store.Put(context.Background(), brKey, brObj.CloneForStorage(nil)))
+
+	// Surrogate bans are lazy-only (they skip the eager scan), so the
+	// entries survive and the ban bites on the next lookup.
+	_, err := rs.store.Ban(context.Background(), api.BanExpr{SurrogateKey: "products"})
+	require.NoError(t, err)
+
+	result := explainURL(context.Background(), url, rs)
+	assert.Equal(t, "miss", result.Verdict)
+	assert.Equal(t, "banned", result.Reason)
+	assert.True(t, result.Stored.Present, "the banned variant physically sits in the tier")
+	require.Len(t, result.Bans, 1)
+	assert.Equal(t, "products", result.Bans[0].SurrogateKey,
+		"the stored surrogate keys participate in the match")
+}
+
+// TestExplain_ClusterLocalOwner pins the no-ring owner report: a
+// routeless, clusterless runState owns every key it stores.
+func TestExplain_ClusterLocalOwner(t *testing.T) {
+	t.Parallel()
+	rs := explainTestState(t)
+	url := "http://example.com/owned"
+	key := cache.BuildKeyFromURL(url, nil)
+	obj := explainObject(key, "/owned", 0, time.Hour, 0, 0)
+	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
+
+	result := explainURL(context.Background(), url, rs)
+	assert.True(t, result.Cluster.Local)
+	assert.Empty(t, result.Cluster.OwnerPeer)
+	assert.True(t, result.Cluster.Local, "no ring: this node owns everything")
+}
+
+// TestExplain_ClusterRingOwner pins the ring-owner report on a real
+// single-node cluster: the owner resolves by name with its data
+// address, and IsLocal marks this node.
+func TestExplain_ClusterRingOwner(t *testing.T) {
+	t.Parallel()
+	rs := explainTestState(t)
+	c, err := cluster.New(cluster.Config{
+		NodeName: "bouine-0",
+		BindAddr: "127.0.0.1:0",
+		Mode:     config.ClusterModeStrong,
+		Logger:   observability.NoopLogger{},
+		PeerInfo: api.PeerInfo{
+			Name:      "bouine-0",
+			Addr:      "127.0.0.1:0",
+			DataAddr:  "127.0.0.1:9010",
+			AdminAddr: "127.0.0.1:9000",
+			Weight:    1.0,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Leave(context.Background()) })
+	rs.clusterNode = c
+
+	url := "http://example.com/ringed"
+	key := cache.BuildKeyFromURL(url, nil)
+	obj := explainObject(key, "/ringed", 0, time.Hour, 0, 0)
+	require.NoError(t, rs.store.Put(context.Background(), key, obj.CloneForStorage(nil)))
+
+	result := explainURL(context.Background(), url, rs)
+	assert.True(t, result.Cluster.Local, "a single-node ring owns everything")
+	assert.Equal(t, "bouine-0 (127.0.0.1:9010)", result.Cluster.OwnerPeer,
+		"the owner peer reports by name with its data address")
+	assert.Equal(t, "hit", result.Verdict)
 }

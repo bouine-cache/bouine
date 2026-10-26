@@ -913,7 +913,14 @@ func (h *Handler) streamMissBuffered(
 	// excluded: they store nothing by method, not by origin policy.
 	// Directive-driven only — errors, caps, and client-state responses
 	// keep the settle-then-stagger flow (see refusesSharedStorage).
-	if !cacheable && !isHEAD && h.responseRefusesSharedStorage(sf) {
+	// Only a request that was itself eligible to share flights may arm
+	// the memo (collapseDenied complement): a cookied or authorized
+	// request's no-store response is not evidence about the anonymous
+	// population's storage policy — origins vary Cache-Control by
+	// request state, and anonymous collapse behavior stays driven by
+	// anonymous evidence (the same refusal ADR-0052/0054 make for
+	// content, applied to the memo's control-plane signal).
+	if !cacheable && !isHEAD && !collapseDenied(ri) && h.responseRefusesSharedStorage(sf) {
 		h.unstorableMemo.note(primaryKey)
 	}
 

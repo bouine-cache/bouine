@@ -152,7 +152,9 @@ zero added latency. The wave-synchronized completion shape — and with
 it the healthy-origin ejection — is pinned gone by
 `TestFetchAndStore_ReleasedFillWaveStaggersOwnFetches` (synctest).
 
-The residual pre-existing behavior is tracked separately (#839): consecutive-5xx ejection by completion adjacency is
-burst-fragile by construction, and a workload whose *only* origin-bound
-path returns 5xx ejects even without waves. Time-windowed ejection
-semantics are an ADR-0051 amendment question, not a fill-flight one.
+The residual pre-existing behavior (#839) is fixed alongside in the
+ADR-0051 amendment: consecutive-5xx ejection is now success-windowed
+(5 s), so an origin answering successes on any path is never ejected
+by 5xx adjacency — with or without waves. An origin whose *only*
+origin-bound path returns 5xx still ejects once the threshold
+completes: that is the operator's `consecutive_5xx` contract.

@@ -7,7 +7,8 @@ you which path restored a target.
 
 | Source | Knob | Effect |
 |---|---|---|
-| Passive 5xx | `health.passive.consecutive_5xx` | Eject after N consecutive 5xx or connection errors |
+| Passive 5xx | `health.passive.consecutive_5xx` | Eject after N consecutive 5xx, counted only once successful fetches on the target have stopped for the 5s success window (#839) |
+| Passive connection errors | `health.passive.consecutive_5xx` | Eject after N consecutive transport failures — never excused by recent successes (the origin is not answering) |
 | Active probes | `health.active.*` | Eject after `unhealthy_threshold` failed probes |
 | Manual admin | `POST /v1/...` MarkHealthy path | Restores only |
 
@@ -21,6 +22,34 @@ target:
 | `active` | Active probe reached `healthy_threshold` successes |
 | `manual` | Operator / admin API marked the target healthy |
 | `eject_for` | The `health.passive.eject_for` window elapsed |
+
+## The passive 5xx success window (#839)
+
+A 5xx *response* from the origin proves the target is alive, so it only
+drives passive ejection once the target has stopped completing
+successful fetches for 5 seconds (`passive5xxCountWindow`): an origin
+that answers 200s on any path while returning 5xx on another is never
+ejected, no matter how the completions interleave. `consecutive_5xx`
+then reads as "eject if the origin keeps 5xxing *and its successes
+have stopped*". Consequences for operators:
+
+- A healthy origin serving one 5xx-returning path (rate limiting, an
+  error endpoint) alongside healthy traffic no longer needs its
+  `consecutive_5xx` raised to survive bursts.
+- A genuinely failing origin — successes stop, 5xx keep coming —
+  ejects within the 5 s window plus `consecutive_5xx` more 5xx
+  completions. Expect ejection ~5 s later than pre-#839.
+- `bouine_origin_passive_errors_total` still counts every observed 5xx
+  response; only the ejection streak is window-gated.
+- Connection errors are never excused by recent successes — a target
+  that stops answering at the transport level ejects by the consecutive
+  count alone.
+- An origin whose *only* origin-bound path legitimately returns 5xx
+  still ejects once `consecutive_5xx` 5xx responses complete (no
+  successful fetch ever lands). If that origin is healthy by design,
+  disable passive ejection on that pool
+  (`pool:<name>.health.passive.consecutive_5xx 0`) and rely on active
+  probes.
 
 ## `health.passive.eject_for`
 

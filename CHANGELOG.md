@@ -300,6 +300,33 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Passive 5xx ejection is success-windowed (#839): a healthy origin
+  answering successes is never ejected by a 5xx burst (ADR-0051
+  amendment).** An origin 5xx *response* only drove passive ejection
+  through the consecutive counter before, and "consecutive" was
+  measured by completion order — any same-host synchronizer (a
+  released fill wave, a draining slow-origin backlog) could land
+  `consecutive_5xx` adjacent 5xx completions between two successes
+  and eject an origin that was answering hundreds of successful
+  fetches per second. A 5xx response now counts toward ejection only
+  once the target has stopped completing successful fetches for a 5s
+  success window (`passive5xxCountWindow`); `consecutive_5xx` reads as
+  "eject if the origin keeps 5xxing **and its successes have
+  stopped**". Connection errors — the origin not answering at all —
+  are never excused by recent successes and still eject by the
+  consecutive count alone; active probes, restores, and the
+  `stayin_alive` grace retention keyed on ejection state are
+  unchanged (grace simply engages less often, because healthy origins
+  are no longer falsely ejected). A genuinely failing origin ejects
+  within the window plus `consecutive_5xx` more 5xx completions. An
+  origin whose only origin-bound path legitimately returns 5xx still
+  ejects once the threshold completes — disable passive ejection on
+  that pool and rely on active probes (runbook 54).
+  `bouine_origin_passive_errors_total` still counts every observed
+  5xx; only the ejection streak is window-gated. Pinned by
+  `TestRecordPassive5xx_SuccessWindowGate` and
+  `TestPool_Passive5xxBurstWithSuccessesDoesNotEject`.
+
 - **A released fill wave could fetch its own copies as one synchronized
   burst, ejecting a healthy origin (ADR-0066 follow-up, #838).** When a
   fill flight settled with nothing usable stored (no-store, private, or

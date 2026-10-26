@@ -71,9 +71,16 @@ type Target struct {
 	metrics       *Metrics
 	addr          string
 	passiveErrors atomic.Int64
-	probeErrors   atomic.Int64
-	successes     atomic.Int64
-	healthy       atomic.Bool
+	// lastSuccessUnix is the Unix-nanosecond timestamp of the most
+	// recent fetch completed with a non-5xx response (a 304 counts — a
+	// conditional hit proves the origin is alive). Written by
+	// notePassiveSuccess on every successful fetch completion, read by
+	// successWithin to gate 5xx passive counting (issue #839). Zero — a
+	// target that has never completed a successful fetch — never gates.
+	lastSuccessUnix atomic.Int64
+	probeErrors     atomic.Int64
+	successes       atomic.Int64
+	healthy         atomic.Bool
 	// lastChange is the Unix-nanosecond timestamp of the most recent
 	// health-state transition (ejection or restore). Zero means no
 	// transition was recorded since boot; /v1/status renders it as an
@@ -87,29 +94,93 @@ type Target struct {
 	ejectedAt atomic.Int64
 }
 
+// passive5xxCountWindow bounds how recent a successful (non-5xx) fetch
+// completion must be for an observed 5xx response to be excused from
+// the passive-ejection streak (issue #839): an origin still answering
+// successes is alive, so its 5xx responses only drive ejection once
+// successes have stopped for the window. Five seconds spans any
+// same-host burst shape (released fill waves, draining slow-origin
+// backlogs) while still ejecting a genuinely failing origin within the
+// window plus threshold-many 5xx completions. A fixed engineering
+// default in the family of defaultOriginMaxConnsPerHost, not an
+// operator knob; promote it to health.passive config only with
+// operator demand.
+const passive5xxCountWindow = 5 * time.Second
+
 // recordPassiveError increments the passive error counter and ejects the
-// target via CompareAndSwap if the threshold is reached. Called from both
-// the 5xx and connection-error paths. The source string is included in
-// the ejection log for operator visibility.
+// target via CompareAndSwap if the threshold is reached. Called from the
+// connection-error path: a transport failure never coincides with a
+// successful response, so no success window gates it — the origin not
+// answering at all ejects by the consecutive count alone. The source
+// string is included in the ejection log for operator visibility.
 func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source, status string) {
 	cnt := t.passiveErrors.Add(1)
 	if t.metrics != nil {
 		t.metrics.incPassiveError(poolName, t.addr, status)
 	}
-	if cnt >= int64(threshold) {
-		if t.healthy.CompareAndSwap(true, false) {
-			now := time.Now().UnixNano()
-			t.ejectedAt.Store(now)
-			t.lastChange.Store(now)
-			if t.metrics != nil {
-				t.metrics.incEjection(poolName, t.addr, "passive")
-			}
-			logger.Warn("target ejected (passive)",
-				"pool", poolName,
-				"target", t.addr,
-				"source", source,
-				"consecutive_errors", cnt)
+	t.passiveEjectAt(cnt, threshold, logger, poolName, source)
+}
+
+// recordPassive5xx counts an origin 5xx RESPONSE toward passive ejection
+// under the success-window gate (issue #839): a well-formed 5xx proves
+// the target is alive, so it only drives ejection when the target has
+// not completed a successful fetch within passive5xxCountWindow. An
+// origin still answering successes on any path is therefore never
+// ejected by a 5xx burst on another path, no matter how the completions
+// interleave — consecutive-by-completion-order alone was burst-fragile
+// (a released fill wave or a draining backlog could land
+// threshold-many adjacent 5xx completions between two successes, and
+// ejected a healthy origin; PR #837/#838). The metric counts every
+// observed 5xx regardless of the gate; the gate only bounds the
+// ejection streak.
+func (t *Target) recordPassive5xx(threshold int, logger observability.Logger, poolName, status string) {
+	if t.metrics != nil {
+		t.metrics.incPassiveError(poolName, t.addr, status)
+	}
+	if t.successWithin(passive5xxCountWindow) {
+		return
+	}
+	t.passiveEjectAt(t.passiveErrors.Add(1), threshold, logger, poolName, "passive 5xx")
+}
+
+// notePassiveSuccess records a fetch completed with a non-5xx response:
+// the ejection streak resets and the completion timestamp advances the
+// success window that gates 5xx counting. A 304 counts — a conditional
+// hit proves the origin is alive.
+func (t *Target) notePassiveSuccess() {
+	t.passiveErrors.Store(0)
+	t.lastSuccessUnix.Store(time.Now().UnixNano())
+}
+
+// successWithin reports whether a fetch on this target completed with a
+// non-5xx response within d of now. Zero last-success — a target that
+// has never completed a successful fetch — never gates.
+func (t *Target) successWithin(d time.Duration) bool {
+	last := t.lastSuccessUnix.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) < d
+}
+
+// passiveEjectAt performs the threshold check and ejection CAS shared by
+// the passive paths once the streak counter has been read.
+func (t *Target) passiveEjectAt(cnt int64, threshold int, logger observability.Logger, poolName, source string) {
+	if cnt < int64(threshold) {
+		return
+	}
+	if t.healthy.CompareAndSwap(true, false) {
+		now := time.Now().UnixNano()
+		t.ejectedAt.Store(now)
+		t.lastChange.Store(now)
+		if t.metrics != nil {
+			t.metrics.incEjection(poolName, t.addr, "passive")
 		}
+		logger.Warn("target ejected (passive)",
+			"pool", poolName,
+			"target", t.addr,
+			"source", source,
+			"consecutive_errors", cnt)
 	}
 }
 
@@ -541,12 +612,14 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		statusStr := strconv.Itoa(statusCode)
 		t.metrics.observeRequestDuration(p.Name, t.addr, statusStr, time.Since(originStart).Seconds())
 
-		// Passive health: eject on consecutive 5xx, reset on success.
+		// Passive health: eject on consecutive 5xx once successes have
+		// stopped for the success window, note every success (reset +
+		// window advance).
 		if conc5xx > 0 {
 			if statusCode >= 500 {
-				t.recordPassiveError(conc5xx, p.logger, p.Name, "passive 5xx", statusStr)
+				t.recordPassive5xx(conc5xx, p.logger, p.Name, statusStr)
 			} else {
-				t.passiveErrors.Store(0)
+				t.notePassiveSuccess()
 			}
 		}
 
@@ -725,14 +798,15 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	}
 	statusStr := strconv.Itoa(resp.StatusCode())
 	t.metrics.observeRequestDuration(c.pool.Name, t.addr, statusStr, time.Since(originStart).Seconds())
-	// Passive health: eject on consecutive 5xx, reset on success. A
-	// 304 is a success here — a conditional hit means the origin is
-	// alive (it is the revalidation fast path).
+	// Passive health: eject on consecutive 5xx once successes have
+	// stopped for the success window, note every success (reset +
+	// window advance). A 304 is a success here — a conditional hit
+	// means the origin is alive (it is the revalidation fast path).
 	if threshold := c.pool.consecutive5xx.Load(); threshold > 0 {
 		if resp.StatusCode() >= 500 {
-			t.recordPassiveError(int(threshold), c.pool.logger, c.pool.Name, "passive 5xx", statusStr)
+			t.recordPassive5xx(int(threshold), c.pool.logger, c.pool.Name, statusStr)
 		} else {
-			t.passiveErrors.Store(0)
+			t.notePassiveSuccess()
 		}
 	}
 	return nil

@@ -155,3 +155,30 @@ schedule — hygiene is fully preserved.
   (`mayReapDecider`).
 - `docs/runbook/54-origin-ejection.md` (health configuration),
   `docs/plans/stayin-alive-grace-retention.md` (implementation plan).
+
+## Amendment: success-windowed passive 5xx counting (#839)
+
+The passive-ejection signal this ADR keys grace retention on changed
+semantics: a 5xx origin *response* now drives passive ejection only
+once the target has stopped completing successful fetches for a
+success window (5 s, `passive5xxCountWindow`). Before, any N adjacent
+5xx completions ejected regardless of successes interleaving — and
+adjacency is a property of completion *order*, which any same-host
+synchronizer (a released fill wave, a draining slow-origin backlog)
+could manufacture, ejecting a healthy origin that was answering
+hundreds of successful fetches per second (PR #837/#838). A well-formed
+5xx response proves the origin is alive; it is an ejection signal only
+when successes have stopped.
+
+Unchanged: connection errors (transport failures — the origin not
+answering at all) count immediately with no success window; active
+probe ejection and all restore paths are untouched; `stayin_alive`
+grace retention keys on the same ejection state as before — it simply
+engages less often, because healthy origins are no longer ejected by
+5xx bursts. An origin whose only origin-bound path legitimately
+returns 5xx still ejects by the consecutive count (no successes ever
+complete): with `consecutive_5xx` configured, that remains the
+operator's expressed contract — "eject if the origin keeps 5xxing".
+
+Pinned by `TestRecordPassive5xx_SuccessWindowGate` (accounting level)
+and `TestPool_Passive5xxBurstWithSuccessesDoesNotEject` (proxied path).

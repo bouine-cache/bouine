@@ -1313,7 +1313,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
-		obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
+		obj := h.buildObject(key, ri, res, resMap, nil, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -3264,7 +3264,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 			return
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
-		obj := buildObject(key, ri, res, bgResMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
+		obj := h.buildObject(key, ri, res, bgResMap, nil, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -3360,7 +3360,7 @@ func (h *Handler) writeAndMaybeStore(
 		if vary := effectiveVary(resMap, h.policy); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
-		obj := buildObject(storeKey, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
+		obj := h.buildObject(storeKey, ri, res, resMap, fillTTL, time.Now())
 		if storeKey != primaryKey {
 			// Enforce MaxVariants cap: skip storage if this primary key already
 			// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -3696,8 +3696,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getRI, res, hdr, h.neg, h.defaultTTL, h.overrideTTL,
-		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, now)
+	obj := h.buildObject(key, getRI, res, hdr, nil, now)
 	if obj == nil {
 		return
 	}
@@ -3940,7 +3939,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
 		return
 	}
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, nil, time.Now())
+	obj := h.buildObject(key, ri, res, resMap, nil, time.Now())
 	h.storeObject(ctx, key, obj, ri, true, 0)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
@@ -4234,8 +4233,15 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 	return upstreamFetchResult(upstreamCtx)
 }
 
+// buildObject assembles the stored api.Object for a fetched response.
+// Route knobs (negative-caching table, TTL defaults/override, jitter, key
+// policy, stayin-alive, upstream pool) are Handler fields: they never vary
+// per call, and keeping them off the parameter list removes the adjacent
+// time.Duration run whose transposition compiled and silently served wrong
+// grace windows.
+//
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, neg *StatusTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, stayinAlive bool, poolName string, presetTTL *time.Duration, now time.Time) *api.Object {
+func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, presetTTL *time.Duration, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9213):
 	// use it as the authoritative directive source when present.
@@ -4272,7 +4278,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	if presetTTL != nil {
 		ttl = *presetTTL
 	} else {
-		ttl = fillFinalTTL(resMap, res.StatusCode, respCC, neg, defaultTTL, overrideTTL, jitterPct, originAge, now)
+		ttl = fillFinalTTL(resMap, res.StatusCode, respCC, h.neg, h.defaultTTL, h.overrideTTL, h.jitterPercent, originAge, now)
 	}
 
 	// res.Body is already an independently-owned copy: all production
@@ -4298,7 +4304,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		// computed once so VaryValue and VaryKey below see the identical
 		// value — skew between them breaks the peer variant gates
 		// (handler.go handleCacheMiss, fastpath.go peerGateMatchesVary).
-		VaryValue:          effectiveVary(resMap, policy),
+		VaryValue:          effectiveVary(resMap, h.policy),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 		// P1b grace retention stamp (ADR-0051): the object carries the
@@ -4306,8 +4312,8 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		// time-based reaping on origin-pool health without any route
 		// knowledge. Two field assignments on the miss path; zero hit
 		// path cost.
-		KeepGrace: stayinAlive,
-		Pool:      poolName,
+		KeepGrace: h.stayinAlive,
+		Pool:      h.poolName,
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
@@ -4340,20 +4346,20 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
-	} else if defaultSWR > 0 {
-		obj.StaleWhileRevalidate = defaultSWR
+	} else if h.defaultSWR > 0 {
+		obj.StaleWhileRevalidate = h.defaultSWR
 	}
 	if respCC.StaleIfErrorSet {
 		obj.StaleIfError = respCC.StaleIfError
-	} else if defaultSIE > 0 {
-		obj.StaleIfError = defaultSIE
+	} else if h.defaultSIE > 0 {
+		obj.StaleIfError = h.defaultSIE
 	}
 	if lm := obj.Header.Get(header.LastModified); lm != "" {
 		if t, err := time.Parse(httpTimeFormat, lm); err == nil {
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(obj.VaryValue, ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(obj.VaryValue, ri.Header, h.policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 

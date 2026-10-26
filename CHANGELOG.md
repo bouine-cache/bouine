@@ -300,6 +300,32 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **A released fill wave could fetch its own copies as one synchronized
+  burst, ejecting a healthy origin (ADR-0066 follow-up, #838).** When a
+  fill flight settled with nothing usable stored (no-store, private, or
+  a 5xx the negative-caching policy does not cover), every parked
+  follower woke on the same settle signal and immediately re-fetched
+  its own copy: N followers reached the origin within microseconds of
+  each other. The synchronized same-status completions clustered
+  adjacently in the pool's passive-health accounting, so a single wave
+  could carry the consecutive-5xx counter past its ejection threshold —
+  a healthy origin serving one 5xx-returning path was ejected, and
+  every origin-bound request then failed fast with 502 "no healthy
+  upstream" until `eject_for` restored the target, after which the next
+  wave re-ejected it (measured on the release-PGO mixed leg: 25.2%
+  failed requests, 12 ejections per 300s; the pre-ADR-0066 fetch flood
+  had masked the adjacency because its constant 200s kept resetting
+  the counter). Followers that fetch their own after an unstorable fill
+  now stagger over a window proportional to the wave size (1ms per
+  follower, capped at 100ms — the fetch_wait_timeout scale), restoring
+  the arrival spread a sequential world has by construction; a lone
+  follower never delays, and store-served followers keep zero added
+  latency. A healthy origin serving a 5xx-returning path no longer
+  accumulates 10 adjacent passive errors while successes are flowing.
+  Pinned by `TestFetchAndStore_ReleasedFillWaveStaggersOwnFetches`
+  (synctest: pre-fix, the wave's own fetches all arrive at the same
+  virtual instant).
+
 - **A collapse flight could hand a truncated body to a follower, and
   an origin connection that broke mid-body could store the truncated
   copy.** The streaming tee published whatever it had buffered when the

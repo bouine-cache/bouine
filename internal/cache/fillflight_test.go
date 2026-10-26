@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -811,4 +812,104 @@ func TestFetchAndStore_FillFollowerShedServes503(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("fill follower did not terminate")
 	}
+}
+
+// TestFillRefetchDelay pins the stagger window's shape: a lone follower
+// (n <= 1) is its own sequential arrival and never delays, a small wave
+// draws from a window proportional to its size, and a huge wave is capped
+// at fillRefetchStaggerMax so the own-fetch delay stays bounded by the
+// same scale as fetchWaitTimeout, the queue bound the sequential world
+// already accepts on this path.
+func TestFillRefetchDelay(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, time.Duration(0), fillRefetchDelay(0), "no wave: sequential arrival")
+	require.Equal(t, time.Duration(0), fillRefetchDelay(1), "a lone follower never delays")
+	for range 100 {
+		d := fillRefetchDelay(2)
+		require.GreaterOrEqual(t, d, time.Duration(0))
+		require.Less(t, d, 2*fillRefetchStaggerPerFollower, "window grows with the wave size")
+	}
+	for range 100 {
+		d := fillRefetchDelay(1 << 20)
+		require.GreaterOrEqual(t, d, time.Duration(0))
+		require.Less(t, d, fillRefetchStaggerMax, "the window is capped")
+	}
+}
+
+// TestFetchAndStore_ReleasedFillWaveStaggersOwnFetches pins that a
+// released fill wave re-fetches its own copies staggered, not as one
+// synchronized burst (issue #838): when the fill settles with nothing
+// usable stored (a no-store origin), every follower wakes on the same
+// settle signal and must fetch its own — and those own fetches must
+// reach the origin spread over the wave's stagger window, the arrival
+// spread a sequential world has by construction. Pre-stagger, all
+// followers fetched at the same instant, clustering their same-status
+// responses adjacently in the pool's passive-health accounting
+// (consecutive 5xx) and hammering an origin already returning errors.
+// synctest, not wall-clock: the origin gates the leader's fetch so the
+// bubble's fake clock cannot advance past the park point, and each
+// own-fetch's arrival timestamp is read from the virtual clock, so the
+// spread assertion is deterministic modulo the uniform random draw
+// (all followers drawing exactly zero is measure-zero-negligible and
+// would mean the stagger regressed to a synchronized burst).
+func TestFetchAndStore_ReleasedFillWaveStaggersOwnFetches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 16
+		var fetches atomic.Int64
+		release := make(chan struct{})
+		var mu sync.Mutex
+		arrivals := make([]time.Time, 0, callers)
+		origin := func(ctx *fasthttp.RequestCtx) {
+			if fetches.Add(1) == 1 {
+				// Hold the leader's fetch open until every other
+				// caller has parked on the flight.
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			mu.Lock()
+			arrivals = append(arrivals, time.Now())
+			mu.Unlock()
+			ctx.Response.Header.Set(header.CacheControl, "no-store")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.WriteString("miss")
+		}
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+		defer store.Close(context.Background())
+		h := NewHandler(HandlerConfig{
+			Upstream:   origin,
+			FastClient: &testFastClient{handler: origin},
+			Store:      store,
+		})
+		defer h.Close(context.Background())
+
+		var wg sync.WaitGroup
+		for range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx := testCtx("GET", "http://example.com/wave")
+				serveRequest(h, ctx)
+				require.Equal(t, 200, respCode(ctx))
+			}()
+		}
+		// The leader is blocked in the origin; the other callers are
+		// blocked on the flight's stored signal — durably blocked, so
+		// Wait returns and releasing cannot race the park point.
+		synctest.Wait()
+		close(release)
+		wg.Wait()
+		synctest.Wait()
+
+		require.Equal(t, int64(callers), fetches.Load(),
+			"a no-store fill settles with nothing usable: every caller fetches its own (sequential count, unchanged)")
+		mu.Lock()
+		defer mu.Unlock()
+		require.Len(t, arrivals, callers)
+		span := arrivals[len(arrivals)-1].Sub(arrivals[0])
+		require.Greater(t, span, time.Duration(0),
+			"the released wave's own fetches must be staggered, not one synchronized burst")
+	})
 }

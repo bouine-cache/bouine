@@ -123,3 +123,36 @@ Unchanged, bit-for-bit:
   own fetch, and a storable fill is the origin certifying cross-caller
   reuse — but ADR-0052's strict stance was taken after a production
   cross-tenant incident and should only be revisited deliberately.
+
+## Amendment: staggered own-fetch release (#838)
+
+The unstorable-fill consequence above — "the follower waits one
+leader-fill duration, then re-fetches its own" — shipped with a
+synchronization bug: every follower of a released wave woke on the same
+settle signal and re-fetched at the same instant, so the origin observed
+N same-status responses completing within microseconds of each other.
+The pool's passive-health accounting (ADR-0051) counts consecutive
+same-status completions, and a single wave could carry the counter past
+the `consecutive_5xx` ejection threshold while the origin was healthy
+and serving successes on other paths — ejecting the sole healthy target
+and failing every origin-bound request fast with 502 until `eject_for`
+restored it, after which the next wave re-ejected it. The pre-ADR-0066
+world never hit this only because its fetch flood kept a constant
+stream of successes resetting the counter between the 5xx completions.
+
+The release is now staggered (`fillRefetchDelay`): a follower that
+fetches its own after an unstorable fill sleeps a uniform-random slice
+of a window proportional to the wave size (1 ms per follower, capped at
+100 ms — the `fetch_wait_timeout` scale). Sequential equivalence is
+unchanged byte-for-byte and in fetch count; what is restored is the
+*arrival spread* of those fetches — the property a sequential world has
+by construction. A lone follower (wave of one) never delays; followers
+served from the store never pass through the own-fetch site and keep
+zero added latency. The wave-synchronized completion shape — and with
+it the healthy-origin ejection — is pinned gone by
+`TestFetchAndStore_ReleasedFillWaveStaggersOwnFetches` (synctest).
+
+The residual pre-existing behavior is tracked separately (#839): consecutive-5xx ejection by completion adjacency is
+burst-fragile by construction, and a workload whose *only* origin-bound
+path returns 5xx ejects even without waves. Time-windowed ejection
+semantics are an ADR-0051 amendment question, not a fill-flight one.

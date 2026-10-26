@@ -2578,6 +2578,52 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 // fetchAndStore/serveFillFollower.
 const fillReentryUserKey = "bouine.fill_reentry"
 
+// fillWaveUserKey is the fasthttp user-value key carrying the size of the
+// fill flight's released wave — the number of followers that parked on the
+// flight — from serveFillFollower to the follower's own-fetch site in
+// fetchAndStore. Set alongside fillReentryUserKey on every fill-follower
+// re-entry; read only by fetchAndStore's re-entry guard. Scoped to
+// internal/cache for the same reason as fillReentryUserKey.
+const fillWaveUserKey = "bouine.fill_wave"
+
+// fillRefetchStaggerPerFollower and fillRefetchStaggerMax bound the
+// stagger window over which a released fill wave re-fetches its own
+// copies: each own-fetching follower sleeps a uniform-random slice of a
+// window that grows linearly with the wave size, capped at 100ms — the
+// same scale as fetchWaitTimeout, the queue bound the sequential world
+// already accepts on this path.
+const (
+	fillRefetchStaggerPerFollower = time.Millisecond
+	fillRefetchStaggerMax         = 100 * time.Millisecond
+)
+
+// fillRefetchDelay returns the stagger delay for one member of a released
+// fill wave of n followers. A lone follower (n == 1) is its own sequential
+// arrival and never delays. Wave members spread over a window proportional
+// to the wave so the origin observes their own fetches as the staggered
+// arrivals a sequential world produces, never as one synchronized burst.
+func fillRefetchDelay(n int) time.Duration {
+	if n <= 1 {
+		return 0
+	}
+	window := time.Duration(n) * fillRefetchStaggerPerFollower
+	if window > fillRefetchStaggerMax {
+		window = fillRefetchStaggerMax
+	}
+	return time.Duration(rand.IntN(int(window))) //nolint:gosec // G404: herd-release spacing, not crypto
+}
+
+// waveSize reads the released fill wave's size from the re-entered
+// request's user value. Absent (0) means the request is not a fill
+// follower; fillRefetchDelay then treats it as a lone sequential
+// arrival and never delays.
+func waveSize(ctx *fasthttp.RequestCtx) int {
+	if n, ok := ctx.UserValue(fillWaveUserKey).(int); ok {
+		return n
+	}
+	return 0
+}
+
 // fetchAndStore fills a miss, parking concurrent misses for the same
 // key on one leader flight when the collapse rules allow it. Personal
 // requests (Authorization, Cookie) and unsafe methods never share a
@@ -2592,7 +2638,21 @@ const fillReentryUserKey = "bouine.fill_reentry"
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, obj *api.Object, ri RequestInfo) {
 	if ctx.UserValue(fillReentryUserKey) == true {
 		// A fill follower fetching its own: the pipeline has already
-		// decided this request's fetch — never re-park.
+		// decided this request's fetch — never re-park. When this
+		// follower is one of a released wave (the fill settled with
+		// nothing usable for any of them), the wave must not reach the
+		// origin as a synchronized burst: N followers waking on the
+		// same settle signal and fetching together complete within
+		// microseconds of each other, which clusters their same-status
+		// responses adjacently in the pool's passive-health accounting
+		// (a healthy origin serving one 5xx-returning path can hit the
+		// consecutive-5xx ejection threshold off a single wave —
+		// diagnosed on PR #837, residual ejection semantics tracked in
+		// #839) and hammers an origin that is already struggling. The
+		// stagger restores the arrival spread a sequential world has
+		// by construction; store-served followers never pass through
+		// here and keep their zero added latency.
+		time.Sleep(fillRefetchDelay(waveSize(ctx)))
 		h.streamMiss(ctx, primaryKey, ri, newInflightStream())
 		return
 	}
@@ -2689,6 +2749,12 @@ func (h *Handler) serveFillFollower(ctx *fasthttp.RequestCtx, lookupKey api.Key,
 	// the leader's fill has (or will) populated the owner.
 	dropStaleOwnerHints(ctx)
 	<-existing.stored
+	// Carry the wave size to the own-fetch site: every follower of this
+	// flight that ends up fetching its own (nothing usable was stored for
+	// it) staggers over a window proportional to the wave instead of
+	// fetching in the synchronized burst the settle signal would
+	// otherwise produce.
+	ctx.SetUserValue(fillWaveUserKey, int(existing.followers.Load()))
 	res := existing.res
 	if res.Err != nil {
 		if errors.Is(res.Err, ErrFetchShed) {

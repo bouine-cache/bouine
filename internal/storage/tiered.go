@@ -533,16 +533,17 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		return nil, "", nil
 	}
 	t.rederiveTransients(loaded)
-	// Promote to hot tier (best-effort: ignore error).
-	_ = t.hot.Put(ctx, key, loaded)
-	// Check lazy bans before serving: Ban() only touches the hot tier,
-	// so warm-tier hits must be checked against the hot tier's active
-	// ban list to avoid serving stale objects that were banned after
-	// being demoted to warm.
+	// Check lazy bans before serving, and before the promotion so a
+	// banned warm hit never pays the hot-tier Put: Ban() only touches
+	// the hot tier, so warm-tier hits must be checked against the hot
+	// tier's active ban list to avoid serving stale objects that were
+	// banned after being demoted to warm.
 	if t.hot.MatchesActiveBan(loaded) {
 		_ = t.hot.Delete(ctx, key)
 		return nil, "", nil
 	}
+	// Promote to hot tier (best-effort: ignore error).
+	_ = t.hot.Put(ctx, key, loaded)
 	return loaded, api.SourceWarm, nil
 }
 

@@ -118,10 +118,6 @@ conformance: build ## Run the http-tests/cache-tests conformance harness.
 conformance-cluster: build ## Run cache-tests conformance against a 3-node strong-mode cluster (min score across nodes).
 	bash test/cachetests/run-cluster.sh
 
-.PHONY: conformance-fastpath
-conformance-fastpath: build ## Run cache-tests conformance with H1 fast path enabled.
-	BOUINE_FAST_PATH=true bash test/cachetests/run.sh
-
 .PHONY: conformance-view
 conformance-view: build ## Run conformance tests then open the comparison UI in a browser.
 	bash test/cachetests/view.sh

@@ -95,19 +95,21 @@ type TrafficClass struct {
 
 // ExperimentalConfig holds opt-in experimental features.
 type ExperimentalConfig struct {
-	// H1FastPath enables the custom HTTP/1.1 parser that bypasses
-	// fasthttp's pooled *fasthttp.RequestCtx machinery on cache hits.
-	// When true, GET/HEAD requests with no conditional headers are
-	// served directly from the parsed request. Misses and non-GET/HEAD
-	// requests fall through to the regular fasthttp handler unchanged.
-	// Default false.
+	// H1FastPath is retired: the custom HTTP/1.1 parser that bypasses
+	// fasthttp's pooled *fasthttp.RequestCtx machinery on cache hits is
+	// now the default path and always enabled when a cache-enabled route
+	// exists. The key is still accepted (strict parse keeps working for
+	// pre-promotion configs) but is ignored — there is no opt-out.
+	// Retirement logged at startup when set. See ADR-0069.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 
-	// H1FastPeerPath enables the fast-path peer branch: on a local cache
-	// miss the H1 fast path asks the key's ring owner before falling
-	// through to the slow path (issue #636). Requires h1_fast_path and a
-	// cluster in strong mode; unwired otherwise (an error is logged at
-	// startup). Default false.
+	// H1FastPeerPath is retired: on a local cache miss the H1 fast path
+	// now always asks the key's ring owner before falling through to the
+	// slow path (issue #636) — the same owner-first peer fetch the slow
+	// path has always performed in strong mode. The key is still
+	// accepted but is ignored; the branch wires whenever a cluster runs
+	// in strong mode. Retirement logged at startup when set. See
+	// ADR-0069.
 	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
 
 	// ConfigReload enables POST /v1/config/reload (bouine config

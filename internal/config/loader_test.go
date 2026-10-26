@@ -1331,32 +1331,45 @@ storage:
 	require.Equal(t, EvictionCachaner, cfg.Storage.WarmEvictionAlgorithm)
 }
 
-// TestValidate_H1FastPeerPathRequiresFastPath asserts that
-// experimental.h1_fast_peer_path without experimental.h1_fast_path is
-// rejected at load time instead of silently no-oping at startup, and
-// that the flag defaults to off.
-func TestValidate_H1FastPeerPathRequiresFastPath(t *testing.T) {
+// TestValidate_RetiredH1FastPathFlags pins the retirement semantics of
+// experimental.h1_fast_path and experimental.h1_fast_peer_path
+// (ADR-0069): both features are always on, the keys still parse for
+// pre-promotion configs, and no cross-field combination is rejected —
+// including h1_fast_peer_path without h1_fast_path, which used to be a
+// load-time error.
+func TestValidate_RetiredH1FastPathFlags(t *testing.T) {
 	t.Parallel()
 
-	// Default config leaves the flag off.
+	// Default config leaves both flags off (they are inert either way).
+	require.False(t, Defaults().Experimental.H1FastPath)
 	require.False(t, Defaults().Experimental.H1FastPeerPath)
 
-	// Flag on without the fast path must be rejected.
+	// The formerly-rejected combination (peer flag without fast-path
+	// flag) must now validate: both keys are ignored.
 	cfg := Defaults()
 	cfg.Listen.HTTP = ":8080"
 	cfg.Experimental.H1FastPeerPath = true
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "experimental.h1_fast_peer_path: requires experimental.h1_fast_path")
+	assert.NoError(t, cfg.Validate(),
+		"retired flags must not be validated: pre-promotion configs keep loading")
 
-	// With the fast path on, the same config validates.
-	cfg.Experimental.H1FastPath = true
-	assert.NoError(t, cfg.Validate())
-
-	// YAML round-trip: the flag parses from its documented key.
-	parsed, err := Parse([]byte("experimental:\n  h1_fast_path: true\n  h1_fast_peer_path: true\n"))
-	require.NoError(t, err)
-	assert.True(t, parsed.Experimental.H1FastPeerPath)
+	// YAML round-trip: both keys still parse from their documented
+	// paths, in any combination, and the values round-trip untouched.
+	tests := []struct {
+		yaml     string
+		fastPath bool
+		fastPeer bool
+	}{
+		{"experimental:\n  h1_fast_path: true\n", true, false},
+		{"experimental:\n  h1_fast_peer_path: true\n", false, true},
+		{"experimental:\n  h1_fast_path: true\n  h1_fast_peer_path: true\n", true, true},
+		{"experimental:\n  h1_fast_path: false\n  h1_fast_peer_path: true\n", false, true},
+	}
+	for _, tt := range tests {
+		parsed, err := Parse([]byte(tt.yaml))
+		require.NoError(t, err, "retired keys must keep parsing: %s", tt.yaml)
+		assert.Equal(t, tt.fastPath, parsed.Experimental.H1FastPath, "h1_fast_path round-trip: %s", tt.yaml)
+		assert.Equal(t, tt.fastPeer, parsed.Experimental.H1FastPeerPath, "h1_fast_peer_path round-trip: %s", tt.yaml)
+	}
 }
 
 // TestValidate_PeerIdleBelowAdminIdle asserts the idle-timeout ordering

@@ -571,10 +571,14 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 	if obj.CacheControl != "" {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
 	}
+	var connListed map[string]bool
+	if obj.HasConnectionList {
+		connListed = parseConnectionListedHeaders(obj)
+	}
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {
 		key, value := obj.Header.At(i)
-		if skipStaticHeader(key, noCacheFields, skipCDC) {
+		if skipStaticHeader(key, noCacheFields, connListed, skipCDC) {
 			continue
 		}
 		hbuf = append(hbuf, key...)
@@ -806,8 +810,17 @@ func shouldSkipHeader(key string, noCacheFields map[string]bool) bool {
 // Date is NOT excluded — the origin's Date header is preserved per
 // RFC 9110 §6.6.1; appendDynamicHeaders adds a Date only when the
 // stored object has none.
-func skipStaticHeader(key string, noCacheFields map[string]bool, skipCDC bool) bool {
+// connListed carries the field names listed in the stored response's
+// Connection header (RFC 9110 §7.6.1): a cache must not forward them,
+// so they are excluded from the serialized head exactly as the slow
+// path's stripConnectionListedHeaders deletes them from its
+// fasthttp.ResponseHeader — the two paths must serve identical header
+// sets for the same object.
+func skipStaticHeader(key string, noCacheFields, connListed map[string]bool, skipCDC bool) bool {
 	if shouldSkipHeader(key, noCacheFields) {
+		return true
+	}
+	if connListed[key] {
 		return true
 	}
 	switch key {
@@ -819,6 +832,38 @@ func skipStaticHeader(key string, noCacheFields map[string]bool, skipCDC bool) b
 	// downstream cache: the synthesized line (appendDynamicHeaders) is
 	// authoritative.
 	return skipCDC && isCDCFamilyHeader(key)
+}
+
+// parseConnectionListedHeaders returns the field names listed in the
+// stored response's Connection header (RFC 9110 §7.6.1) as an interned
+// set, or nil when the object has no Connection header. The fast path
+// consults it when serializing the static header block; the slow path
+// deletes the same names from its fasthttp.ResponseHeader
+// (stripConnectionListedHeaders). Both must agree or the two paths
+// serve different header sets for the same object.
+// Only objects with HasConnectionList pay the map — the common case
+// returns nil and the hit path stays allocation-free.
+func parseConnectionListedHeaders(obj *api.Object) map[string]bool {
+	if !obj.HasConnectionList {
+		return nil
+	}
+	conn := obj.Header.Get(header.Connection)
+	if conn == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(conn, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			m[header.InternKey(f)] = true
+		}
+	}
+	return m
 }
 
 // parseNoCacheFieldNames extracts the field names from a Cache-Control

@@ -25,8 +25,8 @@ endpoints (`Content-Type: text/event-stream`). Design: ADR-0042.
 | Boundary | Default | Semantics for hinted SSE |
 |---|---|---|
 | Origin read (`internal/origin`) | 10 min idle | per-read idle budget, resets on every event — a live stream is never cut by wall clock |
-| Client write, H1 fast path | 5 min idle | re-armed per write; only a client that stops reading is dropped |
-| Client write, no fast path | 1 h absolute | extended per-request via `HeaderReceived`; clients reconnect on close |
+| Client write, H1 fast path (default, ADR-0069) | 5 min idle | re-armed per write; only a client that stops reading is dropped |
+| Client write, no fast path (no cache-enabled route) | 1 h absolute | extended per-request via `HeaderReceived`; clients reconnect on close |
 | Fetch queue wait | `fetch_wait_timeout` (100 ms) | unchanged; SSE streams release their slot at header time |
 
 ## Tuning
@@ -52,9 +52,12 @@ endpoints (`Content-Type: text/event-stream`). Design: ADR-0042.
   stopped sending without heartbeats. Check origin keepalive behavior.
 - **Stream ends at exactly `fetch_timeout`**: the client did not send
   `Accept: text/event-stream` (non-hinted best-effort path).
-- **Stream ends at 1 h with the fast path disabled**: expected on the
-  plain fasthttp serving path; enable `experimental.h1_fast_path` for
-  idle-based (unbounded) client writes, or rely on client reconnects.
+- **Stream ends at 1 h on a deployment with no cache-enabled route**:
+  expected — without a cache-enabled route the listener serves on the
+  plain fasthttp path (the H1 fast path needs a store and a
+  cache-enabled route, ADR-0069), whose client-write budget is the 1 h
+  absolute bound. Add a cache-enabled route, or rely on client
+  reconnects.
 - **503 + Retry-After on stream start**: fetch queue full for
   `fetch_wait_timeout` — raise `max_fetch_concurrency` or investigate
   origin latency.

@@ -12,6 +12,28 @@ the curated, human-readable summary.
 
 ### Changed
 
+- **The H1 fast path is the default path; `experimental.h1_fast_path`
+  and `experimental.h1_fast_peer_path` are retired (ADR-0069).** The
+  zero-allocation HTTP/1.1 hit path is now built whenever a store
+  exists, with no config gate, and the fast-path peer branch is wired
+  on every strong-mode cluster — the same owner-first miss path the
+  slow path has always taken (`applyClusterClosures`), closing a
+  consistency gap where identical traffic took different miss paths
+  depending on the parser. Both keys still parse (any combination,
+  including the formerly rejected `h1_fast_peer_path` without
+  `h1_fast_path`) so pre-promotion configs keep loading; the engine
+  logs a retirement notice at startup when either is set, and there is
+  no opt-out. Promotion also forced the fast path to grow the shutdown
+  drain the fasthttp path already had: `serveFastPath` now tracks each
+  connection's idle/in-flight state through a new zero-allocation
+  h1parser conn-state hook, closes idle keep-alive connections
+  immediately on shutdown, and lets in-flight responses finish
+  (`fasthttp.Server.Shutdown` parity) — previously a shutdown with
+  open idle connections hung the listener goroutine until every idle
+  deadline expired. `make conformance` now exercises the fast path by
+  default (the `conformance-fastpath` make target is gone), and the
+  load-test config drops its `experimental:` block.
+
 - **Client-state responses (`Set-Cookie`, `Set-Login`) are never served to
   a second client through collapse (ADR-0067).** ADR-0012 blocked their
   *storage*; the in-flight collapse surfaces were ungated: byte-handoff

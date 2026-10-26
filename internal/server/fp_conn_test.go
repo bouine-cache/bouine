@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
 )
 
 // --- peekConn tests --- (removed: peekConn deleted with h2c detection)
@@ -272,6 +274,89 @@ func TestServeFastPath_EmptyConnection(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	<-errCh
+}
+
+// TestServeFastPath_ShutdownDrainsInflight pins the fast-path shutdown
+// contract (fasthttp.Server.Shutdown parity, the default-on fast path's
+// answer to issue #76's ordered drain): on context cancellation, idle
+// keep-alive connections are closed immediately (Serve must not hang
+// until their idle deadline) while an in-flight request completes and
+// its response is delivered in full. The slow handler is gated on a
+// channel the test closes after shutdown starts, so the sequencing is
+// deterministic: cancel → drain → release → response arrives → Serve
+// returns.
+func TestServeFastPath_ShutdownDrainsInflight(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	slowStarted := make(chan struct{})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Path()) == "/slow" {
+			// Signal entry before blocking, so the test cancels only
+			// once the request is genuinely in-flight (a request whose
+			// bytes arrived but which no goroutine has begun serving is
+			// indistinguishable from idle — fasthttp's Shutdown has the
+			// same edge and closes it).
+			close(slowStarted)
+			<-release
+			ctx.SetBodyString("slow")
+			return
+		}
+		ctx.SetBodyString("fast")
+	}
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     handler,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForAddr(t, srv)
+	addr := srv.Addr()
+
+	readResponse := func(conn net.Conn) string {
+		buf := make([]byte, 1024)
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+		n, err := conn.Read(buf)
+		require.NoError(t, err, "response must arrive while in-flight through shutdown")
+		return string(buf[:n])
+	}
+
+	// Conn A: complete a request, then park idle on keep-alive.
+	connA, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer func() { _ = connA.Close() }()
+	_, err = connA.Write([]byte("GET /fast HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+	assert.Contains(t, readResponse(connA), "fast")
+
+	// Conn B: in-flight — the handler blocks until the test releases it.
+	connB, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer func() { _ = connB.Close() }()
+	_, err = connB.Write([]byte("GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+
+	// Shutdown with B in flight and A idle.
+	<-slowStarted
+	cancel()
+
+	// The in-flight response must still be delivered after shutdown
+	// began (the release happens strictly after cancel returned).
+	close(release)
+	assert.Contains(t, readResponse(connB), "slow")
+
+	// Serve must return promptly: the idle conn A is closed by the
+	// drain, not held until its idle deadline.
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveFastPath did not return after drain (idle connection pinned shutdown)")
+	}
 }
 
 // TestServeFastPath_HEADRequest verifies that HEAD requests work through

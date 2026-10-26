@@ -2,7 +2,9 @@ package cache
 
 import (
 	"bytes"
+	"reflect"
 	"time"
+	"unsafe"
 
 	"github.com/valyala/fasthttp"
 
@@ -46,7 +48,7 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 	return evaluate(obj, reqCC, respGateFromObject(obj), now)
 }
 
-// tryConditional304Fast checks if the client's conditional headers match
+// tryConditional304 checks if the client's conditional headers match
 // the cached object, using direct Peek calls. Returns true if a 304
 // response was sent. xCache labels the response with the X-Cache value
 // of the serving path ("HIT" for hits, "REVALIDATED" after a successful
@@ -55,7 +57,7 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 // conditional gets cacheStale, so the 304 carries the mirror cap and
 // Warning: 110. rw applies the route's response header rewrite
 // directives to the 304; nil for routes without directives.
-func (h *Handler) tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) bool {
+func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) bool {
 	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
 	if len(inm) > 0 {
 		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
@@ -118,4 +120,62 @@ func (h *Handler) write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src ap
 // a zero-allocation Peek.
 func hasRangeHeader(ctx *fasthttp.RequestCtx) bool {
 	return len(ctx.Request.Header.Peek(header.Range)) > 0
+}
+
+// noDefaultDateOffset is the byte offset of the unexported noDefaultDate
+// field within fasthttp.ResponseHeader. Computed once at package init
+// via reflect. Used by setNoDefaultDate to set the field without needing
+// a public setter on fasthttp.
+var noDefaultDateOffset = func() uintptr {
+	t := reflect.TypeOf(fasthttp.ResponseHeader{})
+	f, ok := t.FieldByName("noDefaultDate")
+	if !ok {
+		return 0 // field not found; setNoDefaultDate will be a no-op
+	}
+	return f.Offset
+}()
+
+// setNoDefaultDate sets the unexported noDefaultDate field on a
+// fasthttp.ResponseHeader to true. This prevents fasthttp from
+// auto-generating a Date header in AppendBytes, which would overwrite
+// the stored origin Date set via SetDateRaw.
+func setNoDefaultDate(hdr *fasthttp.ResponseHeader) {
+	if noDefaultDateOffset == 0 {
+		return
+	}
+	ptr := (*bool)(unsafe.Pointer(uintptr(unsafe.Pointer(hdr)) + noDefaultDateOffset)) //nolint:gosec // G103: controlled unsafe for fasthttp interop
+	*ptr = true
+}
+
+// getOrComputeFastHeader lazily builds a *fasthttp.ResponseHeader from
+// the stored object's static headers (see skipStaticHeader for the
+// exclusions) on the first cache hit, then reuses it on subsequent hits
+// via CopyTo. Cached in obj.FastHeader (atomic.Value) for race-safe
+// reuse across goroutines; noDefaultDate prevents fasthttp from
+// auto-adding a Date.
+func getOrComputeFastHeader(obj *api.Object) *fasthttp.ResponseHeader {
+	if v := obj.FastHeader.Load(); v != nil {
+		return v.(*fasthttp.ResponseHeader)
+	}
+	hdr := &fasthttp.ResponseHeader{}
+	hdr.DisableNormalizing()
+	obj.Header.WriteToFastHTTP(hdr)
+	// The map check backstops HasDate for objects whose flag was lost in
+	// transit (pre-v6 wire decode, ADR-0053): WriteToFastHTTP skips Date
+	// by contract, so a false flag with a stored Date would serve a
+	// response with no Date header at all.
+	if obj.HasDate || obj.Header.Has(header.Date) {
+		dateVal := obj.Header.Get(header.Date)
+		header.SetDateRaw(hdr, dateVal)
+	}
+	if obj.HasConnectionList {
+		stripConnectionListedHeaders(hdr, obj.Header)
+	}
+	if obj.HasNoCacheFields {
+		stripNoCacheFields(hdr, obj.CacheControl)
+	}
+	hdr.SetStatusCode(obj.StatusCode)
+	setNoDefaultDate(hdr)
+	obj.FastHeader.Store(hdr)
+	return hdr
 }

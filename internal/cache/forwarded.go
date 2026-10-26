@@ -4,7 +4,7 @@
 // origin-bound requests.
 //
 // Placement contract: injection happens at origin-bound request
-// construction only — doFetchFast, revalidate, invalidateAndProxy,
+// construction only — doFetch, revalidate, invalidateAndProxy,
 // doFetchStream (miss/bypass/SSE), and the stored-RequestInfo background
 // fetchers (doBackgroundRevalidate, doBackgroundRefresh, doShedRefill).
 // It never touches the live *fasthttp.RequestCtx headers, so:

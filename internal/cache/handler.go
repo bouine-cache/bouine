@@ -4389,17 +4389,24 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 // directly via net.Buffers without iterating the header map per request.
 //
 // Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning), internal
-// headers (X-Bouine-*), and no-cache fields stripped per RFC 9111 §5.2.2.4.
+// headers (X-Bouine-*), no-cache fields stripped per RFC 9111 §5.2.2.4,
+// and fields listed in the stored response's Connection header
+// (RFC 9110 §7.6.1 — the fast path must match the slow path's
+// stripConnectionListedHeaders).
 // Under downstream_freshness: sync (skipCDC, ADR-0063 I3) the origin's
 // RFC 9213-family and Surrogate-Control lines are excluded: the
 // synthesized CDN-Cache-Control (appendDynamicHeaders) is authoritative.
 func serializeHead(obj *api.Object, skipCDC bool) []byte {
 	noCacheFields := parseNoCacheFieldNames(obj.CacheControl)
+	var connListed map[string]bool
+	if obj.HasConnectionList {
+		connListed = parseConnectionListedHeaders(obj)
+	}
 	buf := make([]byte, 0, 512)
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {
 		key, value := obj.Header.At(i)
-		if skipStaticHeader(key, noCacheFields, skipCDC) {
+		if skipStaticHeader(key, noCacheFields, connListed, skipCDC) {
 			continue
 		}
 		buf = append(buf, key...)

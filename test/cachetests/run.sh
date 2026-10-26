@@ -93,28 +93,10 @@ if [ "$ORIGIN_OK" -ne 1 ]; then
 fi
 echo ">>> Origin is up."
 
-# 4. Write bouine config and start bouine.
+# 4. Write bouine config and start bouine. The H1 fast path is always
+# on (ADR-0069); conformance exercises it by default.
 BOUINE_CONFIG=$(mktemp)
-EXPERIMENTAL_YAML="${BOUINE_FAST_PATH:-}"
-if [ "$EXPERIMENTAL_YAML" = "true" ]; then
-    cat > "$BOUINE_CONFIG" <<YAML
-listen:
-  http: "127.0.0.1:$BOUINE_HTTP_PORT"
-  admin: "127.0.0.1:$BOUINE_ADMIN_PORT"
-storage:
-  hot_max_bytes: 256MiB
-upstream_pools:
-  - name: cache-tests
-    targets: ["127.0.0.1:$ORIGIN_PORT"]
-routes:
-  - match: {}
-    pool: cache-tests
-experimental:
-  h1_fast_path: true
-YAML
-    echo ">>> H1 fast path ENABLED for conformance run"
-else
-    cat > "$BOUINE_CONFIG" <<YAML
+cat > "$BOUINE_CONFIG" <<YAML
 listen:
   http: "127.0.0.1:$BOUINE_HTTP_PORT"
   admin: "127.0.0.1:$BOUINE_ADMIN_PORT"
@@ -127,7 +109,7 @@ routes:
   - match: {}
     pool: cache-tests
 YAML
-fi
+echo ">>> H1 fast path is the default path (ADR-0069); conformance run exercises it"
 
 echo ">>> Starting bouine on port $BOUINE_HTTP_PORT..."
 "$BOUINE_BIN" serve --config "$BOUINE_CONFIG" --log-level error --log-format text &

@@ -210,12 +210,12 @@ func (c *Config) Validate() error {
 		ec.addf("listen.read_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
 	}
 
-	// The peer branch only runs inside the fast path's TryHit; without
-	// h1_fast_path the flag would silently no-op. Reject early at load
-	// time instead of logging a warning at startup.
-	if c.Experimental.H1FastPeerPath && !c.Experimental.H1FastPath {
-		ec.addf("experimental.h1_fast_peer_path", "requires experimental.h1_fast_path")
-	}
+	// experimental.h1_fast_path and experimental.h1_fast_peer_path are
+	// retired (ADR-0069): both features are always on. The keys are
+	// still parsed for compatibility and deliberately not validated —
+	// pre-promotion configs (including h1_fast_peer_path without
+	// h1_fast_path) must keep loading; the engine logs the retirement
+	// when either is set.
 
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other

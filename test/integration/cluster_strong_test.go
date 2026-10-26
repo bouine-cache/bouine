@@ -200,8 +200,9 @@ func TestStrong_PurgeBatchEndToEnd(t *testing.T) {
 }
 
 // TestStrong_FastPathPeerFetch exercises the fast-path peer branch
-// (issue #636) end-to-end: with experimental.h1_fast_peer_path enabled
-// on every node, a plain-key miss on a NON-owner node must be served by
+// (issue #636) end-to-end: the branch is always enabled on strong-mode
+// clusters (ADR-0069), so a plain-key miss on a NON-owner node must be
+// served by
 // the owner through FastPathHandler.tryPeerFetch, with X-Cache-Source:
 // peer, WITHOUT the origin seeing the request (the slow-path
 // alternative would fetch from origin on the owner-miss hint, so a

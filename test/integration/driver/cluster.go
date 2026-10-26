@@ -76,9 +76,6 @@ type ClusterStack struct {
 	// hotMaxBytes retains the per-node hot-tier budget so RestartNode
 	// rebuilds the same config BootCluster originally wrote.
 	hotMaxBytes string
-	// experimentalYAML lines are appended to every node config under
-	// the experimental: section (nil = no section).
-	experimentalYAML []string
 	// preserveHost retains the pool's connect.preserve_host setting so
 	// RestartNode rebuilds the same config BootCluster originally wrote.
 	preserveHost bool
@@ -114,11 +111,6 @@ type ClusterOptions struct {
 	// to force constant SIEVE eviction in eviction-pressure scenarios).
 	// Empty keeps the driver default (128MiB).
 	HotMaxBytes string
-	// ExperimentalH1FastPath and ExperimentalH1FastPeerPath flip the
-	// matching keys under the config's experimental: section on every
-	// node. Both default off; the peer flag requires the fast path.
-	ExperimentalH1FastPath     bool
-	ExperimentalH1FastPeerPath bool
 	// PreserveHost sets connect.preserve_host on the origin pool of
 	// every node, so integration tests can cover the origin-bound Host
 	// header behaviour (the origin echoes its Host on /host-echo).
@@ -214,9 +206,6 @@ type nodeConfigParams struct {
 	originAddr  string
 	hotMaxBytes string
 	tls         *TLSOptions // nil when TLS is not configured
-	// experimental lines rendered verbatim under the experimental:
-	// section (nil = omit the section entirely).
-	experimental []string
 	// preserveHost renders connect.preserve_host on the origin pool.
 	preserveHost bool
 	// maxVariants renders cache.max_variants on the default route when
@@ -300,13 +289,6 @@ routes:
 			b.WriteString(formatCertEntry(ec.CertFile, ec.KeyFile, ec.SNI))
 		}
 	}
-	if len(p.experimental) > 0 {
-		b.WriteString("experimental:\n")
-		for _, line := range p.experimental {
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-	}
 	return b.String()
 }
 
@@ -363,14 +345,6 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		configDir:   configDir,
 		hotMaxBytes: opts.HotMaxBytes,
 	}
-	if opts.ExperimentalH1FastPath || opts.ExperimentalH1FastPeerPath {
-		if opts.ExperimentalH1FastPath {
-			s.experimentalYAML = append(s.experimentalYAML, "  h1_fast_path: true")
-		}
-		if opts.ExperimentalH1FastPeerPath {
-			s.experimentalYAML = append(s.experimentalYAML, "  h1_fast_peer_path: true")
-		}
-	}
 	s.preserveHost = opts.PreserveHost
 	s.warmEnabled = opts.WarmTier
 	s.maxVariants = opts.MaxVariants
@@ -395,7 +369,6 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			originAddr:   origin.addr,
 			hotMaxBytes:  opts.HotMaxBytes,
 			tls:          tlsOpts,
-			experimental: s.experimentalYAML,
 			preserveHost: opts.PreserveHost,
 			maxVariants:  opts.MaxVariants,
 			warmDir:      s.warmDirFor(name),
@@ -604,7 +577,6 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		originAddr:   s.origin.addr,
 		hotMaxBytes:  s.hotMaxBytes,
 		tls:          tlsOpts,
-		experimental: s.experimentalYAML,
 		preserveHost: s.preserveHost,
 		maxVariants:  s.maxVariants,
 		warmDir:      s.warmDirFor(name),

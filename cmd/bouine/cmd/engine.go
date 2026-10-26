@@ -1229,8 +1229,19 @@ func resolveListenerOptions(l config.Listen) (fastOpen, deferAccept, reusePort b
 func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHandler, rs *runState) {
 	tcpFastOpen, tcpDeferAccept, reusePort := resolveListenerOptions(e.cfg.Listen)
 
+	// Retired-flag notice (ADR-0069): the keys still parse but nothing
+	// reads them; say so once at startup instead of failing the config.
+	if e.cfg.Experimental.H1FastPath {
+		e.logger.Info("experimental.h1_fast_path is retired: the H1 fast path is always enabled; the flag is ignored")
+	}
+	if e.cfg.Experimental.H1FastPeerPath {
+		e.logger.Info("experimental.h1_fast_peer_path is retired: the fast-path peer branch is always enabled in strong mode; the flag is ignored")
+	}
+
 	var fastPathHandler api.FastPathHandler
-	if e.cfg.Experimental.H1FastPath && rs.store != nil {
+	// The H1 fast path is the default path (ADR-0069): built whenever
+	// a store exists, regardless of the retired experimental flags.
+	if rs.store != nil {
 		fastPathHandler = e.buildFastPath(rs)
 	}
 
@@ -1317,49 +1328,46 @@ func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
 		release = rs.fastPathHandlers[0]
 	}
 	if r := rs.router; r != nil && release != nil {
-		e.logger.Info("H1 fast path enabled", "experimental", true)
+		e.logger.Info("H1 fast path enabled")
 		return server.NewRoutedFastPath(r, release)
 	}
 	if release == nil {
 		// No cache-enabled route exists: no fast path, hits were
 		// impossible before this change too (nothing was stored
 		// through a cache handler).
-		e.logger.Info("H1 fast path disabled: no cache-enabled route", "experimental", true)
+		e.logger.Info("H1 fast path disabled: no cache-enabled route")
 		return nil
 	}
 	// Defensive: buildRouter always runs before startListeners
 	// (buildDataPlane → buildHandler → buildRouter), so a missing
 	// router is a wiring bug, not a config state. Log loudly instead
 	// of silently dropping the feature.
-	e.logger.Error("H1 fast path disabled: router not built (engine wiring bug)",
-		"experimental", true)
+	e.logger.Error("H1 fast path disabled: router not built (engine wiring bug)")
 	return nil
 }
 
 // wireFastPathPeerFetch wires the cluster peer branch (issue #636): on
 // a local miss the fast path asks the key's owner before falling
-// through to the slow path. Same closures the slow-path handlers use.
-// Opt-in behind experimental.h1_fast_peer_path (default off).
+// through to the slow path. Same closures the slow-path handlers use
+// (applyClusterClosures), so both paths hit the same ring and fetcher.
+// Always attempted (ADR-0069): the slow path has always done owner-first
+// peer fetch in strong mode, and the retired experimental.h1_fast_peer_path
+// flag only made the fast path inconsistent with it.
 // Blocking is per-connection by design: TryHit runs on the connection's
 // h1parser goroutine, so a peer-fetch stall affects only that
-// connection. When the flag is set but wiring fails, an error is
-// logged and the daemon starts without the branch (config validation
-// cannot catch this: it depends on runtime wiring state).
+// connection. No strong-mode cluster (single node, weak mode) means
+// there is nothing to wire — Debug, not Error, because that is a normal
+// deployment shape now that the branch is default-on.
 func (e *engine) wireFastPathPeerFetch(rs *runState) {
-	if !e.cfg.Experimental.H1FastPeerPath {
-		// Flag off: nothing to wire, no diagnostics.
-		return
-	}
 	fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)
 	if fpOwnerFn == nil || fpPeerFetch == nil {
-		e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
-			"experimental", true)
+		e.logger.Debug("H1 fast path peer branch not wired: no cluster in strong mode")
 		return
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
 	}
-	e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
+	e.logger.Info("H1 fast path peer fetch enabled")
 }
 
 func boolDefault(v *bool, def bool) bool {

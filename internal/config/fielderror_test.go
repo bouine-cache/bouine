@@ -55,11 +55,6 @@ func TestValidate_FieldError_SinglePath(t *testing.T) {
 			"listen.read_timeout",
 		},
 		{
-			"experimental cross-field",
-			func(c *Config) { c.Experimental.H1FastPeerPath = true },
-			"experimental.h1_fast_peer_path",
-		},
-		{
 			"gogc invalid",
 			func(c *Config) { g := 0; c.GOGC = &g },
 			"gogc",

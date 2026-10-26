@@ -22,7 +22,8 @@ import (
 )
 
 // TestFastPathPoolAttribution is the end-to-end regression test for
-// issue #696: with experimental.h1_fast_path enabled, a fast-path
+// issue #696: with the H1 fast path always enabled (the default since
+// ADR-0069; no experimental flag is set on this engine), a fast-path
 // served hit must carry the route's configured upstream_pool, not
 // "_default". It runs the real engine wiring (initSubsystems +
 // buildDataPlane + startListeners with a bound HTTP listener), warms
@@ -54,7 +55,6 @@ func TestFastPathPoolAttribution(t *testing.T) {
 			Routes: []config.Route{
 				{Name: "api", Pool: "reviews-pool", Cache: config.RouteCache{TTLDefault: 60 * time.Second}},
 			},
-			Experimental: config.ExperimentalConfig{H1FastPath: true},
 		},
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
@@ -164,9 +164,7 @@ func TestFastPathPoolAttribution_NoneEnabledRoute(t *testing.T) {
 	t.Parallel()
 	metrics := observability.NewMetrics()
 	e := &engine{
-		cfg: &config.Config{
-			Experimental: config.ExperimentalConfig{H1FastPath: true},
-		},
+		cfg:     &config.Config{},
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}

@@ -36,9 +36,11 @@ func sharedCluster(t *testing.T, mode string) *driver.ClusterStack {
 	return s
 }
 
-// sharedFastPeerCluster boots (once) a strong-mode stack with the H1
-// fast path AND the fast-path peer branch enabled on every node, so the
-// fast-path peer branch is exercised end-to-end (issue #636).
+// sharedFastPeerCluster boots (once) a dedicated strong-mode stack for
+// the fast-path peer-branch tests (issue #636). Since ADR-0069 the H1
+// fast path and its peer branch are always enabled, so no experimental
+// flags are needed — but the dedicated stack keeps this suite's origin
+// counters isolated from other strong-mode tests.
 func sharedFastPeerCluster(t *testing.T) *driver.ClusterStack {
 	t.Helper()
 	const key = "strong+fastpeer"
@@ -48,10 +50,8 @@ func sharedFastPeerCluster(t *testing.T) *driver.ClusterStack {
 		return s
 	}
 	s := driver.BootCluster(t, driver.ClusterOptions{
-		Mode:                       "strong",
-		NoAutoCleanup:              true,
-		ExperimentalH1FastPath:     true,
-		ExperimentalH1FastPeerPath: true,
+		Mode:          "strong",
+		NoAutoCleanup: true,
 	})
 	clusterClean = append(clusterClean, s.Down)
 	clusterStacks[key] = s

@@ -116,7 +116,6 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 				{Name: "csr", Hosts: []string{"www.example.com"}},
 				{Name: "ssr", Hosts: []string{"*.example.com"}},
 			}},
-			Experimental: config.ExperimentalConfig{H1FastPath: true},
 		},
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),

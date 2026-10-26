@@ -53,9 +53,15 @@ type Parser struct {
 	nowFunc       func() time.Time
 	metricsHook   func(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
-	scheme        string
-	idleRead      time.Duration
-	writeTime     time.Duration
+	// connState, when set, is invoked around each request: active=true
+	// after a request head is parsed, active=false once the response is
+	// fully written and the connection goes back to idle keep-alive. The
+	// listener uses it to distinguish idle from in-flight connections
+	// during graceful shutdown (fasthttp.Server.Shutdown parity).
+	connState func(conn net.Conn, active bool)
+	scheme    string
+	idleRead  time.Duration
+	writeTime time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -108,6 +114,28 @@ func WithMetricsHook(fn func(pool, trafficClass, cacheResult, source string, sta
 // HTTP smuggling attempt.
 func WithSmugglingHook(fn func()) Option {
 	return func(p *Parser) { p.smugglingHook = fn }
+}
+
+// WithConnStateHook sets a callback invoked with active=true after a
+// request head is parsed and active=false once its response is fully
+// written. Called on every request including fast-path hits; it must
+// not allocate (the hit path's allocs/op budget is zero).
+func WithConnStateHook(fn func(conn net.Conn, active bool)) Option {
+	return func(p *Parser) { p.connState = fn }
+}
+
+// markActive reports the connection as serving a request. Zero-alloc.
+func (p *Parser) markActive(conn net.Conn) {
+	if p.connState != nil {
+		p.connState(conn, true)
+	}
+}
+
+// markIdle reports the connection as back to idle keep-alive. Zero-alloc.
+func (p *Parser) markIdle(conn net.Conn) {
+	if p.connState != nil {
+		p.connState(conn, false)
+	}
 }
 
 // serveResult tells the Serve keep-alive loop what to do next.
@@ -231,11 +259,13 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if err != nil {
 			return err
 		}
+		p.markActive(conn)
 		if fallThrough {
 			res, err := p.serveFallThroughRequest(conn, req, excess, &deadline, &writeDeadline)
 			if res == serveClose || err != nil {
 				return err
 			}
+			p.markIdle(conn)
 			continue
 		}
 
@@ -248,6 +278,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			case res == serveClose:
 				return nil
 			case res == serveContinue:
+				p.markIdle(conn)
 				continue
 			}
 		}
@@ -256,6 +287,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if res, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline); res == serveClose || err != nil {
 			return err
 		}
+		p.markIdle(conn)
 	}
 }
 

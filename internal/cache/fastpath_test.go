@@ -924,10 +924,59 @@ func TestShouldSkipHeader(t *testing.T) {
 func TestSkipStaticHeader(t *testing.T) {
 	t.Parallel()
 	noCache := map[string]bool{}
-	assert.True(t, skipStaticHeader(header.XCache, noCache, false))
-	assert.True(t, skipStaticHeader(header.XCacheSource, noCache, false))
-	assert.True(t, skipStaticHeader(header.Warning, noCache, false))
-	assert.False(t, skipStaticHeader("Content-Type", noCache, false))
+	assert.True(t, skipStaticHeader(header.XCache, noCache, nil, false))
+	assert.True(t, skipStaticHeader(header.XCacheSource, noCache, nil, false))
+	assert.True(t, skipStaticHeader(header.Warning, noCache, nil, false))
+	assert.False(t, skipStaticHeader("Content-Type", noCache, nil, false))
+}
+
+// TestSkipStaticHeader_ConnectionListed pins the fast path's share of
+// RFC 9110 §7.6.1 (the cache-tests headers-omit-headers-listed-in-Connection
+// case): fields named in the stored response's Connection header must be
+// excluded from the serialized head, exactly as the slow path's
+// stripConnectionListedHeaders deletes them. With the fast path now the
+// default (ADR-0069), a divergence here is a conformance regression.
+func TestSkipStaticHeader_ConnectionListed(t *testing.T) {
+	t.Parallel()
+	noCache := map[string]bool{}
+	// InternKey canonicalizes both the listed names and the stored
+	// header keys, so the match is case-insensitive: a Connection list
+	// of "a, b" skips a stored "A" header.
+	connListed := map[string]bool{"A": true, "B": true}
+	assert.True(t, skipStaticHeader("A", noCache, connListed, false))
+	assert.True(t, skipStaticHeader("B", noCache, connListed, false))
+	assert.False(t, skipStaticHeader("C", noCache, connListed, false),
+		"unlisted headers must survive the Connection list")
+	assert.False(t, skipStaticHeader("A", noCache, nil, false),
+		"without a Connection list the header is served")
+}
+
+// TestParseConnectionListedHeaders pins the Connection-list parser the
+// skip set is built from: flag-gated, interned keys, nil for the common
+// no-Connection case so the hit path stays allocation-free.
+func TestParseConnectionListedHeaders(t *testing.T) {
+	t.Parallel()
+	t.Run("no_connection_header", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{Header: header.NewMap(2)}
+		assert.Nil(t, parseConnectionListedHeaders(obj))
+	})
+	t.Run("flag_without_header", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{Header: header.NewMap(2)}
+		obj.HasConnectionList = true
+		assert.Nil(t, parseConnectionListedHeaders(obj))
+	})
+	t.Run("listed_fields", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{Header: header.NewMap(2)}
+		obj.HasConnectionList = true
+		obj.Header.Set(header.Connection, "a, b")
+		got := parseConnectionListedHeaders(obj)
+		assert.True(t, got["A"], "listed names canonicalize to match stored keys")
+		assert.True(t, got["B"])
+		assert.False(t, got["C"])
+	})
 }
 
 func TestParseNoCacheFieldNames(t *testing.T) {

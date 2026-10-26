@@ -13,7 +13,6 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/platform"
-	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -150,10 +149,6 @@ type ListenerConfig struct {
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
-	// H1Reactor enables the single-goroutine epoll hit-path event loop
-	// (Linux only; experimental). When true but unavailable, the
-	// listener logs a warning and uses the blocking parser path.
-	H1Reactor bool
 }
 
 // Listener wraps a fasthttp.Server with lifecycle methods matching
@@ -164,27 +159,19 @@ type ListenerConfig struct {
 //
 //nolint:govet // fieldalignment: grouped by role (deps, config, runtime
 type Listener struct {
-	logger      observability.Logger
-	inner       *fasthttp.Server
-	fastPath    api.FastPathHandler
-	fastMetrics api.FastPathMetrics
-	resolved    atomic.Value // stores string
-	// reactorLoop is the H1 reactor handle when the reactor started
-	// (Linux + h1Reactor + fast path). Shutdown drains it so
-	// in-flight handed-off requests finish before the shutdown
-	// sequencer closes the store. Set once by serveFastPath before
-	// Serve's reactor branch; read by Shutdown.
-	reactorLoop     *h1parser.ReactorLoop
-	reactorLoopOnce sync.Once
-	addr            string
-	name            string
-	scheme          string
-	maxConns        int
-	idleTimeout     time.Duration
-	tcpFastOpen     bool
-	tcpDeferAccept  bool
-	reusePort       bool
-	h1Reactor       bool
+	logger         observability.Logger
+	inner          *fasthttp.Server
+	fastPath       api.FastPathHandler
+	fastMetrics    api.FastPathMetrics
+	resolved       atomic.Value // stores string
+	addr           string
+	name           string
+	scheme         string
+	maxConns       int
+	idleTimeout    time.Duration
+	tcpFastOpen    bool
+	tcpDeferAccept bool
+	reusePort      bool
 }
 
 // DefaultIdleTimeout is the keep-alive idle timeout for data-plane
@@ -249,7 +236,6 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		tcpFastOpen:    cfg.TCPFastOpen,
 		tcpDeferAccept: cfg.TCPDeferAccept,
 		reusePort:      cfg.ReusePort,
-		h1Reactor:      cfg.H1Reactor,
 		fastPath:       cfg.FastPath,
 		fastMetrics:    cfg.FastMetrics,
 		scheme:         cfg.Scheme,
@@ -455,16 +441,8 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 }
 
 // Shutdown gracefully stops the listener, waiting for in-flight
-// requests to complete. Safe to call concurrently with Serve. When
-// the H1 reactor is running, its Close drains in-flight handed-off
-// blocking-parser goroutines first — the fasthttp Shutdown below does
-// not know about them (they bypass fasthttp entirely).
+// requests to complete. Safe to call concurrently with Serve.
 func (s *Listener) Shutdown(_ context.Context) error {
-	s.reactorLoopOnce.Do(func() {
-		if s.reactorLoop != nil {
-			s.reactorLoop.Close()
-		}
-	})
 	// Serve's ctx.Done branch may have already closed the listener
 	// and called inner.Shutdown concurrently. A double-close surfaces
 	// as net.ErrClosed — the listener is in the desired state, so

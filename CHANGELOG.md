@@ -315,6 +315,27 @@ the curated, human-readable summary.
   the hot-config surface race-free (and the knob swap safe under
   load).
 
+### Removed
+
+- **The H1 epoll reactor (`experimental.h1_reactor`, ADR-0041,
+  superseded by ADR-0068).** The single-goroutine epoll event loop
+  that batch-served fast-path hits is deleted; all fast-path traffic
+  now uses the blocking h1parser path (one goroutine per connection),
+  which the reactor already fell back to for every non-hit request.
+  The 1-hour external stress-harness A/B (3-node cluster, 6k req/s,
+  100 conns, ~75% non-local-hit traffic) measured the reactor at
+  0.004% of CPU samples with no end-to-end benefit: handoff was
+  terminal per connection, so mixed traffic left the event loop within
+  its first few requests and never returned. Removal deletes ~3.8k
+  lines (transport, state machine, SPSC metrics ring, telemetry,
+  Linux-only e2e suites), drops the `BOUINE_REACTOR_SPIN_BUDGET`
+  knob and the runbook 51 failure modes, and lifts the
+  `h1_reactor`/`h1_fast_peer_path` incompatibility. Configs setting
+  `experimental.h1_reactor` now fail strict parsing with an
+  unknown-field error — remove the key. Nightly load-test and
+  conformance configs no longer enable it; every hit-path alloc gate
+  is unchanged at 0 allocs/op.
+
 ## [0.5.30] - 2026-10-21
 
 ### Security

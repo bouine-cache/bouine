@@ -264,8 +264,8 @@ type FastPathHandler interface {
 // CloseConn, when true, tells the writer the response header block ends
 // with "Connection: close" (RFC 9112 §9.6): the connection must not be
 // reused for another request after this response. Set by the fast path
-// when the request requested close; the h1parser and the reactor both
-// read it to terminate their keep-alive loops after the flush.
+// when the request requested close; the h1parser reads it to
+// terminate its keep-alive loop after the flush.
 //
 // Unstable.
 type FastPathResponse struct {

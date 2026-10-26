@@ -20,7 +20,7 @@ import (
 // declines (nil, false) and falls through to the slow path — the same
 // authority the router's ServeRequest has.
 //
-// Release is route-agnostic by design: the h1parser and reactor call it
+// Release is route-agnostic by design: the h1parser calls it
 // after the response is written, once the request buffer (and with it
 // the route inputs) has been reused, so the route cannot be
 // re-resolved. The release handler injected at construction must

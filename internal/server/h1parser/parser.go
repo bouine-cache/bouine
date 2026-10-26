@@ -53,15 +53,9 @@ type Parser struct {
 	nowFunc       func() time.Time
 	metricsHook   func(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
-	// metricsRing, when non-nil, redirects the reactor's hit metrics
-	// through the async SPSC ring (reactor_metrics.go). Set by the
-	// reactor transport (newReactorLoop) only — the blocking path
-	// always calls metricsHook directly, and tests that want sync
-	// observation leave it nil.
-	metricsRing *metricsRing
-	scheme      string
-	idleRead    time.Duration
-	writeTime   time.Duration
+	scheme        string
+	idleRead      time.Duration
+	writeTime     time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -398,11 +392,9 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scra
 	return req, false, excess, nil
 }
 
-// parseBuffer parses one request from a fully-read header block. It is
-// the parser half of parseRequest, shared with the reactor: the reactor
-// accumulates bytes itself (raw non-blocking reads) and calls this once
-// the header terminator is present. headerEnd is the index just past
-// the \r\n\r\n terminator, or -1 when the buffer ended at EOF without
+// parseBuffer parses one request from a fully-read header block.
+// headerEnd is the index just past the \r\n\r\n terminator, or -1
+// when the buffer ended at EOF without
 // one. The returned request aliases scratch and buf and is valid only
 // until the next parse call.
 func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
@@ -452,7 +444,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 // A per-call []byte("\r\n\r\n") conversion is stack-allocated only as
 // long as the enclosing function is not inlined; when PGO raises the
 // inline budget the conversion escapes to the heap — measured as
-// +1 allocs/op on the reactor hit path with the committed profile.
+// +1 allocs/op on the hit path with the committed profile.
 // A shared slice keeps the terminator scan allocation-free at any
 // inline depth.
 var headerTerm = []byte("\r\n\r\n")
@@ -464,27 +456,6 @@ func findHeaderEnd(buf []byte) int {
 		return -1
 	}
 	return idx + 4
-}
-
-// headerTermOverlap is how far before the current buffer end a
-// terminator search must resume after a miss: a terminator that began
-// in the last len-1 bytes of the previous segment could still
-// complete in the next one. Searching from rLen-overlap is O(1)
-// resumption instead of rescanning consumed bytes per read.
-const headerTermOverlap = len("\r\n\r\n") - 1
-
-// findHeaderEndFrom searches for the \r\n\r\n terminator in buf,
-// starting at byte offset from. Callers that have already searched
-// buf[:from] pass the previously searched length so multi-segment
-// accumulation stays O(n) overall instead of O(n²) rescan per read.
-func findHeaderEndFrom(buf []byte, from int) int {
-	if from < len(buf)-1 {
-		if idx := bytes.Index(buf[from:], headerTerm); idx >= 0 {
-			return from + idx + 4
-		}
-		return -1
-	}
-	return findHeaderEnd(buf)
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
@@ -534,7 +505,7 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 // wins), scan flags (conditional/precondition/TE/CL/duplicate-CL/
 // Pragma: no-cache, per api.ScanFlagForHeader), and the Connection
 // close token — so no consumer re-scans the header array on the hit
-// path (the fused scan, W2 of docs/plans/h1-reactor-perf-round-4.md).
+// path (the fused scan).
 func parseHeaders(buf []byte, req *api.RawRequest) error {
 	pos := skipRequestLine(buf)
 

@@ -101,10 +101,9 @@ type FastPathHandler struct {
 // config. The Handler must be fully initialized before calling this.
 // The cluster peer wiring (ownerFn/peerFetch) is deliberately NOT
 // inherited: the engine decides per deployment whether the fast path
-// may issue blocking peer RPCs (experimental.h1_fast_peer_path, and
-// never under the epoll reactor), and applies it explicitly via
-// WithPeerFetch. Inheriting silently would put a blocking network call
-// on every h1parser goroutine (and the reactor event loop) with no
+// may issue blocking peer RPCs (experimental.h1_fast_peer_path), and
+// applies it explicitly via WithPeerFetch. Inheriting silently would
+// put a blocking network call on every h1parser goroutine with no
 // flag opt-in (issue #696).
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
@@ -272,13 +271,13 @@ func (f *FastPathHandler) tryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // is the actual defense, and the peer's resolver-withhold rule
 // (peerfetch.go, blank-VaryKey answer) is the second.
 //
-// Blocking: this call runs on the h1parser event-loop goroutine and the
-// reactor calls it inline too — the peerFetch closure may block on
-// network I/O for up to the peer-fetch timeout (dial + read). Miss
-// storms therefore serialize misses per loop goroutine, exactly like
-// the parser fallback path does after a fall-through. Acceptable
-// because a miss must hit the network either way; the fallthrough
-// duplicate fetch below is the price of keeping TryHit's contract.
+// Blocking: this call runs on the connection's h1parser goroutine —
+// the peerFetch closure may block on network I/O for up to the
+// peer-fetch timeout (dial + read). A miss storm therefore blocks one
+// goroutine per in-flight miss, the same concurrency the parser
+// fallback path gives after a fall-through. Acceptable because a miss
+// must hit the network either way; the fallthrough duplicate fetch
+// below is the price of keeping TryHit's contract.
 //
 // The returned response carries Source "peer" so access logs and
 // metrics report the same cache_result/source pair as the slow path.

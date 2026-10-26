@@ -96,10 +96,6 @@ echo ">>> Origin is up."
 # 4. Write bouine config and start bouine.
 BOUINE_CONFIG=$(mktemp)
 EXPERIMENTAL_YAML="${BOUINE_FAST_PATH:-}"
-REACTOR_YAML=""
-if [ "${BOUINE_H1_REACTOR:-}" = "true" ]; then
-    REACTOR_YAML="  h1_reactor: true"
-fi
 if [ "$EXPERIMENTAL_YAML" = "true" ]; then
     cat > "$BOUINE_CONFIG" <<YAML
 listen:
@@ -115,9 +111,8 @@ routes:
     pool: cache-tests
 experimental:
   h1_fast_path: true
-${REACTOR_YAML}
 YAML
-    echo ">>> H1 fast path ENABLED for conformance run${REACTOR_YAML:+ (+ h1_reactor)}"
+    echo ">>> H1 fast path ENABLED for conformance run"
 else
     cat > "$BOUINE_CONFIG" <<YAML
 listen:

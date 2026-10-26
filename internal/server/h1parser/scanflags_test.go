@@ -1,7 +1,6 @@
 package h1parser
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,40 +67,4 @@ func TestParseBuffer_FirstHostDuplicateCacheControl(t *testing.T) {
 	require.NoError(t, err2)
 	assert.True(t, ft2, "duplicate CL is smuggling")
 	assert.NotZero(t, scratch2.ScanFlags&api.FlagDuplicateCL)
-}
-
-// TestReactor_AdvanceReadingScanResume exercises the multi-segment
-// terminator scan (W6): a header block arriving in small chunks must
-// parse exactly once, with the resume offset never missing a
-// terminator that straddles a chunk boundary.
-func TestReactor_AdvanceReadingScanResume(t *testing.T) {
-	t.Parallel()
-	full := "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: " + string(bytes.Repeat([]byte{'a'}, 64)) + "\r\n\r\n"
-	req := []byte(full)
-	rc, fio := newTestReactorConn(t, req)
-
-	// Deliver in 7-byte chunks; the machine alternates want-read with
-	// progress until the terminator (which the chunking splits across
-	// a boundary) completes the parse and the hit flushes inline.
-	for i := 0; i < len(req); i += 7 {
-		end := min(i+7, len(req))
-		fio.readSrc = bytes.NewReader(req[i:end])
-		for {
-			switch rc.advance() {
-			case actWaitRead:
-				i = end - 7 // loop increments by 7 on continue
-				goto nextChunk
-			case actWaitWrite:
-				continue // complete the flush with the same chunk source
-			default:
-				t.Fatalf("unexpected action mid-chunking: state=%d", rc.state)
-			}
-		}
-	nextChunk:
-	}
-	// The hit was flushed somewhere in the loop; the machine must be
-	// back to reading with the full response on the wire.
-	assert.Equal(t, rcReading, rc.state, "machine returns to reading after the hit")
-	assert.Contains(t, fio.written.String(), "hello", "hit body flushed")
-	assert.Contains(t, fio.written.String(), "200 OK", "status line flushed")
 }

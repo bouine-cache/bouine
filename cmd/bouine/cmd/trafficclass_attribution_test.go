@@ -163,9 +163,8 @@ func TestTrafficClassAttribution_E2E(t *testing.T) {
 	// (RecordHit via the parser's metrics hook) and the slow-path MISS
 	// (recordFastHTTPMetrics via the middleware) must both have landed
 	// in the pre-resolved ssr series, not the unclassified fallback.
-	// The hook is synchronous on the blocking parser path (no reactor
-	// in this config), but the observation is polled anyway so the
-	// test stays valid under a reactor-enabled shape.
+	// The hook is synchronous on the parser path, but the observation
+	// is polled anyway so the test stays robust under slow machines.
 	poll.Eventually(t, 3*time.Second, 5*time.Millisecond, func() bool {
 		counts := gatherRequestClassCounts(t, e.metrics.Registry)
 		return counts["MISS|origin|ssr"] >= 1 && counts["HIT|hot|ssr"] >= 1

@@ -1,10 +1,12 @@
 # ADR-0041: epoll reactor for batch hit-path serving
 
-- **Status**: Accepted (experimental, behind `experimental.h1_reactor`)
+- **Status**: Superseded by ADR-0068 (reactor removed; no measured
+  benefit under production-shaped traffic)
 - **Date**: 2026-08-30
 - **Deciders**: @thylong
 - **Phase**: performance (post-phase 9 fast path)
-- **See also**: ADR-0034 (fasthttp adoption), docs/plans/hit-path-p99-optimization.md
+- **See also**: ADR-0034 (fasthttp adoption), ADR-0068 (removal),
+  docs/plans/hit-path-p99-optimization.md
 
 ## Context
 

@@ -1674,7 +1674,7 @@ func TestFastPathHandler_PeerHitStale(t *testing.T) {
 }
 
 // TestFastPathHandler_PeerMissFallsThrough pins the fallback contract:
-// a peer miss (nil, nil) returns (nil, false) so the L1 reactor/parser
+// a peer miss (nil, nil) returns (nil, false) so the L1 parser
 // hands the request to the slow path, which falls through to origin —
 // exactly the pre-change behaviour for local misses.
 func TestFastPathHandler_PeerMissFallsThrough(t *testing.T) {

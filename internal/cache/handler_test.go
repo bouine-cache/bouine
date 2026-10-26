@@ -4033,6 +4033,7 @@ func TestTryConditional304_Match(t *testing.T) {
 	assert.Equal(t, fasthttp.StatusNotModified, r.Response.StatusCode())
 	assert.Equal(t, `"v1"`, string(r.Response.Header.Peek(header.ETag)))
 	assert.Equal(t, "HIT", string(r.Response.Header.Peek(header.XCache)))
+	assert.Equal(t, "hot", string(r.Response.Header.Peek(header.XCacheSource)))
 }
 
 func TestTryConditional304_NoMatch(t *testing.T) {

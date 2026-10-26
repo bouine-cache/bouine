@@ -4736,7 +4736,7 @@ func isInvalidatingBytes(method []byte) bool {
 
 // rewriteHook returns the response-rewrite applier when the route
 // configures any response rewrite directive; nil otherwise. Used by
-// package-level response writers (write304Fast) that have no handler
+// package-level response writers (write304) that have no handler
 // reference.
 func (h *Handler) rewriteHook() func(*fasthttp.ResponseHeader) {
 	if h.respHeaderRemove == nil && h.respHeaderSet == nil {

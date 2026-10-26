@@ -25,6 +25,11 @@ import (
 // The miss/revalidate paths continue to use requestInfoFromCtx which
 // builds a full header.Map (needed for Vary matching, cacheability
 // checks, storage, etc.).
+//
+// The response side of the hit path lives here too: getOrComputeFastHeader
+// (the cached *fasthttp.ResponseHeader served objects reuse across hits)
+// and the noDefaultDate field poke it needs, so fasthttp never
+// auto-generates a Date over the stored origin value.
 
 // evaluateFast runs the RFC 9111 state machine via the shared evaluate,
 // reading request directives straight from the *fasthttp.RequestCtx via
@@ -61,7 +66,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
 	if len(inm) > 0 {
 		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
-			h.write304Fast(ctx, obj, src, xCache, result, now, rw)
+			h.write304(ctx, obj, src, xCache, result, now, rw)
 			return true
 		}
 		return false
@@ -73,13 +78,13 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 			return false
 		}
 		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
-			h.write304Fast(ctx, obj, src, xCache, result, now, rw)
+			h.write304(ctx, obj, src, xCache, result, now, rw)
 			return true
 		}
 		if obj.LastModified.IsZero() {
 			if d := obj.Header.Get(header.Date); d != "" {
 				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
-					h.write304Fast(ctx, obj, src, xCache, result, now, rw)
+					h.write304(ctx, obj, src, xCache, result, now, rw)
 					return true
 				}
 			}
@@ -88,7 +93,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 	return false
 }
 
-// write304Fast sets the headers and status code for a 304 Not Modified
+// write304 sets the headers and status code for a 304 Not Modified
 // response using SetCanonical to skip key normalization. Under
 // downstream_freshness: sync the 304 carries the same synthesized
 // CDN-Cache-Control cap as the corresponding 200 serve (ADR-0063 I4:
@@ -96,7 +101,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 // so an uncapped 304 would let a downstream cache re-freshen unboundedly)
 // plus Warning: 110 when the 304 is stale-sourced, mirroring the 200
 // stale serve. X-Cache keeps today's label ("HIT"/"REVALIDATED").
-func (h *Handler) write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) {
+func (h *Handler) write304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, xCache string, result cacheResult, now time.Time, rw func(*fasthttp.ResponseHeader)) {
 	if obj.ETag != "" {
 		ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 	}

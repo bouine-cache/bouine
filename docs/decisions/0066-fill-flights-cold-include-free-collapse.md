@@ -236,8 +236,11 @@ Correctness is unchanged by construction:
   identical (32); steady state
   (`BenchmarkSingle_UnstorableSteadyState`, the exact /miss leg shape —
   1500 rps fixed arrivals, 13 ms RTT, 2 s): memoized p50 13.1 ms =
-  RTT, p99 18.5 ms, against the parked-wave world's analytic
-  ~29 ms mean / ~45 ms p99.
+  RTT, p99 ~18 ms, p999 ~21 ms, against the parked-wave world measured
+  on the same harness with the memo read disabled — p50 28.7 ms,
+  p99 ~44 ms, p999 ~46-49 ms (the analytic wait + stagger + fetch
+  model, confirmed). Fetch counts identical (3001); miss-path
+  allocations drop ~17% (wave parking removed).
 
 Pinned by `TestFetchAndStore_UnstorableFillMemoizesBypass` (the first
 wave still collapses + staggers, the second bursts immediately with

@@ -66,6 +66,11 @@ set -euo pipefail
 
 MODE="${1:-gate}"
 
+# Print the exit status as the final output line so a piped/tail-ed run
+# still shows the verdict — benchmarks are too expensive to re-run just
+# to recover an exit code that a pipe swallowed.
+trap 'echo ">>> bench/run.sh (${MODE}) exit: $?"' EXIT
+
 RESULTS_DIR="bench/results"
 mkdir -p "$RESULTS_DIR"
 OUTFILE="$RESULTS_DIR/current.txt"

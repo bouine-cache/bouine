@@ -62,6 +62,13 @@ the curated, human-readable summary.
 
 ### Added
 
+- **Bench verdicts are pipe-proof.** `bench/run.sh` now prints
+  `>>> bench/run.sh (<mode>) exit: N` as its final output line, so a
+  piped/tail-ed gate run shows PASS/FAIL without relying on an exit
+  code a pipe swallowed — benchmarks are too expensive to re-run just
+  to recover the verdict. Raw output is already persisted to
+  `bench/results/current.txt`.
+
 - **`bouine config get/set/diff` and `GET|POST /v1/config/hot`
   (#815).** The hot-config knob surface: a registry of genuinely
   hot-appliable fields that change on a running daemon without a

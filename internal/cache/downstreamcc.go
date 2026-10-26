@@ -227,7 +227,7 @@ func removeCDCFamily(dst *fasthttp.ResponseHeader) {
 // clock are the same number (ADR-0063 P2).
 func (h *Handler) fillFinalTTLFor(resMap header.Map, delay time.Duration, parsed parsedResponse, now time.Time) time.Duration {
 	originAge := correctedInitialAge(parseOriginAge(resMap), delay, resMap.Get(header.Date), now)
-	return fillFinalTTL(resMap, parsed.status, parsed.respCC, h.neg, h.defaultTTL, h.overrideTTL, h.jitterPercent, originAge, now)
+	return h.fp.fillFinalTTL(resMap, parsed.status, parsed.respCC, originAge, now)
 }
 
 // isCDCFamilyHeader reports whether k is one of the RFC 9213-family or

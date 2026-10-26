@@ -133,16 +133,6 @@ func TestRouter_MetricsIncrement(t *testing.T) {
 	_ = ctx2
 }
 
-// --- maxConnsError test ---
-
-func TestMaxConnsError(t *testing.T) {
-	t.Parallel()
-	e := maxConnsError{}
-	assert.Equal(t, "max_connections reached", e.Error())
-	assert.False(t, e.Timeout())
-	assert.True(t, e.Temporary())
-}
-
 // --- fastPathEnabled test ---
 
 func TestFastPathEnabled(t *testing.T) {

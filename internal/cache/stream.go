@@ -1254,7 +1254,7 @@ func (h *Handler) storeStreamedObject(
 	// fillTTL: preset by the sync-mode fill cap at header-processing
 	// time (ADR-0063) so the stored clock equals the advertised cap;
 	// nil (passthrough) computes the TTL in buildObject as before.
-	obj := buildObject(key, ri, res, resMap, h.neg, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, h.stayinAlive, h.poolName, fillTTL, time.Now())
+	obj := h.buildObject(key, ri, res, resMap, fillTTL, time.Now())
 	if key != primaryKey {
 		// ADR-0068: the variant carries its primary key so a node
 		// storing it via the write-to-owner RPC can register it in the

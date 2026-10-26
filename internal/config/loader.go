@@ -210,15 +210,6 @@ func (c *Config) Validate() error {
 		ec.addf("listen.read_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
 	}
 
-	// The reactor multiplexes fast-path hit serving; without the fast
-	// path it has nothing to serve and would silently no-op. The
-	// listener wiring also gates on H1FastPath, so reject the
-	// combination early at load time instead of logging a warning at
-	// startup.
-	if c.Experimental.H1Reactor && !c.Experimental.H1FastPath {
-		ec.addf("experimental.h1_reactor", "requires experimental.h1_fast_path")
-	}
-
 	// The peer branch only runs inside the fast path's TryHit; without
 	// h1_fast_path the flag would silently no-op. Reject early at load
 	// time instead of logging a warning at startup.

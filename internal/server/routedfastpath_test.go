@@ -125,7 +125,7 @@ func TestRoutedFastPath_HostAndMethodsMatch(t *testing.T) {
 }
 
 // TestRoutedFastPath_ReleaseCrossInstance pins the release-safety
-// property the parser and reactor depend on: the wrapper Releases
+// property the parser depends on: the wrapper Releases
 // through the handler injected at construction, which is not
 // necessarily the producing route's handler — cache.FastPathHandler
 // returns responses to global sync.Pools and ignores its receiver, so

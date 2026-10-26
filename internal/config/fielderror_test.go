@@ -56,8 +56,8 @@ func TestValidate_FieldError_SinglePath(t *testing.T) {
 		},
 		{
 			"experimental cross-field",
-			func(c *Config) { c.Experimental.H1Reactor = true },
-			"experimental.h1_reactor",
+			func(c *Config) { c.Experimental.H1FastPeerPath = true },
+			"experimental.h1_fast_peer_path",
 		},
 		{
 			"gogc invalid",

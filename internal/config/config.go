@@ -103,20 +103,11 @@ type ExperimentalConfig struct {
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 
-	// H1Reactor enables the single-goroutine epoll event loop that
-	// batch-serves cache hits without per-request goroutine park/unpark
-	// (Linux only; see docs/decisions/0041-h1-epoll-reactor.md). Requires
-	// h1_fast_path. When true but unavailable (non-Linux, epoll
-	// failure), the listener logs a warning and uses the blocking
-	// parser path. Default false.
-	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
-
 	// H1FastPeerPath enables the fast-path peer branch: on a local cache
 	// miss the H1 fast path asks the key's ring owner before falling
 	// through to the slow path (issue #636). Requires h1_fast_path and a
 	// cluster in strong mode; unwired otherwise (an error is logged at
-	// startup). Not wired under the epoll reactor, where TryHit must
-	// never block on network I/O. Default false.
+	// startup). Default false.
 	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
 
 	// ConfigReload enables POST /v1/config/reload (bouine config

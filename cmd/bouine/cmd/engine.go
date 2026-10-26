@@ -1234,8 +1234,6 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 		fastPathHandler = e.buildFastPath(rs)
 	}
 
-	h1Reactor := e.cfg.Experimental.H1Reactor && e.cfg.Experimental.H1FastPath
-
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
@@ -1250,7 +1248,6 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "http",
-			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -1276,7 +1273,6 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "https",
-			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)
@@ -1343,23 +1339,15 @@ func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
 // wireFastPathPeerFetch wires the cluster peer branch (issue #636): on
 // a local miss the fast path asks the key's owner before falling
 // through to the slow path. Same closures the slow-path handlers use.
-// Opt-in behind experimental.h1_fast_peer_path (default off). NOT
-// wired under the epoll reactor: TryHit runs inline on the reactor's
-// event loop, which must never block on network I/O (a miss would
-// stall every connection on that loop for the peer-fetch timeout).
-// The h1parser path blocks too, but it is already per-connection
-// blocking by design; the reactor is not. When the flag is set but a
-// condition above holds, an error is logged and the daemon starts
-// without the branch (config validation cannot catch these: they
-// depend on runtime wiring state).
+// Opt-in behind experimental.h1_fast_peer_path (default off).
+// Blocking is per-connection by design: TryHit runs on the connection's
+// h1parser goroutine, so a peer-fetch stall affects only that
+// connection. When the flag is set but wiring fails, an error is
+// logged and the daemon starts without the branch (config validation
+// cannot catch this: it depends on runtime wiring state).
 func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	if !e.cfg.Experimental.H1FastPeerPath {
 		// Flag off: nothing to wire, no diagnostics.
-		return
-	}
-	if e.cfg.Experimental.H1Reactor {
-		e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
-			"experimental", true)
 		return
 	}
 	fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)

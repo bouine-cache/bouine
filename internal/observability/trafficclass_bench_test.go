@@ -92,7 +92,7 @@ func BenchmarkGate_Middleware_Miss_TrafficClass_MixedCaseHost(b *testing.B) {
 
 // BenchmarkGate_RecordHit_TrafficClass measures the fast-path metrics
 // hook (DataPlaneMetrics.RecordHit) with the class axis active — the
-// exact call the h1parser and the reactor drainer make per hit. Must
+// exact call the h1parser makes per hit. Must
 // stay zero-alloc: class strings come from the pre-resolved table.
 func BenchmarkGate_RecordHit_TrafficClass(b *testing.B) {
 	reg := newBenchRegistry()

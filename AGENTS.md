@@ -228,9 +228,9 @@ internal/observability, internal/config.
 - **Buffers**: pool 4 KiB and 64 KiB sizes via `sync.Pool`. Always reset on
   put.
 - **Hashing**: xxhash64 for keys. Never use `crypto/sha*` on the hit path.
-- **Goroutines**: the h1 reactor (ADR-0041) owns the connection/
-  goroutine model — one event-loop goroutine multiplexes many
-  connections; never reintroduce goroutine-per-connection. Background
+- **Goroutines**: the data plane uses one accept goroutine per
+  listener and one goroutine per connection (the blocking h1parser
+  path; the epoll reactor was removed by ADR-0068). Background
   work uses bounded worker pools sized at boot.
 - **Atomics over mutexes** where contention is observed. Document why with
   a benchmark in the PR.

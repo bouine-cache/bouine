@@ -70,7 +70,7 @@ field to `Superseded by ADR-NNNN`.
 | 0038   | Streaming origin responses via fasthttp SetBodyStreamWriter | Accepted |
 | 0039   | HTTP/1.1 pipelining for peer fetch                  | Accepted |
 | 0040   | Re-enable the CI prek cache with a GO_VERSION_STAMP guard | Accepted |
-| 0041   | epoll reactor for batch hit-path serving            | Accepted |
+| 0041   | epoll reactor for batch hit-path serving            | Superseded by ADR-0068 |
 | 0042   | Server-Sent Events streaming semantics              | Accepted |
 | 0043   | Per-route origin timeout                            | Accepted |
 | 0044   | Batched cluster invalidation delivery with per-issuer sequence dedup | Accepted |
@@ -96,3 +96,4 @@ field to `Superseded by ADR-NNNN`.
 | 0064   | amd64 release artifacts build at the GOAMD64=v1 baseline | Accepted |
 | 0066   | Fill flights — collapse cold include-free misses via the store | Accepted |
 | 0067   | Client-state headers (Set-Cookie, Set-Login) never served to a second client | Accepted |
+| 0068   | Remove the H1 epoll reactor (supersedes ADR-0041) | Accepted |

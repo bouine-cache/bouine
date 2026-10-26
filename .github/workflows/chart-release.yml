@@ -62,7 +62,7 @@ jobs:
           ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
 
       - name: Run chart-releaser
-        uses: helm/chart-releaser-action@fae9146b935c45c307b67c4495043ea3fd3e3355 # main, includes fix for unbound latest_tag with skip_packaging
+        uses: helm/chart-releaser-action@0a4a76cd0d743c104539192612dbc24a61c3e3c1 # main, includes fix for unbound latest_tag with skip_packaging
         with:
           charts_dir: deploy/helm
           # Use the pre-packaged .tgz from the previous step instead of

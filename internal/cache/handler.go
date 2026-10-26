@@ -255,6 +255,14 @@ type Handler struct {
 	// lost refills, so a rising shed rate during a purge storm no longer
 	// implies the hit ratio is pinned at the shed equilibrium.
 	RewarmFillInc interface{ Inc() }
+	// FillBypassInc is incremented when an anonymous cold include-free
+	// miss skips the fill flight because the key's most recent fill
+	// settled unstorable by explicit origin directive (no-store/private)
+	// within the memo window (ADR-0066 amendment #2); nil-safe. A
+	// sustained non-zero rate on a route means its origins are sending
+	// no-store/private and the miss latency there is sequential, not
+	// wave-shaped.
+	FillBypassInc interface{ Inc() }
 	// VaryDriftInc counts detected Vary-declaration drifts (ADR-0058),
 	// where the stale resolver and its variants were purged; nil-safe.
 	VaryDriftInc varyDriftInc
@@ -356,6 +364,14 @@ type Handler struct {
 	// a single bool read per request.
 	inflightStreams   inflightTable
 	bypassCookieNames cookieNameScanner
+	// unstorableMemo suppresses fill flights for keys whose most recent
+	// fill settled unstorable by explicit origin directive (no-store /
+	// private) within unstorableMemoWindow (ADR-0066 amendment #2):
+	// re-parking them could only cost every follower the leader-fill
+	// wait plus the released-wave stagger before the same own-fetch,
+	// because such a fill provably stores nothing shareable. A zero
+	// value is usable (see unstorableMemo).
+	unstorableMemo unstorableMemo
 	// fp carries the route's freshness policy (fillPolicy): the TTL
 	// ladder knobs shared by buildObject, the sync-mode fill cap, and
 	// the 304-refresh override. A value, not a pointer, so zero-value
@@ -427,6 +443,11 @@ type HandlerConfig struct {
 	// RewarmFill, if non-nil, is incremented when a shed miss schedules a
 	// bounded background store refill (the post-ban re-warm allowance).
 	RewarmFill interface{ Inc() }
+	// FillBypass, if non-nil, is incremented when an anonymous cold
+	// include-free miss skips the fill flight because the key's most
+	// recent fill settled unstorable by explicit origin directive
+	// (no-store/private) within the memo window (ADR-0066 amendment #2).
+	FillBypass interface{ Inc() }
 	Store      storage.Store
 	Logger     observability.Logger
 	// Negative resolves per-status negative-caching TTLs from the
@@ -891,6 +912,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		StreamingFallbackInc:    cfg.StreamingFallback,
 		FetchShedInc:            cfg.FetchShed,
 		RewarmFillInc:           cfg.RewarmFill,
+		FillBypassInc:           cfg.FillBypass,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
@@ -2658,6 +2680,22 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 	}
 	sfKey, fillFlight := fetchFlightKey(h, primaryKey, lookupKey, obj, ri)
 	if sfKey == (api.Key{}) {
+		h.streamMiss(ctx, primaryKey, ri, newInflightStream())
+		return
+	}
+	if fillFlight && h.unstorableMemo.bypass(primaryKey) {
+		// The key's most recent fill settled unstorable by explicit
+		// origin directive (no-store/private) within the memo window
+		// (ADR-0066 amendment #2): parking this flight again can only
+		// hand every follower one leader-fill wait plus the
+		// released-wave stagger before the same own-fetch — the fill
+		// provably stores nothing shareable. Fetch own immediately,
+		// the sequential behavior; no bytes are ever shared on this
+		// path, so the follower's response passes exactly the gates a
+		// sequential request passes.
+		if h.FillBypassInc != nil {
+			h.FillBypassInc.Inc()
+		}
 		h.streamMiss(ctx, primaryKey, ri, newInflightStream())
 		return
 	}

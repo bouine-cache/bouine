@@ -903,6 +903,20 @@ func (h *Handler) streamMissBuffered(
 	// stored, so the settlement verdict is already final.
 	defer close(inflight.stored)
 
+	// A complete, well-formed response that refuses shared storage by
+	// its own directives (no-store/private) settles this fill with
+	// nothing usable for any follower — now and, unless the origin
+	// changes its mind, on every refill. Memoize the key so subsequent
+	// anonymous cold include-free misses skip the fill flight and fetch
+	// their own immediately instead of parking on fills that provably
+	// store nothing (ADR-0066 amendment #2). HEAD-led fills are
+	// excluded: they store nothing by method, not by origin policy.
+	// Directive-driven only — errors, caps, and client-state responses
+	// keep the settle-then-stagger flow (see refusesSharedStorage).
+	if !cacheable && !isHEAD && h.responseRefusesSharedStorage(sf) {
+		h.unstorableMemo.note(primaryKey)
+	}
+
 	if !isHEAD {
 		ctx.Response.SetBodyRaw(res.Body)
 	}

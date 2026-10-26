@@ -332,9 +332,9 @@ the curated, human-readable summary.
   itself eligible to share flights (anonymous, safe method) may arm
   the memo — a cookied or authorized request's no-store response is
   not evidence about the anonymous population's storage policy. The
-  first wave after the
-  window (or after boot) still collapses and staggers once — bounded
-  by the wave size, and invisible at p99 under the leg's traffic mix.
+  first wave after the window (or after boot) still collapses and
+  staggers once — bounded by the wave size, and invisible at p99 under
+  the leg's traffic mix.
   Sequential fetch counts are unchanged (nothing shareable was ever
   stored for these keys); origin load returns to the sequential rate
   the pre-ADR-0066 world and nginx both produce. Single-shot evidence

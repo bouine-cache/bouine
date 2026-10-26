@@ -103,14 +103,14 @@ func mustRequestInfo(t *testing.T, url string) RequestInfo {
 // unstorableHarness is one no-store/private origin with per-fetch unique
 // bodies plus arrival-spread tracking, under the synctest fake clock.
 type unstorableHarness struct {
-	t         *testing.T
-	h         *Handler
-	fetches   atomic.Int64
-	mu        sync.Mutex
-	arrivals  []time.Time
-	origin    fasthttp.RequestHandler
-	holdFirst bool
-	release   chan struct{}
+	t        *testing.T
+	h        *Handler
+	fetches  atomic.Int64
+	mu       sync.Mutex
+	arrivals []time.Time
+	origin   fasthttp.RequestHandler
+	holdNext atomic.Bool
+	release  chan struct{}
 }
 
 func newUnstorableHarness(t *testing.T, cacheControl string) *unstorableHarness {
@@ -118,7 +118,12 @@ func newUnstorableHarness(t *testing.T, cacheControl string) *unstorableHarness 
 	x := &unstorableHarness{t: t, release: make(chan struct{})}
 	x.origin = func(ctx *fasthttp.RequestCtx) {
 		n := x.fetches.Add(1)
-		if x.holdFirst && n == 1 {
+		// holdNext holds exactly the next fetch (whichever request
+		// issues it) open until release, then disarms: a CAS, not an
+		// ordinal gate — ordinals depend on how many fetches earlier
+		// phases issued and make the hold's engagement
+		// scheduler-luck (the CI-caught flake).
+		if x.holdNext.CompareAndSwap(true, false) {
 			select {
 			case <-x.release:
 			case <-time.After(5 * time.Second):
@@ -254,10 +259,10 @@ func TestFetchAndStore_MemoExpiresRefillsCollapse(t *testing.T) {
 			"the memo lapses after the window")
 
 		// The next wave must park on a leader fill again: hold the
-		// first fetch open until the followers are durably parked, so
+		// next fetch open until the followers are durably parked, so
 		// the fetch count proves the collapse (1 fetch, not `callers`).
 		base := x.fetches.Load()
-		x.holdFirst = true
+		x.holdNext.Store(true)
 		parked := make(chan struct{})
 		go func() {
 			defer close(parked)

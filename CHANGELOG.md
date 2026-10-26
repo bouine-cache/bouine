@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
 ### Dependencies
 
 - **fasthttp v1.76.0 → v1.77.0: security hardening with no hit-path
@@ -3417,7 +3419,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.30...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.0
 [0.5.30]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.30
 [0.5.29]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.29
 [0.5.28]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.28

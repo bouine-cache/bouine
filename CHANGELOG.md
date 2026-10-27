@@ -111,6 +111,27 @@ the curated, human-readable summary.
   `InjectFastHTTP` already had. Pinned by a new allocation gate,
   `BenchmarkGate_TracingPipeline_Disabled` (budget 0).
 
+### Fixed
+
+- **A stale-while-revalidate refresh no longer replays the triggering
+  client's identity to the origin (#846, audit AUD-01).** A logged-in
+  client receiving a stale hit used to trigger the background
+  revalidation with its full header set — session `Cookie` included —
+  so a session-aware origin rendered personalized content that the
+  refresh then stored under the **shared** key, replacing the anonymous
+  entry every other client was served. Requests carrying
+  `Authorization` or `Cookie` no longer trigger the SWR refresh at all
+  (the stale entry is still served; the next anonymous request performs
+  the refresh), the background-refresh analogue of the ADR-0052/0054
+  collapse refusals. Cookie-presence-keyed routes
+  (`cache.key.cookie_presence`) keep the trigger: there the `Cookie`
+  header is a declared variant dimension the refresh fetch must carry,
+  the same deliberate replay the refresh-before-expiry registry applies
+  (`TestRefreshRegistry_CookiePresenceSavesCookie`). Both the slow path
+  and the H1 fast path trigger are gated; pinned by
+  `TestSWRRevalidation_CookiedStaleHitDoesNotPoisonSharedEntry` and
+  friends in `swr_identity_regression_test.go`.
+
 ### Added
 
 - **Bench verdicts are pipe-proof.** `bench/run.sh` now prints

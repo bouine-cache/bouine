@@ -61,8 +61,9 @@ func runMiddleware(b *testing.B, traceparent string) {
 // BenchmarkTopology_TracingMiddleware_Disabled pins the disabled
 // short-circuit (no OTLP endpoint) — the default deployment.
 func BenchmarkTopology_TracingMiddleware_Disabled(b *testing.B) {
+	prev := tracing.TracerEnabled()
 	tracing.EnableForTest(false)
-	b.Cleanup(func() { tracing.EnableForTest(true) })
+	b.Cleanup(func() { tracing.EnableForTest(prev) })
 	runMiddleware(b, "")
 }
 

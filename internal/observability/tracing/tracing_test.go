@@ -171,7 +171,7 @@ func TestInitTracer_SamplingRateSelectsSampler(t *testing.T) {
 	}{
 		{"never", 0, "AlwaysOffSampler"},
 		{"always", 1, "AlwaysOnSampler"},
-		{"ratio", 0.5, "TraceIDRatioBased"},
+		{"ratio", 0.5, "ParentBased{root:TraceIDRatioBased"},
 	}
 
 	for _, tc := range tests {
@@ -185,7 +185,11 @@ func TestInitTracer_SamplingRateSelectsSampler(t *testing.T) {
 			// The sampler logic is tested implicitly via the config path.
 			//
 			// Instead of calling InitTracer (which needs a real endpoint),
-			// we verify the sampler logic directly.
+			// we verify the sampler logic directly: the switch below
+			// mirrors InitTracer's sampler selection (ADR-0070 — the ratio
+			// case is wrapped in ParentBased so sampled incoming parents
+			// always record); the behavioral pin of the installed sampler
+			// lives in TestInitTracer_ParentBasedStitching.
 			var sample sdktrace.Sampler
 			switch tc.rate {
 			case 0:
@@ -193,7 +197,7 @@ func TestInitTracer_SamplingRateSelectsSampler(t *testing.T) {
 			case 1:
 				sample = sdktrace.AlwaysSample()
 			default:
-				sample = sdktrace.TraceIDRatioBased(tc.rate)
+				sample = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(tc.rate))
 			}
 			assert.Contains(t, sample.Description(), tc.wantSampler)
 		})

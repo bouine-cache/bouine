@@ -82,6 +82,19 @@ the curated, human-readable summary.
   the binding constraint. Explicit `peer_fetch_concurrency` values are
   unaffected; the upper bound stays 128.
 
+- **The pipeline tracing middleware no longer pays span-construction
+  cost when tracing is disabled.** `tracing.FastHTTPMiddleware` was the
+  only tracing helper without the disabled short-circuit: with no OTLP
+  endpoint configured (the default), every fall-through request — misses,
+  SWR revalidations, admin traffic; cache hits are unaffected because the
+  H1 fast path never enters the middleware chain — still spent ~250 ns
+  and 10 allocations (608 B) building span attributes and start options
+  for a span the no-op global tracer silently discarded. The middleware
+  now checks the runtime toggle first and invokes the wrapped handler
+  untouched, the same contract `StartSpan`, `StartOriginSpan` and
+  `InjectFastHTTP` already had. Pinned by a new allocation gate,
+  `BenchmarkGate_TracingPipeline_Disabled` (budget 0).
+
 ### Added
 
 - **Bench verdicts are pipe-proof.** `bench/run.sh` now prints

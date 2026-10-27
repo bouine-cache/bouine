@@ -255,6 +255,32 @@ func TestFastHTTPMiddleware_StoresSpanContextForOriginSpan(t *testing.T) {
 	span.End()
 }
 
+func TestFastHTTPMiddleware_TracerDisabledSkipsSpan(t *testing.T) {
+	// Cannot use t.Parallel(): installs global OTel tracer provider.
+	sr := tracetest.NewSpanRecorder()
+	cleanup := newTestTracerProvider(t, sr)
+	defer cleanup()
+
+	// Provider installed, toggle off: proves the guard drops the span, not the no-op fallback.
+	prev := tracerEnabled.Load()
+	tracerEnabled.Store(false)
+	defer tracerEnabled.Store(prev)
+
+	var called bool
+	rctx := &fasthttp.RequestCtx{}
+	h := FastHTTPMiddleware("bouine.pipeline", func(*fasthttp.RequestCtx) { called = true })
+	req := fasthttp.AcquireRequest()
+	req.Header.SetMethod("GET")
+	req.Header.SetRequestURI("http://example.com/foo")
+	rctx.Init(req, nil, nil)
+	h(rctx)
+
+	assert.True(t, called, "middleware must still invoke the wrapped handler when tracing is disabled")
+	assert.Empty(t, sr.Ended(), "no span may be started while tracing is disabled")
+	assert.Nil(t, rctx.UserValue(otelUserValueKey),
+		"middleware must not store a span context when tracing is disabled")
+}
+
 func TestStartOriginSpan_LinkedToPipelineSpan(t *testing.T) {
 	// Cannot use t.Parallel(): installs global OTel tracer provider.
 	sr := tracetest.NewSpanRecorder()

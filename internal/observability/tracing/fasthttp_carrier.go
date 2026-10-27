@@ -50,7 +50,7 @@ func (c fasthttpHeaderCarrier) Keys() []string {
 
 // InjectFastHTTP stamps W3C TraceContext (traceparent / tracestate)
 // and Baggage headers into req so the upstream origin can continue
-// the trace. It is the fasthttp equivalent of [InjectHTTP].
+// the trace.
 //
 // It is a no-op when no tracer is configured or the context has no
 // active span, so callers do not need to guard against unconfigured
@@ -64,8 +64,7 @@ func InjectFastHTTP(ctx context.Context, req *fasthttp.Request) {
 
 // ExtractFastHTTP extracts W3C TraceContext from an incoming
 // *fasthttp.RequestHeader and returns a context enriched with the
-// span context. It is the fasthttp equivalent of extracting from
-// http.Header in [HTTPMiddleware].
+// span context.
 //
 // It is a no-op when no propagator is configured.
 func ExtractFastHTTP(ctx context.Context, h *fasthttp.RequestHeader) context.Context {

@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Dependencies
+
+- **fasthttp v1.76.0 → v1.77.0: security hardening with no hit-path
+  cost.** The data-plane HTTP stack gains static-file symlink
+  confinement via `os.Root` (bouine serves no static files, so the
+  default `FS` is unused), a fix that stopped custom filesystems from
+  deleting unrelated disk files on stale compressed content, and a fix
+  for kept hijacked connections reading from a recycled request
+  context. `Accept-Encoding` codings carrying a quality value
+  (`gzip;q=0.8`) are now recognized by fasthttp's own negotiation
+  (bouine's `Vary` bucketing is unchanged and still verbatim),
+  HTTP/1.0 clients no longer receive `100-continue`/`103 Early Hints`,
+  and cookie parsing tolerates invalid attributes. None of the touched
+  APIs (`FS`, hijacking, keep-alive limits) are used by bouine; all 27
+  `BenchmarkGate_*` allocation budgets hold unchanged.
+
 ### Changed
 
 - **The H1 fast path is the default path; `experimental.h1_fast_path`

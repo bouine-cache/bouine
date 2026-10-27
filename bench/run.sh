@@ -123,7 +123,9 @@ declare -A BUDGETS=(
     [RoutedFastPath_Hit_TrafficClass_MixedCase]=0
     [HistogramObserve_Native]=0
     [HistogramObserve_Native_Distinct]=0
-    [TracingPipeline_Disabled]=0  (disabled middleware short-circuit: no allocations)
+    # TracingPipeline_Disabled: 0 — the disabled middleware short-circuit
+    # allocates nothing.
+    [TracingPipeline_Disabled]=0
 )
 
 run_bench() {

@@ -104,4 +104,8 @@ func main() {
 	}
 
 	printReport(prof, *rate, *duration, *tracing, *collector, result)
+
+	if coll != nil && coll.srv != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "[collector] exports=%d bytes=%d\n", coll.exports.Load(), coll.bytes.Load())
+	}
 }

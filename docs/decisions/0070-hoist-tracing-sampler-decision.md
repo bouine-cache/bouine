@@ -20,7 +20,7 @@ recorded. Measured on the topology harness (M1 Pro, darwin/arm64):
 
 - enabled + NeverSample (root request): **502 ns / 10 allocs** per
   request, all to conclude "don't sample";
-- enabled + ratio, unsampled remote traceparent: **684 ns / 13 allocs**.
+- enabled + ratio, unsampled remote traceparent: **705 ns / 13 allocs**.
 
 The cost lands on every request that enters a wrapped handler chain —
 data-plane misses, admin requests, and (a surface the audit's D3 missed

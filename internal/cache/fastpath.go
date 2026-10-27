@@ -487,6 +487,19 @@ func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	if req.ScanFlags&api.DisqualifyFastPath != 0 {
 		return Directives{}, false
 	}
+	// The fast path hashes the raw path; the slow path hashes fasthttp's
+	// normalized path. A spelling normalization would change (percent
+	// escapes, dot segments, fragments, non-origin forms) must take the
+	// slow path so both paths compute the same key — and so the origin
+	// (which receives the normalized form via canonicalOriginTarget) and
+	// the key can never claim two different identities (issue #847,
+	// audit AUD-04). Such spellings can never fast-path-hit anyway: the
+	// slow path stores under the normalized key, so this only removes a
+	// lookup that was doomed to miss. Zero allocations: one
+	// short-circuiting scan.
+	if pathNeedsNormalization(req.Path) {
+		return Directives{}, false
+	}
 	var reqCC Directives
 	if ccRaw := req.CacheControlRaw; ccRaw != "" {
 		reqCC = ParseCacheControl(ccRaw)

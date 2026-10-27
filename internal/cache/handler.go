@@ -814,6 +814,98 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 	return h.fastClient.Do(context.Background(), req, resp)
 }
 
+// targetPath returns the path portion of a raw request-target — the
+// bytes the slow path's key hashes and the origin's own parser extracts
+// — without allocating. Origin-form targets are used as-is up to the
+// query/fragment; absolute-form targets (scheme://authority/path)
+// reduce to their path; anything else (asterisk-form, malformed)
+// returns nil so the caller takes the parse fallback. The query is
+// excluded: it crosses to the origin verbatim.
+func targetPath(uri []byte) []byte {
+	rest := uri
+	if len(rest) > 0 && rest[0] != '/' {
+		i := bytes.Index(rest, sSlashSlashSlash)
+		if i < 0 {
+			return nil
+		}
+		rest = rest[i+3:]
+		pathStart := -1
+		for j := 0; j < len(rest); j++ {
+			switch rest[j] {
+			case '/':
+				pathStart = j
+			case '?', '#':
+				// Authority ends with an empty path.
+				return header.S2b("/")
+			}
+			if pathStart >= 0 {
+				break
+			}
+		}
+		if pathStart < 0 {
+			return nil // authority only, no path
+		}
+		rest = rest[pathStart:]
+	}
+	if q := bytes.IndexByte(rest, '?'); q >= 0 {
+		rest = rest[:q]
+	}
+	if f := bytes.IndexByte(rest, '#'); f >= 0 {
+		rest = rest[:f]
+	}
+	return rest
+}
+
+// sSlashSlashSlash is the "://" separator of an absolute-form target.
+var sSlashSlashSlash = []byte("://")
+
+// canonicalOriginTarget normalizes the path of a raw request-target
+// exactly the way the cache key normalizes it — through fasthttp's own
+// URI parser, so the two can never drift (issue #847, audit AUD-04).
+// The origin must receive the identity the key claims: the slow path
+// keys fasthttp's normalized ctx.Path() (percent-decoding, dot-segment
+// resolution, fragment stripping), while the raw target used to be
+// forwarded verbatim — so /a/../b and /b shared one cache key although
+// the origin saw two different targets, and the response fetched under
+// one spelling was stored and served under the other. Absolute-form
+// targets with a canonical path pass through unchanged: the origin
+// extracts the same path the key hashes, so the identities already
+// agree.
+//
+// The query string is preserved verbatim: the key sorts and re-escapes
+// it, but sending the sorted form would change duplicate-param and
+// order semantics origins may rely on (cache.key.dedup is the operator
+// opt-in for order sensitivity).
+//
+// Canonical targets (the overwhelming majority) return the input
+// unchanged — one slice scan, zero allocations; only spellings
+// pathNeedsNormalization flags pay the parse-and-rebuild. Miss-path
+// only: every origin-bound fetch funnels through originURI, never the
+// hit path.
+func canonicalOriginTarget(uri []byte) []byte {
+	if len(uri) == 0 {
+		return uri
+	}
+	if !pathNeedsNormalization(targetPath(uri)) {
+		return uri
+	}
+	u := fasthttp.AcquireURI()
+	defer fasthttp.ReleaseURI(u)
+	if err := u.Parse(nil, uri); err != nil {
+		// Unparseable: forward verbatim. The slow path keys the same
+		// bytes for such a request (fasthttp's ctx parse failed the
+		// same way), so cache and origin still agree.
+		return uri
+	}
+	out := make([]byte, 0, len(uri))
+	out = append(out, u.Path()...)
+	if q := u.QueryString(); len(q) > 0 {
+		out = append(out, '?')
+		out = append(out, q...)
+	}
+	return out
+}
+
 // originURI returns the origin-bound form of uri: the route's strip
 // prefix removed (when configured) and the path_rewrite regex applied
 // (when configured). This is the single choke point every origin-bound
@@ -826,6 +918,11 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 // keep the original uri (config contract in RouteRequest.StripPrefix and
 // RouteRequest.PathRewrite).
 func (h *Handler) originURI(uri []byte) []byte {
+	// Normalize BEFORE stripping: the key hashes the normalized path
+	// (prefix included), so the prefix match must see the same form a
+	// clean spelling of the request would produce — /a/../api/x strips
+	// to /x exactly like /api/x does.
+	uri = canonicalOriginTarget(uri)
 	uri = StripRequestURI(h.stripPrefix, uri)
 	if h.pathRewrite != nil {
 		return h.pathRewrite.RewriteURI(uri)

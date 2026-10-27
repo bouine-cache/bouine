@@ -78,16 +78,23 @@ type RawRequest struct {
 	ConnectionClose bool
 	// OwnerMiss reports that the fast path already asked the key's ring
 	// owner for this request and got a definitive miss (nil object, nil
-	// error). The h1parser transfers it to the fallback RequestCtx under
-	// OwnerMissContextKey so handleCacheMiss skips the duplicate owner
-	// lookup and peer RPC and goes straight to origin. The slow path
-	// only honors the hint on routes WITHOUT a KeyPolicy: the hint flag
-	// does not bind to the producing route's policy, so on a policied
-	// route the slow path cannot prove its peer question identical to
-	// the fast path's and keeps the retry. Never set on peer errors
-	// (the slow-path retry is kept) or on gate rejections (the slow
-	// path, with the route's key policy, may still accept). Reset to
-	// false by the parser's per-request soft reset; zero value = unset.
+	// error), or that the owner-ask was provably futile: the key is in
+	// the unstorable-fill memo window (its last local fill settled
+	// no-store/private, directives that forbid shared storage fleet-wide,
+	// so the owner cannot hold it — finding F12). The h1parser transfers
+	// it to the fallback RequestCtx under OwnerMissContextKey so
+	// handleCacheMiss skips the duplicate owner lookup and peer RPC and
+	// goes straight to origin. The slow path only honors the hint on
+	// routes WITHOUT a KeyPolicy: the hint flag does not bind to the
+	// producing route's policy, so on a policied route the slow path
+	// cannot prove its peer question identical to the fast path's and
+	// keeps the retry (the slow path gates the memoized case directly
+	// for those). Never set on peer errors (the slow-path retry is
+	// kept) or on gate rejections (the slow path, with the route's key
+	// policy, may still accept). The memo verdict is fail-open like the
+	// memo itself: an origin that flips to storable inside the window
+	// costs one own-fill before the window lapses. Reset to false by
+	// the parser's per-request soft reset; zero value = unset.
 	OwnerMiss bool
 	// OwnerGateReject reports that the fast path asked the key's ring
 	// owner and got back an object whose VaryKey failed this request's

@@ -27,6 +27,15 @@ the curated, human-readable summary.
   trace stitching: a sampled incoming `traceparent` now always records
   instead of being subject to a fresh ratio draw that could silently
   drop hops of a sampled CDN → L1 → L2 chain.
+- **Cache: the unstorable-fill memo gates the peer ask.** A key whose
+  most recent local fill settled `no-store`/`private` cannot be held
+  by its ring owner either — those directives forbid shared storage
+  fleet-wide — yet every request for a remote-owned key still paid a
+  bare-key peer RPC that deterministically 404'd before its own origin
+  fetch (2/3 of requests per hot personalized key on a 3-node ring).
+  Both the fast path and the slow path now consult the 5-second
+  unstorable memo before the ask, fail-open like the memo itself, and
+  the fast path flags the request so the slow path does not re-ask.
 
 ### Added
 

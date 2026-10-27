@@ -116,8 +116,8 @@ jobs:
       - run: go test -race -count=1 -timeout=120s ./...
 
   test-macos:
-    name: test (macos-14)
-    runs-on: macos-14
+    name: test (macos-15)
+    runs-on: macos-15
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7

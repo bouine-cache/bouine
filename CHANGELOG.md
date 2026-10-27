@@ -38,6 +38,34 @@ the curated, human-readable summary.
   `listen.idle_timeout`) on small pods. Refusals remain instant
   `503 + close`, now counted exactly by the new metric.
 
+### Fixed
+
+- **The origin-bound request-target now carries the identity the cache
+  key claims (#847, audit AUD-04).** The slow path builds the key from
+  fasthttp's normalized path (percent-decoding, dot-segment resolution),
+  but the raw request-target used to be forwarded verbatim — so
+  `/a/../b` and `/b` shared one cache key while the origin saw two
+  different targets, and the response fetched under one spelling was
+  stored and served under the other. `originURI` (the single choke point
+  every origin-bound fetch passes through) now normalizes the target's
+  path through fasthttp's own URI parser, so the origin always receives
+  the spelling the key hashed: canonical targets — the overwhelming
+  majority, including absolute-form ones — cross unchanged with one
+  zero-allocation slice scan, and only dot-segment, percent-escaped, or
+  fragment-bearing spellings pay a parse. The query string still
+  crosses verbatim (the key sorts and re-escapes it, but reordering on
+  the wire would change duplicate-param and order semantics;
+  `cache.key.dedup` remains the operator opt-in). Two parity gaps from
+  the same root are closed with it: the H1 fast path now declines
+  paths fasthttp normalization would rewrite (it hashes the raw path,
+  so such spellings could never fast-path-hit anyway — the check only
+  removes a doomed lookup), and `BuildKeyFromURL` resolves dot
+  segments so `bouine keys find` / `bouine purge` address the key the
+  data plane actually stored. No stored-key changes: canonical
+  spellings hash identically, so nothing invalidates on upgrade.
+  Pinned by `key_origin_parity_regression_test.go`; bench gate and
+  cache-tests score unchanged.
+
 ## [0.6.2] - 2026-10-28
 
 ### Fixed

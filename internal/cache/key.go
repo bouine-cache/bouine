@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/bouine-cache/xxhash/v3"
@@ -34,8 +36,25 @@ func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if err != nil {
 		return api.Key{}
 	}
+	path := u.Path
+	// Align the admin-plane key with the data-plane key (issue #847):
+	// net/url decodes percent escapes but does NOT resolve dot
+	// segments, while every data-plane key hashes fasthttp's normalized
+	// path (decode + resolve). Without this, `bouine keys find` and
+	// `bouine purge` of /a/../b computed a key nothing was ever stored
+	// under. Percent escapes are already decoded in u.Path, so only dot
+	// segments (and non-origin forms) can diverge; resolve them through
+	// fasthttp's own parser on the raw URL so the result is byte-equal
+	// to what BuildKeyFast produced for the same request.
+	if pathNeedsNormalization(path) {
+		fu := fasthttp.AcquireURI()
+		if err := fu.Parse(nil, []byte(rawURL)); err == nil {
+			path = string(fu.Path())
+		}
+		fasthttp.ReleaseURI(fu)
+	}
 	_ = u // URL parsed for BuildKeyFromURL
-	ri := RequestInfo{Method: "GET", URI: rawURL, Host: u.Host, Path: u.Path, TLS: u.Scheme == "https"}
+	ri := RequestInfo{Method: "GET", URI: rawURL, Host: u.Host, Path: path, TLS: u.Scheme == "https"}
 	return BuildKey(ri, policy)
 }
 
@@ -201,6 +220,48 @@ var (
 	sGET      = "GET"
 	headBytes = []byte("HEAD")
 )
+
+// pathNeedsNormalization reports whether fasthttp's URI normalization
+// would change the raw path: it percent-decodes %XX, resolves /./ and
+// /../ segments and trailing /. and /.., strips a fragment, and adds a
+// leading slash. `//` is deliberately NOT flagged: the canonical path
+// builders collapse duplicate slashes themselves (appendCanonicalPath
+// and its byte twin), so both key paths agree on that spelling already.
+//
+// This is the parity guard for issue #847 (audit AUD-04): the H1 fast
+// path hashes the raw path while the slow path hashes fasthttp's
+// normalized ctx.Path(), so any spelling this function flags must not
+// take the fast path — and the origin-bound target must be normalized
+// the same way (canonicalOriginTarget), so the origin always receives
+// the identity the key claims.
+//
+// Generic over string and []byte so the fast path (string) and the
+// origin-bound target ([]byte) share one implementation. Zero
+// allocations; a single short-circuiting scan.
+func pathNeedsNormalization[path string | []byte](p path) bool {
+	if len(p) == 0 || p[0] != '/' {
+		// Not an origin-form path (absolute-form, asterisk-form, or
+		// empty): normalization rewrites it into parts.
+		return true
+	}
+	for i := 1; i < len(p); i++ {
+		switch p[i] {
+		case '%', '#':
+			return true // percent-decoding / fragment stripping
+		case '.':
+			if p[i-1] != '/' {
+				continue // inside a name: /logo.png is canonical
+			}
+			if i+1 == len(p) || p[i+1] == '/' {
+				return true // trailing "/." or a "/./" segment
+			}
+			if p[i+1] == '.' && (i+2 == len(p) || p[i+2] == '/') {
+				return true // trailing "/.." or a "/../" segment
+			}
+		}
+	}
+	return false
+}
 
 // bytesEqual compares two byte slices without allocation.
 func bytesEqual(a, b []byte) bool {

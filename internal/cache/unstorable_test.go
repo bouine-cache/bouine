@@ -193,7 +193,24 @@ func TestFetchAndStore_UnstorableFillMemoizesBypass(t *testing.T) {
 		x := newUnstorableHarness(t, "no-store")
 
 		// First burst: memo empty, so the wave parks on one leader fill.
-		first := x.burst(callers, "/memo")
+		// The leader's fetch is held open until the followers are durably
+		// parked — without the hold, sequential scheduling (low GOMAXPROCS
+		// under -race) lets each caller settle and memoize before the next
+		// one enters, so no wave ever parks, the released-wave stagger never
+		// runs, and the arrival-spread assertion below fails on scheduler
+		// luck (the CI flake on ubuntu-24.04-arm), not on a behavior change.
+		x.holdNext.Store(true)
+		var first []string
+		waveDone := make(chan struct{})
+		go func() {
+			defer close(waveDone)
+			first = x.burst(callers, "/memo")
+		}()
+		synctest.Wait()
+		require.Equal(t, int64(1), x.fetches.Load(),
+			"first wave: the wave collapses onto one held leader fill (the parked followers have not fetched)")
+		close(x.release)
+		<-waveDone
 		synctest.Wait()
 		require.Equal(t, int64(callers), x.fetches.Load(),
 			"first wave: one fetch per caller (leader + released followers)")

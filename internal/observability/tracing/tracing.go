@@ -47,16 +47,17 @@ func Tracer() trace.Tracer {
 	return otel.Tracer(tracerName)
 }
 
-// HTTPMiddleware wraps an http.Handler with an OTel span named spanName.
-// The span inherits any trace context propagated in the incoming HTTP
-// headers via W3C TraceContext (http.Header propagation).
-
 // FastHTTPMiddleware wraps a fasthttp.RequestHandler with an OTel span
 // named spanName. The span inherits trace context from the incoming
 // request headers via W3C TraceContext (fasthttpHeaderCarrier).
+// When no tracer is configured, the wrapped handler runs untouched.
 func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	t := Tracer()
 	return func(ctx *fasthttp.RequestCtx) {
+		if !tracerEnabled.Load() {
+			next(ctx)
+			return
+		}
 		scheme := "http"
 		if ctx.IsTLS() {
 			scheme = "https"
@@ -142,11 +143,6 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 func TracerEnabled() bool {
 	return tracerEnabled.Load()
 }
-
-// InjectHTTP stamps the W3C TraceContext (traceparent / tracestate) and
-// Baggage headers into req so the upstream origin can continue the trace.
-// It is a no-op when no tracer is configured or the context has no active
-// span, so callers do not need to guard against unconfigured tracing.
 
 // RecordError records err on span and sets the span status to Error.
 // Safe to call with a nil span.

@@ -296,6 +296,22 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	if isLocal {
 		return nil, false
 	}
+	// Unstorable-fill memo gate (finding F12): a key whose most recent
+	// local fill settled no-store/private within the memo window cannot
+	// be served by the owner either — those directives forbid shared
+	// storage fleet-wide — so the bare-key ask would 404 every time.
+	// Without this gate every request for a remote-owned personalized
+	// key pays a wasted peer RPC before its own origin fetch (2/3 of
+	// them on a 3-node ring), on the hot keys where it hurts most.
+	// Fail-open exactly like the memo's slow-path consumer: if the
+	// origin flipped to storable inside the window, this request fills
+	// its own once and the window lapses; OwnerMiss keeps the slow path
+	// from re-asking. Store-constructed handlers (nil owner) keep the
+	// ask — the memo is Handler-owned state.
+	if f.owner != nil && f.owner.unstorableMemo.bypass(lookupKey) {
+		req.OwnerMiss = true
+		return nil, false
+	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err == nil && peerObj != nil && isPeerResolverMetadata(peerObj) {
 		// ADR-0068: the owner answered the bare primary-key ask with

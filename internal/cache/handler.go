@@ -1772,7 +1772,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	if h.peerHintsApply(obj, ctx) {
 		// Either hint proves the owner was already asked for exactly
 		// this (nil-policy, plain-key) question: skip the duplicate RPC.
-	} else if h.ownerFn != nil && h.peerFetch != nil {
+	} else if h.ownerFn != nil && h.peerFetch != nil && !h.unstorableMemo.bypass(lookupKey) {
+		// The memo gate mirrors the fast path's (finding F12): a key
+		// whose last local fill settled no-store/private cannot be
+		// held by the owner, so the ask would 404. Keyed by the ask key
+		// (lookupKey) — fail-open wherever that differs from the memo's
+		// primary key (policied routes) or the window has lapsed.
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			// ADR-0068: the fast path may have already asked this exact
 			// blank question and fetched the metadata-only resolver —

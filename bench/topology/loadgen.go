@@ -280,33 +280,51 @@ func (l *loadGen) stop() {
 }
 
 type measureSnapshot struct {
-	wall time.Time
-	ru   syscall.Rusage
-	ms   runtime.MemStats
+	wall    time.Time
+	ru      syscall.Rusage
+	ms      runtime.MemStats
+	sent    int64
+	dropped int64
+	errors  int64
+	non200  int64
 }
 
-func takeSnapshot() measureSnapshot {
+func (l *loadGen) takeSnapshot() measureSnapshot {
 	var s measureSnapshot
 	runtime.ReadMemStats(&s.ms)
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &s.ru)
 	s.wall = time.Now()
+	// Outcome and error counters are snapshotted at the same instant as
+	// the runtime stats so completed/dropped/errors/non200 are bracketed
+	// to the measurement window exactly like Mallocs and CPU: requests
+	// completing during collect() must not widen the denominator of
+	// share, mallocs/req or cpu_us/req.
+	s.sent = l.sent.Load()
+	s.dropped = l.dropped.Load()
+	s.errors = l.errors.Load()
+	s.non200 = l.non200.Load()
 	return s
 }
 
 // run drives warmup then the measurement window, and returns the window's
 // aggregated result. The loadgen runs continuously across both phases; the
-// recorder, origin counters and runtime snapshots bracket only the
-// measurement window.
+// recorder, the outcome/error counters, the origin and peer counters and
+// the runtime snapshots bracket only the measurement window — warmup
+// requests never dilute the reported shares or per-request derivatives.
 func (l *loadGen) run() runResult {
 	l.start()
 	time.Sleep(l.cfg.warmup)
 
 	l.rec.reset()
+	l.sent.Store(0)
+	l.dropped.Store(0)
+	l.errors.Store(0)
+	l.non200.Store(0)
 	originBefore := l.cfg.originStats()
 	peerBefore := l.cfg.peerStats()
-	before := takeSnapshot()
+	before := l.takeSnapshot()
 	time.Sleep(l.cfg.measure)
-	after := takeSnapshot()
+	after := l.takeSnapshot()
 	peerAfter := l.cfg.peerStats()
 	originAfter := l.cfg.originStats()
 	result := l.collect(before, after, originBefore, originAfter, peerBefore, peerAfter)
@@ -348,10 +366,10 @@ type nodeLatency struct {
 
 func (l *loadGen) collect(before, after measureSnapshot, originBefore, originAfter originStats, peerBefore, peerAfter [nodesPerTier]peerFetchCounters) runResult {
 	var r runResult
-	r.completed = l.sent.Load()
-	r.dropped = l.dropped.Load()
-	r.errors = l.errors.Load()
-	r.non200 = l.non200.Load()
+	r.completed = after.sent - before.sent
+	r.dropped = after.dropped - before.dropped
+	r.errors = after.errors - before.errors
+	r.non200 = after.non200 - before.non200
 	r.origin.ssrRendered = originAfter.ssrRendered - originBefore.ssrRendered
 	r.origin.nostoreSeen = originAfter.nostoreSeen - originBefore.nostoreSeen
 	for n := range nodesPerTier {

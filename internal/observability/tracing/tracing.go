@@ -42,6 +42,29 @@ const otelUserValueKey = "otel.ctx"
 // global tracer, avoiding ~3 allocations per fetch on the miss path.
 var tracerEnabled atomic.Bool
 
+// hoistMode records what InitTracer's sampler deterministically drops, so
+// the middleware and origin-span helpers can skip the attribute building
+// and the SDK Start call entirely for requests the sampler provably will
+// not record. It is the mirror of the sampler InitTracer installs and
+// must only be written by InitTracer — a directly-installed provider
+// (tests, tracingtest) leaves it at hoistNone, which degrades to the
+// pre-hoist behavior: call the SDK and build attributes unconditionally.
+type hoistMode int32
+
+const (
+	// hoistNone mirrors AlwaysSample: every span records, so there is
+	// nothing to hoist and attributes are never wasted.
+	hoistNone hoistMode = iota
+	// hoistAll mirrors NeverSample: nothing records, ever.
+	hoistAll
+	// hoistUnsampledParent mirrors ParentBased(TraceIDRatioBased):
+	// an unsampled parent (remote or local) deterministically drops the
+	// child, so the whole span pipeline can be skipped for it.
+	hoistUnsampledParent
+)
+
+var samplerHoist atomic.Int32
+
 // Tracer returns the global tracer under the bouine instrumentation name.
 func Tracer() trace.Tracer {
 	return otel.Tracer(tracerName)
@@ -51,6 +74,16 @@ func Tracer() trace.Tracer {
 // named spanName. The span inherits trace context from the incoming
 // request headers via W3C TraceContext (fasthttpHeaderCarrier).
 // When no tracer is configured, the wrapped handler runs untouched.
+//
+// The sampler's drop decision is hoisted ahead of the attribute building
+// (finding F4): the four attribute strings are byte→string conversions
+// the request goroutine pays only to learn "don't sample" when the
+// sampler drops. For the configurations where the drop is provable
+// (NeverSample; ParentBased with an unsampled parent) the whole SDK
+// Start call is skipped too; for indeterminate cases (root spans under
+// a ratio sampler — the trace ID is generated inside the SDK) the span
+// starts without attributes and sets them only when recording, so a
+// dropped root never pays for attributes either.
 func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	t := Tracer()
 	return func(ctx *fasthttp.RequestCtx) {
@@ -70,15 +103,37 @@ func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.
 		// handler) will access freed RequestCtx memory via
 		// context.parentCancelCtx.
 		extractedCtx := ExtractFastHTTP(context.Background(), &ctx.Request.Header)
+		switch hoistMode(samplerHoist.Load()) {
+		case hoistAll:
+			// NeverSample drops every span; the parent span context is
+			// still published so downstream origin spans keep the
+			// (unsampled) trace-id chain.
+			ctx.SetUserValue(otelUserValueKey, extractedCtx)
+			next(ctx)
+			return
+		case hoistUnsampledParent:
+			// ParentBased(TraceIDRatioBased): an unsampled remote parent
+			// deterministically drops the child. Keep extractedCtx as
+			// the published context — it already carries the remote
+			// span context, so children and logs can still read the trace
+			// ID without a span ever being created.
+			if sc := trace.SpanContextFromContext(extractedCtx); sc.IsRemote() && !sc.IsSampled() {
+				ctx.SetUserValue(otelUserValueKey, extractedCtx)
+				next(ctx)
+				return
+			}
+		}
 		spanCtx, span := t.Start(extractedCtx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(
+		)
+		if span.IsRecording() {
+			span.SetAttributes(
 				attribute.String("http.method", string(ctx.Method())),
 				attribute.String("http.scheme", scheme),
 				attribute.String("http.host", string(ctx.Host())),
 				attribute.String("http.path", string(ctx.Path())),
-			),
-		)
+			)
+		}
 		defer span.End()
 		ctx.SetUserValue(otelUserValueKey, spanCtx)
 		next(ctx)
@@ -98,27 +153,40 @@ func SpanContextFromRequest(ctx *fasthttp.RequestCtx) context.Context {
 // StartOriginSpan starts the "bouine.origin" span for an origin fetch,
 // parented on the client's trace. method and path are byte slices so the
 // disabled-tracer path converts nothing; route is the bounded route label
-// (http.route), never the raw path. Attributes are built conditionally so
-// empty pool/route values are omitted rather than counted as dropped
-// attributes by the SDK.
+// (http.route), never the raw path. The sampler-drop hoist mirrors
+// FastHTTPMiddleware (finding F4): under NeverSample the span pipeline is
+// skipped outright, and under ParentBased a parent span context that is
+// valid but unsampled deterministically drops the child — origin spans
+// are only ever children, so no attribute is built for a span that cannot
+// record. Indeterminate parents (no valid span context — a ratio-sampled
+// root) start the span bare and set attributes only when recording.
 func StartOriginSpan(parent context.Context, method, path []byte, pool, route string) (context.Context, trace.Span) {
 	if !tracerEnabled.Load() {
 		return parent, trace.SpanFromContext(parent)
 	}
-	attrs := make([]attribute.KeyValue, 0, 4)
-	attrs = append(attrs,
-		attribute.String("http.method", string(method)),
-		attribute.String("http.path", string(path)),
-	)
-	if pool != "" {
-		attrs = append(attrs, attribute.String("upstream_pool", pool))
+	switch hoistMode(samplerHoist.Load()) {
+	case hoistAll:
+		return parent, trace.SpanFromContext(parent)
+	case hoistUnsampledParent:
+		if sc := trace.SpanContextFromContext(parent); sc.IsValid() && !sc.IsSampled() {
+			return parent, trace.SpanFromContext(parent)
+		}
 	}
-	if route != "" {
-		attrs = append(attrs, attribute.String("http.route", route))
+	ctx, span := Tracer().Start(parent, "bouine.origin")
+	if span.IsRecording() {
+		attrs := make([]attribute.KeyValue, 0, 4)
+		attrs = append(attrs,
+			attribute.String("http.method", string(method)),
+			attribute.String("http.path", string(path)),
+		)
+		if pool != "" {
+			attrs = append(attrs, attribute.String("upstream_pool", pool))
+		}
+		if route != "" {
+			attrs = append(attrs, attribute.String("http.route", route))
+		}
+		span.SetAttributes(attrs...)
 	}
-	ctx, span := Tracer().Start(parent, "bouine.origin",
-		trace.WithAttributes(attrs...),
-	)
 	return ctx, span
 }
 
@@ -176,12 +244,22 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 		return func() {}, fmt.Errorf("otlp exporter: %w", err)
 	}
 
+	// ParentBased(TraceIDRatioBased) fixes trace stitching for chains that
+	// arrive sampled (CDN → L1 → L2): under the bare TraceIDRatioBased the
+	// sampled-flag of an incoming traceparent was ignored and a sampled
+	// trace could silently drop hops (finding F4/D2). SamplingRate 0 and 1
+	// keep their exact Always/Never semantics. The hoist mode published
+	// alongside is the mirror of this choice; both must change together.
 	sample := sdktrace.AlwaysSample()
+	hoist := hoistNone
 	if cfg.SamplingRate > 0 && cfg.SamplingRate < 1 {
-		sample = sdktrace.TraceIDRatioBased(cfg.SamplingRate)
+		sample = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SamplingRate))
+		hoist = hoistUnsampledParent
 	} else if cfg.SamplingRate == 0 {
 		sample = sdktrace.NeverSample()
+		hoist = hoistAll
 	}
+	samplerHoist.Store(int32(hoist))
 
 	svcName := cfg.ServiceName
 	if svcName == "" {

@@ -10,6 +10,32 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Performance
+
+- **Tracing: the sampler's drop decision is hoisted ahead of span
+  attribute building (ADR-0070).** With tracing enabled, every request
+  entering a wrapped handler chain (data-plane misses, admin requests,
+  and — a previously unmeasured surface — every served peer RPC) paid
+  four attribute conversions plus the OTel SDK's start machinery to
+  learn "don't sample": 502 ns / 10 allocs per request at
+  `sampling_rate: 0`, 684 ns / 13 allocs under a ratio sampler with an
+  unsampled incoming traceparent. Dropped requests now skip the
+  attribute building entirely, and in the two deterministic
+  configurations (sampling_rate 0, and unsampled parents under
+  ParentBased) the whole SDK start call; sampled requests are
+  unchanged. The ratio sampler is wrapped in `ParentBased`, fixing
+  trace stitching: a sampled incoming `traceparent` now always records
+  instead of being subject to a fresh ratio draw that could silently
+  drop hops of a sampled CDN → L1 → L2 chain.
+
+### Added
+
+- `bench/topology`: an in-process 3-node strong-cluster measurement
+  harness (tier boot via the cobra entrypoint, SSR/no-store origins,
+  open-model Zipf load generator with per-outcome percentiles, fake
+  OTLP collector, tracing middleware micro-benchmarks) used to size
+  the changes above and re-verify them on the pinned runner.
+
 ## [0.6.0] - 2026-10-26
 
 ### Dependencies

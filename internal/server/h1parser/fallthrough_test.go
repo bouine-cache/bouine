@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -438,6 +439,127 @@ func dialTCPPair(t *testing.T) (client, server net.Conn) {
 	require.Nil(t, res.err)
 
 	return c, res.conn
+}
+
+// TestHandleFallThrough_PoolReaderReset pins the pooled-reader reset
+// contract: a checked-out *bufio.Reader must never carry buffered bytes
+// from a previous fall-through into the next request's parse. A pipelined
+// or aborted request can leave bytes unread in the reader's buffer; the
+// pool hands the same entry to the next fall-through (possibly on another
+// connection — the Parser is shared listener-wide), so both release and
+// checkout must Reset. Without it the stale prefix would corrupt the
+// next request's head and the fallback handler would never run.
+func TestHandleFallThrough_PoolReaderReset(t *testing.T) {
+	var gotPaths []string
+	handler := func(ctx *fasthttp.RequestCtx) {
+		gotPaths = append(gotPaths, string(ctx.Path()))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
+	parser := New(nil, handler)
+	req := func(path string) *api.RawRequest {
+		return &api.RawRequest{
+			Method:      "GET",
+			Path:        path,
+			HTTPVersion: "HTTP/1.1",
+			Host:        "example.com",
+			Headers: [api.MaxRawHeaders]api.RawHeader{
+				{Key: "Host", Value: "example.com"},
+				{Key: "Connection", Value: "close"},
+			},
+			NHeaders: 2,
+		}
+	}
+
+	// First fall-through serves and releases its reader to the pool.
+	_, err := parser.handleFallThrough(&mockConn{}, req("/first"), nil)
+	require.NoError(t, err, "first handleFallThrough")
+	require.Equal(t, []string{"/first"}, gotPaths)
+
+	// Dirty the pooled entry the way an aborted or pipelined
+	// fall-through could: bytes read into the reader but never consumed
+	// by a request must be dropped, not replayed into the next parse.
+	dirty := acquireReader(&parser.fallReaderPool, &repeatReader{buf: []byte("STALE-UNREAD-BYTES")})
+	_, _ = dirty.Discard(4)
+	releaseReader(&parser.fallReaderPool, dirty)
+
+	// The second fall-through checks out that same entry on another
+	// connection: the stale buffered bytes must be gone.
+	_, err = parser.handleFallThrough(&mockConn{}, req("/second"), nil)
+	require.NoError(t, err, "second handleFallThrough")
+	require.Equal(t, []string{"/first", "/second"}, gotPaths,
+		"stale reader state must not corrupt the next fall-through")
+}
+
+// TestHandleFallThroughRaw_ServesOversizeHead pins the oversize path:
+// the buffered prefix plus nothing more on the wire parses fully, the
+// fallback handler runs, and the response always carries
+// Connection: close (the fallback owns the read state afterwards, so the
+// connection never continues).
+func TestHandleFallThroughRaw_ServesOversizeHead(t *testing.T) {
+	buffered := []byte("GET /big HTTP/1.1\r\nHost: example.com\r\nX-Oversize: " +
+		strings.Repeat("x", 2048) + "\r\n\r\n")
+	var called bool
+	w := &bytes.Buffer{}
+	handler := func(ctx *fasthttp.RequestCtx) {
+		called = true
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
+	parser := New(nil, handler)
+
+	parser.handleFallThroughRaw(&mockConn{r: bytes.NewReader(nil), w: w}, buffered)
+
+	require.True(t, called, "fallback handler must run for the oversize request")
+	assert.Contains(t, w.String(), "200 OK")
+	assert.Contains(t, w.String(), "Connection: close")
+}
+
+// TestHandleFallThroughRaw_PoolReaderReset mirrors
+// TestHandleFallThrough_PoolReaderReset for the 64 KiB oversize pool:
+// stale buffered bytes must not leak into the next oversize parse.
+func TestHandleFallThroughRaw_PoolReaderReset(t *testing.T) {
+	var gotPaths []string
+	handler := func(ctx *fasthttp.RequestCtx) {
+		gotPaths = append(gotPaths, string(ctx.Path()))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
+	parser := New(nil, handler)
+	head := func(path string) []byte {
+		return []byte("GET " + path + " HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	}
+
+	parser.handleFallThroughRaw(&mockConn{}, head("/first"))
+
+	dirty := acquireReader(&parser.oversizeReaderPool, &repeatReader{buf: []byte("STALE-UNREAD-BYTES")})
+	_, _ = dirty.Discard(4)
+	releaseReader(&parser.oversizeReaderPool, dirty)
+
+	parser.handleFallThroughRaw(&mockConn{}, head("/second"))
+
+	require.Equal(t, []string{"/first", "/second"}, gotPaths,
+		"stale reader state must not corrupt the next oversize fall-through")
+}
+
+// TestAcquireReleaseReader pins the acquire/release helpers themselves:
+// released readers are re-pointed at a non-blocking placeholder (reading
+// returns EOF, never stale bytes), keep their buffer size, and a checked
+// out reader starts empty regardless of what the previous holder left.
+func TestAcquireReleaseReader(t *testing.T) {
+	pool := sync.Pool{New: func() any { return bufio.NewReaderSize(eofReader{}, readBufferSize) }}
+
+	br := acquireReader(&pool, &repeatReader{buf: []byte("SOMETHING")})
+	_, _ = br.Discard(4)
+	require.Equal(t, readBufferSize, br.Size(), "pooled reader buffer size")
+	require.NotZero(t, br.Buffered(), "precondition: reader holds unread bytes")
+	releaseReader(&pool, br)
+
+	br = acquireReader(&pool, &repeatReader{buf: []byte("SOMETHING")})
+	require.Zero(t, br.Buffered(), "checkout must reset buffered state")
+	releaseReader(&pool, br)
+
+	var eof eofReader
+	n, err := eof.Read(make([]byte, 8))
+	require.ErrorIs(t, err, io.EOF)
+	require.Zero(t, n)
 }
 
 type mockConn struct {

@@ -280,7 +280,26 @@ the curated, human-readable summary.
   the issue itself): URL→key is deterministic, key→URL is impossible
   (the XXH128 key is an irreversible hash), which is why bouine, like
   Varnish, has no object listing. Runbook 63; the bouineapi SDK
-  gained `Client.KeysFind`, `Client.KeysTop`, and `Client.KeysRecent`.
+  gained `Client.KeysFind`, `Client.KeysTop`, and   `Client.KeysRecent`.
+
+### Performance
+
+- **Pooled fall-through `bufio.Readers` in the H1 parser.** The
+  fall-through paths (miss fill, bypass, dynamic POST — ~43% of
+  CF-realistic traffic) allocated a fresh 16 KiB `*bufio.Reader` per
+  request (`handleFallThrough`) and 64 KiB on the oversize-header
+  fallback (`handleFallThroughRaw`) — measured at ~50% of all
+  allocated bytes per pod under saturation load (~25-60 MB/s),
+  driving GC cycles every few hundred ms and burning 10-40% CPU in
+  scan/mark. Readers are now pooled per listener (`sync.Pool` on the
+  shared `Parser`, sized 16 KiB/64 KiB) and fully `Reset` on both
+  checkout (re-pointed at the per-request prefix replay, stale
+  buffered bytes discarded) and release (connection reference
+  dropped). Safe to reuse because fasthttp copies header values out
+  of the peek buffer into its own byte buckets. Miss-path
+  `handleFallThrough` drops from 19,335 B/op / 23 allocs to
+  2,820 B/op / 21 allocs in the micro-bench, and `bufio.NewReaderSize`
+  vanishes from alloc_space profiles. The hit path is untouched.
 
 ### Documentation
 

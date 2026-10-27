@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/platform"
@@ -31,6 +32,12 @@ import (
 // 99.9%+ of real-world HTTP/1.1 request headers. Requests exceeding
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
+
+// oversizeBufferSize is the bufio.Reader buffer size for the
+// oversize-header fallback (headers that exceeded readBufferSize): the
+// 16 KiB already buffered plus the remainder still on the wire must fit,
+// and the per-header caps (AGENTS.md §6) bound the head at 64 KiB.
+const oversizeBufferSize = 64 * 1024
 
 // refreshThreshold is the minimum remaining read-deadline window below
 // which Serve re-arms the read deadline: one setsockopt per interval
@@ -59,6 +66,28 @@ type Parser struct {
 	// listener uses it to distinguish idle from in-flight connections
 	// during graceful shutdown (fasthttp.Server.Shutdown parity).
 	connState func(conn net.Conn, active bool)
+	// fallReaderPool caches *bufio.Readers with readBufferSize-byte
+	// buffers for the fall-through request replays. handleFallThrough
+	// allocates a fresh 16 KiB reader per fall-through request without
+	// it; at a ~43% fall-through rate under load that alone was ~50% of
+	// all allocated bytes (~25-60 MB/s per pod), driving GC cycles every
+	// few hundred ms and burning 10-40% CPU in scan/mark. Entries are
+	// Reset on checkout (re-pointed at the per-request prefixConn,
+	// stale buffered bytes discarded) and on release (reference dropped
+	// so a pooled entry never pins a connection). The Parser is shared
+	// by every connection of a listener, so the pool is process-wide
+	// and entry count tracks in-flight fall-throughs, not open conns.
+	// Pooled readers are safe to reuse: fasthttp copies header values
+	// out of the peek buffer into its own byte buckets
+	// (header.go parseHeaders: append(h.host[:0], s.value...)).
+	fallReaderPool sync.Pool
+
+	// oversizeReaderPool caches the 64 KiB readers for the
+	// oversize-header fallback (handleFallThroughRaw). Same reset
+	// contract as fallReaderPool; a separate pool so the common path
+	// does not pay 64 KiB per entry.
+	oversizeReaderPool sync.Pool
+
 	scheme    string
 	idleRead  time.Duration
 	writeTime time.Duration
@@ -77,6 +106,8 @@ func New(fastPath api.FastPathHandler, fallback fasthttp.RequestHandler, opts ..
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.fallReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, readBufferSize) }
+	p.oversizeReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, oversizeBufferSize) }
 	return p
 }
 
@@ -696,13 +727,42 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Ti
 	return err
 }
 
+// eofReader is the placeholder io.Reader pooled *bufio.Readers are Reset
+// to on release: it never yields data, so a reader left pointing at it
+// can never read stale bytes if used before its next checkout, and the
+// Reset drops the previous prefixConn (and its net.Conn) reference.
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+// acquireReader checks out a pooled *bufio.Reader and re-points it at rd.
+// Reset discards any buffered bytes left over from the previous checkout —
+// pipelined bytes buffered past a previous request's body must never leak
+// into the next request's parse — and keeps the existing buffer, so the
+// 16 KiB/64 KiB allocation happens only when the pool is cold.
+func acquireReader(pool *sync.Pool, rd io.Reader) *bufio.Reader {
+	br := pool.Get().(*bufio.Reader)
+	br.Reset(rd)
+	return br
+}
+
+// releaseReader returns br to pool after a full reset: buffered bytes are
+// discarded and the underlying reader reference is dropped so a pooled
+// entry never pins a prefixConn (and through it a net.Conn) past its
+// request's lifetime (AGENTS.md §7: always reset on put).
+func releaseReader(pool *sync.Pool, br *bufio.Reader) {
+	br.Reset(eofReader{})
+	pool.Put(br)
+}
+
 // handleFallThrough serves a miss-path request via the fallback
 // fasthttp.RequestHandler. Instead of copying pre-buffered bytes into the
 // ctx and truncating bodies that span multiple TCP reads, it replays the
 // buffered request bytes through a prefixConn so fasthttp's own parser
 // re-reads the request with full body framing (Content-Length, chunked,
-// trailers, Expect: 100-continue) from the live socket. This costs one
-// small allocation on the miss path only — the hit path is untouched.
+// trailers, Expect: 100-continue) from the live socket. The head rebuild
+// and the pooled *bufio.Reader are the only per-request allocations —
+// the hit path is untouched.
 //
 // Returns (close, err). When close is true the caller should return
 // from the keep-alive loop — the client requested Connection: close
@@ -727,7 +787,10 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// 16 KiB matches readBufferSize: the rebuilt head plus any buffered
 	// excess can reach that size, and fasthttp errors with "small read
 	// buffer" when the bufio.Reader cannot hold the full header block.
-	br := bufio.NewReaderSize(rc, readBufferSize)
+	// The reader is pooled — see fallReaderPool — so this is a checkout,
+	// not a per-request allocation.
+	br := acquireReader(&p.fallReaderPool, rc)
+	defer releaseReader(&p.fallReaderPool, br)
 	if err := ctx.Request.Read(br); err != nil {
 		// Malformed input beyond what the fast parser rejected — the
 		// connection state is now indeterminate; close it without
@@ -757,10 +820,17 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 
 	p.fallback(&ctx)
 
+	return p.writeFallThroughResponse(conn, &ctx, clientClose)
+}
+
+// writeFallThroughResponse writes the fallback handler's response and
+// reports whether the connection may continue (false) or must close
+// (true). Shared by both fall-through paths.
+func (p *Parser) writeFallThroughResponse(conn net.Conn, ctx *fasthttp.RequestCtx, clientClose bool) (bool, error) {
 	// Propagate Connection: close from the request to the response so
 	// the client knows the connection will not be reused. The fasthttp
 	// server's own serve loop does this automatically (server.go:2678),
-	// but handleFallThrough bypasses that loop.
+	// but the fall-through paths bypass that loop.
 	if clientClose {
 		ctx.Response.Header.SetConnectionClose()
 	}
@@ -872,25 +942,19 @@ func (p *Parser) handleFallThroughRaw(conn net.Conn, buffered []byte) {
 	// The buffered bytes alone can approach 16 KiB (the h1parser read
 	// buffer), so the bufio.Reader must be large enough to hold them plus
 	// the remainder from the socket; otherwise fasthttp fails with
-	// "small read buffer".
-	br := bufio.NewReaderSize(rc, 64*1024)
+	// "small read buffer". Pooled like the fall-through reader — see
+	// oversizeReaderPool.
+	br := acquireReader(&p.oversizeReaderPool, rc)
+	defer releaseReader(&p.oversizeReaderPool, br)
 	if err := ctx.Request.Read(br); err != nil {
 		_ = writeBadRequest(conn)
 		return
 	}
 
 	p.fallback(&ctx)
-	ctx.Response.Header.SetConnectionClose()
-
-	// Streamed responses re-arm the write deadline per Write (see
-	// handleFallThrough); this connection always closes after the
-	// response either way (the fallback owned the read state).
-	writeConn := conn
-	if ctx.Response.IsBodyStream() {
-		writeConn = &idleWriteConn{Conn: conn, budget: p.writeTime}
-	}
-	_ = conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime))
-	_, _ = ctx.Response.WriteTo(writeConn)
+	// clientClose=true: the fallback owned the read state afterwards, so
+	// this connection always closes after the response.
+	_, _ = p.writeFallThroughResponse(conn, &ctx, true)
 }
 
 // idleWriteConn re-arms the write deadline before every Write, turning

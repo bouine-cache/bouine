@@ -61,9 +61,15 @@ fresh errors — the error counter is zeroed on restore, so the threshold
 counts new failures only. Expect a broken target with a short window to
 oscillate; that is the knob's contract, and the operator opted in.
 
-Without `eject_for` (or an active health check), an ejected target stays
-out until a manual restore — the dashboard's "ejected targets never
-rejoin" insight fires for that configuration.
+An unset `eject_for` resolves to the **built-in 30s default** on pools
+with `consecutive_5xx` configured: leaving the window unset used to keep
+an ejected target out until a manual restore, which on a single-target
+pool without an active probe meant *until restart* — one transient error
+burst (measured: 22 clustered connection errors) ejected the origin for
+the rest of the run and every subsequent miss returned an instant 502.
+To disable automatic restore on a passive pool, set a very long window;
+there is no eject-forever sentinel anymore. Pools without `consecutive_5xx`
+never eject, so their window stays unset.
 
 Alert on `rate(bouine_origin_ejections_total[5m]) > 0` together with
 `rate(bouine_origin_restores_total{source="eject_for"}[5m])`: sustained
@@ -81,11 +87,12 @@ Both passive-ejection knobs are hot-config, scoped per pool
   Raise it when a flapping origin ejects too eagerly, drop to `0` to
   disable passive ejection on that pool.
 - `pool:<name>.health.passive.eject_for` — the restore window. Hot-
-  changeable only when the boot config set `eject_for` (the reaper
-  goroutine starts once, at boot); shrinking it restores ejected
-  targets sooner, `0` pauses restores. A pool without a boot-time
-  `eject_for` rejects runtime sets with a precise error — set it in
-  YAML and restart.
+  changeable when the boot config started the reaper — an explicit
+  `eject_for`, or `consecutive_5xx` with the window left unset (the
+  30s built-in default runs the reaper). Shrinking it restores ejected
+  targets sooner, `0` pauses restores. A pool booted without passive
+  health rejects runtime sets with a precise error — set it in YAML and
+  restart.
 
 ```bash
 bouine config set pool:api.health.passive.consecutive_5xx 10 --dry-run

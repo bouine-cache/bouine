@@ -27,6 +27,14 @@ type KeyPolicy struct {
 	// includeJoined is includeHeaders pre-joined ("a, b, c") so the
 	// collapse flight key need not re-join on every cold miss.
 	includeJoined string
+	// derivedVary is the Vary list this policy alone determines
+	// (include_headers unioned with the synthetic cookie-presence
+	// field), pre-joined in effectiveVary's stored shape ("a, b",
+	// sorted, deduplicated) so the ADR-0071 peer paths read a constant
+	// instead of re-deriving it per miss. Empty when the policy keys no
+	// variants. Recomputed by computeDerivedVary — called by
+	// NewKeyPolicy and WithCookiePresence, the two construction sites.
+	derivedVary   string
 	stripPrefixes []string // prefix patterns to strip, capped at 16
 	// cookiePresence is the route's cache.key.cookie_presence list
 	// (issue #768): cookie names whose presence (never their values)
@@ -292,7 +300,7 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 	} else {
 		includeHeaders = nil
 	}
-	return &KeyPolicy{
+	p := &KeyPolicy{
 		stripParams:    stripParams,
 		keepParams:     keepParams,
 		stripPrefixes:  stripPrefixes,
@@ -303,6 +311,31 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 		includeJoined:  strings.Join(includeHeaders, ", "),
 		excludeHost:    excludeHost,
 	}
+	p.computeDerivedVary()
+	return p
+}
+
+// computeDerivedVary derives the derivedVary constant (ADR-0071): the
+// Vary list the policy alone determines — include_headers unioned with
+// the synthetic cookie-presence field — in exactly effectiveVary's
+// stored shape (sorted, deduplicated, ", "-joined), so a correct
+// derivation hashes to the stored variant keys byte-for-byte. Called
+// only at policy construction; mutating a policy after the handler is
+// serving is already forbidden.
+func (p *KeyPolicy) computeDerivedVary() {
+	fields := make([]string, 0, len(p.includeHeaders)+1)
+	fields = append(fields, p.includeHeaders...)
+	if p.hasCookiePresence() {
+		fields = append(fields, cookiePresenceField)
+	}
+	sort.Strings(fields)
+	uniq := fields[:0]
+	for i, f := range fields {
+		if i == 0 || f != fields[i-1] {
+			uniq = append(uniq, f)
+		}
+	}
+	p.derivedVary = strings.Join(uniq, ", ")
 }
 
 // WithCookiePresence sets the cookie-presence list after
@@ -315,6 +348,7 @@ func (p *KeyPolicy) WithCookiePresence(names []string) *KeyPolicy {
 		return nil
 	}
 	p.cookiePresence = normalizeCookiePresence(names)
+	p.computeDerivedVary()
 	return p
 }
 

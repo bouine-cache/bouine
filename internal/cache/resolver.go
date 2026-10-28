@@ -2,8 +2,6 @@ package cache
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -119,6 +117,11 @@ func transferredResolver(ctx *fasthttp.RequestCtx, obj *api.Object, lookupKey ap
 // list in, so every stored entry lives under a derived variant key and
 // the primary key only ever holds the metadata-only resolver.
 //
+// Precomputed at policy construction (KeyPolicy.derivedVary,
+// computeDerivedVary) — the policy is immutable while serving, so the
+// ADR-0071 peer paths read the constant instead of re-deriving it per
+// miss.
+//
 // The value equals the stored VaryValue iff the origin declared no Vary
 // field beyond the policy's own (a declared field inside the include
 // list dedups into the same union). An origin that declares extra
@@ -128,25 +131,10 @@ func transferredResolver(ctx *fasthttp.RequestCtx, obj *api.Object, lookupKey ap
 // a wrong body: the variant-assertion gates (peerfetch.go,
 // servePeerHit) still bound what is served.
 func configDerivedVary(policy *KeyPolicy) string {
-	if policy == nil || (len(policy.includeHeaders) == 0 && !policy.hasCookiePresence()) {
+	if policy == nil {
 		return ""
 	}
-	// includeHeaders is already trimmed, lowercased, sorted, and
-	// deduped by NewKeyPolicy; the sort+dedup below mirrors
-	// effectiveVary's union step so the shapes stay byte-identical.
-	fields := make([]string, 0, len(policy.includeHeaders)+1)
-	fields = append(fields, policy.includeHeaders...)
-	if policy.hasCookiePresence() {
-		fields = append(fields, cookiePresenceField)
-	}
-	sort.Strings(fields)
-	uniq := fields[:0]
-	for i, f := range fields {
-		if i == 0 || f != fields[i-1] {
-			uniq = append(uniq, f)
-		}
-	}
-	return strings.Join(uniq, ", ")
+	return policy.derivedVary
 }
 
 // serveResolverPeerVariant completes the two-step variant resolution for

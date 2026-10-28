@@ -548,3 +548,98 @@ func TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation(t *testing.
 	require.Equal(t, realAssertion, asks[2].assertion,
 		"ask three: the real variant key, asserted from the authoritative Vary list")
 }
+
+// TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation pins the
+// ADR-0071 rejected-answer skip: when the derived variant ask IS answered
+// but the answer is stale (or rejected), the bare ask's metadata carries
+// the SAME derived Vary list — re-deriving would repeat the identical
+// variant-key question. The two-step must be skipped: two asks total
+// (derived ask, bare ask) and the ordinary origin fill, never a third
+// identical variant ask.
+func TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation(t *testing.T) {
+	t.Parallel()
+	originHits := 0
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originHits++
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		_, _ = ctx.Write([]byte("origin-fill"))
+	}
+
+	req := testCtx("GET", "http://example.com/stale-derived")
+	req.Request.Header.Set("X-Test-Variant", "a")
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false)
+	ri := requestInfoFromCtx(req)
+	primaryKey := BuildKey(ri, policy)
+	derivedVary := configDerivedVary(policy)
+	derivedVk := VariantKey(primaryKey, derivedVary, ri.Header, policy)
+	derivedAssertion := BuildVaryKey(derivedVary, ri.Header, policy)
+
+	type ask struct {
+		key       api.Key
+		assertion string
+	}
+	var asks []ask
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Policy:     policy,
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:       1 << 20,
+			NumShards:      2,
+			ReaperInterval: -1,
+		}),
+		OwnerFn: func(api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:1"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, assertion string) (*api.Object, error) {
+			asks = append(asks, ask{key: key, assertion: assertion})
+			if key == primaryKey {
+				// The metadata-only resolver (ADR-0068) carrying the SAME
+				// derived Vary list: the derivation was right, the
+				// variant answer was stale.
+				res := &api.Object{
+					Key:        primaryKey,
+					PairedKey:  derivedVk,
+					StatusCode: 200,
+					VaryValue:  derivedVary,
+					StoredAt:   time.Now(),
+					TTL:        time.Minute,
+				}
+				res.Header = header.NewMap(1)
+				res.Header.AppendEntry("Cache-Control", "max-age=60")
+				return res, nil
+			}
+			if key == derivedVk && assertion == derivedAssertion {
+				// Answered but expired: no SWR window, so the freshness
+				// evaluation rejects it and servePeerHit returns false.
+				variant := &api.Object{
+					Key:        derivedVk,
+					VaryKey:    derivedAssertion,
+					VaryValue:  derivedVary,
+					StatusCode: 200,
+					Body:       []byte("variant-stale"),
+					BodySize:   13,
+					StoredAt:   time.Now().Add(-time.Hour),
+					TTL:        time.Minute,
+				}
+				variant.Header = header.NewMap(1)
+				variant.Header.AppendEntry("Cache-Control", "max-age=60")
+				return variant, nil
+			}
+			return nil, nil
+		},
+	})
+
+	h.ServeRequest(req)
+
+	require.Equal(t, 200, respCode(req))
+	require.Equal(t, "origin-fill", respBody(req),
+		"the stale variant must not be served; the fill is the recovery")
+	require.Equal(t, 1, originHits)
+	require.Len(t, asks, 2,
+		"two asks total: the derived ask, then the bare ask — the identical re-derivation is skipped")
+	require.Equal(t, derivedVk, asks[0].key)
+	require.Equal(t, derivedAssertion, asks[0].assertion)
+	require.Equal(t, primaryKey, asks[1].key)
+	require.Empty(t, asks[1].assertion)
+}

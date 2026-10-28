@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-28
+
 ### Fixed
 
 - **Stale objects served through a peer are now refreshed (#857).**
@@ -25,6 +27,30 @@ the curated, human-readable summary.
   revalidation copied the request method, host and path as views into
   the h1parser read buffer, which the next keep-alive request
   overwrites. They are now copied.
+- **Misses shed by construction at realistic miss demand: the built-in
+  `max_fetch_concurrency` default rises from 32 to 256.** A miss holds
+  its fetch-semaphore slot for roughly the origin latency, so a route
+  sustains at most `slots / origin-latency` misses per second; with 32
+  slots that ceiling is 640 misses/s at a 50 ms origin, and everything
+  above it waited the full `fetch_wait_timeout` (100 ms) before a
+  `503 + Retry-After` — measured at a 10% miss rate / 25k RPS profile
+  against a 50 ms origin: 75% of all misses shed while the hit path
+  stayed untouched. The 256 default sustains ~5 100 misses/s at the
+  same latency (0 sheds measured on the same profile). The bound stays
+  bounded: buffered misses are still capped per-fetch by
+  `max_response_bytes` (worst case `256 × 2 × 4 MiB = 2 GiB` across a
+  route) and streaming misses by the global tee cap; operators on
+  small pods should keep `slots × 2 × max_response_bytes` within about
+  two thirds of `GOMEMLIMIT` (sizing guide in runbook 53). The
+  load-test config now pins its admission knobs explicitly
+  (`max_fetch_concurrency: 256`, `fetch_wait_timeout: 250ms`,
+  `connect.max_connections: 640` sized to cover foreground + SWR +
+  refresh demand) so harness results stop depending on built-in
+  defaults. `bench/run.sh gate` now refuses to run under bash < 4:
+  the macOS default bash 3.2 has no associative arrays, and its
+  `declare -A BUDGETS` failure previously aborted the gate while its
+  own EXIT trap still reported `exit: 0` — the allocs/op budgets were
+  silently unenforced.
 
 ### Performance
 
@@ -128,33 +154,6 @@ the curated, human-readable summary.
   every route. `route_defaults.cache` still accepts only its designed
   merge surface (`bypass_on_user_agent`, `downstream_freshness`); other
   cache fields fail strict decoding.
-
-### Fixed
-
-- **Misses shed by construction at realistic miss demand: the built-in
-  `max_fetch_concurrency` default rises from 32 to 256.** A miss holds
-  its fetch-semaphore slot for roughly the origin latency, so a route
-  sustains at most `slots / origin-latency` misses per second; with 32
-  slots that ceiling is 640 misses/s at a 50 ms origin, and everything
-  above it waited the full `fetch_wait_timeout` (100 ms) before a
-  `503 + Retry-After` — measured at a 10% miss rate / 25k RPS profile
-  against a 50 ms origin: 75% of all misses shed while the hit path
-  stayed untouched. The 256 default sustains ~5 100 misses/s at the
-  same latency (0 sheds measured on the same profile). The bound stays
-  bounded: buffered misses are still capped per-fetch by
-  `max_response_bytes` (worst case `256 × 2 × 4 MiB = 2 GiB` across a
-  route) and streaming misses by the global tee cap; operators on
-  small pods should keep `slots × 2 × max_response_bytes` within about
-  two thirds of `GOMEMLIMIT` (sizing guide in runbook 53). The
-  load-test config now pins its admission knobs explicitly
-  (`max_fetch_concurrency: 256`, `fetch_wait_timeout: 250ms`,
-  `connect.max_connections: 640` sized to cover foreground + SWR +
-  refresh demand) so harness results stop depending on built-in
-  defaults. `bench/run.sh gate` now refuses to run under bash < 4:
-  the macOS default bash 3.2 has no associative arrays, and its
-  `declare -A BUDGETS` failure previously aborted the gate while its
-  own EXIT trap still reported `exit: 0` — the allocs/op budgets were
-  silently unenforced.
 
 ## [0.6.0] - 2026-10-26
 
@@ -3565,7 +3564,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.2
 [0.6.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.1
 [0.6.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.0
 [0.5.30]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.30

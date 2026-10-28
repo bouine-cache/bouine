@@ -10,7 +10,6 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Performance
 
 - **Tracing: the sampler's drop decision is hoisted ahead of span

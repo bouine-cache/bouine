@@ -51,7 +51,11 @@ the curated, human-readable summary.
   the identical variant ask is skipped and the ordinary fill runs (two
   asks total, not three). Completion keeps incrementing
   `bouine_peer_fetch_resolver_answers_total{side="consumer"}`, so
-  fleet convergence stays observable. Routes without key headers keep
+  fleet convergence stays observable. A wrong derivation (the bare
+  ask's metadata carries a Vary list beyond the policy-derived one)
+  increments `bouine_peer_fetch_derived_fallback_total` and logs the
+  route with both lists, so the degraded three-ask mode announces
+  itself the first time it happens. Routes without key headers keep
   today's two-step exactly.
 
 ## [0.6.1] - 2026-10-28

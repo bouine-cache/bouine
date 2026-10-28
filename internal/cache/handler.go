@@ -309,6 +309,12 @@ type Handler struct {
 	// the ADR-0068 two-step resolution and serves the variant. Nil in
 	// single-node mode.
 	onResolverTwoStep func()
+	// onResolverDerivedFallback is called when the ADR-0071 bare ask
+	// answers with resolver metadata carrying a Vary list beyond the
+	// policy-derived one — the config-derived derivation proved wrong
+	// and the route fell back to the ADR-0068 two-step at +1 RPC per
+	// Vary cold miss. Nil in single-node mode.
+	onResolverDerivedFallback func()
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -539,7 +545,16 @@ type HandlerConfig struct {
 	// variant. Wired to the peer-fetch resolver-answers metric
 	// (consumer side) by the engine; nil in single-node mode.
 	OnResolverTwoStep func()
-	Upstream          fasthttp.RequestHandler
+	// OnResolverDerivedFallback, if non-nil, is called when the ADR-0071
+	// config-derived variant ask falls back to the ADR-0068 two-step
+	// because the bare ask's metadata carried a Vary list beyond the
+	// policy-derived one — the route's origin declares Vary fields
+	// outside its cache.key include list, and every Vary cold miss on
+	// it costs one extra peer RPC until that changes. Wired to the
+	// peer-fetch derived-fallback metric by the engine; nil in
+	// single-node mode.
+	OnResolverDerivedFallback func()
+	Upstream                  fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -907,48 +922,49 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		jitterPct:   cfg.JitterPercent,
 	}
 	h := &Handler{
-		upstream:                cfg.Upstream,
-		fastClient:              cfg.FastClient,
-		stripPrefix:             []byte(cfg.StripPrefix),
-		pathRewrite:             cfg.PathRewrite,
-		store:                   cfg.Store,
-		logger:                  cfg.Logger,
-		fp:                      fp,
-		stayinAlive:             cfg.StayinAlive,
-		logCacheKeys:            cfg.LogCacheKeys,
-		variantSets:             make(map[api.Key]map[api.Key]struct{}),
-		VaryCapHits:             cfg.VaryCapHits,
-		VaryDriftInc:            cfg.VaryDrift,
-		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
-		StreamingFallbackInc:    cfg.StreamingFallback,
-		FetchShedInc:            cfg.FetchShed,
-		RewarmFillInc:           cfg.RewarmFill,
-		FillBypassInc:           cfg.FillBypass,
-		ownerFn:                 cfg.OwnerFn,
-		peerFetch:               cfg.PeerFetch,
-		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
-		onResolverTwoStep:       cfg.OnResolverTwoStep,
-		peerPut:                 cfg.PeerPut,
-		purgeBroadcast:          cfg.PurgeBroadcast,
-		allowSetCookie:          cfg.AllowSetCookie,
-		syncCDC:                 cfg.DownstreamFreshness == downstreamSync,
-		bypassOnCookie:          cfg.BypassOnCookie,
-		uaBypass:                compileUABypass(cfg.BypassOnUserAgent),
-		bypassCookieNames:       newCookieNameScanner(cfg.BypassOnCookieNames),
-		maxObjectSize:           cfg.MaxObjectSize,
-		maxVariants:             cfg.MaxVariants,
-		maxResponseBytes:        cfg.MaxResponseBytes,
-		policy:                  cfg.Policy,
-		refreshBeforeExpiry:     cfg.RefreshBeforeExpiry,
-		refreshMargin:           cfg.RefreshMargin,
-		refreshTimeout:          cfg.RefreshTimeout,
-		refreshMinHits:          cfg.RefreshMinHits,
-		refreshPersistCycles:    cfg.RefreshPersistCycles,
-		refreshMinScore:         cfg.RefreshMinScore,
-		refreshReactiveFirst:    cfg.RefreshReactiveFirst,
-		routeName:               cfg.RouteName,
-		poolName:                cfg.PoolName,
-		done:                    make(chan struct{}),
+		upstream:                  cfg.Upstream,
+		fastClient:                cfg.FastClient,
+		stripPrefix:               []byte(cfg.StripPrefix),
+		pathRewrite:               cfg.PathRewrite,
+		store:                     cfg.Store,
+		logger:                    cfg.Logger,
+		fp:                        fp,
+		stayinAlive:               cfg.StayinAlive,
+		logCacheKeys:              cfg.LogCacheKeys,
+		variantSets:               make(map[api.Key]map[api.Key]struct{}),
+		VaryCapHits:               cfg.VaryCapHits,
+		VaryDriftInc:              cfg.VaryDrift,
+		StreamingBufferBytesSet:   cfg.StreamingBufferBytes,
+		StreamingFallbackInc:      cfg.StreamingFallback,
+		FetchShedInc:              cfg.FetchShed,
+		RewarmFillInc:             cfg.RewarmFill,
+		FillBypassInc:             cfg.FillBypass,
+		ownerFn:                   cfg.OwnerFn,
+		peerFetch:                 cfg.PeerFetch,
+		onPeerVariantMismatch:     cfg.OnPeerVariantMismatch,
+		onResolverTwoStep:         cfg.OnResolverTwoStep,
+		onResolverDerivedFallback: cfg.OnResolverDerivedFallback,
+		peerPut:                   cfg.PeerPut,
+		purgeBroadcast:            cfg.PurgeBroadcast,
+		allowSetCookie:            cfg.AllowSetCookie,
+		syncCDC:                   cfg.DownstreamFreshness == downstreamSync,
+		bypassOnCookie:            cfg.BypassOnCookie,
+		uaBypass:                  compileUABypass(cfg.BypassOnUserAgent),
+		bypassCookieNames:         newCookieNameScanner(cfg.BypassOnCookieNames),
+		maxObjectSize:             cfg.MaxObjectSize,
+		maxVariants:               cfg.MaxVariants,
+		maxResponseBytes:          cfg.MaxResponseBytes,
+		policy:                    cfg.Policy,
+		refreshBeforeExpiry:       cfg.RefreshBeforeExpiry,
+		refreshMargin:             cfg.RefreshMargin,
+		refreshTimeout:            cfg.RefreshTimeout,
+		refreshMinHits:            cfg.RefreshMinHits,
+		refreshPersistCycles:      cfg.RefreshPersistCycles,
+		refreshMinScore:           cfg.RefreshMinScore,
+		refreshReactiveFirst:      cfg.RefreshReactiveFirst,
+		routeName:                 cfg.RouteName,
+		poolName:                  cfg.PoolName,
+		done:                      make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
@@ -1873,6 +1889,25 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 				// the fill below is the recovery either way.
 				if derivedTried != "" && peerObj.VaryValue == derivedTried {
 					break
+				}
+				if derivedTried != "" {
+					// ADR-0071 signal: the metadata carries a Vary list
+					// BEYOND the policy-derived one — the derivation
+					// proved wrong (the origin declared a field outside
+					// the include list) and this route is now in the
+					// degraded three-ask mode until the origin stops
+					// declaring it. Increment the fallback counter and
+					// log both lists with the route so the degraded
+					// mode announces itself the first time it happens
+					// — the completions counter cannot see it (it
+					// counts a converged three-ask like a one-ask).
+					if h.onResolverDerivedFallback != nil {
+						h.onResolverDerivedFallback()
+					}
+					h.logger.Warn("config-derived Vary list proved wrong, falling back to the two-step",
+						"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+						"key", lookupKey.Hex(), "derived_vary", derivedTried,
+						"authoritative_vary", peerObj.VaryValue)
 				}
 				if h.serveResolverPeerVariant(ctx, primaryKey, peerObj, now, ri) {
 					return

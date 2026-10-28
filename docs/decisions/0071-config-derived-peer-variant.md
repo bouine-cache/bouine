@@ -101,9 +101,12 @@ the stored Vary list.
 - Per-request added work when the derivation is right: one local hash
   (`VariantKey` + `BuildVaryKey` are already the step-two cost). When it
   is wrong: one extra peer RPC per cold miss on the affected route until
-  the origin stops declaring the extra field — bounded, observable as a
-  three-ask sequence in `bouine_peer_fetch_resolver_answers_total` and
-  the owner logs, and never a correctness hazard.
+  the origin stops declaring the extra field — bounded, never a
+  correctness hazard, and observable the first time it happens: a wrong
+  derivation increments `bouine_peer_fetch_derived_fallback_total` and
+  logs a warn with the route, the derived list, and the authoritative
+  list (the completions counter cannot see the degraded mode — it counts
+  a converged three-ask like a one-ask).
 - No wire change: `ClusterProtocolVersion` stays "4"; the ask format is
   untouched (the derived ask is today's variant-key ask, sent to the
   variant's owner instead of the primary's). Rolling upgrades mix
@@ -116,7 +119,10 @@ the stored Vary list.
   served), `TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation`
   (rejected derived answer: two asks, no identical re-derivation, the
   fill is the recovery), and `TestFastPathHandler_ConfigDerivedSkips-
-  BareAsk` (no RPC, no hints). The owner side is untouched — no owner
+  BareAsk` (no RPC, no hints) — the three peer tests also pin the
+  `OnResolverDerivedFallback` signal: exactly one increment on the
+  wrong-derivation fallback, zero on the converged single ask and the
+  stale skip. The owner side is untouched — no owner
   tests change.
 
 ## Notes

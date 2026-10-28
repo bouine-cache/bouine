@@ -335,11 +335,12 @@ const (
 	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
 	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
 	// metricSourceSlots bounds the source axis: HOT=0,WARM=1,PEER=2,
-	// ORIGIN=3,BOUINE=4. The set is declared once, as data, in
+	// NEAR=3,ORIGIN=4,BOUINE=5. The set is declared once, as data, in
 	// TestSourceLabelSetClosed, which fails when any encoding of it
-	// (this bound, sourceIndex, sourceIndexBytes, normaliseSource, the
-	// middleware index switch) drifts out of sync.
-	metricSourceSlots = 5
+	// (this bound, sourceIndex, sourceIndexBytes, normaliseSource,
+	// sourceSlotNames — the middleware's slot-to-label lookup) drifts
+	// out of sync.
+	metricSourceSlots = 6
 	// metricClassSlots bounds the traffic_class axis: "unclassified"
 	// (index 0) + the config cap of 8 classes. Static array bound so
 	// the per-pool tables stay one allocation; unused slots cost
@@ -449,9 +450,24 @@ func cacheResultIndexBytes(s []byte) int {
 	}
 }
 
+// sourceSlotNames maps a source slot index to its label string, in
+// closed-set order (hot, warm, peer, near, origin, bouine). One more
+// encoding of the closed source-label set — pinned in lockstep by
+// TestSourceLabelSetClosed, like sourceIndex and normaliseSource —
+// so the middleware resolves a slot to its label with an array read
+// instead of a switch.
+var sourceSlotNames = [metricSourceSlots]string{
+	string(api.SourceHot),
+	string(api.SourceWarm),
+	string(api.SourcePeer),
+	string(api.SourceNear),
+	string(api.SourceOrigin),
+	string(api.SourceBouine),
+}
+
 // sourceIndex maps source strings to array indices. Returns -1 for unknown.
 // Both the empty string (bouine-synthesized responses on the wire) and
-// "bouine" (the metrics label for that default slot) resolve to slot 4,
+// "bouine" (the metrics label for that default slot) resolve to slot 5,
 // so a normalised label string always finds its pre-resolved slot.
 func sourceIndex(s string) int {
 	switch s {
@@ -461,12 +477,14 @@ func sourceIndex(s string) int {
 		return 1
 	case string(api.SourcePeer):
 		return 2
-	case string(api.SourceOrigin):
+	case string(api.SourceNear):
 		return 3
+	case string(api.SourceOrigin):
+		return 4
 	case string(api.SourceBouine):
-		return 4
+		return 5
 	case "":
-		return 4
+		return 5
 	default:
 		return -1
 	}
@@ -484,12 +502,14 @@ func sourceIndexBytes(s []byte) int {
 		return 1
 	case string(api.SourcePeer):
 		return 2
-	case string(api.SourceOrigin):
+	case string(api.SourceNear):
 		return 3
+	case string(api.SourceOrigin):
+		return 4
 	case string(api.SourceBouine):
-		return 4
+		return 5
 	case "":
-		return 4
+		return 5
 	default:
 		return -1
 	}
@@ -900,20 +920,17 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 			}
 		}
 		srcIdx := sourceIndexBytes(ctx.Response.Header.Peek(header.XCacheSource))
+		// Indexed lookup, not a switch: every branch the switch added
+		// landed on this middleware's complexity budget, and the array
+		// is one more encoding of the closed set — pinned by
+		// TestSourceLabelSetClosed like the rest. Empty
+		// (bouine-synthesized: only-if-cached 504, shed 503) and unknown
+		// or spoofed header values both stay at the -1 index and collapse
+		// into the closed set's default "bouine" slot.
 		var source string
-		switch srcIdx {
-		case 0:
-			source = string(api.SourceHot)
-		case 1:
-			source = string(api.SourceWarm)
-		case 2:
-			source = string(api.SourcePeer)
-		case 3:
-			source = string(api.SourceOrigin)
-		default:
-			// Empty (bouine-synthesized: only-if-cached 504, shed 503) and
-			// unknown or spoofed header values both collapse into the
-			// closed set's default "bouine" slot.
+		if srcIdx >= 0 {
+			source = sourceSlotNames[srcIdx]
+		} else {
 			source = string(api.SourceBouine)
 		}
 
@@ -1194,7 +1211,8 @@ func normaliseCacheResult(xCache string) string {
 // "_default" and traffic_class "unclassified").
 func normaliseSource(xCacheSource string) string {
 	switch xCacheSource {
-	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin), string(api.SourceBouine):
+	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer),
+		string(api.SourceNear), string(api.SourceOrigin), string(api.SourceBouine):
 		return xCacheSource
 	default:
 		return string(api.SourceBouine)

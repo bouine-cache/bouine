@@ -59,8 +59,13 @@ const nearAdmitWindow = 30 * time.Second
 // nearMaxTTLDefault bounds a near entry's freshness lifetime
 // independently of the origin's TTL: even without invalidation
 // propagation, a near copy cannot outlive it. Used when the config
-// leaves max_ttl at zero.
-const nearMaxTTLDefault = 30 * time.Second
+// leaves max_ttl at zero. 10s rather than 30s: on a measured
+// production fleet's peer-fetch key distribution (ADR-0071) a 5–10 s
+// bound already keeps ~2/3 of the absorption a 30 s bound buys, while
+// the no-propagation staleness window stays within an order of
+// magnitude of a broadcast delivery gap (ms in the healthy case,
+// seconds degraded).
+const nearMaxTTLDefault = 10 * time.Second
 
 // NearCacheCounters carries the near-cache metrics. Every counter is
 // optional (nil-safe): a test-constructed NearCache counts nothing.
@@ -112,6 +117,18 @@ type NearCache struct {
 // NewNearCache builds a near cache over a dedicated hot-store instance
 // (SIEVE eviction, byte-budgeted, ban-aware on Get — the same store
 // implementation the main tier uses, at a smaller budget).
+//
+// The near store's lazy-ban TTL is maxTTL plus the admission window,
+// not the main store's 24 h: a ban can only ever matter to an entry
+// stored before the ban was created, and such an entry is admitted at
+// most one peer-fetch round trip after its owner-side store time (an
+// answer fetched before the ban can land after it) and dies at
+// admission + maxTTL. nearAdmitWindow (30 s) exceeds any configured
+// peer-fetch round trip, so pruning bans at maxTTL+nearAdmitWindow
+// never drops one that could still bite — while keeping the near
+// store's ban list ~3 orders of magnitude smaller than the main
+// store's under fleet-wide ban storms, where every broadcast ban
+// lands on every node's near store too.
 func NewNearCache(cfg NearCacheConfig) *NearCache {
 	maxBytes := cfg.MaxBytes
 	if maxBytes <= 0 {
@@ -122,7 +139,7 @@ func NewNearCache(cfg NearCacheConfig) *NearCache {
 		maxTTL = nearMaxTTLDefault
 	}
 	return &NearCache{
-		store:    storage.NewHotStore(storage.HotConfig{MaxBytes: maxBytes}),
+		store:    storage.NewHotStore(storage.HotConfig{MaxBytes: maxBytes, BanTTL: maxTTL + nearAdmitWindow}),
 		maxTTL:   maxTTL,
 		counters: cfg.Counters,
 	}
@@ -188,6 +205,16 @@ func (n *NearCache) Hits() int64 {
 // remaining freshness and maxTTL, with grace windows zeroed: no stale
 // serving, no revalidation from a non-owner.
 //
+// The stored copy keeps the object's ORIGINAL StoredAt: ban exemption
+// in the near store's Get compares StoredAt against the ban's creation
+// time (bans.go subjectTo), so a re-stamped copy would be exempt from
+// every ban created before its admission — including a ban that landed
+// while the peer answer was in flight and already killed the owner's
+// copy, resurrecting banned bytes locally for max_ttl. The freshness
+// clock is preserved instead through the TTL: the entry expires at
+// now+min(remaining, maxTTL), the same instant a re-stamped entry would
+// have, while StoredAt (and the Age it derives) stay the owner's truth.
+//
 // The stored entry is a store-owned clone: HotStore.Put copies body
 // and headers under the shard lock, so obj's buffers are never
 // retained and the caller keeps full ownership.
@@ -213,8 +240,11 @@ func (n *NearCache) Admit(ctx context.Context, key api.Key, obj *api.Object, now
 	// own boundary: admission pays two body copies per admitted object,
 	// once per key per freshness window.
 	stored := obj.CloneForStorage(nil)
-	stored.StoredAt = now
-	stored.TTL = min(remaining, n.maxTTL)
+	// TTL is a duration-since-StoredAt everywhere (expiry is
+	// StoredAt.Add(TTL)), so carrying the original StoredAt means the
+	// bounded freshness must be expressed as an absolute expiry first:
+	// StoredAt+TTL = now+min(remaining, maxTTL).
+	stored.TTL = now.Add(min(remaining, n.maxTTL)).Sub(obj.StoredAt)
 	stored.StaleWhileRevalidate = 0
 	stored.StaleIfError = 0
 	if err := n.store.Put(ctx, key, stored); err != nil {

@@ -1797,21 +1797,28 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// held by the owner, so the ask would 404. Keyed by the ask key
 		// (lookupKey) — fail-open wherever that differs from the memo's
 		// primary key (policied routes) or the window has lapsed.
-		//
-		// Experimental near-cache (ADR-0071): before re-asking the
-		// owner, consult the local near copy of a previously
-		// peer-fetched object. Fresh-only serving — Lookup refuses
-		// expired entries and admission zeroed the grace windows, so
-		// Evaluate's Hit is the only servable outcome here, and a miss
-		// falls through to the ordinary owner ask below.
-		if nearObj, fresh := h.nearCache.Lookup(ctx, lookupKey, now); fresh {
-			if d := Evaluate(ri, nearObj, now); d.Decision == Hit {
-				h.nearCache.RecordHit()
-				h.serveObject(ctx, nearObj, now, cacheHit, api.SourceNear)
-				return
-			}
-		}
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
+			// Experimental near-cache (ADR-0071): before re-asking the
+			// owner, consult the local near copy of a previously
+			// peer-fetched object. Fresh-only serving — Lookup refuses
+			// expired entries and admission zeroed the grace windows, so
+			// Evaluate's Hit is the only servable outcome here, and a miss
+			// falls through to the ordinary owner ask below.
+			//
+			// Non-owned keys only, like the fast path's tryPeerFetch
+			// (which returns before its near branch when isLocal): a near
+			// entry for a key this node OWNS can only be a leftover from a
+			// ring change (admission runs on non-owners only), and serving
+			// it would skip this node's authoritative fill for up to the
+			// entry's TTL — the owner would 404 its peers into origin
+			// while the leftover lives out its clock.
+			if nearObj, fresh := h.nearCache.Lookup(ctx, lookupKey, now); fresh {
+				if d := Evaluate(ri, nearObj, now); d.Decision == Hit {
+					h.nearCache.RecordHit()
+					h.serveObject(ctx, nearObj, now, cacheHit, api.SourceNear)
+					return
+				}
+			}
 			// ADR-0068: the fast path may have already asked this exact
 			// blank question and fetched the metadata-only resolver —
 			// reuse it instead of repeating the identical bare ask.

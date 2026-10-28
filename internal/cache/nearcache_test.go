@@ -187,6 +187,70 @@ func TestNearCache_InvalidationSurfaces(t *testing.T) {
 	})
 }
 
+// TestNearCache_AdmitKeepsOwnerSideStoredAt pins the ban-exemption
+// parity of admission: the near store's Get exempts entries whose
+// StoredAt is after the ban's creation time (a refilled copy is fresh,
+// bans.go subjectTo), so admission must keep the OWNER-side StoredAt.
+// Re-stamping it with the admission time would exempt every entry
+// from bans created before its admission — including a ban that
+// landed while the peer answer was in flight and already killed the
+// owner's copy — resurrecting banned bytes locally for the entry's
+// TTL. The stored TTL carries the same absolute expiry either way.
+func TestNearCache_AdmitKeepsOwnerSideStoredAt(t *testing.T) {
+	t.Parallel()
+	key := BuildKey(mustRequestInfo(t, "http://example.com/ban-race"), nil)
+	now := time.Now()
+
+	t.Run("ban created while the peer answer was in flight kills the admitted copy", func(t *testing.T) {
+		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute})
+		armAdmitMemo(n, key)
+		// The owner stored the object before the ban arrived; the ban
+		// lands (broadcast) while the peer answer is in flight, i.e.
+		// before this node admits it.
+		obj := nearTestObject(key, 10*time.Minute)
+		obj.StoredAt = time.Now()
+		n.Ban(t.Context(), api.BanExpr{PathRegex: "/guarded"})
+		n.Admit(t.Context(), key, obj, time.Now())
+		assert.False(t, mustNearLookup(t, n, key, time.Now()),
+			"an admitted copy of a banned object must stay banned: exemption compares the owner-side StoredAt, not the admission time")
+	})
+
+	t.Run("ban older than the object's storage does not block admission", func(t *testing.T) {
+		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute})
+		armAdmitMemo(n, key)
+		// The owner refilled after the ban (its new copy is exempt, the
+		// documented refill semantics) — the near copy must be exempt
+		// the same way, or near hits would under-serve refilled keys.
+		n.Ban(t.Context(), api.BanExpr{PathRegex: "/guarded"})
+		obj := nearTestObject(key, 10*time.Minute)
+		obj.StoredAt = time.Now()
+		n.Admit(t.Context(), key, obj, time.Now())
+		assert.True(t, mustNearLookup(t, n, key, time.Now()),
+			"an exempt refill must admit and serve exactly like the owner's exempt copy")
+	})
+
+	t.Run("stored TTL preserves the absolute expiry and the owner-side StoredAt", func(t *testing.T) {
+		n := NewNearCache(NearCacheConfig{MaxTTL: 30 * time.Second})
+		armAdmitMemo(n, key)
+		// Stored 10 s ago, fresh for another 50 s, older than max_ttl:
+		// the entry must expire at now+max_ttl (the same instant a
+		// re-stamped entry computed) while keeping the owner's clock.
+		obj := nearTestObject(key, time.Hour)
+		obj.StoredAt = now.Add(-10 * time.Second)
+		n.Admit(t.Context(), key, obj, now)
+		got, ok := n.Lookup(t.Context(), key, now)
+		require.True(t, ok)
+		assert.Equal(t, obj.StoredAt, got.StoredAt,
+			"admission keeps the owner-side StoredAt (ban exemption and Age parity)")
+		assert.Equal(t, now.Add(30*time.Second), got.StoredAt.Add(got.TTL),
+			"the entry expires at admission-now + min(remaining freshness, max_ttl)")
+		assert.True(t, mustNearLookup(t, n, key, now.Add(29*time.Second)),
+			"fresh inside the bounded window")
+		assert.False(t, mustNearLookup(t, n, key, now.Add(31*time.Second)),
+			"expired past the bounded window")
+	})
+}
+
 func TestNearCache_NilReceiverIsDisabled(t *testing.T) {
 	t.Parallel()
 	var n *NearCache
@@ -443,6 +507,58 @@ func TestHandleCacheMiss_NearCacheServesAndInvalidates(t *testing.T) {
 	assert.EqualValues(t, 1, originCalls.Load(), "the definitive owner miss falls through to origin")
 }
 
+// TestHandleCacheMiss_NearEntryNotServedForOwnedKeys pins the slow
+// path's ownership gate: a near entry for a key this node OWNS can
+// only be a leftover from a ring change (admission runs on
+// non-owners only), and serving it would skip this node's
+// authoritative fill for up to the entry's TTL — the owner would 404
+// its peers into origin while the leftover lives out its clock. The
+// fast path already gates on isLocal before its near branch
+// (tryPeerFetch returns first); the slow path must match it.
+func TestHandleCacheMiss_NearEntryNotServedForOwnedKeys(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	near := NewNearCache(NearCacheConfig{MaxTTL: time.Minute})
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		NearCache:  near,
+		OwnerFn: func(api.Key) (api.PeerInfo, bool) {
+			// This node owns the key: the ring moved ownership here
+			// after the near entry was admitted on a node that owned
+			// nothing at the time (a scale-up rebalance, a peer
+			// restart).
+			return api.PeerInfo{Addr: "self:8443"}, true
+		},
+		PeerFetch: func(context.Context, api.PeerInfo, api.Key, string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	key := BuildKey(mustRequestInfo(t, "http://example.com/owned-near"), nil)
+	armAdmitMemo(near, key)
+	near.Admit(t.Context(), key, nearTestObject(key, time.Minute), time.Now())
+	require.True(t, mustNearLookup(t, near, key, time.Now()), "precondition: the leftover near entry is fresh")
+
+	r := testCtx("GET", "http://example.com/owned-near")
+	h.ServeRequest(r)
+	require.Equal(t, 200, respCode(r))
+	assert.Equal(t, "from-origin", respBody(r),
+		"an owned key must fill its authoritative copy from origin, not from a leftover near entry")
+	assert.EqualValues(t, 1, originCalls.Load())
+	assert.EqualValues(t, 0, peerFetchCalls.Load(), "the owner never asks itself")
+	assert.EqualValues(t, 0, near.Hits(), "a near entry for an owned key must not serve on the slow path")
+}
+
 // getErrStore wraps a working store with a failing Get, so the near
 // cache's error paths are pinned without a crashy fake.
 type getErrStore struct {
@@ -572,21 +688,49 @@ func TestFastPathPeerFetch_NearEntrySurvivesGateRefusal(t *testing.T) {
 
 // TestNearCache_ZeroConfigAppliesDefaults pins the built-in bounds: an
 // all-zero config (the config layer's zero values) yields the 16 MiB /
-// 30 s defaults, not a zero-byte store or an entry that dies at once.
+// 10 s defaults, not a zero-byte store or an entry that dies at once,
+// and the near store's lazy-ban TTL is capped at max_ttl plus the
+// admission window (a ban older than that can never bite a near entry).
 func TestNearCache_ZeroConfigAppliesDefaults(t *testing.T) {
 	t.Parallel()
 	n := NewNearCache(NearCacheConfig{})
 	require.NotNil(t, n.store)
 
+	hot, ok := n.store.(*storage.HotStore)
+	require.True(t, ok, "the near store is a hot store")
+	assert.Equal(t, nearMaxTTLDefault+nearAdmitWindow, hot.BanTTL(),
+		"the near store prunes bans at max_ttl + admission window, not the 24h main-store default")
+
 	key := BuildKey(mustRequestInfo(t, "http://example.com/defaults"), nil)
 	now := time.Now()
 	armAdmitMemo(n, key)
-	n.Admit(t.Context(), key, nearTestObject(key, time.Hour), now)
+	obj := nearTestObject(key, time.Hour)
+	// Pin the owner-side StoredAt to the test clock: the stored TTL is
+	// a duration-since-StoredAt, so an unpinned one drifts by the
+	// nanoseconds between the two time.Now() calls.
+	obj.StoredAt = now
+	n.Admit(t.Context(), key, obj, now)
 
-	// The entry survives past the 30 s default cap only because the
+	// The entry survives past the 10 s default cap only because the
 	// origin TTL (1 h) is bounded by maxTTL: the stored TTL must be the
-	// 30 s default, not the object's hour.
+	// 10 s default, not the object's hour.
 	got, ok := n.Lookup(t.Context(), key, now)
 	require.True(t, ok)
 	require.Equal(t, nearMaxTTLDefault, got.TTL, "max_ttl zero applies the built-in default")
+}
+
+// TestNearCache_BanTTLScalesWithMaxTTL pins the ban-TTL cap for an
+// explicit max_ttl: the bound is max_ttl plus the admission window (an
+// answer fetched before a ban can be admitted one peer-fetch round
+// trip later, and dies at admission + max_ttl), so a ban that could
+// still bite is never pruned early — and nothing is kept anywhere
+// near the main store's 24 h.
+func TestNearCache_BanTTLScalesWithMaxTTL(t *testing.T) {
+	t.Parallel()
+	n := NewNearCache(NearCacheConfig{MaxTTL: 45 * time.Second})
+	hot, ok := n.store.(*storage.HotStore)
+	require.True(t, ok)
+	assert.Equal(t, 45*time.Second+nearAdmitWindow, hot.BanTTL())
+	assert.Less(t, hot.BanTTL(), storage.DefaultBanTTL,
+		"the near store's ban list must not live on the main store's 24h clock")
 }

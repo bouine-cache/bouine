@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -171,14 +172,18 @@ func TestNearCache_InvalidationSurfaces(t *testing.T) {
 	})
 
 	t.Run("ban blocks the near entry exactly like the main store", func(t *testing.T) {
-		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute})
+		invalidations := &nearCounter{}
+		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute,
+			Counters: NearCacheCounters{Invalidations: invalidations}})
 		armAdmitMemo(n, key)
 		n.Admit(t.Context(), key, nearTestObject(key, time.Minute), now)
 		require.True(t, mustNearLookup(t, n, key, now))
-		_, err := n.store.Ban(t.Context(), api.BanExpr{PathRegex: "/guarded"})
-		require.NoError(t, err)
+		// The engine-facing surface (wired next to the engine's store.Ban
+		// when a ban broadcasts), not the raw store.
+		n.Ban(t.Context(), api.BanExpr{PathRegex: "/guarded"})
 		assert.False(t, mustNearLookup(t, n, key, now),
 			"a banned key must miss in the near cache the moment it would miss on the owner")
+		assert.EqualValues(t, 1, invalidations.n.Load(), "a ban-driven removal counts as an invalidation")
 	})
 }
 
@@ -436,4 +441,152 @@ func TestHandleCacheMiss_NearCacheServesAndInvalidates(t *testing.T) {
 	require.Equal(t, 200, respCode(r))
 	assert.EqualValues(t, 1, peerFetchCalls.Load(), "a purged near copy must not serve")
 	assert.EqualValues(t, 1, originCalls.Load(), "the definitive owner miss falls through to origin")
+}
+
+// getErrStore wraps a working store with a failing Get, so the near
+// cache's error paths are pinned without a crashy fake.
+type getErrStore struct {
+	storage.Store
+}
+
+func (getErrStore) Get(context.Context, api.Key) (*api.Object, api.Source, error) {
+	return nil, "", errors.New("get boom")
+}
+
+// putErrStore wraps a working store with a failing Put.
+type putErrStore struct {
+	storage.Store
+}
+
+func (putErrStore) Put(context.Context, api.Key, *api.Object) error {
+	return errors.New("put boom")
+}
+
+// TestNearCache_StoreFailuresDegradGracefully pins the error paths: a
+// failing store Get reports a near miss (the request falls through to
+// the ordinary peer ask), and a failing store Put refuses admission
+// without panicking or counting.
+func TestNearCache_StoreFailuresDegradeGracefully(t *testing.T) {
+	t.Parallel()
+	key := BuildKey(mustRequestInfo(t, "http://example.com/storefail"), nil)
+	now := time.Now()
+
+	t.Run("Get error is a miss", func(t *testing.T) {
+		t.Parallel()
+		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute})
+		n.store = getErrStore{Store: n.store}
+		obj, ok := n.Lookup(t.Context(), key, now)
+		assert.False(t, ok, "a store error must not surface as a near hit")
+		assert.Nil(t, obj)
+	})
+
+	t.Run("Put error refuses admission", func(t *testing.T) {
+		t.Parallel()
+		admits := &nearCounter{}
+		n := NewNearCache(NearCacheConfig{MaxTTL: time.Minute,
+			Counters: NearCacheCounters{Admissions: admits}})
+		n.store = putErrStore{Store: n.store}
+		armAdmitMemo(n, key)
+		n.Admit(t.Context(), key, nearTestObject(key, time.Minute), now)
+		assert.Zero(t, admits.n.Load(), "a refused admission must not count")
+		_, ok := n.Lookup(t.Context(), key, now)
+		assert.False(t, ok)
+	})
+}
+
+// TestFastPathPeerFetch_NearEntrySurvivesGateRefusal pins the
+// fall-through contract: a request whose own freshness gate refuses the
+// fresh near entry (request Cache-Control: max-age=0) neither serves
+// from nor evicts it — the ask proceeds and the next plain request
+// still serves near.
+func TestFastPathPeerFetch_NearEntrySurvivesGateRefusal(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(fasthttp.StatusOK)
+		},
+		Store:     store,
+		NearCache: NewNearCache(NearCacheConfig{MaxTTL: time.Minute}),
+	})
+	fp := NewFastPathHandler(h)
+
+	var asks atomic.Int32
+	fp.WithPeerFetch(
+		func(api.Key) (api.PeerInfo, bool) { return api.PeerInfo{Addr: "owner:8080"}, false },
+		func(_ context.Context, _ api.PeerInfo, key api.Key, _ string) (*api.Object, error) {
+			asks.Add(1)
+			obj := nearTestObject(key, time.Minute)
+			// A real peer answer carries the OWNER's store time, already
+			// in the past when the requester evaluates it.
+			obj.StoredAt = time.Now().Add(-100 * time.Millisecond)
+			return obj, nil
+		},
+	)
+
+	plain := &api.RawRequest{
+		Method: "GET", Path: "/gate-refusal", Host: "example.com",
+		Scheme: "http", HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(plain, nil)
+
+	// Admit via the popularity gate (two peer fetches).
+	for range 2 {
+		_, ok := fp.TryHit(plain, time.Now())
+		require.True(t, ok)
+	}
+	require.EqualValues(t, 2, asks.Load())
+	_, fresh := h.nearCache.Lookup(t.Context(), key, time.Now())
+	require.True(t, fresh, "precondition: the near entry is admitted")
+
+	// max-age=0: the request's own freshness clock refuses the fresh
+	// near entry, so the near lookup must fall through to the peer
+	// ask. The owner's answer fails the same request clock and, with no
+	// validators to revalidate against, the whole fast path falls
+	// through to the slow path/origin — the strict request is served by
+	// neither the near copy nor the peer answer, and the refusal must
+	// not evict the entry. The header travels the real path:
+	// RecomputeScanFlags derives CacheControlRaw from the header array,
+	// not the other way round.
+	strict := &api.RawRequest{
+		Method: "GET", Path: "/gate-refusal", Host: "example.com",
+		Scheme: "http", HTTPVersion: "HTTP/1.1",
+	}
+	strict.Headers[0] = api.RawHeader{Key: "Cache-Control", Value: "max-age=0"}
+	strict.NHeaders = 1
+	strict.RecomputeScanFlags()
+	require.Equal(t, "max-age=0", strict.CacheControlRaw)
+	resp, ok := fp.TryHit(strict, time.Now())
+	require.False(t, ok, "a gate-refused near entry must not serve; the strict request falls through")
+	require.Nil(t, resp)
+	assert.EqualValues(t, 3, asks.Load(), "the refusal still falls through to the peer ask")
+
+	// The near entry survived the refusal: the next plain request
+	// still serves from local memory.
+	resp, ok = fp.TryHit(plain, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, string(api.SourceNear), resp.Source)
+	assert.EqualValues(t, 3, asks.Load(), "the near entry must still serve after a gate refusal")
+}
+
+// TestNearCache_ZeroConfigAppliesDefaults pins the built-in bounds: an
+// all-zero config (the config layer's zero values) yields the 16 MiB /
+// 30 s defaults, not a zero-byte store or an entry that dies at once.
+func TestNearCache_ZeroConfigAppliesDefaults(t *testing.T) {
+	t.Parallel()
+	n := NewNearCache(NearCacheConfig{})
+	require.NotNil(t, n.store)
+
+	key := BuildKey(mustRequestInfo(t, "http://example.com/defaults"), nil)
+	now := time.Now()
+	armAdmitMemo(n, key)
+	n.Admit(t.Context(), key, nearTestObject(key, time.Hour), now)
+
+	// The entry survives past the 30 s default cap only because the
+	// origin TTL (1 h) is bounded by maxTTL: the stored TTL must be the
+	// 30 s default, not the object's hour.
+	got, ok := n.Lookup(t.Context(), key, now)
+	require.True(t, ok)
+	require.Equal(t, nearMaxTTLDefault, got.TTL, "max_ttl zero applies the built-in default")
 }

@@ -355,32 +355,8 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 
 	// Experimental peer near-cache (ADR-0071): one shared instance
 	// per engine — every route Handler, fast path and invalidation
-	// surface serves from and reaches the same near entries. Nil
-	// unless experimental.near_cache.enabled, so the disabled path
-	// costs nothing.
-	var nearCache *cache.NearCache
-	if nc := e.cfg.Experimental.NearCache; nc != nil && nc.Enabled {
-		nearMetrics := observability.NewNearCacheMetrics()
-		e.metrics.Registry.MustRegister(nearMetrics.Hits, nearMetrics.Admissions, nearMetrics.Invalidations)
-		nearCache = cache.NewNearCache(cache.NearCacheConfig{
-			MaxBytes: int64(nc.MaxBytes),
-			MaxTTL:   nc.MaxTTL,
-			Counters: cache.NearCacheCounters{
-				Hits:          nearMetrics.Hits,
-				Admissions:    nearMetrics.Admissions,
-				Invalidations: nearMetrics.Invalidations,
-			},
-		})
-		e.logger.Info("experimental near-cache enabled",
-			"max_bytes", int64(nc.MaxBytes), "max_ttl", nc.MaxTTL.String())
-		// The near branch lives inside the peer-ask path (both H1
-		// fast path and slow path), which only wires in strong mode.
-		// An enabled-but-inert feature is a config the operator
-		// should hear about, not silently ignore.
-		if e.cfg.Cluster.Mode != config.ClusterModeStrong || clusterNode == nil {
-			e.logger.Warn("experimental near-cache enabled but the cluster is not in strong mode: the near path never runs")
-		}
-	}
+	// surface serves from and reaches the same near entries.
+	nearCache := e.buildNearCache(clusterNode != nil)
 
 	rs := &runState{
 		store:          store,
@@ -465,6 +441,43 @@ func (e *engine) resolveAdminToken() string {
 			"hint", "set admin.token in config or BOUINE_ADMIN_TOKEN env var to silence this warning")
 	}
 	return token
+}
+
+// buildNearCache constructs the engine's shared experimental
+// near-cache (ADR-0071): one instance injected into every route
+// Handler, fast path and invalidation surface, so invalidation
+// applied through any surface reaches the same near entries. Nil
+// unless experimental.near_cache.enabled — the disabled deployment
+// costs nothing (every *cache.NearCache method is nil-safe).
+//
+// clusterLive reports whether the gossip cluster actually came up. The
+// near branch lives inside the peer-ask path (both the H1 fast path
+// and the slow path), which only runs in strong mode with a live
+// cluster: an enabled-but-inert feature is a config the operator
+// should hear about, not silently ignore, so the inert shapes log a
+// warning.
+func (e *engine) buildNearCache(clusterLive bool) *cache.NearCache {
+	nc := e.cfg.Experimental.NearCache
+	if nc == nil || !nc.Enabled {
+		return nil
+	}
+	nearMetrics := observability.NewNearCacheMetrics()
+	e.metrics.Registry.MustRegister(nearMetrics.Hits, nearMetrics.Admissions, nearMetrics.Invalidations)
+	near := cache.NewNearCache(cache.NearCacheConfig{
+		MaxBytes: int64(nc.MaxBytes),
+		MaxTTL:   nc.MaxTTL,
+		Counters: cache.NearCacheCounters{
+			Hits:          nearMetrics.Hits,
+			Admissions:    nearMetrics.Admissions,
+			Invalidations: nearMetrics.Invalidations,
+		},
+	})
+	e.logger.Info("experimental near-cache enabled",
+		"max_bytes", int64(nc.MaxBytes), "max_ttl", nc.MaxTTL.String())
+	if e.cfg.Cluster.Mode != config.ClusterModeStrong || !clusterLive {
+		e.logger.Warn("experimental near-cache enabled but the cluster is not in strong mode: the near path never runs")
+	}
+	return near
 }
 
 func (e *engine) initRings() (*observability.Rings, string) {

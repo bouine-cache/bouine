@@ -386,9 +386,11 @@ func ScanFlagForHeader(key, value string) RequestScanFlags {
 }
 
 // FastPathMetrics is implemented by the observability layer (L7) to
-// record fast-path hits without going through the middleware chain.
-// The h1parser calls RecordHit after serving a hit. L1 depends on
-// this interface (declared in the leaf package), not on L7 directly.
+// record fast-path and listener-admission events without going through
+// the middleware chain. The h1parser calls RecordHit after serving a
+// hit; the listener calls IncrementConnRejection when the connection
+// cap refuses a connection at accept. L1 depends on this interface
+// (declared in the leaf package), not on L7 directly.
 //
 // Unstable.
 type FastPathMetrics interface {
@@ -400,4 +402,10 @@ type FastPathMetrics interface {
 	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
 	// obs-fold). The implementation increments a Prometheus counter.
 	IncrementSmugglingRejected()
+	// IncrementConnRejection is called by the connection-limit listener
+	// for every connection refused at accept because
+	// listen.max_connections was reached. The refusal path also writes
+	// a rate-limited warn log; the counter must stay exact so alerts
+	// can rely on it.
+	IncrementConnRejection()
 }

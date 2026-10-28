@@ -98,7 +98,7 @@ func TestServeSingle_HTTPS(t *testing.T) {
 func TestConnLimitListener_Close(t *testing.T) {
 	t.Parallel()
 	pl := newPipeListener()
-	lim := newConnLimitListener(pl, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	lim := newConnLimitListener(pl, 1, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	require.NoError(t, lim.Close())
 }
 

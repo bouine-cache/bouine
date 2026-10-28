@@ -10,6 +10,34 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- `bouine_conn_rejections_total`: an exact counter of data-plane
+  connections refused at accept because `listen.max_connections` was
+  reached. The refusal used to be observable only through one warn
+  log line per rejected connection — under a connection flood the
+  refusal path itself became the expense (24 040 structured-log lines
+  in one measured 8 000-VU run). The warn log is now rate-limited to
+  one line per 10 s per listener with the suppressed count folded
+  into the next line; the counter counts every refusal. New runbook
+  64 documents the signal and the sizing.
+
+### Changed
+
+- **The shipped `listen.max_connections` default rises from 4096 to
+  65536** (`config/default.yaml` and the Helm chart's default values;
+  explicit values are untouched, and 0 still disables the cap). The
+  4096 default refused client populations a single CDN front produces:
+  idle keep-alive connections hold a slot, so a 5 000-VU keep-alive
+  population hit 4 520 raw `503 + Connection: close` refusals at the
+  accept path (and 19 520 at 8 000 VUs) while NGINX's default envelope
+  (16 384 × 4 workers ≈ 65 k) served the same population without
+  error. 65536 matches the fd limit the daemon raises at boot; each
+  fast-path connection pins ~32 KiB, so the new default pins at most
+  ~2 GiB — size down (or close idle connections sooner via
+  `listen.idle_timeout`) on small pods. Refusals remain instant
+  `503 + close`, now counted exactly by the new metric.
+
 ## [0.6.2] - 2026-10-28
 
 ### Fixed
@@ -142,16 +170,6 @@ the curated, human-readable summary.
   open-model Zipf load generator with per-outcome percentiles, fake
   OTLP collector, tracing middleware micro-benchmarks) used to size
   the changes above and re-verify them on the pinned runner.
-- **`route_defaults.cache.downstream_freshness`: declare the downstream
-  freshness mode once for every route (ADR-0063).** A top-level
-  `route_defaults.cache.downstream_freshness: sync` now caps downstream
-  CDN freshness on all routes without repeating the knob on each one.
-  A route without its own `cache.downstream_freshness` inherits the
-  default wholesale; a route's own value replaces it (`passthrough` is
-  the explicit opt-out). Pool and static routes inherit alike — the
-  knob is consumed by every cache handler — and an invalid default is
-  reported once at `route_defaults`' own path instead of surfacing on
-  every route. `route_defaults.cache` still accepts only its designed
   merge surface (`bypass_on_user_agent`, `downstream_freshness`); other
   cache fields fail strict decoding.
 

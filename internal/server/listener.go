@@ -475,15 +475,6 @@ type connLimitListener struct {
 	open int32 // atomic, for observability only
 }
 
-// maxConnsError represents a connection-limit-reached error. It implements
-// net.Error with Temporary()=true. Accept now loops internally instead of
-// returning this error, but the type is kept for testing.
-type maxConnsError struct{}
-
-func (maxConnsError) Error() string   { return "max_connections reached" }
-func (maxConnsError) Timeout() bool   { return false }
-func (maxConnsError) Temporary() bool { return true }
-
 func newConnLimitListener(inner net.Listener, max int, log observability.Logger) net.Listener {
 	return newConnLimitListenerWithSem(inner, make(chan struct{}, max), log)
 }

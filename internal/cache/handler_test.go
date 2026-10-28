@@ -3680,7 +3680,7 @@ func TestWriteBufferedResult_CorrectedAge(t *testing.T) {
 		Delay:      5 * time.Second,
 	}
 	ctx := testCtx("GET", "http://example.com/f")
-	h.writeBufferedResult(ctx, res, api.Key{}, requestInfoFromCtx(ctx))
+	h.writeBufferedResult(ctx, res)
 	require.Equal(t, 200, respCode(ctx))
 	require.Equal(t, "5", respHeader(ctx, header.Age),
 		"the follower must report the leader's corrected age, not Age: 0")
@@ -4028,11 +4028,12 @@ func TestTryConditional304_Match(t *testing.T) {
 	}
 	r := testCtx("GET", "http://example.com/")
 	r.Request.Header.Set(header.IfNoneMatch, `"v1"`)
-	ok := h.tryConditional304(r, obj, api.SourceHot)
+	ok := h.tryConditional304(r, obj, api.SourceHot, "HIT", cacheHit, time.Now(), nil)
 	require.True(t, ok)
 	assert.Equal(t, fasthttp.StatusNotModified, r.Response.StatusCode())
 	assert.Equal(t, `"v1"`, string(r.Response.Header.Peek(header.ETag)))
 	assert.Equal(t, "HIT", string(r.Response.Header.Peek(header.XCache)))
+	assert.Equal(t, "hot", string(r.Response.Header.Peek(header.XCacheSource)))
 }
 
 func TestTryConditional304_NoMatch(t *testing.T) {
@@ -4049,7 +4050,7 @@ func TestTryConditional304_NoMatch(t *testing.T) {
 	}
 	r := testCtx("GET", "http://example.com/")
 	r.Request.Header.Set(header.IfNoneMatch, `"v2"`)
-	ok := h.tryConditional304(r, obj, api.SourceHot)
+	ok := h.tryConditional304(r, obj, api.SourceHot, "HIT", cacheHit, time.Now(), nil)
 	require.False(t, ok)
 }
 

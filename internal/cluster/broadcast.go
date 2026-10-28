@@ -162,12 +162,6 @@ func (b *Broadcaster) BroadcastPurgeAsync(key api.Key, varyKey string) {
 // via gossip for redundant delivery. In eventual mode it sends via
 // gossip only (no HTTP fan-out).
 func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey string) {
-	// Detach from the caller's context so peer fan-out is bounded only
-	// by broadcastTimeout, not by the engine lifecycle or per-request
-	// cancellation. This ensures final purges during shutdown reach all
-	// peers. The caller's ctx still governs local store operations.
-	_ = context.WithoutCancel(ctx)
-
 	evt := api.PurgeEvent{
 		Key:      key,
 		VaryKey:  varyKey,
@@ -196,10 +190,6 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 // of N. Delivery is synchronous, like BroadcastPurge on an idle
 // queue, so a returned call has already fanned out.
 func (b *Broadcaster) BroadcastPurges(ctx context.Context, keys []api.Key) {
-	// Detached like BroadcastPurge: bounded by broadcastTimeout, not
-	// the engine lifecycle or per-request cancellation.
-	_ = context.WithoutCancel(ctx)
-
 	if len(keys) == 0 {
 		return
 	}
@@ -294,8 +284,6 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 // enqueues via gossip for redundant delivery. In eventual mode it sends
 // via gossip only.
 func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
-	_ = context.WithoutCancel(ctx)
-
 	evt := api.RefreshEvent{
 		Key:      key,
 		Issuer:   b.cluster.cfg.NodeName,

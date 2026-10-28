@@ -739,19 +739,6 @@ type HandlerConfig struct {
 	// request cookie. Default (false): cookied requests participate in
 	// the cache per RFC 9111.
 	BypassOnCookie bool
-	// BypassOnCookieNames routes requests carrying any cookie whose
-	// name is in the list entirely around the cache — the same
-	// contract as BypassOnCookie (no lookup, no storage, no
-	// in-flight sharing), scoped to the listed names (issue #768).
-	// Cookie names are matched case-insensitively on the name token
-	// only, never on values or substrings. Requests carrying only
-	// unlisted cookies participate in the cache per RFC 9111 — the
-	// knob exists so ubiquitous analytics/consent cookies do not
-	// force the blunt presence trigger.
-	// In-flight sharing is refused unconditionally for every cookied
-	// request by collapseDenied (ADR-0054) regardless of this list:
-	// a listed-cookie request can never receive another user's
-	// in-flight body, and an unlisted-cookie request cannot either.
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
@@ -1612,7 +1599,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		if disp.Decision == StaleHit {
 			cacheRes = cacheStale
 		}
-		if h.tryConditional304Fast(ctx, disp.Object, src, "HIT", cacheRes, now, h.rewriteHook()) {
+		if h.tryConditional304(ctx, disp.Object, src, "HIT", cacheRes, now, h.rewriteHook()) {
 			// I8 (ADR-0063): a stale-sourced conditional 304 must fire
 			// the same background-revalidation trigger the 200 path
 			// does, under both freshness modes. Under sync a
@@ -2151,7 +2138,7 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 	// list. When the client's condition was part of what the origin
 	// validated, the client gets its 304 — the same complement the
 	// plain revalidation path serves.
-	if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
+	if h.tryConditional304(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 		return true
 	}
 	h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
@@ -2307,58 +2294,6 @@ func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
 		return
 	}
 	h.peerPut(ctx, owner, obj)
-}
-
-// tryConditional304 returns true and writes a 304 if the client's
-// conditional headers match the cached object. Used for both hit and
-// revalidate paths. src is the storage-tier source (hot/warm).
-func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) bool {
-	// Read conditional headers directly from ctx.Request.Header via Peek
-	// to avoid building a full RequestInfo (headerFromCtx allocates a
-	// header.Map with string() for every request header).
-	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
-	if len(inm) > 0 {
-		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
-			if obj.ETag != "" {
-				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
-			}
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
-			ctx.SetStatusCode(fasthttp.StatusNotModified)
-			return true
-		}
-		return false
-	}
-	ims := ctx.Request.Header.Peek(header.IfModifiedSince)
-	if len(ims) > 0 {
-		imsTime := parseHTTPDate(string(ims))
-		if imsTime.IsZero() {
-			return false
-		}
-		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
-			if obj.ETag != "" {
-				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
-			}
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
-			ctx.SetStatusCode(fasthttp.StatusNotModified)
-			return true
-		}
-		if obj.LastModified.IsZero() {
-			if d := obj.Header.Get(header.Date); d != "" {
-				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
-					if obj.ETag != "" {
-						ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
-					}
-					ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-					ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
-					ctx.SetStatusCode(fasthttp.StatusNotModified)
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // handleBypass handles the BYPASS path (requests with no-store or
@@ -2875,7 +2810,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			return
 		}
 		// No re-store: the leader already stored.
-		h.writeBufferedResult(ctx, res, primaryKey, ri)
+		h.writeBufferedResult(ctx, res)
 		return
 	}
 	// Leader: remove from inflight map when done.
@@ -2976,12 +2911,7 @@ func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
 // writeBufferedResult writes a fetchResult to the client without
 // storing (the leader already stored it). Used by singleflight
 // followers in the streaming miss path.
-func (h *Handler) writeBufferedResult(
-	ctx *fasthttp.RequestCtx,
-	res fetchResult,
-	_ api.Key,
-	_ RequestInfo,
-) {
+func (h *Handler) writeBufferedResult(ctx *fasthttp.RequestCtx, res fetchResult) {
 	dst := &ctx.Response.Header
 	res.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
@@ -3148,7 +3078,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		// in the client's If-None-Match list MUST produce a 200 for the
 		// client. A matching If-None-Match / If-Modified-Since therefore
 		// gets the 304 it asked for instead of a full re-served response.
-		if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
+		if h.tryConditional304(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 			return
 		}
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
@@ -3321,7 +3251,7 @@ func (h *Handler) freshenFromHead(
 	h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 	// The HEAD client's own conditional is evaluated against the
 	// freshened entry, mirroring the 304 branch (§4.3.1).
-	if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
+	if h.tryConditional304(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
 		return true
 	}
 	dst := &ctx.Response.Header
@@ -3872,13 +3802,13 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	// Only invalidate on 2xx/3xx success.
 	statusCode := resp.StatusCode()
 	if statusCode >= 200 && statusCode < 400 {
-		h.invalidateAfterProxyFast(ctx, resp)
+		h.invalidateAfterProxy(ctx, resp)
 	}
 }
 
-// invalidateAfterProxyFast handles cache invalidation and optional
+// invalidateAfterProxy handles cache invalidation and optional
 // POST-response storage after a successful fasthttp origin fetch.
-func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasthttp.Response) {
+func (h *Handler) invalidateAfterProxy(ctx *fasthttp.RequestCtx, resp *fasthttp.Response) {
 	getRI := requestInfoFromCtx(ctx)
 	getRI.Method = "GET"
 	key := BuildKey(getRI, h.policy)
@@ -3898,7 +3828,7 @@ func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasth
 	// freshness and its Content-Location matches the request URI. RFC 9111
 	// dropped this rule (no equivalent section), but the behavior is kept
 	// intentionally for Varnish parity.
-	h.maybeStorePostResponseFast(ctx, getRI, key, resp)
+	h.maybeStorePostResponse(ctx, getRI, key, resp)
 }
 
 // purgeAndBroadcast invalidates key locally, then fans the purge out
@@ -3914,10 +3844,10 @@ func (h *Handler) purgeAndBroadcast(ctx *fasthttp.RequestCtx, key api.Key) {
 	}
 }
 
-// maybeStorePostResponseFast stores a successful POST response under
+// maybeStorePostResponse stores a successful POST response under
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 7234 §3; dropped by RFC 9111, kept by design).
-func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
+func (h *Handler) maybeStorePostResponse(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
 	// A 304 is never storable (RFC 9110 §15.4.5) — see IsCacheable's
 	// guard; it carries no body and satisfies no subsequent request.
 	if resp.StatusCode() == fasthttp.StatusNotModified {
@@ -4112,7 +4042,7 @@ func (h *Handler) triggerShedRefill(ri RequestInfo, key api.Key) {
 // The request URI is the client's own request line (path/query only,
 // stripped of the route prefix); the dialed host is the operator-
 // configured pool target selected by PoolFastClient.dispatch, never a
-// request parameter. Same data flow as doFetchFast/doFetchBg (suppressed
+// request parameter. Same data flow as doFetch/doFetchBg (suppressed
 // go/request-forgery alerts); see docs/security/threat-model.md §A10.
 func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key) {
 	// Rebuild the origin request from the materialized fields.
@@ -4237,16 +4167,9 @@ func (h *Handler) shouldRefresh(staleHits int64, obj *api.Object) bool {
 	return true
 }
 
-func (h *Handler) doFetch(ctx *fasthttp.RequestCtx) (res fetchResult) {
-	// Fetch from origin using FastClient. The response is captured
-	// directly in a pooled *fasthttp.Response with no intermediate
-	// header.Map or body buffer allocations.
-	return h.doFetchFast(ctx)
-}
-
-// doFetchFast performs an origin fetch using the fasthttp client.
+// doFetch performs an origin fetch using the fasthttp client.
 // The response is captured directly in a pooled *fasthttp.Response.
-func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
+func (h *Handler) doFetch(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
@@ -4284,7 +4207,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
-	// resp is released inside doFetchFast after the headers are detached
+	// resp is released inside doFetch after the headers are detached
 	// into an owned header.Map and the body copied: the result is shared
 	// with singleflight followers, so it must not alias pooled state.
 
@@ -4379,7 +4302,7 @@ func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		select {
 		case <-done:
 			if panicVal != nil {
-				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstream maps ErrAbortHandler; the same convention as doFetchFast
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstream maps ErrAbortHandler; the same convention as doFetch
 			}
 			defer upstreamCtx.Response.Reset()
 			return upstreamFetchResult(upstreamCtx)
@@ -4399,7 +4322,7 @@ func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
 // the client's conn-owned buffer on streaming paths. No dialing happens
 // here: the scratch request only feeds the wired in-process handler,
 // never a network client — the same data flow the FastClient paths
-// already carry (suppressed go/request-forgery alerts on doFetchFast/
+// already carry (suppressed go/request-forgery alerts on doFetch/
 // doFetchBg share it). See docs/security/threat-model.md §A10: origin
 // targets are operator-configured, never derived from request parameters.
 func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
@@ -4432,7 +4355,7 @@ func upstreamFetchResult(ctx *fasthttp.RequestCtx) fetchResult {
 // RequestCtx and handed to the in-process upstream handler. No dialing
 // happens here: the scratch request only feeds the wired handler, never a
 // network client — the same data flow the FastClient paths already have
-// (suppressed alerts on doFetchFast/doFetchBg share it). See
+// (suppressed alerts on doFetch/doFetchBg share it). See
 // docs/security/threat-model.md §A10: origin targets are
 // operator-configured, never derived from request parameters.
 func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResult) {
@@ -4466,7 +4389,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 		select {
 		case <-done:
 			if panicVal != nil {
-				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstreamRequest maps ErrAbortHandler; the same convention as doFetchFast
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstreamRequest maps ErrAbortHandler; the same convention as doFetch
 			}
 			return upstreamFetchResult(upstreamCtx)
 		case <-deadline.C:
@@ -4541,8 +4464,8 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 	}
 
 	// res.Body is already an independently-owned copy: all production
-	// callers (doFetchFast, streamMissBuffered, streamMissTee,
-	// doFetchBg, maybeStorePostResponseFast) copy the body from the
+	// callers (doFetch, streamMissBuffered, streamMissTee,
+	// doFetchBg, maybeStorePostResponse) copy the body from the
 	// pooled fasthttp.Response buffer before calling buildObject.
 	// Using res.Body directly avoids a redundant make+copy per miss.
 	obj := &api.Object{
@@ -4813,7 +4736,7 @@ func isInvalidatingBytes(method []byte) bool {
 
 // rewriteHook returns the response-rewrite applier when the route
 // configures any response rewrite directive; nil otherwise. Used by
-// package-level response writers (write304Fast) that have no handler
+// package-level response writers (write304) that have no handler
 // reference.
 func (h *Handler) rewriteHook() func(*fasthttp.ResponseHeader) {
 	if h.respHeaderRemove == nil && h.respHeaderSet == nil {

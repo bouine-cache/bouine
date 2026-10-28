@@ -130,7 +130,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 
 // purgeAfterSSEProxy invalidates cached entries for an invalidating-method
 // request served through the SSE stream path. It mirrors the key purge of
-// invalidateAfterProxyFast (RFC 9111 §4.4 Location/Content-Location
+// invalidateAfterProxy (RFC 9111 §4.4 Location/Content-Location
 // eviction) minus the POST-response storage, which never applies to
 // hinted requests: an event stream cannot be stored, and a finite response
 // on a client-announced stream URL has no stable representation to cache.

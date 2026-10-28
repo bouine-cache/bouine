@@ -173,20 +173,31 @@ const refreshGetTimeout = 5 * time.Second
 const defaultMaxResponseBytes int64 = 4 << 20 // 4 MiB
 
 // defaultFetchConcurrency bounds concurrent foreground origin fetches.
-// Each fetch can buffer up to defaultMaxResponseBytes (with 2x
-// over-allocation from bytes.Buffer), so this caps worst-case memory
-// at concurrency × 2 × maxResponseBytes = 32 × 2 × 4 MiB = 256 MiB.
-const defaultFetchConcurrency = 32
+// Each buffered (non-streaming) fetch can hold up to maxResponseBytes
+// (with 2x over-allocation from bytes.Buffer), so this caps worst-case
+// buffered memory at concurrency x 2 x maxResponseBytes = 256 x 2 x 4 MiB
+// = 2 GiB; streaming misses are additionally bounded by the global tee
+// cap (max_streaming_buffer_bytes). 32 shed misses by construction once
+// miss-rate x origin-latency exceeded 32 (Little's law: a 10% miss rate
+// at 25k RPS against a 50 ms origin needed 125 slots and 75% of misses
+// burned the full fetch_wait_timeout then 503'd), so the default is
+// sized for realistic miss demand instead. Operators caching larger
+// objects should lower concurrency so that
+// concurrency x 2 x max_response_bytes stays within about two thirds
+// of GOMEMLIMIT.
+const defaultFetchConcurrency = 256
 
 // defaultMaxStreamingBufferBytes is the fallback cap on total bytes held
 // in live streaming tee buffers when neither max_streaming_buffer_bytes
 // nor GOMEMLIMIT is configured. When GOMEMLIMIT is set, the cap is
-// derived at startup as 5% of the runtime soft memory limit (see
+// derived at startup as 7% of the runtime soft memory limit (see
 // config.ResolveMaxStreamingBufferBytes). Each tee buffer is also
 // individually capped at maxResponseBytes (see teeStreamToClient), so
-// the worst case is concurrency × maxResponseBytes = 32 × 4 MiB =
-// 128 MiB. This fallback (64 MiB) is half the theoretical worst case,
-// so the global cap triggers before all 32 slots fill with full buffers.
+// the worst case is concurrency × maxResponseBytes = 256 × 4 MiB =
+// 1 GiB. This fallback (64 MiB) is well below the theoretical worst
+// case, so the global cap triggers long before all slots fill with
+// full buffers and cacheable misses fall back to streamMissBuffered
+// instead of pinning memory.
 const defaultMaxStreamingBufferBytes int64 = 64 << 20 // 64 MiB
 
 // defaultFetchTimeout bounds the total origin fetch time (header + body)

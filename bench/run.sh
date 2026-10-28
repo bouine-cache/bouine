@@ -62,6 +62,16 @@
 
 set -euo pipefail
 
+# The gate's alloc budgets live in an associative array (declare -A).
+# bash 3.2 (the macOS default /bin/bash) has no associative arrays and
+# dies inside the declare with an unbound-variable error whose EXIT trap
+# can report success — the gate silently stops enforcing budgets. Fail
+# loudly instead.
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "bench/run.sh: bash >= 4 required for the gate (associative-array budgets); found ${BASH_VERSION}" >&2
+    exit 2
+fi
+
 MODE="${1:-gate}"
 
 # Print the exit status as the final output line so a piped/tail-ed run

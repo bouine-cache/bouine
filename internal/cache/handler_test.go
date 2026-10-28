@@ -51,6 +51,21 @@ func testHandler(t *testing.T, upstream fasthttp.RequestHandler) *Handler {
 	})
 }
 
+// TestNewHandler_DefaultFetchConcurrency pins the built-in fetch-semaphore
+// size: unset MaxFetchConcurrency must resolve to the documented default
+// (256). The default is Little's-law-sized for realistic miss demand — the
+// historical 32-slot default shed by construction once miss-rate ×
+// origin-latency exceeded 32 (a 10% miss rate at 25k RPS against a 50 ms
+// origin needs 125 slots and 75% of its misses 503'd), so any change to
+// this number must re-justify the sizing math in the config docs and
+// runbook 53.
+func TestNewHandler_DefaultFetchConcurrency(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, func(_ *fasthttp.RequestCtx) {})
+	require.Equal(t, defaultFetchConcurrency, cap(h.fetchSem))
+	require.Equal(t, 256, defaultFetchConcurrency)
+}
+
 // TestHandler_NoCacheWithETag_RevalidatesOnUse pins the cache-tests
 // cc-resp-no-cache-revalidate behavior: a response with Cache-Control:
 // no-cache and an ETag (no other freshness) is stored, and every reuse

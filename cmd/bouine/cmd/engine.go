@@ -89,6 +89,13 @@ type runState struct {
 	token        string
 	handlers     []*cache.Handler // all cache.Handler instances; per-route knobs filtered via accessor methods
 
+	// nearCache is the experimental peer near-cache (ADR-0071): one
+	// shared instance per engine, injected into every route Handler
+	// and fast path so invalidation applied through any surface
+	// reaches the same near entries. Nil when the feature is off
+	// (the default) — every *cache.NearCache method is nil-safe.
+	nearCache *cache.NearCache
+
 	// fastPathHandlers holds one FastPathHandler per cache-enabled
 	// route (proxied and cached-static), built from that route's
 	// Handler so pool/policy attribution matches the slow path
@@ -346,6 +353,28 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	headerRing := observability.NewOriginHeaderRing()
 	rings.HeaderRing = headerRing
 
+	// Experimental peer near-cache (ADR-0071): one shared instance
+	// per engine — every route Handler, fast path and invalidation
+	// surface serves from and reaches the same near entries. Nil
+	// unless experimental.near_cache.enabled, so the disabled path
+	// costs nothing.
+	var nearCache *cache.NearCache
+	if nc := e.cfg.Experimental.NearCache; nc != nil && nc.Enabled {
+		nearMetrics := observability.NewNearCacheMetrics()
+		e.metrics.Registry.MustRegister(nearMetrics.Hits, nearMetrics.Admissions, nearMetrics.Invalidations)
+		nearCache = cache.NewNearCache(cache.NearCacheConfig{
+			MaxBytes: int64(nc.MaxBytes),
+			MaxTTL:   nc.MaxTTL,
+			Counters: cache.NearCacheCounters{
+				Hits:          nearMetrics.Hits,
+				Admissions:    nearMetrics.Admissions,
+				Invalidations: nearMetrics.Invalidations,
+			},
+		})
+		e.logger.Info("experimental near-cache enabled",
+			"max_bytes", int64(nc.MaxBytes), "max_ttl", nc.MaxTTL.String())
+	}
+
 	rs := &runState{
 		store:          store,
 		pools:          pools,
@@ -366,6 +395,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
 		seq:            seq,
+		nearCache:      nearCache,
 	}
 	return rs, shutdownTracer, nil
 }
@@ -387,6 +417,10 @@ func (rs *runState) wireGossipInvalidator() {
 			return rs.purgeKey(ctx, evt.Key)
 		},
 		BanFn: func(ctx context.Context, evt api.BanEvent) error {
+			// The near cache evaluates the same ban state as the main
+			// store (ADR-0071): apply to both so a near copy of a banned
+			// object dies with the owner's copy.
+			rs.nearCache.Ban(ctx, evt.Predicate)
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
 		},
@@ -841,6 +875,10 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 		},
 		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
 			expr := api.BanExpr{HostRegex: hostRegex, PathRegex: pathRegex}
+			// Near cache ban parity (ADR-0071): the local apply precedes
+			// the broadcast, so this node's near entries die immediately
+			// and the peers' on delivery.
+			rs.nearCache.Ban(dCtx, expr)
 			n, err := rs.store.Ban(dCtx, expr)
 			if err != nil {
 				return n, err
@@ -1366,6 +1404,11 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+		// Store-constructed fast paths carry no route Handler to
+		// inherit the near cache from; route-constructed ones already
+		// did at construction (ADR-0071). WithNearCache with a nil
+		// instance is the disabled default.
+		fp.WithNearCache(rs.nearCache)
 	}
 	e.logger.Info("H1 fast path peer fetch enabled")
 }

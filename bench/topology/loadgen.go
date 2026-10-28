@@ -60,13 +60,14 @@ type outcome uint8
 const (
 	outHot outcome = iota
 	outPeer
+	outNear
 	outMiss
 	outBypass
 	outOther
 	outCount
 )
 
-var outcomeNames = [outCount]string{"HIT/hot", "HIT/peer", "MISS", "BYPASS", "OTHER"}
+var outcomeNames = [outCount]string{"HIT/hot", "HIT/peer", "HIT/near", "MISS", "BYPASS", "OTHER"}
 
 const nodesPerTier = 3
 
@@ -257,6 +258,7 @@ var (
 	bBYPASS = []byte("BYPASS")
 	bHot    = []byte("hot")
 	bPeer   = []byte("peer")
+	bNear   = []byte("near")
 )
 
 func classify(xc, xcs []byte) outcome {
@@ -265,6 +267,8 @@ func classify(xc, xcs []byte) outcome {
 		return outHot
 	case bytes.Equal(xc, bHIT) && bytes.Equal(xcs, bPeer):
 		return outPeer
+	case bytes.Equal(xc, bHIT) && bytes.Equal(xcs, bNear):
+		return outNear
 	case bytes.Equal(xc, bMISS):
 		return outMiss
 	case bytes.Equal(xc, bBYPASS):

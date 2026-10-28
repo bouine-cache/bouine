@@ -37,6 +37,11 @@ const (
 	SourceWarm Source = "warm"
 	// SourcePeer — served from a cluster peer via peer-fetch RPC.
 	SourcePeer Source = "peer"
+	// SourceNear — served from this node's experimental near-cache of
+	// peer-fetched objects (experimental.near_cache): the bytes the
+	// owner would have sent, held locally for a bounded freshness
+	// window (ADR-0071). Only appears when the feature is enabled.
+	SourceNear Source = "near"
 	// SourceOrigin — a fetch was dispatched toward the upstream origin:
 	// misses (including failed-fetch error responses), write-through
 	// proxy, and BYPASS.

@@ -38,7 +38,7 @@ type nodePorts struct {
 	gossip int
 }
 
-func bootTier(originAddr string, tr tracingSpec) (*tier, error) {
+func bootTier(originAddr string, tr tracingSpec, near bool) (*tier, error) {
 	np := [3]nodePorts{}
 	for i := range np {
 		p, err := reserveNodePorts()
@@ -56,7 +56,7 @@ func bootTier(originAddr string, tr tracingSpec) (*tier, error) {
 	t := &tier{cfgDir: cfgDir}
 
 	for i := range 3 {
-		node, err := t.bootNode(i, np[i], seeds, originAddr, tr)
+		node, err := t.bootNode(i, np[i], seeds, originAddr, tr, near)
 		if err != nil {
 			t.down()
 			return nil, err
@@ -72,8 +72,21 @@ func bootTier(originAddr string, tr tracingSpec) (*tier, error) {
 }
 
 // bootNode writes one node's YAML config and starts its cobra entrypoint.
-func (t *tier) bootNode(i int, p nodePorts, seeds, originAddr string, tr tracingSpec) (tierNode, error) {
+func (t *tier) bootNode(i int, p nodePorts, seeds, originAddr string, tr tracingSpec, near bool) (tierNode, error) {
 	name := "topo-" + strconv.Itoa(i+1)
+	// nearYAML renders the experimental.near_cache block (ADR-0071):
+	// 64 MiB / 30s — enough to hold the Zipf head of the harness
+	// keyspace at the audited body sizes, bounded enough to keep RSS
+	// comparable.
+	nearYAML := ""
+	if near {
+		nearYAML = `experimental:
+  near_cache:
+    enabled: true
+    max_bytes: 64MiB
+    max_ttl: 30s
+`
+	}
 	cfg := fmt.Sprintf(`listen:
   http: "127.0.0.1:%d"
   admin: "127.0.0.1:%d"
@@ -87,7 +100,7 @@ cluster:
   mode: strong
   join: [%s]
   hop_limit: 2
-%supstream_pools:
+%s%supstream_pools:
   - name: ssr
     targets: ["%s"]
 routes:
@@ -106,7 +119,7 @@ routes:
     cache:
       ttl_default: 600s
 `,
-		p.http, p.admin, p.gossip, harnessToken, name, seeds, tr.yaml(), originAddr)
+		p.http, p.admin, p.gossip, harnessToken, name, seeds, tr.yaml(), nearYAML, originAddr)
 
 	cfgPath := filepath.Join(t.cfgDir, name+".yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {

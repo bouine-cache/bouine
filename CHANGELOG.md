@@ -60,6 +60,26 @@ the curated, human-readable summary.
   Both the fast path and the slow path now consult the 5-second
   unstorable memo before the ask, fail-open like the memo itself, and
   the fast path flags the request so the slow path does not re-ask.
+- **Cluster (experimental): a bounded near-cache of peer-fetched
+  objects on non-owner nodes (ADR-0071, audit finding F2).** On a
+  3-node strong cluster, 64% of steady-state requests are `HIT/peer`:
+  a full serialize + transfer + decode + copy round (two body-sized
+  allocations per request across the two nodes) for bytes that are
+  identical on every call. Behind `experimental.near_cache.enabled`
+  (default off), non-owners now hold a small SIEVE-evicted, byte- and
+  TTL-bounded local copy of peer answers for keys that prove popular,
+  and serve it fresh-only at local-hit latency. Measured on the
+  topology harness (hit-heavy 1000/s, near store 64 MiB / 30 s per
+  node): `HIT/near` serves 54–55% of requests, peer RPCs drop 85%,
+  near-hit p50 matches local-hot p50 (−40% vs the peer hit it
+  replaces), whole-process mallocs/req 35.2 → 13.9 (−60%), GC rate
+  −70%, CPU −10–15%, origin behavior unchanged. Invalidation rides
+  the existing purge/refresh/ban broadcast (purges and refreshes
+  delete near copies, bans evaluate inside the near store's Get);
+  admission refuses variants, resolvers, empty bodies and anything not
+  fresh; every entry's TTL is bounded by `max_ttl` even without
+  propagation. New counters:
+  `bouine_near_cache_{hits,admissions,invalidations}_total`.
 
 ### Added
 

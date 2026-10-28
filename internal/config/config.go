@@ -120,6 +120,37 @@ type ExperimentalConfig struct {
 	// Default false; phase 2 (route table and pool target swap) lands
 	// separately under the same flag.
 	ConfigReload bool `yaml:"config_reload,omitempty" json:"config_reload,omitempty"`
+
+	// NearCache enables the experimental peer near-cache (ADR-0071):
+	// on non-owner nodes, peer-fetched objects for hot keys are held
+	// in a small bounded local store and served fresh from it instead
+	// of re-asking the owner per request. Fresh-only serving, TTL
+	// bounded by max_ttl, invalidation riding the existing
+	// purge/refresh/ban cluster broadcast. Nil (default) = disabled.
+	// See NearCacheConfig.
+	NearCache *NearCacheConfig `yaml:"near_cache,omitempty" json:"near_cache,omitempty"`
+}
+
+// NearCacheConfig configures the experimental peer near-cache
+// (ADR-0071). Every bound exists to keep the feature's blast radius
+// explicit; see the ADR for the safety model.
+//
+// Unstable — the experimental feature owns its own surface.
+type NearCacheConfig struct {
+	// Enabled turns the near-cache on. Exists separately from the
+	// block's presence so a config can carry the knobs ahead of the
+	// flip.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MaxBytes bounds the near store per node (bodies + per-object
+	// overhead, the same accounting as the hot tier). Zero applies
+	// the built-in default; validation caps it so a typo cannot
+	// silently double a node's memory.
+	MaxBytes ByteSize `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// MaxTTL bounds every admitted entry's freshness lifetime
+	// independently of the origin's TTL: even without invalidation
+	// propagation, a near copy cannot outlive it. Zero applies the
+	// built-in default; validation caps it.
+	MaxTTL time.Duration `yaml:"max_ttl,omitempty" json:"max_ttl,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

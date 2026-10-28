@@ -372,6 +372,12 @@ type Handler struct {
 	// because such a fill provably stores nothing shareable. A zero
 	// value is usable (see unstorableMemo).
 	unstorableMemo unstorableMemo
+	// nearCache is the deployment's experimental peer near-cache
+	// (ADR-0071), shared by every route Handler of the engine and
+	// inherited by route-constructed FastPathHandlers. Nil (the
+	// default, experimental.near_cache unset) disables the near branch
+	// everywhere: every *NearCache method is nil-safe.
+	nearCache *NearCache
 	// fp carries the route's freshness policy (fillPolicy): the TTL
 	// ladder knobs shared by buildObject, the sync-mode fill cap, and
 	// the 304-refresh override. A value, not a pointer, so zero-value
@@ -448,8 +454,16 @@ type HandlerConfig struct {
 	// recent fill settled unstorable by explicit origin directive
 	// (no-store/private) within the memo window (ADR-0066 amendment #2).
 	FillBypass interface{ Inc() }
-	Store      storage.Store
-	Logger     observability.Logger
+	// NearCache, when non-nil, enables the experimental peer
+	// near-cache (ADR-0071) for this route: peer-fetched objects on
+	// non-owned keys are admitted into a bounded local store and
+	// served fresh from it instead of re-asking the owner. The engine
+	// constructs ONE instance and shares it across route Handlers, so
+	// invalidation (purge/refresh/ban) applied through any Handler
+	// reaches the same near entries. Nil disables.
+	NearCache *NearCache
+	Store     storage.Store
+	Logger    observability.Logger
 	// Negative resolves per-status negative-caching TTLs from the
 	// route's negative_ttl policy (both forms normalized to one map by
 	// the config layer). Nil disables negative caching.
@@ -913,6 +927,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		FetchShedInc:            cfg.FetchShed,
 		RewarmFillInc:           cfg.RewarmFill,
 		FillBypassInc:           cfg.FillBypass,
+		nearCache:               cfg.NearCache,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
 		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
@@ -1075,6 +1090,10 @@ func (h *Handler) Close(ctx context.Context) error {
 // Returns owned=true when this handler had the key (tracked variants or a
 // store hit). When owned=false, no store mutation was performed.
 func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
+	// The experimental near-cache (ADR-0071) holds peer-fetched copies
+	// for non-owned keys; the purge broadcast reaches this surface on
+	// every node, so the near copy dies with the owner's copy.
+	h.nearCache.Purge(ctx, primaryKey)
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
 	delete(h.variantSets, primaryKey)
@@ -1113,6 +1132,10 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 // (false, nil) when the key was not in the store, and (true, err) when
 // the store operation failed.
 func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, error) {
+	// Near entries carry no grace windows (ADR-0071 admission zeroes
+	// them), so a refresh's soft-purge is a hard delete on this
+	// surface: the next request re-fetches fresh from the owner.
+	h.nearCache.Refresh(ctx, primaryKey)
 	// Collect variant keys for the primary key.
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
@@ -1774,6 +1797,19 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// held by the owner, so the ask would 404. Keyed by the ask key
 		// (lookupKey) — fail-open wherever that differs from the memo's
 		// primary key (policied routes) or the window has lapsed.
+		//
+		// Experimental near-cache (ADR-0071): before re-asking the
+		// owner, consult the local near copy of a previously
+		// peer-fetched object. Fresh-only serving — Lookup refuses
+		// expired entries and admission zeroed the grace windows, so
+		// Evaluate's Hit is the only servable outcome here, and a miss
+		// falls through to the ordinary owner ask below.
+		if nearObj, fresh := h.nearCache.Lookup(ctx, lookupKey, now); fresh {
+			if d := Evaluate(ri, nearObj, now); d.Decision == Hit {
+				h.serveObject(ctx, nearObj, now, cacheHit, api.SourceNear)
+				return
+			}
+		}
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			// ADR-0068: the fast path may have already asked this exact
 			// blank question and fetched the metadata-only resolver —
@@ -1802,6 +1838,12 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 				}
 			case peerObj != nil:
 				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
+					// Experimental near-cache (ADR-0071): the owner's
+					// answer is safe to remember locally — Admit's
+					// guards (non-variant, bodyful, fresh, popular)
+					// decide whether it is worth it. Admission clones;
+					// peerObj stays owned by this request's serve.
+					h.nearCache.Admit(ctx, lookupKey, peerObj, now)
 					return
 				}
 			}

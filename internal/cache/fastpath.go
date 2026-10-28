@@ -55,8 +55,13 @@ type FastPathHandler struct {
 	// runs and TryHit behaves exactly as before.
 	ownerFn   func(key api.Key) (owner api.PeerInfo, isLocal bool)
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	policy    *KeyPolicy // nil = no query/header policy
-	onStale   func(req *api.RawRequest, key api.Key, stale *api.Object)
+	// near is the owning deployment's experimental peer near-cache
+	// (ADR-0071), inherited from the route Handler on construction or
+	// wired explicitly via WithNearCache. Nil (default) disables the
+	// near branch entirely: every method on *NearCache is nil-safe.
+	near    *NearCache
+	policy  *KeyPolicy // nil = no query/header policy
+	onStale func(req *api.RawRequest, key api.Key, stale *api.Object)
 	// uaBypass mirrors the owning Handler's compiled
 	// cache.bypass_on_user_agent patterns (issue #771, ADR-0055). When
 	// non-nil, TryHit declines matching requests so they fall through
@@ -115,6 +120,7 @@ func NewFastPathHandler(h *Handler) *FastPathHandler {
 		bypassCookieNames: h.bypassCookieNames,
 		uaBypass:          h.uaBypass,
 		syncCDC:           h.syncCDC,
+		near:              h.nearCache,
 	}
 }
 
@@ -158,6 +164,17 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool), peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) *FastPathHandler {
 	f.ownerFn = ownerFn
 	f.peerFetch = peerFetch
+	return f
+}
+
+// WithNearCache wires the experimental peer near-cache (ADR-0071) onto
+// a store-constructed handler. Route-constructed handlers inherit the
+// owning Handler's near cache at construction. The near branch only
+// runs when cluster peer fetch is wired too: near entries exist only
+// for keys the node does not own, which is exactly the peer-ask
+// population.
+func (f *FastPathHandler) WithNearCache(n *NearCache) *FastPathHandler {
+	f.near = n
 	return f
 }
 
@@ -312,6 +329,22 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 		req.OwnerMiss = true
 		return nil, false
 	}
+	// Experimental near-cache (ADR-0071): before paying the peer RPC,
+	// consult the local near copy of a previously peer-fetched object.
+	// Fresh-only — Lookup refuses expired entries and admission zeroed
+	// the grace windows — so a near hit is exactly the response the
+	// owner would return for this key, served from local memory. A
+	// non-Hit decision (gate refusal, request directives) falls
+	// through to the ordinary ask below; the near entry stays for the
+	// next request whose gates do pass.
+	if nearObj, fresh := f.near.Lookup(ctx, lookupKey, now); fresh {
+		if disp := evaluate(nearObj, reqCC, respGateFromObject(nearObj), now); disp.Decision == Hit {
+			resp := f.serializeResponse(req, nearObj, api.SourceNear, now, "HIT")
+			if resp != nil {
+				return resp, true
+			}
+		}
+	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err == nil && peerObj != nil && isPeerResolverMetadata(peerObj) {
 		// ADR-0068: the owner answered the bare primary-key ask with
@@ -377,6 +410,10 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	disp := evaluate(peerObj, reqCC, respGateFromObject(peerObj), now)
 	switch disp.Decision {
 	case Hit:
+		// Experimental near-cache (ADR-0071): a fresh owner answer is
+		// a candidate for local remembrance — Admit's popularity gate
+		// and guards decide. Admit clones; peerObj stays this request's.
+		f.near.Admit(ctx, lookupKey, peerObj, now)
 		resp := f.serializeResponse(req, peerObj, api.SourcePeer, now, "HIT")
 		if resp == nil {
 			return nil, false

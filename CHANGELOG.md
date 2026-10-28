@@ -77,8 +77,22 @@ the curated, human-readable summary.
   the existing purge/refresh/ban broadcast (purges and refreshes
   delete near copies, bans evaluate inside the near store's Get);
   admission refuses variants, resolvers, empty bodies and anything not
-  fresh; every entry's TTL is bounded by `max_ttl` even without
-  propagation. New counters:
+  fresh; every entry's TTL is bounded by `max_ttl` (default 10 s) even
+  without propagation. The feature is route-scoped: the
+  `experimental.near_cache.routes` allowlist selects which routes get
+  the near branch (empty = nowhere, fail-closed; unknown names fail
+  config validation), so identity-bearing funnels whose cache key
+  omits request-identity headers stay out of the near population by
+  construction. The near store's lazy-ban TTL is capped at
+  `max_ttl` + the admission window instead of the main store's 24 h —
+  a ban older than that can never bite a near entry, and every
+  broadcast ban lands on every node's near store too. Near hits are
+  labeled `source="near"` on
+  `bouine_requests_total`/`bouine_response_bytes_total`; admitted
+  copies keep the peer answer's owner-side `StoredAt` so ban exemption
+  and the served `Age` match the owner's copy; the near lookup only
+  serves keys this node does not own (fast path and slow path). New
+  counters:
   `bouine_near_cache_{hits,admissions,invalidations}_total`.
 
 ### Added

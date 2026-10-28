@@ -41,7 +41,19 @@ on non-owner nodes, gated behind `experimental.near_cache.enabled`
 `storage.HotStore` instance — SIEVE eviction, byte-budgeted,
 ban-evaluating — plus a popularity memo of the unstorable-memo shape).
 Every route Handler, fast path and invalidation surface shares the
-instance.
+instance. **Route scoping (amendment #2)**: `experimental.near_cache.
+routes` is the allowlist of route names the feature may act on — only
+a listed route's Handler (and the fast path built from it) gets the
+instance; every other route is wired the nil instance and keeps paying
+peer RPCs exactly as before. An empty allowlist is valid and selects
+NOWHERE (the fail-closed rollout shape; the engine logs the inert
+warning), and config validation rejects names that match no route so a
+typo cannot silently de-scope a selected route. This is the mitigation
+for the cross-client amplification a global flag would carry: a route
+whose cache key omits request-identity headers (the cross-client leak
+class a shared cache keyed without request identity invites) stays
+out of the near population by construction — it must be explicitly
+named to have its peer answers pinned locally for `max_ttl`.
 
 Safety model (fail-closed at every doubt):
 
@@ -49,9 +61,14 @@ Safety model (fail-closed at every doubt):
    `VaryValue` — variant bodies and the ADR-0068 metadata resolver are
    refused outright), bodyful, still-fresh objects. The stored copy's
    TTL is bounded by BOTH the object's remaining freshness and
-   `max_ttl` (default 30 s, capped at 5 m), and its grace windows are
+   `max_ttl` (default 10 s, capped at 5 m), and its grace windows are
    zeroed — a near entry never serves stale and never triggers
-   revalidation (revalidation stays the owner's job, issue #509).
+   revalidation (revalidation stays the owner's job, issue #509). The
+   default is 10 s rather than the original 30 s: on a measured
+   production fleet's peer-fetch key distribution a 5–10 s bound keeps
+   ~2/3 of the absorption a 30 s bound buys, while the no-propagation
+   staleness window stays within an order of magnitude of a broadcast
+   delivery gap (ms healthy, seconds degraded).
 2. **Popularity gate**: a key peer-fetched twice within 30 s admits on
    the second fetch; first sight only arms the gate. One-pass traffic
    never churns the bounded store.
@@ -65,12 +82,22 @@ Safety model (fail-closed at every doubt):
 5. **Invalidation parity**: `Handler.Purge` and `SoftPurge` delete the
    near copy (a refresh is a hard delete — near entries carry no grace
    to mark stale); the engine applies `Ban` expressions to the near
-   store next to the main store, so bans evaluate identically on both.
+   store next to the main store, so bans evaluate identically on both —
+   including the exemption rule (objects stored after a ban's creation
+   are not subject to it): admission keeps the peer answer's
+   owner-side `StoredAt` instead of re-stamping the admission time, so
+   a near copy stays subject to every ban its owner's copy is subject
+   to (and exempt from every ban it is exempt from), and the served
+   `Age` stays the owner's truth.
 6. **Bounded blast radius**: `max_bytes` per node (default 16 MiB,
    capped at 256 MiB), fresh-only serving, `max_ttl` as the staleness
    bound that holds even without invalidation propagation, all
-   validation-capped; three counters (`bouine_near_cache_{hits,
-   admissions,invalidations}_total`) make the feature observable.
+   validation-capped; the near store's lazy-ban TTL is capped at
+   `max_ttl` + the admission window (not the main store's 24 h — a ban
+   older than that can never bite a near entry, and every broadcast
+   ban lands on every node's near store too); three counters
+   (`bouine_near_cache_{hits,admissions,invalidations}_total`) make
+   the feature observable.
 
 The bytes a near hit serves are exactly the bytes the peer RPC would
 have returned, to the same request population (requests that computed

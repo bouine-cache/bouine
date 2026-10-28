@@ -1176,11 +1176,11 @@ func ForwardedStandard() ForwardedConfig {
 // declared once. The merge is field-scoped and form-aware (see
 // mergeRouteDefaults in loader.go). Unstable.
 type RouteDefaults struct {
-	// Cache holds cache-side defaults. Only bypass_on_user_agent is
-	// mergeable today; other RouteCache fields are rejected here at
-	// decode time (strict mode), same rationale as Request. Declared
-	// before Request (fieldalignment: it carries the block's only
-	// slice).
+	// Cache holds cache-side defaults. Only bypass_on_user_agent and
+	// downstream_freshness are mergeable today; other RouteCache fields
+	// are rejected here at decode time (strict mode), same rationale as
+	// Request. Declared before Request (fieldalignment: it carries the
+	// block's only slice).
 	Cache RouteDefaultsCache `yaml:"cache,omitempty" json:"cache,omitempty"`
 	// Request holds request-side defaults. Only forwarded is
 	// mergeable; other RouteRequest fields are rejected here at decode
@@ -1205,6 +1205,18 @@ type RouteDefaultsRequest struct {
 // sharing the type would silently accept every cache field under
 // route_defaults before its merge semantics are designed.
 type RouteDefaultsCache struct {
+	// DownstreamFreshness is the cache.downstream_freshness default
+	// (ADR-0063), so a CDN-fronted deployment declares the mode once
+	// instead of repeating it on every route. Every route without its
+	// own value inherits it; a route's own value replaces it —
+	// `downstream_freshness: passthrough` is the explicit opt-out
+	// (unlike the list knobs there is no empty-form escape hatch). Both
+	// pool and static routes inherit: the knob is consumed by every
+	// cache handler and validateRouteCache accepts the field on every
+	// route kind. The enum is validated at route_defaults' own path
+	// before the merge (validateRouteDefaults). Declared before
+	// BypassOnUserAgent (fieldalignment: slice goes after string).
+	DownstreamFreshness DownstreamFreshness `yaml:"downstream_freshness,omitempty" json:"downstream_freshness,omitempty"`
 	// BypassOnUserAgent is the cache.bypass_on_user_agent default
 	// (issue #771, ADR-0055), so a layered deployment declares its
 	// verified-bot bypass patterns once instead of repeating them on

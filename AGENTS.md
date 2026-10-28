@@ -408,9 +408,11 @@ Observability is a product feature, not an afterthought.
 - Per-route `downstream_freshness` (`passthrough` | `sync`, default
   `passthrough`) caps downstream CDN freshness by synthesizing
   `CDN-Cache-Control` (RFC 9213) — `Cache-Control` is never mutated
-  (ADR-0011). Investigate chain-TTL behavior there, not here: ADR-0063
-  holds the behavior matrix, the per-CDN portability table (Cloudflare,
-  Fastly, bunny.net) and the ceiling math.
+  (ADR-0011). Settable once for every route via
+  `route_defaults.cache.downstream_freshness` (routes without their
+  own value inherit). Investigate chain-TTL behavior there, not here:
+  ADR-0063 holds the behavior matrix, the per-CDN portability table
+  (Cloudflare, Fastly, bunny.net) and the ceiling math.
 - The Go SDK (`pkg/bouineapi`) follows semver. Wire types in `pkg/api` are
   additive — add fields, never remove or rename in the same major.
 - Feature flags for experimental work live under `experimental:` in

@@ -451,6 +451,13 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		applyClusterClosures(&cfg, e, rs)
 		// Data-plane invalidation fan-out (issue #753).
 		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
+		// Experimental peer near-cache (ADR-0071): the engine shares one
+		// instance across the selected route Handlers so every
+		// invalidation surface reaches the same near entries. Route
+		// scoping (am #2): nearCacheFor returns nil for routes not in
+		// the experimental.near_cache.routes allowlist — their near
+		// branch (and the fast path built from this Handler) never runs.
+		cfg.NearCache = rs.nearCacheFor(rc.Name)
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		e.addRoute(router, rc, cached.ServeRequest, buildRouteFP(cached))
@@ -605,6 +612,9 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		// Data-plane invalidation fan-out for cache-enabled static routes;
 		// same rationale as the proxied-route wiring (issue #753).
 		cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
+		// Experimental peer near-cache (ADR-0071), shared as on proxied
+		// routes — and route-scoped the same way (am #2).
+		cfg.NearCache = rs.nearCacheFor(rc.Name)
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
 		handler = cached.ServeRequest

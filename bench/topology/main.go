@@ -37,6 +37,7 @@ func main() {
 		workers   = flag.Int("workers", 192, "load generator worker goroutines")
 		list      = flag.Bool("list", false, "list profiles and exit")
 		memprof   = flag.String("memprofile", "", "write an allocation profile to this path after the run")
+		near      = flag.Bool("near", false, "enable experimental.near_cache on every node (64MiB / 30s) — ADR-0071")
 	)
 	flag.Parse()
 
@@ -73,7 +74,7 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stdout, "[harness] collector %s up: %s\n", *collector, collAddr(coll))
 	}
 
-	t, err := bootTier(origin.addr, tracingSpec{rate: *tracing, endpoint: collAddr(coll)})
+	t, err := bootTier(origin.addr, tracingSpec{rate: *tracing, endpoint: collAddr(coll)}, *near)
 	if err != nil {
 		fatal("tier: %v", err)
 	}
@@ -104,6 +105,9 @@ func main() {
 	}
 
 	printReport(prof, *rate, *duration, *tracing, *collector, result)
+	if *near {
+		_, _ = fmt.Fprintln(os.Stdout, "near-cache: enabled (experimental.near_cache: 64MiB / 30s)")
+	}
 
 	if coll != nil && coll.srv != nil {
 		_, _ = fmt.Fprintf(os.Stdout, "[collector] exports=%d bytes=%d\n", coll.exports.Load(), coll.bytes.Load())

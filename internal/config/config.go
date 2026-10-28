@@ -120,6 +120,53 @@ type ExperimentalConfig struct {
 	// Default false; phase 2 (route table and pool target swap) lands
 	// separately under the same flag.
 	ConfigReload bool `yaml:"config_reload,omitempty" json:"config_reload,omitempty"`
+
+	// NearCache enables the experimental peer near-cache (ADR-0071):
+	// on non-owner nodes, peer-fetched objects for hot keys are held
+	// in a small bounded local store and served fresh from it instead
+	// of re-asking the owner per request. Fresh-only serving, TTL
+	// bounded by max_ttl, invalidation riding the existing
+	// purge/refresh/ban cluster broadcast. Nil (default) = disabled.
+	// See NearCacheConfig.
+	NearCache *NearCacheConfig `yaml:"near_cache,omitempty" json:"near_cache,omitempty"`
+}
+
+// NearCacheConfig configures the experimental peer near-cache
+// (ADR-0071). Every bound exists to keep the feature's blast radius
+// explicit; see the ADR for the safety model.
+//
+// Unstable — the experimental feature owns its own surface.
+type NearCacheConfig struct {
+	// Routes is the allowlist of route names the feature may act on:
+	// only a route whose name is listed gets a near-cache branch
+	// (slow path and fast path); every other route keeps paying peer
+	// RPCs exactly as before. Empty (the default) means the near path
+	// runs NOWHERE even when enabled — the fail-closed rollout shape:
+	// a route must be explicitly named to have its peer answers
+	// remembered locally, so identity-bearing funnels (routes whose
+	// cache key omits request-identity headers — the cross-client
+	// leak class a shared cache keyed without request identity
+	// invites) stay out by construction. Route names are the
+	// post-validation names (an explicit `name:` or the
+	// derived host:path / path label); validation rejects names that
+	// match no configured route so a typo cannot silently disable a
+	// selected route. Declared first: fieldalignment wants the slice
+	// before the scalar knobs.
+	Routes []string `yaml:"routes,omitempty" json:"routes,omitempty"`
+	// Enabled turns the near-cache on. Exists separately from the
+	// block's presence so a config can carry the knobs ahead of the
+	// flip.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MaxBytes bounds the near store per node (bodies + per-object
+	// overhead, the same accounting as the hot tier). Zero applies
+	// the built-in default; validation caps it so a typo cannot
+	// silently double a node's memory.
+	MaxBytes ByteSize `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+	// MaxTTL bounds every admitted entry's freshness lifetime
+	// independently of the origin's TTL: even without invalidation
+	// propagation, a near copy cannot outlive it. Zero applies the
+	// built-in default (10s); validation caps it.
+	MaxTTL time.Duration `yaml:"max_ttl,omitempty" json:"max_ttl,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

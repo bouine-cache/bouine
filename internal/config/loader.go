@@ -51,6 +51,23 @@ const MaxPeerFetchConcurrency = 128
 // leaf) prevent a shared import. If you change one, change the other.
 const maxReadTimeout = 5 * time.Minute
 
+// Validation caps for experimental.near_cache (ADR-0071). Duplicated
+// from internal/cache (nearDefaultMaxBytes, nearMaxTTLDefault) because
+// config is a leaf; the cache-layer defaults apply the same values at
+// runtime when the config leaves them at zero.
+const (
+	// maxNearCacheBytes caps the per-node near store: 256 MiB is a
+	// deliberate multiple of the 16 MiB default — enough to serve a
+	// large near working set, small enough that a typo cannot double a
+	// node's heap.
+	maxNearCacheBytes = 256 << 20
+	// maxNearCacheTTL caps the staleness bound of a near copy: 5
+	// minutes of possibly-unpropagated staleness is the most an
+	// operator may ask the rest of the fleet to accept from an
+	// experimental feature.
+	maxNearCacheTTL = 5 * time.Minute
+)
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -217,6 +234,13 @@ func (c *Config) Validate() error {
 	// h1_fast_path) must keep loading; the engine logs the retirement
 	// when either is set.
 
+	// experimental.near_cache (ADR-0071): bounds make the feature's
+	// blast radius explicit — a near store is per-node heap on top of
+	// the hot tier, and max_ttl is the staleness bound that holds even
+	// when invalidation propagation is unavailable (single-node admin
+	// surfaces, broadcast backlog).
+	c.validateNearCache(ec)
+
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.
@@ -227,6 +251,56 @@ func (c *Config) Validate() error {
 	c.validateTrafficClasses(ec)
 
 	return ec.err()
+}
+
+// validateNearCache checks the experimental.near_cache block (ADR-0071):
+// bounds make the feature's blast radius explicit — a near store is
+// per-node heap on top of the hot tier, and max_ttl is the staleness
+// bound that holds even when invalidation propagation is unavailable.
+// A disabled block is skipped entirely (a config can carry the knobs
+// ahead of the flip without satisfying caps it does not use).
+func (c *Config) validateNearCache(ec *errCollector) {
+	nc := c.Experimental.NearCache
+	if nc == nil || !nc.Enabled {
+		return
+	}
+	if nc.MaxBytes < 0 {
+		ec.addf("experimental.near_cache.max_bytes", "must be >= 0, got %v", int64(nc.MaxBytes))
+	}
+	if nc.MaxBytes > maxNearCacheBytes {
+		ec.addf("experimental.near_cache.max_bytes", "must be <= %v (per-node near-store cap), got %v", maxNearCacheBytes, int64(nc.MaxBytes))
+	}
+	if nc.MaxTTL < 0 {
+		ec.addf("experimental.near_cache.max_ttl", "must be >= 0, got %v", nc.MaxTTL)
+	}
+	if nc.MaxTTL > maxNearCacheTTL {
+		ec.addf("experimental.near_cache.max_ttl", "must be <= %v (staleness bound), got %v", maxNearCacheTTL, nc.MaxTTL)
+	}
+	// Route allowlist (ADR-0071 am #2): an empty list is VALID — it is
+	// the fail-closed rollout shape (the near path runs nowhere; the
+	// engine logs the inert warning) — but a listed name that matches
+	// no route is a typo that would silently de-scope a route the
+	// operator selected, so it fails the load. Route names are already
+	// normalized here (validateRoute derives them when unset), so the
+	// comparison sees the same names the engine's route scoping will.
+	if len(nc.Routes) == 0 {
+		return
+	}
+	named := make(map[string]struct{}, len(c.Routes))
+	for i := range c.Routes {
+		named[c.Routes[i].Name] = struct{}{}
+	}
+	for i, name := range nc.Routes {
+		if name == "" {
+			ec.addf(fmt.Sprintf("experimental.near_cache.routes[%d]", i),
+				"must be a route name, not empty (unnamed routes are selected by their derived label, e.g. \"host:/path\")")
+			continue
+		}
+		if _, ok := named[name]; !ok {
+			ec.addf(fmt.Sprintf("experimental.near_cache.routes[%d]", i),
+				"routes %q matches no configured route (routes are selected by their name — explicit or derived host:path/path label)", name)
+		}
+	}
 }
 
 // Traffic-class validation caps (ADR-0047): the closed label set is

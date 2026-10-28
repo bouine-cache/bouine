@@ -355,9 +355,10 @@ func TestSourceIndex(t *testing.T) {
 	assert.Equal(t, 0, sourceIndex(string(api.SourceHot)))
 	assert.Equal(t, 1, sourceIndex(string(api.SourceWarm)))
 	assert.Equal(t, 2, sourceIndex(string(api.SourcePeer)))
-	assert.Equal(t, 3, sourceIndex(string(api.SourceOrigin)))
-	assert.Equal(t, 4, sourceIndex(string(api.SourceBouine)))
-	assert.Equal(t, 4, sourceIndex(""))
+	assert.Equal(t, 3, sourceIndex(string(api.SourceNear)))
+	assert.Equal(t, 4, sourceIndex(string(api.SourceOrigin)))
+	assert.Equal(t, 5, sourceIndex(string(api.SourceBouine)))
+	assert.Equal(t, 5, sourceIndex(""))
 	assert.Equal(t, -1, sourceIndex("unknown"))
 }
 
@@ -375,6 +376,7 @@ func TestSourceLabelSetClosed(t *testing.T) {
 		string(api.SourceHot),
 		string(api.SourceWarm),
 		string(api.SourcePeer),
+		string(api.SourceNear),
 		string(api.SourceOrigin),
 		string(api.SourceBouine),
 	}
@@ -385,6 +387,7 @@ func TestSourceLabelSetClosed(t *testing.T) {
 		assert.Equal(t, i, sourceIndex(s), "sourceIndex(%q)", s)
 		assert.Equal(t, i, sourceIndexBytes([]byte(s)), "sourceIndexBytes(%q)", s)
 		assert.Equal(t, s, normaliseSource(s), "normaliseSource(%q) passes through", s)
+		assert.Equal(t, s, sourceSlotNames[i], "sourceSlotNames[%d] is %q's label", i, s)
 	}
 
 	// The wire alias of the bouine slot: an empty X-Cache-Source and any

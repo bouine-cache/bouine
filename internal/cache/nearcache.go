@@ -1,0 +1,297 @@
+package cache
+
+import (
+	"context"
+	"sync/atomic"
+	"time"
+
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
+)
+
+// nearcache.go implements the experimental peer near-cache (ADR-0071,
+// audit finding F2): a small, bounded, node-local store of
+// peer-fetched objects on NON-OWNER nodes, so a hot remote-owned key
+// stops paying a peer RPC — the full serialize + transfer + decode +
+// copy round on the owner and this node — for every request. Measured
+// on the topology harness, 64% of hit-heavy requests are HIT/peer; the
+// near-cache serves the Zipf head of those from local memory.
+//
+// Safety model (the feature is fail-closed everywhere a doubt exists):
+//
+//   - Admission requires an object that is non-variant (blank VaryKey
+//     AND blank VaryValue — a variant body or the ADR-0068 metadata
+//     resolver is never admitted), bodyful, and fresh at admission
+//     time; the entry's TTL is bounded by nearMaxTTL AND the object's
+//     remaining freshness, and its grace windows are zeroed: a near
+//     entry never serves stale and never triggers revalidation
+//     (revalidation stays the owner's job, issue #509).
+//   - Serving requires the SAME freshness evaluation a local hit runs
+//     (evaluate / Evaluate); an expired entry is dropped, not served.
+//   - Invalidation rides the existing cluster broadcast: purges,
+//     refreshes and bans already fan out to every node and apply
+//     through the local surfaces (Handler.Purge / SoftPurge and the
+//     engine-level store.Ban); the near-cache hooks exactly those
+//     surfaces, so a near copy dies with the owner's copy, and bans
+//     evaluate inside the near store's Get exactly as in the main
+//     store.
+//   - Popularity gate: a key must be peer-fetched twice within
+//     nearAdmitWindow before it is admitted, so one-pass traffic never
+//     churns the bounded store.
+//
+// The bytes a near hit serves are exactly the bytes the peer RPC would
+// have returned, to the same request population, within the same
+// freshness window — the near cache changes WHERE the answer is read
+// from, not WHAT is answerable. Anything the peer path would refuse
+// (no-store origins, variants, identity-bearing routes' bypass gates,
+// request no-cache) is refused at the same place it is refused today:
+// upstream of the near lookup.
+
+// nearAdmitWindow bounds the popularity gate: a key peer-fetched twice
+// within this window is admitted. 30s — long enough that a Zipf head
+// key admits on its second request under any realistic arrival rate,
+// short enough that a burst of unique keys does not arm a wave of
+// admissions for traffic that will never come back. A fixed
+// engineering default, not an operator knob; promote with demand (the
+// same policy as the unstorable memo's window).
+const nearAdmitWindow = 30 * time.Second
+
+// nearMaxTTLDefault bounds a near entry's freshness lifetime
+// independently of the origin's TTL: even without invalidation
+// propagation, a near copy cannot outlive it. Used when the config
+// leaves max_ttl at zero. 10s rather than 30s: on a measured
+// production fleet's peer-fetch key distribution (ADR-0071) a 5–10 s
+// bound already keeps ~2/3 of the absorption a 30 s bound buys, while
+// the no-propagation staleness window stays within an order of
+// magnitude of a broadcast delivery gap (ms in the healthy case,
+// seconds degraded).
+const nearMaxTTLDefault = 10 * time.Second
+
+// NearCacheCounters carries the near-cache metrics. Every counter is
+// optional (nil-safe): a test-constructed NearCache counts nothing.
+// The engine injects prometheus counters (internal/observability);
+// the cache layer never imports the metrics library.
+//
+// Unstable — the experimental feature owns its own surface.
+type NearCacheCounters struct {
+	// Hits counts near-cache serves (fresh entries only).
+	Hits interface{ Inc() }
+	// Admissions counts objects actually stored into the near cache
+	// (after the popularity gate and all admission guards).
+	Admissions interface{ Inc() }
+	// Invalidations counts purge/refresh/ban-driven removals observed
+	// by the near cache. Sustained non-zero rates mean the fleet's
+	// invalidation traffic is fighting near-cache reuse.
+	Invalidations interface{ Inc() }
+}
+
+// NearCacheConfig parameterizes NewNearCache.
+//
+// Unstable — the experimental feature owns its own surface.
+type NearCacheConfig struct {
+	Counters NearCacheCounters
+	MaxBytes int64
+	MaxTTL   time.Duration
+}
+
+// nearDefaultMaxBytes is the byte budget used when the config leaves
+// max_bytes at zero: 16 MiB of peer-fetched objects per node — enough
+// for ~100 SSR pages at the audited body sizes, small enough to be
+// irrelevant next to the hot tier.
+const nearDefaultMaxBytes = 16 << 20
+
+// NearCache is the node-local store of peer-fetched objects. A nil
+// *NearCache is valid and disabled: every method is nil-safe and
+// degrades to "no near cache", so call sites wire the pointer
+// unconditionally and the config decides existence.
+//
+// Unstable — the experimental feature owns its own surface.
+type NearCache struct {
+	counters NearCacheCounters
+	store    storage.Store
+	admit    ttlKeyMemo
+	maxTTL   time.Duration
+	nearHits atomic.Int64
+}
+
+// NewNearCache builds a near cache over a dedicated hot-store instance
+// (SIEVE eviction, byte-budgeted, ban-aware on Get — the same store
+// implementation the main tier uses, at a smaller budget).
+//
+// The near store's lazy-ban TTL is maxTTL plus the admission window,
+// not the main store's 24 h: a ban can only ever matter to an entry
+// stored before the ban was created, and such an entry is admitted at
+// most one peer-fetch round trip after its owner-side store time (an
+// answer fetched before the ban can land after it) and dies at
+// admission + maxTTL. nearAdmitWindow (30 s) exceeds any configured
+// peer-fetch round trip, so pruning bans at maxTTL+nearAdmitWindow
+// never drops one that could still bite — while keeping the near
+// store's ban list ~3 orders of magnitude smaller than the main
+// store's under fleet-wide ban storms, where every broadcast ban
+// lands on every node's near store too.
+func NewNearCache(cfg NearCacheConfig) *NearCache {
+	maxBytes := cfg.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = nearDefaultMaxBytes
+	}
+	maxTTL := cfg.MaxTTL
+	if maxTTL <= 0 {
+		maxTTL = nearMaxTTLDefault
+	}
+	return &NearCache{
+		store:    storage.NewHotStore(storage.HotConfig{MaxBytes: maxBytes, BanTTL: maxTTL + nearAdmitWindow}),
+		maxTTL:   maxTTL,
+		counters: cfg.Counters,
+	}
+}
+
+// Lookup returns the near entry for key when it is still fresh at now.
+// Expired entries are removed (best effort) and reported as misses:
+// a near entry never serves past its freshness lifetime. The store's
+// Get evaluates bans exactly like the main store's Get, so a banned
+// key reports a miss here the moment it would miss on the owner's
+// side of the same broadcast.
+//
+// A fresh result is not yet a serve: the caller still runs its
+// request-side freshness gate, and only a Hit decision becomes a
+// near hit — call RecordHit at the serve site so the counter measures
+// serves, not lookups.
+func (n *NearCache) Lookup(ctx context.Context, key api.Key, now time.Time) (*api.Object, bool) {
+	if n == nil {
+		return nil, false
+	}
+	obj, _, err := n.store.Get(ctx, key)
+	if err != nil || obj == nil {
+		return nil, false
+	}
+	if !now.Before(obj.StoredAt.Add(obj.TTL)) {
+		// Expired: reclaim the bytes so the bound stays honest.
+		_ = n.store.Delete(ctx, key)
+		return nil, false
+	}
+	return obj, true
+}
+
+// RecordHit counts one near-cache serve. Called by the serve paths
+// after a fresh Lookup passed their request-side freshness gate, so
+// the hit counters measure serves, not lookups.
+func (n *NearCache) RecordHit() {
+	if n == nil {
+		return
+	}
+	n.nearHits.Add(1)
+	if n.counters.Hits != nil {
+		n.counters.Hits.Inc()
+	}
+}
+
+// Hits returns the number of near serves observed by this node. Used
+// by tests and harness readouts; the prometheus counters are the
+// operator surface.
+func (n *NearCache) Hits() int64 {
+	if n == nil {
+		return 0
+	}
+	return n.nearHits.Load()
+}
+
+// Admit stores a peer-fetched object under key when it is safe and
+// worth it. Guards, in order: the object must be non-variant (blank
+// VaryKey and blank VaryValue — variant bodies and the ADR-0068
+// metadata resolver are refused outright), bodyful, and still fresh;
+// and the key must have been peer-fetched once before within
+// nearAdmitWindow (the popularity gate — first sight only arms the
+// gate). The stored copy carries a TTL bounded by both the object's
+// remaining freshness and maxTTL, with grace windows zeroed: no stale
+// serving, no revalidation from a non-owner.
+//
+// The stored copy keeps the object's ORIGINAL StoredAt: ban exemption
+// in the near store's Get compares StoredAt against the ban's creation
+// time (bans.go subjectTo), so a re-stamped copy would be exempt from
+// every ban created before its admission — including a ban that landed
+// while the peer answer was in flight and already killed the owner's
+// copy, resurrecting banned bytes locally for max_ttl. The freshness
+// clock is preserved instead through the TTL: the entry expires at
+// now+min(remaining, maxTTL), the same instant a re-stamped entry would
+// have, while StoredAt (and the Age it derives) stay the owner's truth.
+//
+// The stored entry is a store-owned clone: HotStore.Put copies body
+// and headers under the shard lock, so obj's buffers are never
+// retained and the caller keeps full ownership.
+func (n *NearCache) Admit(ctx context.Context, key api.Key, obj *api.Object, now time.Time) {
+	if n == nil || obj == nil {
+		return
+	}
+	if obj.VaryKey != "" || obj.VaryValue != "" || len(obj.Body) == 0 {
+		return
+	}
+	remaining := obj.StoredAt.Add(obj.TTL).Sub(now)
+	if remaining <= 0 {
+		return
+	}
+	if !n.admit.bypass(key) {
+		n.admit.note(key, nearAdmitWindow)
+		return
+	}
+	// CloneForStorage is the ownership boundary (Object carries an
+	// atomic — value copies are illegal), and it lets this function
+	// bound the copy's freshness without touching the caller's object,
+	// which the serve path still reads. Put clones once more under its
+	// own boundary: admission pays two body copies per admitted object,
+	// once per key per freshness window.
+	stored := obj.CloneForStorage(nil)
+	// TTL is a duration-since-StoredAt everywhere (expiry is
+	// StoredAt.Add(TTL)), so carrying the original StoredAt means the
+	// bounded freshness must be expressed as an absolute expiry first:
+	// StoredAt+TTL = now+min(remaining, maxTTL).
+	stored.TTL = now.Add(min(remaining, n.maxTTL)).Sub(obj.StoredAt)
+	stored.StaleWhileRevalidate = 0
+	stored.StaleIfError = 0
+	if err := n.store.Put(ctx, key, stored); err != nil {
+		return
+	}
+	if n.counters.Admissions != nil {
+		n.counters.Admissions.Inc()
+	}
+}
+
+// Purge removes key's near entry. Wired into Handler.Purge so the
+// existing purge broadcast (which reaches every node) invalidates the
+// near copy with the owner's copy. Purges do not bump the
+// invalidations counter — they delete silently alongside the main
+// store, exactly like every other invalidation surface; the counter
+// exists to expose refresh/ban churn that is near-cache-specific.
+func (n *NearCache) Purge(ctx context.Context, key api.Key) {
+	if n == nil {
+		return
+	}
+	_ = n.store.Delete(ctx, key)
+}
+
+// Refresh removes key's near entry. Near entries carry no grace
+// windows, so a soft purge has nothing to mark stale: deleting is the
+// conservative equivalent, and the next request re-fetches fresh from
+// the owner. Wired into Handler.SoftPurge for the refresh broadcast.
+func (n *NearCache) Refresh(ctx context.Context, key api.Key) {
+	if n == nil {
+		return
+	}
+	_ = n.store.Delete(ctx, key)
+	if n.counters.Invalidations != nil {
+		n.counters.Invalidations.Inc()
+	}
+}
+
+// Ban applies a ban expression to the near store's lazy ban list, the
+// same expression the engine applies to the main store when a ban
+// broadcasts. Wired next to the engine's store.Ban call so both
+// stores evaluate identical ban state on Get.
+func (n *NearCache) Ban(ctx context.Context, expr api.BanExpr) {
+	if n == nil {
+		return
+	}
+	_, _ = n.store.Ban(ctx, expr)
+	if n.counters.Invalidations != nil {
+		n.counters.Invalidations.Inc()
+	}
+}

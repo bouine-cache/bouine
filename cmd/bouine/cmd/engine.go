@@ -89,6 +89,22 @@ type runState struct {
 	token        string
 	handlers     []*cache.Handler // all cache.Handler instances; per-route knobs filtered via accessor methods
 
+	// nearCache is the experimental peer near-cache (ADR-0071): one
+	// shared instance per engine, injected into the route Handlers
+	// selected by nearRoutes and their fast paths, so invalidation
+	// applied through any surface reaches the same near entries. Nil
+	// when the feature is off (the default) — every *cache.NearCache
+	// method is nil-safe.
+	nearCache *cache.NearCache
+
+	// nearRoutes is the route-name allowlist resolved from
+	// experimental.near_cache.routes (ADR-0071 am #2): only a route
+	// whose (post-validation) name is listed gets the near branch;
+	// every other route's Handler is wired a nil near cache and keeps
+	// paying peer RPCs exactly as before. Empty (or nil nearCache)
+	// scopes the feature to nowhere — the fail-closed rollout shape.
+	nearRoutes map[string]bool
+
 	// fastPathHandlers holds one FastPathHandler per cache-enabled
 	// route (proxied and cached-static), built from that route's
 	// Handler so pool/policy attribution matches the slow path
@@ -346,6 +362,12 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	headerRing := observability.NewOriginHeaderRing()
 	rings.HeaderRing = headerRing
 
+	// Experimental peer near-cache (ADR-0071): one shared instance
+	// per engine — every selected route Handler, fast path and
+	// invalidation surface serves from and reaches the same near
+	// entries.
+	nearCache := e.buildNearCache(clusterNode != nil)
+
 	rs := &runState{
 		store:          store,
 		pools:          pools,
@@ -366,6 +388,8 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
 		seq:            seq,
+		nearCache:      nearCache,
+		nearRoutes:     nearRouteAllowlist(e.cfg.Experimental.NearCache),
 	}
 	return rs, shutdownTracer, nil
 }
@@ -387,6 +411,10 @@ func (rs *runState) wireGossipInvalidator() {
 			return rs.purgeKey(ctx, evt.Key)
 		},
 		BanFn: func(ctx context.Context, evt api.BanEvent) error {
+			// The near cache evaluates the same ban state as the main
+			// store (ADR-0071): apply to both so a near copy of a banned
+			// object dies with the owner's copy.
+			rs.nearCache.Ban(ctx, evt.Predicate)
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
 		},
@@ -424,6 +452,79 @@ func (e *engine) resolveAdminToken() string {
 			"hint", "set admin.token in config or BOUINE_ADMIN_TOKEN env var to silence this warning")
 	}
 	return token
+}
+
+// buildNearCache constructs the engine's shared experimental
+// near-cache (ADR-0071): one instance injected into every selected
+// route Handler, fast path and invalidation surface, so invalidation
+// applied through any surface reaches the same near entries. Nil
+// unless experimental.near_cache.enabled — the disabled deployment
+// costs nothing (every *cache.NearCache method is nil-safe).
+//
+// clusterLive reports whether the gossip cluster actually came up. The
+// near branch lives inside the peer-ask path (both the H1 fast path
+// and the slow path), which only runs in strong mode with a live
+// cluster: an enabled-but-inert feature is a config the operator
+// should hear about, not silently ignore, so the inert shapes log a
+// warning.
+func (e *engine) buildNearCache(clusterLive bool) *cache.NearCache {
+	nc := e.cfg.Experimental.NearCache
+	if nc == nil || !nc.Enabled {
+		return nil
+	}
+	nearMetrics := observability.NewNearCacheMetrics()
+	e.metrics.Registry.MustRegister(nearMetrics.Hits, nearMetrics.Admissions, nearMetrics.Invalidations)
+	near := cache.NewNearCache(cache.NearCacheConfig{
+		MaxBytes: int64(nc.MaxBytes),
+		MaxTTL:   nc.MaxTTL,
+		Counters: cache.NearCacheCounters{
+			Hits:          nearMetrics.Hits,
+			Admissions:    nearMetrics.Admissions,
+			Invalidations: nearMetrics.Invalidations,
+		},
+	})
+	e.logger.Info("experimental near-cache enabled",
+		"max_bytes", int64(nc.MaxBytes), "max_ttl", nc.MaxTTL.String(),
+		"routes", len(nc.Routes))
+	if len(nc.Routes) == 0 {
+		e.logger.Warn("experimental near-cache enabled but no routes selected (experimental.near_cache.routes is empty): the near path runs nowhere")
+	}
+	if e.cfg.Cluster.Mode != config.ClusterModeStrong || !clusterLive {
+		e.logger.Warn("experimental near-cache enabled but the cluster is not in strong mode: the near path never runs")
+	}
+	return near
+}
+
+// nearRouteAllowlist resolves experimental.near_cache.routes into the
+// set of route names the feature may act on (ADR-0071 am #2). Nil
+// config (feature off) or an empty list yields a set that selects
+// nothing — the fail-closed rollout shape. Names here are the
+// post-validation route names (validateRoute derives them when unset,
+// same normalization the engine's route table sees), and
+// config.Validate has already rejected names matching no route.
+func nearRouteAllowlist(nc *config.NearCacheConfig) map[string]bool {
+	if nc == nil || len(nc.Routes) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(nc.Routes))
+	for _, r := range nc.Routes {
+		m[r] = true
+	}
+	return m
+}
+
+// nearCacheFor resolves the route-scoped near-cache instance for one
+// route: the shared instance when the route's name is allowlisted,
+// nil otherwise (unnamed routes never are — their names are derived
+// at validation, so every route HAS a name by this point). A nil
+// result scopes the route out: its Handler and the fast path built
+// from it carry no near branch, and admission on that route never
+// runs, so no near entry can ever exist for its keys.
+func (rs *runState) nearCacheFor(route string) *cache.NearCache {
+	if rs.nearCache == nil || !rs.nearRoutes[route] {
+		return nil
+	}
+	return rs.nearCache
 }
 
 func (e *engine) initRings() (*observability.Rings, string) {
@@ -841,6 +942,10 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 		},
 		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
 			expr := api.BanExpr{HostRegex: hostRegex, PathRegex: pathRegex}
+			// Near cache ban parity (ADR-0071): the local apply precedes
+			// the broadcast, so this node's near entries die immediately
+			// and the peers' on delivery.
+			rs.nearCache.Ban(dCtx, expr)
 			n, err := rs.store.Ban(dCtx, expr)
 			if err != nil {
 				return n, err
@@ -1366,6 +1471,13 @@ func (e *engine) wireFastPathPeerFetch(rs *runState) {
 	}
 	for _, fp := range rs.fastPathHandlers {
 		fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+		// Near-cache scoping (ADR-0071 am #2): route-constructed fast
+		// paths inherited their route's SCOPED instance at construction
+		// (the Handler was built with nearCacheFor(route)); nothing to
+		// re-wire here, and setting the shared instance would override
+		// an out-of-scope route's nil with the live one. Store-
+		// constructed handlers carry no route identity to scope, so
+		// they keep the disabled (nil) default — fail-closed.
 	}
 	e.logger.Info("H1 fast path peer fetch enabled")
 }

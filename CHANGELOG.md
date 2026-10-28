@@ -26,6 +26,31 @@ the curated, human-readable summary.
   the h1parser read buffer, which the next keep-alive request
   overwrites. They are now copied.
 
+### Performance
+
+- **Cache: config-derived Vary resolution skips the bare ask on the
+  cold-miss peer path (ADR-0071).** ADR-0068's two-step made every Vary
+  cold miss on a non-owner cost two admin-port RPCs (bare primary-key
+  ask for resolver metadata, then the derived variant-key ask), both
+  landing on the owner's traced admin chain — measured on prod as a
+  sustained peer-fetch p99 tail that scales with request volume. On a
+  route whose `cache.key` policy alone determines the Vary list
+  (`include_headers` / `cookie_presence` — the multi-locale shape
+  where the origin declares no Vary of its own), the primary key only
+  ever holds the metadata-only resolver, so the bare ask can never
+  return a body: both the H1 fast path (`tryPeerFetch`) and the slow
+  path miss handler now derive the variant key locally
+  (`configDerivedVary`) and ask the variant's owner directly with a
+  real vary-key assertion — one RPC instead of two. A wrong
+  derivation (the origin declared a Vary field beyond the include
+  list) answers a miss and falls back to the ADR-0068 two-step, which
+  is also the correction path: the cost is one extra ask, never a
+  wrong body (the variant-assertion gates still bound what is
+  served). Completion keeps incrementing
+  `bouine_peer_fetch_resolver_answers_total{side="consumer"}`, so
+  fleet convergence stays observable. Routes without key headers keep
+  today's two-step exactly.
+
 ## [0.6.1] - 2026-10-28
 
 ### Reverted

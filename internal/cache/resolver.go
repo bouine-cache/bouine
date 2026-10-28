@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -108,6 +110,45 @@ func transferredResolver(ctx *fasthttp.RequestCtx, obj *api.Object, lookupKey ap
 	return xfer
 }
 
+// configDerivedVary returns the Vary list a route's KeyPolicy alone
+// determines: the union of the key's include_headers allow-list and the
+// synthetic cookie-presence field, normalized exactly as effectiveVary
+// normalizes the stored union (stream.go) — sorted, deduplicated,
+// ", "-joined. Non-empty therefore only when the policy keys variants
+// (ADR-0071): on such a route effectiveVary always unions the include
+// list in, so every stored entry lives under a derived variant key and
+// the primary key only ever holds the metadata-only resolver.
+//
+// The value equals the stored VaryValue iff the origin declared no Vary
+// field beyond the policy's own (a declared field inside the include
+// list dedups into the same union). An origin that declares extra
+// fields makes the derivation wrong — the derived variant key hashes
+// elsewhere — which answers 404 and falls back to the two-step
+// resolution (ADR-0068), so wrong derivations cost one extra ask, never
+// a wrong body: the variant-assertion gates (peerfetch.go,
+// servePeerHit) still bound what is served.
+func configDerivedVary(policy *KeyPolicy) string {
+	if policy == nil || (len(policy.includeHeaders) == 0 && !policy.hasCookiePresence()) {
+		return ""
+	}
+	// includeHeaders is already trimmed, lowercased, sorted, and
+	// deduped by NewKeyPolicy; the sort+dedup below mirrors
+	// effectiveVary's union step so the shapes stay byte-identical.
+	fields := make([]string, 0, len(policy.includeHeaders)+1)
+	fields = append(fields, policy.includeHeaders...)
+	if policy.hasCookiePresence() {
+		fields = append(fields, cookiePresenceField)
+	}
+	sort.Strings(fields)
+	uniq := fields[:0]
+	for i, f := range fields {
+		if i == 0 || f != fields[i-1] {
+			uniq = append(uniq, f)
+		}
+	}
+	return strings.Join(uniq, ", ")
+}
+
 // serveResolverPeerVariant completes the two-step variant resolution for
 // a node with no local Vary context (ADR-0068). Step one fetched the
 // metadata-only resolver from the primary key's owner; this step derives
@@ -124,14 +165,36 @@ func transferredResolver(ctx *fasthttp.RequestCtx, obj *api.Object, lookupKey ap
 // primary-key peer HITS — the first variant's body to every requester.
 // Closing the leak made the legitimate two-step path mandatory.
 func (h *Handler) serveResolverPeerVariant(ctx *fasthttp.RequestCtx, primaryKey api.Key, resolver *api.Object, now time.Time, ri RequestInfo) bool {
-	vk := VariantKey(primaryKey, resolver.VaryValue, ri.Header, h.policy)
+	if !h.serveDerivedPeerVariant(ctx, primaryKey, resolver.VaryValue, now, ri) {
+		return false
+	}
+	// Count completions only: a rejection or stale answer is not a
+	// converged two-step, and the consumer-side counter exists to
+	// prove the fleet's Vary cold misses converge through the owner
+	// (zero here means they go to origin instead, ADR-0068).
+	if h.onResolverTwoStep != nil {
+		h.onResolverTwoStep()
+	}
+	return true
+}
+
+// serveDerivedPeerVariant is the step-two body shared by the wire-resolved
+// two-step (serveResolverPeerVariant) and the config-derived single ask
+// (ADR-0071, handleCacheMiss): derive the variant key for THIS request's
+// selecting headers from varyValue — learned from the resolver or
+// computed from the route's KeyPolicy alone — and ask the variant's
+// owner with a real vary-key assertion. Never servable metadata: a miss
+// or rejection returns false and the caller falls back to its ordinary
+// path (origin fill, or the bare ask when the derivation is unproven).
+func (h *Handler) serveDerivedPeerVariant(ctx *fasthttp.RequestCtx, primaryKey api.Key, varyValue string, now time.Time, ri RequestInfo) bool {
+	vk := VariantKey(primaryKey, varyValue, ri.Header, h.policy)
 	if vk == primaryKey {
 		// The Vary list collapsed to the primary key: the resolver
 		// itself would be this request's entry — metadata-only, so
 		// nothing is servable. The ordinary fill re-populates it.
 		return false
 	}
-	assertion := BuildVaryKey(resolver.VaryValue, ri.Header, h.policy)
+	assertion := BuildVaryKey(varyValue, ri.Header, h.policy)
 	if assertion == "" {
 		return false
 	}
@@ -144,17 +207,7 @@ func (h *Handler) serveResolverPeerVariant(ctx *fasthttp.RequestCtx, primaryKey 
 	// primary hashes elsewhere) is served without re-storing. Its
 	// Source label says "peer" — a cosmetic mislabel for the local
 	// case on a cold path.
-	if !h.servePeerHit(ctx, vk, variant, now, ri) {
-		return false
-	}
-	// Count completions only: a rejection or stale answer is not a
-	// converged two-step, and the consumer-side counter exists to
-	// prove the fleet's Vary cold misses converge through the owner
-	// (zero here means they go to origin instead, ADR-0068).
-	if h.onResolverTwoStep != nil {
-		h.onResolverTwoStep()
-	}
-	return true
+	return h.servePeerHit(ctx, vk, variant, now, ri)
 }
 
 func (h *Handler) getVariantForResolution(ctx context.Context, vk api.Key, assertion string) *api.Object {

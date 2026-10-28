@@ -1810,6 +1810,30 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 			peerObj := transferredResolver(ctx, obj, lookupKey)
 			var err error
 			if peerObj == nil {
+				// ADR-0071: on a plain cold miss (no stored object, no
+				// local resolver) for a route whose KeyPolicy alone
+				// determines the Vary list, the bare primary-key ask can
+				// only ever be answered with resolver metadata — every
+				// servable entry on such a route is stored under a
+				// derived variant key — so derive the variant key
+				// locally and ask the variant's owner directly: one ask
+				// instead of two. A miss or rejection falls through to
+				// the bare ask below, which is also the correction path
+				// when the derivation proves wrong (the origin declared
+				// a Vary field beyond the include list).
+				if obj == nil && resolver == nil {
+					if derived := configDerivedVary(h.policy); derived != "" {
+						if h.serveDerivedPeerVariant(ctx, primaryKey, derived, now, ri) {
+							// Same completion counter as the wire-resolved
+							// two-step: the cold miss converged through the
+							// variant's owner (ADR-0068).
+							if h.onResolverTwoStep != nil {
+								h.onResolverTwoStep()
+							}
+							return
+						}
+					}
+				}
 				peerObj, err = h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj))
 			}
 			switch {

@@ -25,6 +25,7 @@ code change that introduces a new failure mode.
 | [`61-pgo-profile-refresh.md`](61-pgo-profile-refresh.md) | PGO profile refresh and custom-profile builds. |
 | [`62-config-reload.md`](62-config-reload.md) | Config reload (experimental): apply a whole file's hot-appliable changes to a running daemon. |
 | [`63-keys-introspection.md`](63-keys-introspection.md) | Cache-key introspection: keys find/top/recent without storage enumeration (#816). |
+| [`64-connection-limit.md`](64-connection-limit.md) | Data-plane connection cap: `bouine_conn_rejections_total`, sizing, refusal path. |
 | [`gc-tuning-fasthttp.md`](gc-tuning-fasthttp.md) | GC tuning under fasthttp. |
 | [`native-histogram.md`](native-histogram.md) | Native-histogram latency metrics. |
 | [`static-files.md`](static-files.md) | Static file serving. |

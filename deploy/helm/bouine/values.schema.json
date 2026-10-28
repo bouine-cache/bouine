@@ -128,10 +128,10 @@
               "description": "Listen address for the cluster plane, as host:port. The port is the container port: the Services resolve it by name and the NetworkPolicy allows it post-DNAT, so overriding config.listen.cluster keeps routing coherent. An empty string disables the cluster plane."
             },
             "max_connections": {
-              "description": "Cap on simultaneously open data-plane connections. Under HTTP/1.1 this bounds in-flight requests; over-limit connections receive 503 + close. Idle keep-alive connections hold a slot. 0 disables the limit.",
+              "description": "Cap on simultaneously open data-plane connections. Under HTTP/1.1 this bounds in-flight requests; over-limit connections receive 503 + close (counted by bouine_conn_rejections_total). Idle keep-alive connections hold a slot, so size for the client population; each fast-path connection pins ~32 KiB. 0 disables the limit.",
               "type": "integer",
               "minimum": 0,
-              "default": 4096
+              "default": 65536
             },
             "idle_timeout": {
               "description": "Keep-alive idle timeout for data-plane connections (default 120s). Keep an upstream proxy or LB's keepalive timeout BELOW this so it closes idle connections first; otherwise bouine may close a connection mid-reuse and the upstream logs 'upstream prematurely closed connection'.",

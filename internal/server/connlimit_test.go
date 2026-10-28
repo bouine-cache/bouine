@@ -58,7 +58,7 @@ func TestConnLimitListener_AllowsWithinLimit(t *testing.T) {
 	t.Parallel()
 
 	pl := newPipeListener()
-	lim := newConnLimitListener(pl, 2, observability.NoopLogger{})
+	lim := newConnLimitListener(pl, 2, observability.NoopLogger{}, nil)
 	conns := make(chan net.Conn, 4)
 
 	go func() {
@@ -106,7 +106,7 @@ func TestConnLimitListener_RejectsOverLimit(t *testing.T) {
 	t.Parallel()
 
 	pl := newPipeListener()
-	lim := newConnLimitListener(pl, 1, observability.NoopLogger{})
+	lim := newConnLimitListener(pl, 1, observability.NoopLogger{}, nil)
 
 	// Fill the limit with one connection.
 	client1, server1 := net.Pipe()
@@ -183,7 +183,7 @@ func TestConnLimitListener_HTTPServeSurvives(t *testing.T) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	lim := newConnLimitListener(ln, 1, observability.NoopLogger{})
+	lim := newConnLimitListener(ln, 1, observability.NoopLogger{}, nil)
 	addr := ln.Addr().String()
 
 	srv := &fasthttp.Server{
@@ -294,7 +294,7 @@ func TestConnLimitListener_ConcurrentClose(t *testing.T) {
 
 	const max = 8
 	pl := newPipeListener()
-	lim := newConnLimitListener(pl, max, observability.NoopLogger{})
+	lim := newConnLimitListener(pl, max, observability.NoopLogger{}, nil)
 
 	accepted := make([]net.Conn, max)
 	for i := 0; i < max; i++ {
@@ -328,3 +328,132 @@ func TestConnLimitListener_ConcurrentClose(t *testing.T) {
 
 // Ensure atomic import is used.
 var _ = atomic.AddInt32
+
+// countingConnMetrics counts connection rejections through the same
+// interface the listener receives in production.
+type countingConnMetrics struct{ rejections atomic.Int64 }
+
+func (m *countingConnMetrics) RecordHit(string, string, string, string, int, int, time.Duration) {
+}
+func (m *countingConnMetrics) IncrementSmugglingRejected() {}
+func (m *countingConnMetrics) IncrementConnRejection()     { m.rejections.Add(1) }
+
+// feedRejectedConn feeds one connection into pl that a saturated
+// connLimitListener will refuse, draining the 503 the refusal writes
+// (net.Pipe is synchronous: the write blocks until read).
+func feedRejectedConn(t *testing.T, pl *pipeListener) {
+	t.Helper()
+	client, server := net.Pipe()
+	go func() {
+		buf := make([]byte, 128)
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = client.Read(buf)
+		_ = client.Close()
+		_ = server.Close()
+	}()
+	pl.conns <- server
+}
+
+// TestConnLimitListener_RejectionMetric verifies that every refused
+// connection increments the connection-rejection counter exactly once:
+// the counter is the exact, alertable signal while the accompanying
+// warn log is rate-limited. Before it existed, the only trace of the
+// cliff was one warn line per refusal (24,040 lines in one measured
+// connection flood) — log spending caused by the very overload the
+// cap protects against.
+func TestConnLimitListener_RejectionMetric(t *testing.T) {
+	t.Parallel()
+	m := &countingConnMetrics{}
+	pl := newPipeListener()
+	lim := newConnLimitListener(pl, 1, observability.NoopLogger{}, m)
+
+	// Fill the single slot.
+	client1, server1 := net.Pipe()
+	pl.conns <- server1
+	c1, err := lim.Accept()
+	require.NoError(t, err, "first accept")
+
+	// A looping Accept consumes the refused connections.
+	go func() {
+		for {
+			_, err := lim.Accept()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	feedRejectedConn(t, pl)
+	feedRejectedConn(t, pl)
+	require.Eventually(t, func() bool { return m.rejections.Load() == 2 },
+		5*time.Second, 10*time.Millisecond, "both refusals must count exactly")
+
+	_ = c1.Close()
+	_ = client1.Close()
+	_ = server1.Close()
+}
+
+// recordingLogger captures warn lines for assertions.
+type recordingLogger struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *recordingLogger) Info(string, ...any) {}
+func (l *recordingLogger) Warn(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, msg)
+}
+func (l *recordingLogger) Error(string, ...any) {}
+func (l *recordingLogger) Debug(string, ...any) {}
+
+func (l *recordingLogger) warnCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.warns)
+}
+
+// TestConnLimitListener_RejectionWarnRateLimited verifies the warn
+// rate limit: one warn line per interval, with the count of suppressed
+// rejections folded into the next emitted line. The clock is injected
+// (no sleeps in tests), and the exact counter keeps counting every
+// refusal.
+func TestConnLimitListener_RejectionWarnRateLimited(t *testing.T) {
+	t.Parallel()
+	var clock atomic.Int64 // unix seconds, starts far from zero
+	now := func() time.Time { return time.Unix(clock.Load(), 0) }
+	base := int64(1_000_000)
+	rec := &recordingLogger{}
+
+	cl := &connLimitListener{
+		log:       rec,
+		metrics:   &countingConnMetrics{},
+		nowFn:     now,
+		warnEvery: 10 * time.Second,
+	}
+
+	// First rejection at base warns immediately (lastWarn starts at
+	// the zero time, so the first interval always elapses) and swaps
+	// suppression back to zero.
+	clock.Store(base)
+	cl.reject()
+	require.Equal(t, 1, rec.warnCount(), "first rejection warns")
+	require.Zero(t, cl.suppressed.Load(), "the emitted line resets suppression")
+
+	// Two more within the window: suppressed, no new warn line.
+	cl.reject()
+	cl.reject()
+	require.Equal(t, 1, rec.warnCount(), "in-window rejections do not warn")
+	require.Equal(t, int64(2), cl.suppressed.Load(), "in-window rejections accumulate")
+
+	// After the window elapses, the next rejection warns and resets
+	// the suppression count it just carried.
+	clock.Store(base + 11)
+	cl.reject()
+	require.Equal(t, 2, rec.warnCount(), "first rejection after the window warns")
+	require.Zero(t, cl.suppressed.Load(), "the emitted line resets suppression")
+
+	// The exact counter saw every refusal: 4 total, 2 warn lines.
+	require.Equal(t, int64(4), cl.metrics.(*countingConnMetrics).rejections.Load())
+}

@@ -7,10 +7,18 @@ listen:
   # max_connections caps simultaneously open data-plane connections.
   # Under HTTP/1.1 a request holds its connection, so this also bounds
   # in-flight requests and the goroutine pile a slow origin can cause
-  # (issue #562). Over-limit connections get 503 + close at accept.
-  # Note: idle keep-alive connections hold a slot too — size for your
-  # client population, not just peak concurrency.
-  max_connections: 4096
+  # (issue #562). Over-limit connections get 503 + close at accept
+  # (counted by bouine_conn_rejections_total). Note: idle keep-alive
+  # connections hold a slot too — size for your client population, not
+  # just peak concurrency.
+  # The default (65536) matches the fd limit the daemon raises at boot,
+  # the same envelope NGINX gives a worker set (16384 x 4 workers);
+  # 4096 refused legitimate client populations five times smaller than
+  # a CDN front's keep-alive pool. Each accepted fast-path connection
+  # pins roughly 32 KiB (16 KiB read buffer + goroutine stack), so
+  # 65536 conns pin about 2 GiB — size down for small pods. Set 0 to
+  # disable the cap entirely (unbounded, not recommended).
+  max_connections: 65536
   # idle_timeout is the keep-alive idle timeout for data-plane
   # connections (default 120s). Lower it when a front-end proxies to
   # bouine so IT closes idle connections first, and keep it above your

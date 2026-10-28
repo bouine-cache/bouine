@@ -421,3 +421,4 @@ type mockFastPathMetrics struct{}
 func (m *mockFastPathMetrics) RecordHit(pool, trafficClass, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 }
 func (m *mockFastPathMetrics) IncrementSmugglingRejected() {}
+func (m *mockFastPathMetrics) IncrementConnRejection()     {}

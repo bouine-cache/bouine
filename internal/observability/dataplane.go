@@ -54,6 +54,11 @@ type DataPlaneMetrics struct {
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
+	// ConnRejections counts data-plane connections refused at accept
+	// because listen.max_connections was reached. Each refusal also
+	// writes a rate-limited warn log; the counter stays exact so alerts
+	// can rely on it.
+	ConnRejections prometheus.Counter
 	// accessLog receives structured access log entries. nil disables
 	// access logging (used in tests and when the operator sets log
 	// level above Info).
@@ -208,11 +213,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	m.initRefreshMetrics()
 	m.initWALMetrics()
 	m.initStreamingMetrics()
-	m.HTTPSmugglingRejected = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "http_smuggling_rejected_total",
-		Help:      "Total HTTP smuggling attempts rejected by the h1parser (CL+TE conflict, duplicate Content-Length, obs-fold).",
-	})
+	m.initAdmissionMetrics()
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.CFBatchFlushed, m.CFBatchDeduped, m.CFBatchFlushErr,
@@ -226,10 +227,27 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
 		m.MetricsResetTotal, m.RequestQueueDepth,
-		m.HTTPSmugglingRejected,
+		m.HTTPSmugglingRejected, m.ConnRejections,
 		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
 		m.RewarmFillTotal, m.FillBypassTotal, m.VaryDriftTotal)
 	return m
+}
+
+// initAdmissionMetrics creates the parser- and listener-level admission
+// rejection counters (HTTP smuggling, connection limit). Called by
+// NewDataPlaneMetrics; extracted like initShedMetrics to keep
+// NewDataPlaneMetrics under the funlen limit.
+func (m *DataPlaneMetrics) initAdmissionMetrics() {
+	m.HTTPSmugglingRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "http_smuggling_rejected_total",
+		Help:      "Total HTTP smuggling attempts rejected by the h1parser (CL+TE conflict, duplicate Content-Length, obs-fold).",
+	})
+	m.ConnRejections = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "conn_rejections_total",
+		Help:      "Data-plane connections refused at accept because listen.max_connections was reached. Non-zero rate means the client population (including idle keep-alive connections) exceeds the cap; refused connections get 503 + close.",
+	})
 }
 
 // initHotStoreMetrics creates the hot-tier gauges, the eviction
@@ -1095,6 +1113,14 @@ func (m *DataPlaneMetrics) RecordHit(pool, trafficClass, cacheResult, source str
 // duplicate Content-Length, or obs-fold.
 func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
 	m.HTTPSmugglingRejected.Inc()
+}
+
+// IncrementConnRejection implements api.FastPathMetrics. It counts one
+// data-plane connection refused at accept by the connection-limit
+// listener. Called on every refusal (the accompanying warn log is
+// rate-limited; the counter is not).
+func (m *DataPlaneMetrics) IncrementConnRejection() {
+	m.ConnRejections.Inc()
 }
 
 // recordFastHTTPRings updates the dashboard ring buffers for non-HIT

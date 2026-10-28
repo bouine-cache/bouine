@@ -48,9 +48,13 @@ config:
     # max_connections caps simultaneously open data-plane connections.
     # Under HTTP/1.1 a request holds its connection, so this bounds the
     # in-flight request pile a slow origin can cause (issue #562);
-    # over-limit connections get 503 + close at accept. Idle keep-alive
-    # connections hold a slot too — size for your client population.
-    max_connections: 4096
+    # over-limit connections get 503 + close at accept (counted by
+    # bouine_conn_rejections_total). Idle keep-alive connections hold a
+    # slot too — size for your client population, not just peak
+    # concurrency. The default (65536) matches the fd limit the daemon
+    # raises at boot; each fast-path connection pins ~32 KiB, so 65536
+    # conns pin ~2 GiB — size down for small pods. 0 disables the cap.
+    max_connections: 65536
     # Keep-alive idle timeout for data-plane connections (default 120s).
     # Keep an upstream proxy/LB's keep-alive idle timeout BELOW this so
     # the upstream closes idle connections first; otherwise bouine may

@@ -118,6 +118,7 @@ func TestFastPathHandler_Interface(t *testing.T) {
 type fakeFastPathMetrics struct {
 	hitCount       int
 	smugglingCount int
+	connRejected   int
 }
 
 func (f *fakeFastPathMetrics) RecordHit(_, _, _, _ string, _, _ int, _ time.Duration) {
@@ -126,6 +127,10 @@ func (f *fakeFastPathMetrics) RecordHit(_, _, _, _ string, _, _ int, _ time.Dura
 
 func (f *fakeFastPathMetrics) IncrementSmugglingRejected() {
 	f.smugglingCount++
+}
+
+func (f *fakeFastPathMetrics) IncrementConnRejection() {
+	f.connRejected++
 }
 
 func TestFastPathMetrics_Interface(t *testing.T) {

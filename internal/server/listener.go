@@ -326,7 +326,7 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 	s.resolved.Store(ln.Addr().String())
 
 	if s.maxConns > 0 {
-		ln = newConnLimitListener(ln, s.maxConns, s.logger)
+		ln = newConnLimitListener(ln, s.maxConns, s.logger, s.fastMetrics)
 	}
 
 	s.logger.Info("listener started",
@@ -400,7 +400,7 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 			firstAddr = ln.Addr().String()
 		}
 		if s.maxConns > 0 {
-			ln = newConnLimitListenerWithSem(ln, sem, s.logger)
+			ln = newConnLimitListenerWithSem(ln, sem, s.logger, s.fastMetrics)
 		}
 		if s.name == "https" {
 			ln = tls.NewListener(ln, s.inner.TLSConfig)
@@ -464,15 +464,33 @@ func (s *Listener) Addr() string {
 	return s.addr
 }
 
+// connRejectionWarnInterval bounds the warn-log rate on the connection
+// refusal path: one line per interval, with the count of suppressed
+// rejections folded into the next line. A connection flood used to cost
+// one structured-log line per refusal (24,040 lines in one measured
+// run) — the refusal path itself became the expense exactly when the
+// process was busiest. The bouine_conn_rejections_total counter stays
+// exact; only the log is sampled.
+const connRejectionWarnInterval = 10 * time.Second
+
 // connLimitListener wraps a net.Listener with a semaphore that caps
 // the number of concurrently accepted connections. When the limit is
 // reached, new connections are closed immediately to prevent FD
 // exhaustion under connection-flood attacks (e.g. slowloris).
 type connLimitListener struct {
 	net.Listener
-	sem  chan struct{}
-	log  observability.Logger
-	open int32 // atomic, for observability only
+	sem chan struct{}
+	log observability.Logger
+	// metrics receives one IncrementConnRejection per refused
+	// connection (exact, unlike the rate-limited warn log). nil-safe.
+	metrics api.FastPathMetrics
+	// nowFn and warnEvery bound the warn-log rate; injectable for tests
+	// (no sleeps in tests).
+	nowFn      func() time.Time
+	warnEvery  time.Duration
+	open       int32        // atomic, for observability only
+	lastWarn   atomic.Int64 // unix nano of the last emitted warn line
+	suppressed atomic.Int64 // rejections since the last emitted line
 }
 
 // maxConnsError represents a connection-limit-reached error. It implements
@@ -484,15 +502,18 @@ func (maxConnsError) Error() string   { return "max_connections reached" }
 func (maxConnsError) Timeout() bool   { return false }
 func (maxConnsError) Temporary() bool { return true }
 
-func newConnLimitListener(inner net.Listener, max int, log observability.Logger) net.Listener {
-	return newConnLimitListenerWithSem(inner, make(chan struct{}, max), log)
+func newConnLimitListener(inner net.Listener, max int, log observability.Logger, metrics api.FastPathMetrics) net.Listener {
+	return newConnLimitListenerWithSem(inner, make(chan struct{}, max), log, metrics)
 }
 
-func newConnLimitListenerWithSem(inner net.Listener, sem chan struct{}, log observability.Logger) net.Listener {
+func newConnLimitListenerWithSem(inner net.Listener, sem chan struct{}, log observability.Logger, metrics api.FastPathMetrics) net.Listener {
 	return &connLimitListener{
-		Listener: inner,
-		sem:      sem,
-		log:      log,
+		Listener:  inner,
+		sem:       sem,
+		log:       log,
+		metrics:   metrics,
+		nowFn:     time.Now,
+		warnEvery: connRejectionWarnInterval,
 	}
 }
 
@@ -514,9 +535,27 @@ func (l *connLimitListener) Accept() (net.Conn, error) {
 			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			_, _ = conn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 			_ = conn.Close()
-			l.log.Warn("connection rejected: max_connections reached")
+			l.reject()
 		}
 	}
+}
+
+// reject accounts for one refused connection: the exact counter
+// increment, and a warn-log line rate-limited to one per warnEvery.
+// Concurrent refusals serialize on the lastWarn CAS; the losers land in
+// suppressed and are reported on the next emitted line.
+func (l *connLimitListener) reject() {
+	if l.metrics != nil {
+		l.metrics.IncrementConnRejection()
+	}
+	now := l.nowFn().UnixNano()
+	last := l.lastWarn.Load()
+	if now-last >= int64(l.warnEvery) && l.lastWarn.CompareAndSwap(last, now) {
+		l.log.Warn("connection rejected: max_connections reached",
+			"suppressed_since_last", l.suppressed.Swap(0))
+		return
+	}
+	l.suppressed.Add(1)
 }
 
 // connLimitConn releases the semaphore slot when the connection is

@@ -784,7 +784,12 @@ type RouteCache struct {
 	// MaxFetchConcurrency bounds the number of concurrent foreground
 	// origin fetches per route. When the limit is reached, additional
 	// fetches wait up to fetch_wait_timeout for a slot and then shed.
-	// Zero (default) applies a safe built-in limit (32).
+	// Zero (default) applies the built-in limit (256). Size it from
+	// Little's law for the worst case: slots >= miss-rate × origin
+	// latency (10% misses at 25k RPS against a 50 ms origin needs 125
+	// slots; the old 32-slot default shed 75% of those misses). Keep
+	// slots × 2 × max_response_bytes within about two thirds of
+	// GOMEMLIMIT for buffered misses.
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// MaxVariants caps the number of distinct Vary variants stored per
 	// primary cache key on this route. When the cap is reached, further

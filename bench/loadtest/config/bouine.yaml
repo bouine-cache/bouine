@@ -27,6 +27,14 @@ upstream_pools:
     health:
       passive:
         consecutive_5xx: 10
+    # 640 covers the worst concurrent origin demand of the default
+    # admission chain on this route: 256 foreground fetch slots
+    # (routes[].cache.max_fetch_concurrency) + 256 SWR revalidations
+    # (revalSem) + 8 background refreshes. The fasthttp pool has no
+    # wait configured, so a cap below the semaphores turns bursts into
+    # instant 502s instead of queueing.
+    connect:
+      max_connections: 640
 
 routes:
   - name: "default"
@@ -37,3 +45,13 @@ routes:
       negative_ttl: "5s"
       stale_while_revalidate: "30s"
       jitter_percent: 5
+      # Little's law for the harness's miss-heavy scenarios (§3.3/§3.6
+      # style: up to 10% misses at 25k RPS against a 50 ms origin needs
+      # 125 slots): 256 gives 2x headroom. The former implicit 32-slot
+      # default shed 75% of misses at that point.
+      max_fetch_concurrency: 256
+      # Shed waits are cheap-ish but not free: every shed request burns
+      # the full wait before its 503. 250ms keeps burst absorption
+      # without making a saturated origin park connections for a
+      # meaningful fraction of the client timeout.
+      fetch_wait_timeout: "250ms"

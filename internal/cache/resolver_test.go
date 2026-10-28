@@ -342,3 +342,209 @@ func TestStoreFromPeer_NoRefreshRegistrationWithoutURI(t *testing.T) {
 	require.Nil(t, h.refreshRegistry.Lookup(key),
 		"a peer-put object carries no URL on the wire — registering it would schedule a guaranteed-failing refresh")
 }
+
+// TestConfigDerivedVary pins the ADR-0071 derivation's normalization: the
+// Vary list a KeyPolicy alone determines is the include_headers union with
+// the synthetic cookie-presence field, in exactly effectiveVary's stored
+// shape (sorted, deduplicated, ", "-joined) so a correct derivation
+// hashes to the stored variant keys byte-for-byte.
+func TestConfigDerivedVary(t *testing.T) {
+	t.Parallel()
+	require.Empty(t, configDerivedVary(nil),
+		"no policy: the Vary list is the origin's alone — never derivable")
+	require.Empty(t, configDerivedVary(NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)),
+		"a policy without key headers keys no variants — never derivable")
+	require.Equal(t, "accept-language, bm-market",
+		configDerivedVary(NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"BM-Market", "Accept-Language"}, false)),
+		"the include list is normalized exactly as effectiveVary normalizes the stored union")
+	require.Equal(t, "bm-market, x-bouine-cookie-presence",
+		configDerivedVary(NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"BM-Market"}, false).
+			WithCookiePresence([]string{"BM_Advertising"})),
+		"the synthetic cookie-presence field unions in and sorts with the include list")
+}
+
+// TestResolverPeerVariant_ConfigDerivedSingleAsk pins the ADR-0071
+// single-ask resolution: on a route whose KeyPolicy alone determines the
+// Vary list (include_headers), a plain cold miss on a non-owner must NOT
+// pay the bare primary-key ask for resolver metadata — the slow path
+// derives the variant key locally and asks the variant's owner directly
+// with a real vary-key assertion. One peer ask instead of two.
+func TestResolverPeerVariant_ConfigDerivedSingleAsk(t *testing.T) {
+	t.Parallel()
+	originHits := 0
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originHits++
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		_, _ = ctx.Write([]byte("origin-fill"))
+	}
+
+	req := testCtx("GET", "http://example.com/config-derived")
+	req.Request.Header.Set("X-Test-Variant", "a")
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false)
+	ri := requestInfoFromCtx(req)
+	primaryKey := BuildKey(ri, policy)
+	derivedVary := configDerivedVary(policy)
+	derivedVk := VariantKey(primaryKey, derivedVary, ri.Header, policy)
+	derivedAssertion := BuildVaryKey(derivedVary, ri.Header, policy)
+
+	type ask struct {
+		key       api.Key
+		assertion string
+	}
+	var asks []ask
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Policy:     policy,
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:       1 << 20,
+			NumShards:      2,
+			ReaperInterval: -1,
+		}),
+		// This node owns nothing — the non-owner cold-lookup shape.
+		OwnerFn: func(api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:1"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, assertion string) (*api.Object, error) {
+			asks = append(asks, ask{key: key, assertion: assertion})
+			if key != derivedVk || assertion != derivedAssertion {
+				return nil, nil
+			}
+			variant := &api.Object{
+				Key:        derivedVk,
+				VaryKey:    derivedAssertion,
+				VaryValue:  derivedVary,
+				StatusCode: 200,
+				Body:       []byte("variant-a"),
+				BodySize:   9,
+				StoredAt:   time.Now(),
+				TTL:        time.Minute,
+			}
+			variant.Header = header.NewMap(1)
+			variant.Header.AppendEntry("Cache-Control", "max-age=60")
+			return variant, nil
+		},
+	})
+
+	h.ServeRequest(req)
+
+	require.Equal(t, 200, respCode(req))
+	require.Equal(t, "HIT", respHeader(req, header.XCache),
+		"the derived ask must serve the variant, not origin")
+	require.Equal(t, "variant-a", respBody(req))
+	require.Zero(t, originHits, "the derived ask must prevent the origin fetch")
+	require.Len(t, asks, 1,
+		"one peer ask: the derived variant-key ask — never the bare primary-key ask")
+	require.Equal(t, derivedVk, asks[0].key)
+	require.Equal(t, derivedAssertion, asks[0].assertion,
+		"the single ask must assert THIS request's variant dimension")
+}
+
+// TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation pins
+// the ADR-0071 fallback: when the origin declared a Vary field beyond
+// the policy's include list, the config-derived Vary list is wrong — the
+// derived variant key hashes elsewhere and its owner answers a miss.
+// The bare ask must then run (it fetches the authoritative resolver
+// metadata) and the ADR-0068 two-step must complete against the REAL Vary
+// list: three asks total, the correct variant served, never a wrong
+// body.
+func TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation(t *testing.T) {
+	t.Parallel()
+	originHits := 0
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originHits++
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		_, _ = ctx.Write([]byte("origin-fill"))
+	}
+
+	// effectiveVary stores the union sorted and ", "-joined; the origin
+	// declared X-Origin-Extra, which is NOT in the include list.
+	const realVary = "x-origin-extra, x-test-variant"
+	req := testCtx("GET", "http://example.com/wrong-derivation")
+	req.Request.Header.Set("X-Test-Variant", "a")
+	req.Request.Header.Set("X-Origin-Extra", "z")
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false)
+	ri := requestInfoFromCtx(req)
+	primaryKey := BuildKey(ri, policy)
+	derivedVary := configDerivedVary(policy)
+	derivedVk := VariantKey(primaryKey, derivedVary, ri.Header, policy)
+	derivedAssertion := BuildVaryKey(derivedVary, ri.Header, policy)
+	realVk := VariantKey(primaryKey, realVary, ri.Header, policy)
+	realAssertion := BuildVaryKey(realVary, ri.Header, policy)
+
+	type ask struct {
+		key       api.Key
+		assertion string
+	}
+	var asks []ask
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Policy:     policy,
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:       1 << 20,
+			NumShards:      2,
+			ReaperInterval: -1,
+		}),
+		OwnerFn: func(api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:1"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, assertion string) (*api.Object, error) {
+			asks = append(asks, ask{key: key, assertion: assertion})
+			switch key {
+			case primaryKey:
+				// The metadata-only resolver, as the primary key's owner
+				// would answer the bare ask (ADR-0068): the REAL Vary
+				// list, beyond what the policy alone determines.
+				res := &api.Object{
+					Key:        primaryKey,
+					PairedKey:  realVk,
+					StatusCode: 200,
+					VaryValue:  realVary,
+					StoredAt:   time.Now(),
+					TTL:        time.Minute,
+				}
+				res.Header = header.NewMap(1)
+				res.Header.AppendEntry("Cache-Control", "max-age=60")
+				return res, nil
+			case realVk:
+				if assertion != realAssertion {
+					return nil, nil
+				}
+				variant := &api.Object{
+					Key:        realVk,
+					VaryKey:    realAssertion,
+					VaryValue:  realVary,
+					StatusCode: 200,
+					Body:       []byte("variant-a"),
+					BodySize:   9,
+					StoredAt:   time.Now(),
+					TTL:        time.Minute,
+				}
+				variant.Header = header.NewMap(1)
+				variant.Header.AppendEntry("Cache-Control", "max-age=60")
+				return variant, nil
+			}
+			// The derived key — including a correctly derived one — has
+			// no entry: the derivation was wrong.
+			return nil, nil
+		},
+	})
+
+	h.ServeRequest(req)
+
+	require.Equal(t, 200, respCode(req))
+	require.Equal(t, "variant-a", respBody(req))
+	require.Zero(t, originHits)
+	require.Len(t, asks, 3,
+		"the wrong derivation costs one extra ask, then falls back to the two-step")
+	require.Equal(t, derivedVk, asks[0].key)
+	require.Equal(t, derivedAssertion, asks[0].assertion,
+		"ask one: the derived variant key with its real assertion")
+	require.Equal(t, primaryKey, asks[1].key)
+	require.Empty(t, asks[1].assertion,
+		"ask two: the bare primary-key ask — no local Vary context")
+	require.Equal(t, realVk, asks[2].key)
+	require.Equal(t, realAssertion, asks[2].assertion,
+		"ask three: the real variant key, asserted from the authoritative Vary list")
+}

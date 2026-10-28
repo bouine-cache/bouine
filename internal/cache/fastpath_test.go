@@ -2316,3 +2316,62 @@ func TestFastPathHitEmitsSingleDateLine(t *testing.T) {
 		fp.Release(resp)
 	})
 }
+
+// TestFastPathHandler_ConfigDerivedSkipsBareAsk pins the ADR-0071
+// fast-path gate: on a route whose KeyPolicy alone determines the Vary
+// list, the primary key only ever holds the metadata-only resolver, so
+// the bare ask can never return a body — tryPeerFetch must skip it
+// entirely (no RPC, no owner hints: the owner was not asked) and let the
+// slow path run the derived variant-key ask. A route without key headers
+// keeps the bare ask and its OwnerMiss hint.
+func TestFastPathHandler_ConfigDerivedSkipsBareAsk(t *testing.T) {
+	t.Parallel()
+
+	type ask struct {
+		key       api.Key
+		assertion string
+	}
+	newCase := func(t *testing.T, policy *KeyPolicy) (asks []ask, ok bool, req *api.RawRequest) {
+		t.Helper()
+		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+		ownerFn := func(api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:1"}, false
+		}
+		peerFetch := func(_ context.Context, _ api.PeerInfo, key api.Key, assertion string) (*api.Object, error) {
+			asks = append(asks, ask{key: key, assertion: assertion})
+			return nil, nil
+		}
+		h := NewHandler(HandlerConfig{
+			Store:     store,
+			Policy:    policy,
+			OwnerFn:   ownerFn,
+			PeerFetch: peerFetch,
+		})
+		fp := NewFastPathHandler(h).WithPeerFetch(ownerFn, peerFetch)
+		req = &api.RawRequest{
+			Method:      "GET",
+			Path:        "/derived",
+			Host:        "example.com",
+			Scheme:      "http",
+			HTTPVersion: "HTTP/1.1",
+			NHeaders:    1,
+		}
+		req.Headers[0] = api.RawHeader{Key: "X-Test-Variant", Value: "a"}
+		resp, hit := fp.TryHit(req, time.Now())
+		require.Nil(t, resp)
+		return asks, hit, req
+	}
+
+	asks, hit, req := newCase(t, NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false))
+	require.False(t, hit)
+	require.Empty(t, asks,
+		"no bare ask on a config-derived route: the slow path runs the derived variant-key ask")
+	require.Nil(t, req.OwnerResolver, "no resolver was fetched, so none is transferred")
+	require.False(t, req.OwnerMiss, "the owner was not asked — no miss hint may suppress the slow path")
+
+	asks, hit, _ = newCase(t, nil)
+	require.False(t, hit)
+	require.Len(t, asks, 1, "a route without key headers keeps the bare primary-key ask")
+	require.False(t, asks[0].key.IsZero(), "the bare ask carries the primary key")
+	require.Empty(t, asks[0].assertion, "the cold ask carries no assertion — no local Vary context")
+}

@@ -324,6 +324,19 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 		req.OwnerMiss = true
 		return nil, false
 	}
+	// ADR-0071: on a route whose KeyPolicy alone determines the Vary
+	// list (configDerivedVary non-empty), every servable entry is
+	// stored under a derived variant key and the primary key only
+	// ever holds the metadata-only resolver — so the bare ask below
+	// can never return a body. Skip it: the slow path derives the
+	// variant key locally and asks the variant's owner directly
+	// (handleCacheMiss → serveDerivedPeerVariant), falling back to
+	// the bare ask when the derivation proves wrong. No hint is set:
+	// the owner was NOT asked, so the slow path must run its own
+	// (derived) question.
+	if configDerivedVary(f.policy) != "" {
+		return nil, false
+	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err == nil && peerObj != nil && isPeerResolverMetadata(peerObj) {
 		// ADR-0068: the owner answered the bare primary-key ask with

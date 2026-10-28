@@ -83,6 +83,7 @@ func (t *tier) bootNode(i int, p nodePorts, seeds, originAddr string, tr tracing
 		nearYAML = `experimental:
   near_cache:
     enabled: true
+    routes: ["ssr"]
     max_bytes: 64MiB
     max_ttl: 30s
 `
@@ -104,7 +105,8 @@ cluster:
   - name: ssr
     targets: ["%s"]
 routes:
-  - match:
+  - name: ssr
+    match:
       path_prefix: /ssr/
     pool: ssr
     cache:

@@ -29,6 +29,7 @@ func TestNearCacheConfig_Decode(t *testing.T) {
 experimental:
   near_cache:
     enabled: true
+    routes: ["/"]
     max_bytes: 64MiB
     max_ttl: 45s
 `)))
@@ -41,6 +42,9 @@ experimental:
 	}
 	if !nc.Enabled {
 		t.Fatal("enabled must decode true")
+	}
+	if len(nc.Routes) != 1 || nc.Routes[0] != "/" {
+		t.Fatalf("routes: got %v, want [/]", nc.Routes)
 	}
 	if int64(nc.MaxBytes) != 64<<20 {
 		t.Fatalf("max_bytes: got %d, want %d", int64(nc.MaxBytes), int64(64<<20))
@@ -140,4 +144,96 @@ experimental:
 	if !strings.Contains(err.Error(), "admit_window") {
 		t.Fatalf("error %q does not mention the unknown key", err)
 	}
+}
+
+// TestNearCacheConfig_RoutesAllowlist pins the route-scoping rules
+// (ADR-0071 am #2): a listed name must match a configured route
+// (explicit `name:` or the derived host:path/path label — "/" is the
+// derived name of the path_prefix "/" route above), an empty list is
+// the valid fail-closed shape, and an empty-string entry is rejected
+// rather than silently selecting nothing.
+func TestNearCacheConfig_RoutesAllowlist(t *testing.T) {
+	t.Parallel()
+	t.Run("derived route name is selectable", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Parse([]byte(nearConfigYAML(`
+experimental:
+  near_cache:
+    enabled: true
+    routes: ["/"]
+`)))
+		if err != nil {
+			t.Fatalf("the derived route name must validate: %v", err)
+		}
+		if got := cfg.Experimental.NearCache.Routes; len(got) != 1 || got[0] != "/" {
+			t.Fatalf("routes: got %v", got)
+		}
+	})
+
+	t.Run("explicit route name is selectable", func(t *testing.T) {
+		t.Parallel()
+		yaml := `
+listen:
+  admin: ":9000"
+upstream_pools:
+  - name: app
+    targets: ["a:1"]
+routes:
+  - name: reviews
+    match: { path_prefix: "/reviews/" }
+    pool: app
+experimental:
+  near_cache:
+    enabled: true
+    routes: ["reviews"]
+`
+		if _, err := Parse([]byte(yaml)); err != nil {
+			t.Fatalf("an explicit route name must validate: %v", err)
+		}
+	})
+
+	t.Run("empty list is the valid fail-closed shape", func(t *testing.T) {
+		t.Parallel()
+		// No routes key at all: enabled with an empty allowlist must
+		// load (the engine logs the inert warning), not fail.
+		if _, err := Parse([]byte(nearConfigYAML(`
+experimental:
+  near_cache:
+    enabled: true
+`))); err != nil {
+			t.Fatalf("an empty allowlist is the fail-closed rollout shape, not an error: %v", err)
+		}
+	})
+
+	t.Run("unknown route name is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := Parse([]byte(nearConfigYAML(`
+experimental:
+  near_cache:
+    enabled: true
+    routes: ["ghost"]
+`)))
+		if err == nil {
+			t.Fatal("a typo in the allowlist must fail the load, not silently de-scope the route")
+		}
+		if !strings.Contains(err.Error(), "ghost") || !strings.Contains(err.Error(), "near_cache.routes") {
+			t.Fatalf("error %q must name the offending allowlist entry", err)
+		}
+	})
+
+	t.Run("empty string entry is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := Parse([]byte(nearConfigYAML(`
+experimental:
+  near_cache:
+    enabled: true
+    routes: [""]
+`)))
+		if err == nil {
+			t.Fatal("an empty allowlist entry must fail the load")
+		}
+		if !strings.Contains(err.Error(), "near_cache.routes") {
+			t.Fatalf("error %q must point at the allowlist", err)
+		}
+	})
 }

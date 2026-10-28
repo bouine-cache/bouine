@@ -29,6 +29,7 @@ func nearWiringEngine(t *testing.T, mode config.ClusterMode, logs *bytes.Buffer)
 			Experimental: config.ExperimentalConfig{
 				NearCache: &config.NearCacheConfig{
 					Enabled:  true,
+					Routes:   []string{"r1"},
 					MaxBytes: 32 << 20,
 					MaxTTL:   45 * time.Second,
 				},
@@ -101,4 +102,49 @@ func TestBuildNearCache_MetricsRegistered(t *testing.T) {
 		}
 	}
 	assert.EqualValues(t, 3, count, "hits, admissions and invalidations counters must be registered")
+}
+
+// TestBuildNearCache_WarnsWhenNoRoutesSelected pins the fail-closed
+// rollout shape (ADR-0071 am #2): enabled with an empty routes
+// allowlist still builds the shared instance (config, metrics, ban
+// surfaces stay live) but the near path runs nowhere — and the
+// operator is told, exactly like the not-in-strong-mode warning.
+func TestBuildNearCache_WarnsWhenNoRoutesSelected(t *testing.T) {
+	t.Parallel()
+	logs := &bytes.Buffer{}
+	e := nearWiringEngine(t, config.ClusterModeStrong, logs)
+	e.cfg.Experimental.NearCache.Routes = nil
+	require.NotNil(t, e.buildNearCache(true), "the instance is built: surfaces stay live, scoping selects nothing")
+	assert.Contains(t, logs.String(), "no routes selected", "an empty allowlist must be visible")
+	assert.NotContains(t, logs.String(), "not in strong mode", "a live strong cluster has nothing else to warn about")
+}
+
+// TestNearCacheFor_Scoping pins the route scoping resolution: the
+// shared instance for allowlisted route names, nil for everything
+// else — other routes, unnamed routes (never selectable), a disabled
+// feature, and an empty allowlist.
+func TestNearCacheFor_Scoping(t *testing.T) {
+	t.Parallel()
+	logs := &bytes.Buffer{}
+	e := nearWiringEngine(t, config.ClusterModeStrong, logs)
+	near := e.buildNearCache(true)
+	require.NotNil(t, near)
+
+	rs := &runState{
+		nearCache:  near,
+		nearRoutes: nearRouteAllowlist(e.cfg.Experimental.NearCache),
+	}
+	require.NotNil(t, rs.nearRoutes, "a non-empty allowlist resolves to a set")
+	assert.Same(t, near, rs.nearCacheFor("r1"), "an allowlisted route gets the shared instance")
+	assert.Nil(t, rs.nearCacheFor("other"), "a route outside the allowlist is scoped out")
+	assert.Nil(t, rs.nearCacheFor(""), "an unnamed route is never selectable")
+
+	// Fail-closed shapes: disabled feature, empty allowlist.
+	rsOff := &runState{nearCache: nil, nearRoutes: nearRouteAllowlist(nil)}
+	assert.Nil(t, rsOff.nearCacheFor("r1"), "a disabled feature scopes every route out")
+	rsEmpty := &runState{
+		nearCache:  near,
+		nearRoutes: nearRouteAllowlist(&config.NearCacheConfig{Enabled: true}),
+	}
+	assert.Nil(t, rsEmpty.nearCacheFor("r1"), "an empty allowlist scopes every route out, even with the instance live")
 }

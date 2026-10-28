@@ -1809,21 +1809,36 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 			// boolean hints cannot carry: the object's own Key.
 			peerObj := transferredResolver(ctx, obj, lookupKey)
 			var err error
+			// derivedTried is the Vary list whose derivation the
+			// ADR-0071 ask below already attempted ("" when none): on a
+			// metadata answer carrying the SAME list, the two-step's
+			// re-derivation would repeat the identical variant-key
+			// question and is skipped (see the metadata case below).
+			derivedTried := ""
 			if peerObj == nil {
-				// ADR-0071: on a plain cold miss (no stored object, no
-				// local resolver) for a route whose KeyPolicy alone
-				// determines the Vary list, the bare primary-key ask can
-				// only ever be answered with resolver metadata — every
-				// servable entry on such a route is stored under a
-				// derived variant key — so derive the variant key
-				// locally and ask the variant's owner directly: one ask
-				// instead of two. A miss or rejection falls through to
-				// the bare ask below, which is also the correction path
-				// when the derivation proves wrong (the origin declared
-				// a Vary field beyond the include list).
+				// ADR-0071: on a plain cold miss for a route whose
+				// KeyPolicy alone determines the Vary list, the bare
+				// primary-key ask can only ever be answered with
+				// resolver metadata — every servable entry on such a
+				// route is stored under a derived variant key — so
+				// derive the variant key locally and ask the variant's
+				// owner directly: one ask instead of two. A miss or
+				// rejection falls through to the bare ask below, which
+				// is also the correction path when the derivation proves
+				// wrong (the origin declared a Vary field beyond the
+				// include list). Both guards are load-bearing, not
+				// defensive: obj == nil keeps a stale object's owner
+				// first-lookup question (peerVaryAssertion(obj), a
+				// different question) off the derived ask, and
+				// resolver == nil keeps a VARIANT miss off it — lookup
+				// returns the primary resolver there (handler.go
+				// lookup), so this node HAS local Vary context and the
+				// resolver's authoritative list must win over the
+				// policy-derived one.
 				if obj == nil && resolver == nil {
-					if derived := configDerivedVary(h.policy); derived != "" {
-						if h.serveDerivedPeerVariant(ctx, primaryKey, derived, now, ri) {
+					derivedTried = configDerivedVary(h.policy)
+					if derivedTried != "" {
+						if h.serveDerivedPeerVariant(ctx, primaryKey, derivedTried, now, ri) {
 							// Same completion counter as the wire-resolved
 							// two-step: the cold miss converged through the
 							// variant's owner (ADR-0068).
@@ -1847,7 +1862,18 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 				// resolver — the Vary list this node could
 				// not compute locally. Derive THIS request's
 				// variant key and re-ask the variant's owner
-				// with a real assertion.
+				// with a real assertion — unless the ADR-0071
+				// ask above already asked exactly that: a
+				// metadata answer carrying the SAME derived
+				// list means the derivation was right and the
+				// variant answer was rejected or stale, so the
+				// re-derivation would repeat the identical
+				// variant-key question. Two asks total (the
+				// derived ask, this bare ask) instead of three;
+				// the fill below is the recovery either way.
+				if derivedTried != "" && peerObj.VaryValue == derivedTried {
+					break
+				}
 				if h.serveResolverPeerVariant(ctx, primaryKey, peerObj, now, ri) {
 					return
 				}

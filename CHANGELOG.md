@@ -40,13 +40,16 @@ the curated, human-readable summary.
   ever holds the metadata-only resolver, so the bare ask can never
   return a body: both the H1 fast path (`tryPeerFetch`) and the slow
   path miss handler now derive the variant key locally
-  (`configDerivedVary`) and ask the variant's owner directly with a
-  real vary-key assertion — one RPC instead of two. A wrong
-  derivation (the origin declared a Vary field beyond the include
-  list) answers a miss and falls back to the ADR-0068 two-step, which
-  is also the correction path: the cost is one extra ask, never a
-  wrong body (the variant-assertion gates still bound what is
-  served). Completion keeps incrementing
+  (`configDerivedVary`, precomputed on the immutable KeyPolicy) and
+  ask the variant's owner directly with a real vary-key assertion —
+  one RPC instead of two. A wrong derivation (the origin declared a
+  Vary field beyond the include list) answers a miss and falls back to
+  the ADR-0068 two-step, which is also the correction path: the cost is
+  one extra ask, never a wrong body (the variant-assertion gates still
+  bound what is served). A stale or rejected derived answer is not
+  re-derived either — the bare ask's metadata carries the same list, so
+  the identical variant ask is skipped and the ordinary fill runs (two
+  asks total, not three). Completion keeps incrementing
   `bouine_peer_fetch_resolver_answers_total{side="consumer"}`, so
   fleet convergence stays observable. Routes without key headers keep
   today's two-step exactly.

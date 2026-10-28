@@ -42,7 +42,13 @@ the stored Vary list.
    cookie-presence field, normalized exactly as `effectiveVary`
    normalizes the stored union (sorted, deduplicated, ", "-joined), so
    a correct derivation hashes to the stored variant keys
-   byte-for-byte. Empty when the policy keys no variants.
+   byte-for-byte. Empty when the policy keys no variants. The value is
+   **precomputed at policy construction**
+   (`KeyPolicy.derivedVary`, computed by `NewKeyPolicy` and
+   `WithCookiePresence` — the two construction sites): the policy is
+   immutable while serving, so the per-miss call sites read a constant
+   instead of re-deriving (and re-allocating) it on every cold miss of
+   a gated route.
 2. **On a route where the derivation is non-empty, the primary key only
    ever holds the metadata-only resolver** (every servable entry is
    stored under a derived variant key), so the bare ask can never
@@ -68,6 +74,14 @@ the stored Vary list.
    `servePeerHit`'s response-side gate still bound what is served.
    Mixed-config fleets (an owner running a different route policy) hit
    the same fallback.
+   A **rejected or stale** derived answer takes the same fallback's
+   first leg only: the bare ask's metadata then carries the SAME
+   derived list (the derivation was right), so the two-step's
+   re-derivation would repeat the identical variant-key question and is
+   **skipped** — two asks total (the derived ask, the bare ask) plus the
+   ordinary fill, which is the recovery either way. Without the skip
+   the fully-expired-variant case would cost a third, identical
+   variant ask.
 4. **Completion accounting is unchanged**: a config-derived resolution
    increments `bouine_peer_fetch_resolver_answers_total{side="consumer"}`
    exactly like the wire-resolved two-step, so fleet convergence stays
@@ -99,8 +113,11 @@ the stored Vary list.
   `effectiveVary`), `TestResolverPeerVariant_ConfigDerivedSingleAsk`
   (one ask, real assertion), `TestResolverPeerVariant_ConfigDerived-
   FallsBackOnWrongDerivation` (three-ask fallback, correct variant
-  served), and `TestFastPathHandler_ConfigDerivedSkipsBareAsk` (no RPC,
-  no hints). The owner side is untouched — no owner tests change.
+  served), `TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation`
+  (rejected derived answer: two asks, no identical re-derivation, the
+  fill is the recovery), and `TestFastPathHandler_ConfigDerivedSkips-
+  BareAsk` (no RPC, no hints). The owner side is untouched — no owner
+  tests change.
 
 ## Notes
 

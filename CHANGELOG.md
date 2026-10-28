@@ -234,6 +234,29 @@ the curated, human-readable summary.
   merge surface (`bypass_on_user_agent`, `downstream_freshness`); other
   cache fields fail strict decoding.
 
+### Fixed
+
+- **Passive origin ejection no longer lasts forever when `eject_for` is
+  left unset.** The zero value now resolves to a built-in 30s restore
+  window on pools that configure passive health (`consecutive_5xx`),
+  and the eject reaper starts for every pool whose resolved window is
+  positive. Previously, one transient error burst ejected a
+  single-target pool for the process lifetime: with no active probe
+  and no restore endpoint, 22 clustered connection errors produced a
+  10-consecutive ejection and every subsequent miss of the run
+  returned an instant 502 ("no healthy upstream") until restart —
+  measured live in the load-test topology (53 281 user-visible 502s
+  from 22 transient errors). A restored-but-still-broken target
+  re-ejects after the threshold, so a dead origin flaps instead of
+  failing permanently. Pools without passive health never eject and
+  keep a zero window; there is no eject-forever configuration anymore
+  (set a very long window to opt out of restore). The
+  `config-pool-passive-eject-forever` dashboard insight is removed
+  with it — the state it warned about can no longer occur. The
+  `eject_for` hot-config knob is now live whenever the reaper started
+  at boot (explicit window, or passive health enabled), and the
+  load-test config pins `eject_for: 30s` explicitly.
+
 ## [0.6.0] - 2026-10-26
 
 ### Dependencies

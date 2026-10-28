@@ -349,13 +349,15 @@ func TestPoolConsecutive5xxKnob(t *testing.T) {
 }
 
 // TestPoolEjectForKnob pins the cold-start boundary: eject_for is
-// hot-changeable only when the boot config set it (the reaper starts
-// once, at boot). Both dry runs and real sets on a reaper-less pool
-// fail with the same precise error, so a dry run predicts reality.
+// hot-changeable only when the boot config started the reaper — an
+// explicit eject_for, or passive health enabled at boot (the unset
+// window then resolves to the built-in default, which runs the
+// reaper). Both dry runs and real sets on a reaper-less pool fail
+// with the same precise error, so a dry run predicts reality.
 func TestPoolEjectForKnob(t *testing.T) {
 	t.Parallel()
 	p := testPool(t, "api", 0, 0)
-	knob := poolEjectForKnob("api", 0, 0, p)
+	knob := poolEjectForKnob("api", 0, 0, 0, p)
 	assert.Equal(t, "default", knob.source(knob.get()))
 
 	_, err := applyHotKnob(knob, admin.HotSetRequest{Key: knob.key, Value: "5m", DryRun: true}, testSetsCounter())
@@ -369,7 +371,7 @@ func TestPoolEjectForKnob(t *testing.T) {
 
 	// Boot-configured reaper: the knob is fully live.
 	p2 := testPool(t, "api", 0, time.Hour)
-	knob2 := poolEjectForKnob("api", time.Hour, time.Hour, p2)
+	knob2 := poolEjectForKnob("api", time.Hour, time.Hour, 0, p2)
 	assert.Equal(t, "file", knob2.source(knob2.get()))
 	_, err = applyHotKnob(knob2, admin.HotSetRequest{Key: knob2.key, Value: "90s", DryRun: true}, testSetsCounter())
 	require.NoError(t, err)
@@ -379,6 +381,17 @@ func TestPoolEjectForKnob(t *testing.T) {
 	assert.True(t, res.Applied)
 	assert.Equal(t, "1m30s", res.NewValue)
 	assert.Equal(t, 90*time.Second, p2.EjectFor())
+
+	// Passive health at boot with the window unset: the pool resolved
+	// the zero to the built-in 30s default, so the reaper runs and the
+	// knob is live even though the boot file value is 0.
+	p3 := testPool(t, "api", 10, 0)
+	require.Equal(t, 30*time.Second, p3.EjectFor())
+	knob3 := poolEjectForKnob("api", 0, 0, 10, p3)
+	res, err = applyHotKnob(knob3, admin.HotSetRequest{Key: knob3.key, Value: "45s"}, testSetsCounter())
+	require.NoError(t, err)
+	assert.True(t, res.Applied)
+	assert.Equal(t, 45*time.Second, p3.EjectFor())
 }
 
 // TestClusterDisabledReason pins the three admin-surface states:

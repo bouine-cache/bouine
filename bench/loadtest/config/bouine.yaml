@@ -27,6 +27,12 @@ upstream_pools:
     health:
       passive:
         consecutive_5xx: 10
+        # Explicit so harness behavior is pinned: the built-in default is
+        # the same 30s, but the load-test topology must not depend on
+        # built-in defaults. Without a window, one transient error burst
+        # used to eject the single origin target for the rest of the run
+        # (measured: 22 errors -> 53k instant 502s in one leg).
+        eject_for: "30s"
     # 640 covers the worst concurrent origin demand of the default
     # admission chain on this route: 256 foreground fetch slots
     # (routes[].cache.max_fetch_concurrency) + 256 SWR revalidations

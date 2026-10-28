@@ -56,7 +56,6 @@ func init() {
 		ruleClusterBroadcastFailures,
 		ruleCDNLastError,
 		ruleCDNPurgeSkipped,
-		ruleConfigPoolPassiveEjectForever,
 		ruleClusterPeerHealthDegraded,
 		ruleAnomalyFetchShed,
 	}
@@ -1201,26 +1200,6 @@ func ruleCDNPurgeSkipped(data InsightData) *Insight {
 		Evidence: fmt.Sprintf("purge_skipped: %d", data.CFPurgeSkipped),
 		Action:   "/dashboard/invalidation",
 	}
-}
-
-func ruleConfigPoolPassiveEjectForever(data InsightData) *Insight {
-	for _, pool := range data.Config.UpstreamPools {
-		// Ejected-forever requires BOTH restore paths absent: no
-		// eject_for window and no active health check. A configured
-		// eject_for restores the target automatically (issue #599).
-		if pool.Health.Passive.EjectFor == 0 && pool.Health.Active.Path == "" {
-			return &Insight{
-				ID:       "config-pool-passive-eject-forever",
-				Severity: SeverityMed,
-				Category: CategoryUpstream,
-				Title:    fmt.Sprintf("Pool %s: ejected targets never rejoin", pool.Name),
-				Detail:   "PassiveEjectFor is 0 and no active health check is configured — passively ejected targets are gone forever",
-				Evidence: fmt.Sprintf("pool: %s, eject_for: 0, active_check: none", pool.Name),
-				Action:   "/dashboard/config",
-			}
-		}
-	}
-	return nil
 }
 
 func ruleClusterPeerHealthDegraded(data InsightData) *Insight {

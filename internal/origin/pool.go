@@ -246,6 +246,18 @@ const DefaultMaxIdleConnDuration = 90 * time.Second
 // for connect.timeout.
 const defaultDialTimeout = 10 * time.Second
 
+// defaultEjectFor is how long a passively ejected target stays out when
+// the operator configured passive health (consecutive_5xx) but left
+// eject_for unset. Without a default window, a transient error burst
+// ejected the target for the process lifetime on pools without an active
+// probe or a restore endpoint: measured in the load-test topology, 22
+// clustered connection errors produced one ejection and every subsequent
+// miss of the run was an instant 502 (no healthy upstream). The window is
+// deliberately short — a restored-but-still-broken target re-ejects after
+// the consecutive threshold, so a dead origin flaps instead of failing
+// permanently.
+const defaultEjectFor = 30 * time.Second
+
 // defaultKeepAlive is the TCP keep-alive probe interval on origin
 // connections. Fallback for connect.keep_alive.
 const defaultKeepAlive = 30 * time.Second
@@ -330,10 +342,15 @@ type PoolConfig struct {
 	// Zero disables passive health.
 	Consecutive5xx int
 	// EjectFor bounds how long a passively ejected target stays out
-	// before being restored. Zero (default) keeps the ejected target
-	// out until an active probe or manual restore — the historical
-	// behavior, and the honest mode for pools without an active health
-	// check (see the config-pool-passive-eject-forever insight).
+	// before being restored. Zero (default) applies the built-in
+	// default (30s) when passive health is configured
+	// (Consecutive5xx > 0): without a default window, a transient error
+	// burst ejected the only origin target permanently on pools without
+	// an active probe or a restore endpoint, converting one bad moment
+	// into a full miss outage until restart. Pools without passive
+	// health never eject, so zero stays zero for them. To disable
+	// automatic restore on a passive pool, set a very long window —
+	// there is no eject-forever sentinel anymore.
 	EjectFor time.Duration
 	// HedgeTimeout fires a duplicate request against the pool after
 	// this delay for idempotent methods (GET/HEAD/OPTIONS); the first
@@ -458,8 +475,15 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	}
 	// Atomically-typed hot knobs cannot be set in the struct literal;
 	// Store them immediately after construction (before the pool is
-	// shared with any goroutine).
-	p.ejectFor.Store(int64(cfg.EjectFor))
+	// shared with any goroutine). The eject_for zero value resolves to
+	// the built-in default when passive health is configured, so a
+	// transient error burst cannot eject the origin permanently on
+	// pools that never set the knob.
+	ejectFor := cfg.EjectFor
+	if ejectFor <= 0 && cfg.Consecutive5xx > 0 {
+		ejectFor = defaultEjectFor
+	}
+	p.ejectFor.Store(int64(ejectFor))
 	p.consecutive5xx.Store(int64(cfg.Consecutive5xx))
 	p.client = newOriginClient(p.clientConfig)
 	p.streamClient = newOriginStreamClient(p.clientConfig)

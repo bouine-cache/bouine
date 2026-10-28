@@ -758,26 +758,6 @@ func TestRuleAnomalyFetchShed(t *testing.T) {
 	require.Nil(t, ins)
 }
 
-func TestRuleConfigPoolPassiveEjectForever(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.UpstreamPools[0].Health.Passive.EjectFor = 0
-	cfg.UpstreamPools[0].Health.Active.Path = ""
-	data := InsightData{Config: cfg}
-	ins := ruleConfigPoolPassiveEjectForever(data)
-	require.NotNil(t, ins)
-	assert.Equal(t, SeverityMed, ins.Severity)
-
-	cfg.UpstreamPools[0].Health.Passive.EjectFor = 30 * time.Second
-	ins = ruleConfigPoolPassiveEjectForever(data)
-	require.Nil(t, ins)
-
-	cfg.UpstreamPools[0].Health.Passive.EjectFor = 0
-	cfg.UpstreamPools[0].Health.Active.Path = "/health"
-	ins = ruleConfigPoolPassiveEjectForever(data)
-	require.Nil(t, ins)
-}
-
 func TestRuleClusterPeerHealthDegraded(t *testing.T) {
 	t.Parallel()
 	data := InsightData{

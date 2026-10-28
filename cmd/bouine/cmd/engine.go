@@ -1402,14 +1402,13 @@ func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin
 	}
 }
 
-// startEjectReapers runs the eject_for window reaper for every pool that
-// configured the knob. Pools without eject_for get no goroutine —
-// historical behavior (ejected until an active probe or manual restore).
+// startEjectReapers runs the eject_for window reaper for every pool whose
+// resolved restore window is positive: pools with an explicit eject_for,
+// and pools with passive health whose unset window resolved to the
+// built-in default (see origin.defaultEjectFor). Pools without passive
+// health never eject, so they get no goroutine.
 func (e *engine) startEjectReapers(g *supervised.Group, pools map[string]*origin.Pool) {
 	for _, pc := range e.cfg.UpstreamPools {
-		if pc.Health.Passive.EjectFor <= 0 {
-			continue
-		}
 		p := pools[pc.Name]
 		if p == nil {
 			continue

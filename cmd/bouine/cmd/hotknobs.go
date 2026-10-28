@@ -221,7 +221,7 @@ func poolKnobs(cfg *config.Config, bootCfg *config.Config, pools map[string]*ori
 		bootHealth := bootValues[name]
 		knobs = append(knobs,
 			poolConsecutive5xxKnob(name, health.Passive.Consecutive5xx, pools[name]),
-			poolEjectForKnob(name, health.Passive.EjectFor, bootHealth.Passive.EjectFor, pools[name]),
+			poolEjectForKnob(name, health.Passive.EjectFor, bootHealth.Passive.EjectFor, bootHealth.Passive.Consecutive5xx, pools[name]),
 		)
 	}
 	return knobs
@@ -345,26 +345,30 @@ func poolConsecutive5xxKnob(poolName string, fileValue int, p *origin.Pool) hotK
 
 // poolEjectForKnob builds the pool:<name>.health.passive.eject_for
 // knob: how long a passively ejected target stays out before the
-// EjectReaper restores it. Hot-changeable only when the boot config
-// set eject_for — the reaper goroutine is started once at boot — so
-// both dry runs and real sets on a reaper-less pool fail with the
-// same precise error.
-func poolEjectForKnob(poolName string, fileValue, bootValue time.Duration, p *origin.Pool) hotKnob {
+// EjectReaper restores it. The reaper goroutine is started once at boot,
+// for pools whose resolved window is positive — an explicit eject_for,
+// or passive health with the window left unset (the built-in 30s
+// default) — so both dry runs and real sets on a reaper-less pool fail
+// with the same precise error.
+func poolEjectForKnob(poolName string, fileValue, bootValue time.Duration, bootConsecutive5xx int, p *origin.Pool) hotKnob {
 	// The reaper goroutine is started once, at boot, for pools whose
-	// boot config set eject_for — so the capability is the BOOT value,
-	// never the (possibly reloaded) file value.
-	reaperRuns := bootValue > 0
+	// boot config ran one — an explicit window, or passive health with
+	// the unset window resolving to the default — so the capability is
+	// derived from BOOT values, never the (possibly reloaded) file
+	// value.
+	reaperRuns := bootValue > 0 || bootConsecutive5xx > 0
 	return hotKnob{
 		key: "pool:" + poolName + ".health.passive.eject_for",
 		description: "how long a passively ejected target of this pool stays out before the reaper restores it; " +
-			"0 keeps targets out until a probe succeeds. Runtime changes need the boot config to set eject_for (the reaper starts once, at boot)",
-		def:       "0",
+			"leaving it unset uses the built-in 30s default on pools with passive health, while a runtime set of 0 disables restore until changed back; " +
+			"runtime changes need the reaper started at boot (eject_for set, or passive health enabled)",
+		def:       "30s",
 		fileValue: fileValue.String(),
 		fromFile:  reaperRuns,
 		get:       func() string { return p.EjectFor().String() },
 		set: func(value string, apply bool) (string, error) {
 			if !reaperRuns {
-				return "", fmt.Errorf("eject_for reaper is not running for pool %q: the boot config left health.passive.eject_for unset, "+
+				return "", fmt.Errorf("eject_for reaper is not running for pool %q: the boot config left health.passive.eject_for unset and passive health disabled, "+
 					"so no reaper would honor a runtime change; set eject_for in your YAML and restart", poolName)
 			}
 			d, err := parseHotDuration(value)

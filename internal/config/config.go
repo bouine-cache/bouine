@@ -496,8 +496,16 @@ type ActiveHealthCheck struct {
 
 // PassiveHealthCheck is the rolling-error-rate ejection policy.
 type PassiveHealthCheck struct {
-	Consecutive5xx int           `yaml:"consecutive_5xx,omitempty" json:"consecutive_5xx,omitempty"`
-	EjectFor       time.Duration `yaml:"eject_for,omitempty" json:"eject_for,omitempty"`
+	Consecutive5xx int `yaml:"consecutive_5xx,omitempty" json:"consecutive_5xx,omitempty"`
+	// EjectFor bounds how long a passively ejected target stays out
+	// before the reaper restores it. Zero (default) applies a 30s
+	// built-in default when consecutive_5xx is configured: without a
+	// restore window, a transient error burst ejected single-target
+	// pools for the process lifetime (no active probe, no restore
+	// endpoint), turning one bad moment into a full miss outage until
+	// restart. To disable automatic restore on a passive pool, set a
+	// very long window — there is no eject-forever sentinel anymore.
+	EjectFor time.Duration `yaml:"eject_for,omitempty" json:"eject_for,omitempty"`
 }
 
 // ConnectPolicy bounds dial behaviour and origin connection lifetimes.

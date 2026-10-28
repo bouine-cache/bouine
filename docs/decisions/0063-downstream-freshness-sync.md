@@ -120,6 +120,15 @@ cycle; visitor latency flat during the window (CF `UPDATING`). Point 6 is
 what keeps that ceiling honest when the arriving traffic is itself
 conditional (CF revalidation) rather than plain requests.
 
+Amendment (2026-10-28): the mode is also settable once for every route
+via a top-level `route_defaults.cache.downstream_freshness`, merged
+into each route before validation (`mergeRouteDefaults`). A route
+without its own value inherits the default; a route's own value
+replaces it (`passthrough` is the explicit opt-out). Unlike
+`bypass_on_user_agent`, static routes inherit too — the knob is
+consumed by every cache handler. Per-route config and behavior are
+unchanged.
+
 ## Behavior matrix
 
 The two modes per scenario — `passthrough` is today's byte-for-byte

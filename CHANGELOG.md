@@ -10,6 +10,7 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Performance
 
 - **Tracing: the sampler's drop decision is hoisted ahead of span
@@ -44,6 +45,18 @@ the curated, human-readable summary.
   open-model Zipf load generator with per-outcome percentiles, fake
   OTLP collector, tracing middleware micro-benchmarks) used to size
   the changes above and re-verify them on the pinned runner.
+- **`route_defaults.cache.downstream_freshness`: declare the downstream
+  freshness mode once for every route (ADR-0063).** A top-level
+  `route_defaults.cache.downstream_freshness: sync` now caps downstream
+  CDN freshness on all routes without repeating the knob on each one.
+  A route without its own `cache.downstream_freshness` inherits the
+  default wholesale; a route's own value replaces it (`passthrough` is
+  the explicit opt-out). Pool and static routes inherit alike — the
+  knob is consumed by every cache handler — and an invalid default is
+  reported once at `route_defaults`' own path instead of surfacing on
+  every route. `route_defaults.cache` still accepts only its designed
+  merge surface (`bypass_on_user_agent`, `downstream_freshness`); other
+  cache fields fail strict decoding.
 
 ## [0.6.0] - 2026-10-26
 

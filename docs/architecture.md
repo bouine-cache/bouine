@@ -492,8 +492,10 @@ form remains for tuning `max_append` and subsets), and a top-level
 `route_defaults.request.forwarded` declares it once for every route:
 routes inherit wholesale, override with a preset/token list, OR flags
 in via the mapping form, or opt out with `none`. `route_defaults`
-accepts only `request.forwarded` today; static routes ignore an
-inherited default (no origin-bound request exists), and all validation
+accepts `request.forwarded`, `cache.bypass_on_user_agent` (pool
+routes only), and `cache.downstream_freshness` (every route kind;
+ADR-0063) today; static routes ignore an inherited forwarded default
+(no origin-bound request exists), and all validation
 runs on the resolved value (config contract:
 `config.RouteDefaults`, `mergeRouteDefaults`).
 

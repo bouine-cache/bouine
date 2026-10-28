@@ -770,18 +770,21 @@ func (c *Config) validateRouteDefaults(ec *errCollector) {
 	}
 	validateBypassOnUserAgent(ec, "route_defaults.cache.bypass_on_user_agent",
 		c.RouteDefaults.Cache.BypassOnUserAgent)
+	validateDownstreamFreshness(ec, "route_defaults.cache",
+		c.RouteDefaults.Cache.DownstreamFreshness)
 }
 
 // mergeRouteDefaults folds route_defaults into every route before
 // per-route validation. Each half (request.forwarded,
-// cache.bypass_on_user_agent) merges independently — an empty or
-// opted-out default in one half never blocks the other. Both halves
-// are idempotent (Validate may be called more than once) and skipped
-// when their own default is invalid, so the route_defaults error
-// stands alone.
+// cache.bypass_on_user_agent, cache.downstream_freshness) merges
+// independently — an empty or opted-out default in one half never
+// blocks the other. All halves are idempotent (Validate may be called
+// more than once) and skipped when their own default is invalid, so
+// the route_defaults error stands alone.
 func (c *Config) mergeRouteDefaults() {
 	c.mergeForwardedDefaults()
 	c.mergeBypassOnUserAgentDefaults()
+	c.mergeDownstreamFreshnessDefaults()
 }
 
 // mergeForwardedDefaults folds route_defaults.request.forwarded into
@@ -894,6 +897,40 @@ func (c *Config) mergeBypassOnUserAgentDefaults() {
 func bypassOnUserAgentValid(patterns []string) bool {
 	var ec errCollector
 	return validateBypassOnUserAgent(&ec, "", patterns)
+}
+
+// mergeDownstreamFreshnessDefaults folds
+// route_defaults.cache.downstream_freshness (ADR-0063) into every
+// route before per-route validation, so a CDN-fronted deployment
+// declares the mode once instead of repeating it on every route.
+// Precedence:
+//
+//   - unset route value (""): inherits the default wholesale.
+//   - route's own value: replaces the default wholesale — the enum's
+//     explicit opt-out is the value itself (`passthrough`), so unlike
+//     the list knobs there is no empty-form escape hatch to design.
+//
+// Unlike bypass_on_user_agent, static routes inherit too: the knob is
+// consumed by every cache handler (pool or static) and
+// validateRouteCache accepts the field on every route kind. Idempotent
+// and skipped when the default is invalid
+// (validateRouteDefaults already reported it at route_defaults' own
+// path), so the route_defaults error stands alone.
+func (c *Config) mergeDownstreamFreshnessDefaults() {
+	d := c.RouteDefaults.Cache.DownstreamFreshness
+	if d == "" {
+		return
+	}
+	switch d {
+	case DownstreamFreshnessPassthrough, DownstreamFreshnessSync:
+	default:
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Cache.DownstreamFreshness == "" {
+			r.Cache.DownstreamFreshness = d
+		}
+	}
 }
 
 // inheritDefaultMaxAppend fills an unset route max_append from the

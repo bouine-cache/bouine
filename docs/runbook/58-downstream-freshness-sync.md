@@ -28,6 +28,16 @@ routes:
       downstream_freshness: sync
 ```
 
+Or declare it once for every route — a route without its own
+`cache.downstream_freshness` inherits the default, a route's own
+value replaces it:
+
+```yaml
+route_defaults:
+  cache:
+    downstream_freshness: sync
+```
+
 `Cache-Control` is **never mutated** (ADR-0011's browser contract
 holds); bouine synthesizes `CDN-Cache-Control` (RFC 9213), which
 Cloudflare honors in preference to `Cache-Control`.

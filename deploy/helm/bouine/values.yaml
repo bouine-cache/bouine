@@ -105,7 +105,8 @@ config:
   # headers on): `forwarded: standard` or `forwarded: [client_ip, proto, host, via]`;
   # `forwarded: false` / `none` opts a route out of a route_default.
   # Declare once for every route via route_defaults (merged before
-  # validation; only request.forwarded is mergeable today):
+  # validation; mergeable fields today: request.forwarded,
+  # cache.bypass_on_user_agent, cache.downstream_freshness):
   #   route_defaults:
   #     request:
   #       forwarded: standard

@@ -373,6 +373,13 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		})
 		e.logger.Info("experimental near-cache enabled",
 			"max_bytes", int64(nc.MaxBytes), "max_ttl", nc.MaxTTL.String())
+		// The near branch lives inside the peer-ask path (both H1
+		// fast path and slow path), which only wires in strong mode.
+		// An enabled-but-inert feature is a config the operator
+		// should hear about, not silently ignore.
+		if e.cfg.Cluster.Mode != config.ClusterModeStrong || clusterNode == nil {
+			e.logger.Warn("experimental near-cache enabled but the cluster is not in strong mode: the near path never runs")
+		}
 	}
 
 	rs := &runState{

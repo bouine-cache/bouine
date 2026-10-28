@@ -188,13 +188,14 @@ func TestNearCache_NilReceiverIsDisabled(t *testing.T) {
 	key := BuildKey(mustRequestInfo(t, "http://example.com/nil"), nil)
 	now := time.Now()
 
-	assert.False(t, n.Enabled())
+	// Every method is nil-safe: the disabled deployment shape.
 	_, ok := n.Lookup(t.Context(), key, now)
 	assert.False(t, ok)
 	n.Admit(t.Context(), key, nearTestObject(key, time.Minute), now)
 	n.Purge(t.Context(), key)
 	n.Refresh(t.Context(), key)
 	n.Ban(t.Context(), api.BanExpr{})
+	n.RecordHit()
 	assert.Zero(t, n.Hits())
 }
 
@@ -213,8 +214,12 @@ func TestNearCache_Counters(t *testing.T) {
 	n.Admit(t.Context(), key, nearTestObject(key, time.Minute), now)
 	require.EqualValues(t, 1, admits.n.Load())
 
+	// A fresh lookup alone is not a serve: the counter must stay flat
+	// until the serve site records the hit.
 	_, ok := n.Lookup(t.Context(), key, now)
 	require.True(t, ok)
+	require.Zero(t, hits.n.Load(), "a gate-pending lookup must not count as a serve")
+	n.RecordHit()
 	require.EqualValues(t, 1, hits.n.Load())
 	require.EqualValues(t, 1, n.Hits())
 
@@ -290,6 +295,7 @@ func TestFastPathPeerFetch_NearCacheServesWithoutAsk(t *testing.T) {
 	assert.Equal(t, "HIT", resp.CacheResult)
 	assert.Equal(t, string(api.SourceNear), resp.Source)
 	assert.EqualValues(t, 2, asks.Load(), "a near hit must not re-ask the owner")
+	assert.EqualValues(t, 1, h.nearCache.Hits(), "a near serve must be recorded")
 }
 
 // TestFastPathPeerFetch_MemoGatePrecedesNear pins the ordering: the
@@ -419,6 +425,7 @@ func TestHandleCacheMiss_NearCacheServesAndInvalidates(t *testing.T) {
 	assert.Contains(t, respBody(r), "peer-body")
 	assert.EqualValues(t, 0, peerFetchCalls.Load(), "the near copy must serve without the owner ask")
 	assert.EqualValues(t, 0, originCalls.Load())
+	require.EqualValues(t, 1, near.Hits(), "a near serve must be recorded")
 
 	// Purge (what the peer broadcast applies on every node): the near
 	// copy dies with the owner's copy, and the next request re-asks.

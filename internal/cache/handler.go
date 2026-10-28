@@ -1806,6 +1806,7 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 		// falls through to the ordinary owner ask below.
 		if nearObj, fresh := h.nearCache.Lookup(ctx, lookupKey, now); fresh {
 			if d := Evaluate(ri, nearObj, now); d.Decision == Hit {
+				h.nearCache.RecordHit()
 				h.serveObject(ctx, nearObj, now, cacheHit, api.SourceNear)
 				return
 			}

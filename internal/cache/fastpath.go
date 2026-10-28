@@ -341,6 +341,7 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 		if disp := evaluate(nearObj, reqCC, respGateFromObject(nearObj), now); disp.Decision == Hit {
 			resp := f.serializeResponse(req, nearObj, api.SourceNear, now, "HIT")
 			if resp != nil {
+				f.near.RecordHit()
 				return resp, true
 			}
 		}

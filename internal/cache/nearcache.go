@@ -128,18 +128,17 @@ func NewNearCache(cfg NearCacheConfig) *NearCache {
 	}
 }
 
-// Enabled reports whether a near cache exists. A nil receiver is
-// disabled; the config default is off (ADR-0071).
-func (n *NearCache) Enabled() bool {
-	return n != nil
-}
-
 // Lookup returns the near entry for key when it is still fresh at now.
 // Expired entries are removed (best effort) and reported as misses:
 // a near entry never serves past its freshness lifetime. The store's
 // Get evaluates bans exactly like the main store's Get, so a banned
 // key reports a miss here the moment it would miss on the owner's
 // side of the same broadcast.
+//
+// A fresh result is not yet a serve: the caller still runs its
+// request-side freshness gate, and only a Hit decision becomes a
+// near hit — call RecordHit at the serve site so the counter measures
+// serves, not lookups.
 func (n *NearCache) Lookup(ctx context.Context, key api.Key, now time.Time) (*api.Object, bool) {
 	if n == nil {
 		return nil, false
@@ -153,11 +152,20 @@ func (n *NearCache) Lookup(ctx context.Context, key api.Key, now time.Time) (*ap
 		_ = n.store.Delete(ctx, key)
 		return nil, false
 	}
+	return obj, true
+}
+
+// RecordHit counts one near-cache serve. Called by the serve paths
+// after a fresh Lookup passed their request-side freshness gate, so
+// the hit counters measure serves, not lookups.
+func (n *NearCache) RecordHit() {
+	if n == nil {
+		return
+	}
 	n.nearHits.Add(1)
 	if n.counters.Hits != nil {
 		n.counters.Hits.Inc()
 	}
-	return obj, true
 }
 
 // Hits returns the number of near serves observed by this node. Used
@@ -219,7 +227,10 @@ func (n *NearCache) Admit(ctx context.Context, key api.Key, obj *api.Object, now
 
 // Purge removes key's near entry. Wired into Handler.Purge so the
 // existing purge broadcast (which reaches every node) invalidates the
-// near copy with the owner's copy.
+// near copy with the owner's copy. Purges do not bump the
+// invalidations counter — they delete silently alongside the main
+// store, exactly like every other invalidation surface; the counter
+// exists to expose refresh/ban churn that is near-cache-specific.
 func (n *NearCache) Purge(ctx context.Context, key api.Key) {
 	if n == nil {
 		return

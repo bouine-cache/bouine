@@ -643,6 +643,7 @@ func applyClusterClosures(cfg *cache.HandlerConfig, e *engine, rs *runState) {
 	cfg.PeerFetch = peerFetchFn
 	cfg.OnPeerVariantMismatch = func() { rs.clusterMetrics.IncPeerFetchVariantMismatch("consumer") }
 	cfg.OnResolverTwoStep = func() { rs.clusterMetrics.IncPeerFetchResolverAnswer("consumer") }
+	cfg.OnResolverDerivedFallback = func() { rs.clusterMetrics.IncPeerFetchDerivedFallback() }
 	// Write-to-owner RPC: a non-owner that fetches from origin
 	// forwards the object to the owner so subsequent peer-fetches
 	// hit (issue #509). Fire-and-forget in a bounded goroutine so

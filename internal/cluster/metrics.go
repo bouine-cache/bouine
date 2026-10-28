@@ -66,6 +66,14 @@ type Metrics struct {
 	// Zero means Vary cold misses on non-owners go to origin instead of
 	// converging through the owner — e.g. a mixed-version fleet.
 	PeerFetchResolverAnswers *prometheus.CounterVec
+	// PeerFetchDerivedFallback counts ADR-0071 config-derived Vary
+	// derivations that proved wrong: the bare ask's metadata carried a
+	// Vary list beyond the policy-derived one, so the route fell back
+	// to the ADR-0068 two-step at one extra peer RPC per Vary cold
+	// miss. Sustained non-zero means a route's origin declares Vary
+	// fields outside its cache.key include list; the warn log carries
+	// the route and both lists.
+	PeerFetchDerivedFallback prometheus.Counter
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -134,6 +142,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "peer_fetch_resolver_answers_total",
 			Help:      "Metadata-only Vary resolver answers served over peer fetch, by side (server, consumer). Zero consumer-side means Vary cold misses on non-owners bypass owner convergence (ADR-0068).",
 		}, []string{"side"}),
+		PeerFetchDerivedFallback: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "peer_fetch_derived_fallback_total",
+			Help:      "Config-derived Vary derivations (ADR-0071) that proved wrong: the bare ask's metadata carried a Vary list beyond the policy-derived one, so the route fell back to the ADR-0068 two-step at one extra peer RPC per Vary cold miss. Sustained non-zero means a route's origin declares Vary fields outside its cache.key include list; the warn log carries the route and both lists.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -146,6 +159,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.GossipOversizedDrops,
 		m.PeerFetchVariantMismatch,
 		m.PeerFetchResolverAnswers,
+		m.PeerFetchDerivedFallback,
 	)
 	return m
 }
@@ -247,6 +261,17 @@ func (m *Metrics) IncPeerFetchResolverAnswer(side string) {
 		return
 	}
 	m.PeerFetchResolverAnswers.WithLabelValues(side).Inc()
+}
+
+// IncPeerFetchDerivedFallback increments the derived-fallback counter:
+// a config-derived Vary derivation (ADR-0071) proved wrong and the
+// route fell back to the ADR-0068 two-step. Nil-safe: single-node mode
+// never registers the counter.
+func (m *Metrics) IncPeerFetchDerivedFallback() {
+	if m == nil || m.PeerFetchDerivedFallback == nil {
+		return
+	}
+	m.PeerFetchDerivedFallback.Inc()
 }
 
 // IncRingEmpty increments the ring-empty counter. Called when Owner

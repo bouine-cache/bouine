@@ -379,6 +379,7 @@ func TestResolverPeerVariant_ConfigDerivedSingleAsk(t *testing.T) {
 	}
 
 	req := testCtx("GET", "http://example.com/config-derived")
+	derivedFallbacks := 0
 	req.Request.Header.Set("X-Test-Variant", "a")
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false)
 	ri := requestInfoFromCtx(req)
@@ -401,6 +402,7 @@ func TestResolverPeerVariant_ConfigDerivedSingleAsk(t *testing.T) {
 			NumShards:      2,
 			ReaperInterval: -1,
 		}),
+		OnResolverDerivedFallback: func() { derivedFallbacks++ },
 		// This node owns nothing — the non-owner cold-lookup shape.
 		OwnerFn: func(api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:1"}, false
@@ -438,6 +440,8 @@ func TestResolverPeerVariant_ConfigDerivedSingleAsk(t *testing.T) {
 	require.Equal(t, derivedVk, asks[0].key)
 	require.Equal(t, derivedAssertion, asks[0].assertion,
 		"the single ask must assert THIS request's variant dimension")
+	require.Zero(t, derivedFallbacks,
+		"a converged single ask is not a fallback: the derived-fallback counter must stay zero")
 }
 
 // TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation pins
@@ -460,6 +464,7 @@ func TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation(t *testing.
 	// effectiveVary stores the union sorted and ", "-joined; the origin
 	// declared X-Origin-Extra, which is NOT in the include list.
 	const realVary = "x-origin-extra, x-test-variant"
+	derivedFallbacks := 0
 	req := testCtx("GET", "http://example.com/wrong-derivation")
 	req.Request.Header.Set("X-Test-Variant", "a")
 	req.Request.Header.Set("X-Origin-Extra", "z")
@@ -529,6 +534,7 @@ func TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation(t *testing.
 			// no entry: the derivation was wrong.
 			return nil, nil
 		},
+		OnResolverDerivedFallback: func() { derivedFallbacks++ },
 	})
 
 	h.ServeRequest(req)
@@ -547,6 +553,8 @@ func TestResolverPeerVariant_ConfigDerivedFallsBackOnWrongDerivation(t *testing.
 	require.Equal(t, realVk, asks[2].key)
 	require.Equal(t, realAssertion, asks[2].assertion,
 		"ask three: the real variant key, asserted from the authoritative Vary list")
+	require.Equal(t, 1, derivedFallbacks,
+		"the wrong derivation must signal the fallback exactly once: the route is in the degraded three-ask mode")
 }
 
 // TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation pins the
@@ -566,6 +574,7 @@ func TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation(t *testing.T) {
 	}
 
 	req := testCtx("GET", "http://example.com/stale-derived")
+	derivedFallbacks := 0
 	req.Request.Header.Set("X-Test-Variant", "a")
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, []string{"X-Test-Variant"}, false)
 	ri := requestInfoFromCtx(req)
@@ -628,6 +637,7 @@ func TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation(t *testing.T) {
 			}
 			return nil, nil
 		},
+		OnResolverDerivedFallback: func() { derivedFallbacks++ },
 	})
 
 	h.ServeRequest(req)
@@ -642,4 +652,6 @@ func TestResolverPeerVariant_ConfigDerivedStaleSkipsRederivation(t *testing.T) {
 	require.Equal(t, derivedAssertion, asks[0].assertion)
 	require.Equal(t, primaryKey, asks[1].key)
 	require.Empty(t, asks[1].assertion)
+	require.Zero(t, derivedFallbacks,
+		"the derivation was right and the variant was stale — that is a skip, not a wrong-derivation fallback")
 }

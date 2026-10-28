@@ -1696,12 +1696,28 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 			cacheRes = cacheStale
 		}
 		h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
-		// Do not store or revalidate: the object came from the owner.
-		// Caching it on a non-owner would make the fleet cache redundant
-		// (issue #509). Revalidation is the owner's responsibility.
+		// Do not store: the object came from the owner. Caching it on a
+		// non-owner would make the fleet cache redundant (issue #509).
+		// A stale copy is still refreshed from here: the owner never
+		// learns that a peer served it, so without this trigger it stays
+		// stale for the whole SWR window (issue #857).
+		// doBackgroundRevalidate forwards the fresh object to the owner.
+		if d.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
+			h.triggerBgRevalidate(ri, peerStaleKey(peerObj, lookupKey), peerObj)
+		}
 		return true
 	}
 	return false
+}
+
+// peerStaleKey is the key a peer-served stale object is refreshed and
+// forwarded under: its own stored key (a variant key for Vary objects),
+// falling back to the lookup key for objects decoded without one.
+func peerStaleKey(peerObj *api.Object, lookupKey api.Key) api.Key {
+	if peerObj.Key != (api.Key{}) {
+		return peerObj.Key
+	}
+	return lookupKey
 }
 
 // peerHintsApply reports whether a fast-path peer-branch hint (transferred
@@ -2095,6 +2111,12 @@ func (h *Handler) isOwnerOrUnmanaged(key api.Key) bool {
 // background revalidation the miss path uses (triggerBgRevalidate).
 // Non-blocking: the refresh limit / revalSem backpressure inside
 // triggerBgRevalidate applies unchanged.
+//
+// Owner-gated: a local stale copy on a non-owner is a leftover from a
+// ring change. Refreshing it would forward the fresh object to the
+// owner but leave the local copy stale, so every request would go to
+// the origin. Peer-served stale objects use
+// TriggerBgRevalidateFromPeerStale instead.
 func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.Key, stale *api.Object) {
 	if !h.isOwnerOrUnmanaged(key) {
 		return
@@ -2103,6 +2125,17 @@ func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.K
 	// keep-alive request on the same connection.
 	ri := requestInfoFromRaw(req)
 	h.triggerBgRevalidate(ri, key, stale)
+}
+
+// TriggerBgRevalidateFromPeerStale is the fast-path hook for a STALE
+// object served from the owner over peer fetch (issue #857). It is
+// TriggerBgRevalidateFromFastPath without the owner gate: the owner
+// never learns that a peer served its stale copy, so the node that
+// served it refreshes it, and doBackgroundRevalidate forwards the fresh
+// object to the owner instead of storing it here (issue #509).
+func (h *Handler) TriggerBgRevalidateFromPeerStale(req *api.RawRequest, key api.Key, stale *api.Object) {
+	// Materialize before the request buffer is reused.
+	h.triggerBgRevalidate(requestInfoFromRaw(req), key, stale)
 }
 
 // remapHeadToGet converts a HEAD method to GET for background origin
@@ -2132,16 +2165,21 @@ func remapHeadToGet(method string) string {
 // headerFromCtx produces from fasthttp's collected cookies, so both
 // paths' RequestInfos key identically.
 func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
-	uri := req.Path
+	// strings.Clone: the RawRequest strings alias the connection's read
+	// buffer, which the next keep-alive request overwrites while the
+	// background revalidation still reads them. Header values need no
+	// clone: header.Map.Set interns (copies) them.
+	path := strings.Clone(req.Path)
+	uri := path
 	if req.Query != "" {
-		uri += "?" + req.Query
+		uri = path + "?" + req.Query
 	}
-	method := remapHeadToGet(req.Method)
+	method := strings.Clone(remapHeadToGet(req.Method))
 	ri := RequestInfo{
 		Method: method,
 		URI:    uri,
-		Host:   req.Host,
-		Path:   req.Path,
+		Host:   strings.Clone(req.Host),
+		Path:   path,
 		TLS:    req.Scheme == "https",
 	}
 	ri.Header = header.NewMap(req.NHeaders)
@@ -3354,6 +3392,9 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
 		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
+		// A non-owner refreshing a peer-served stale copy (issue #857)
+		// delivers it to the owner; no-op on the owner itself.
+		h.forwardToOwnerIfRemote(ctx, refreshed)
 		return
 	}
 
@@ -3369,7 +3410,14 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		}
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(bgResMap, h.policy))
 		obj := h.buildObject(key, ri, res, bgResMap, nil, time.Now())
+		// Keep the variant's link to its primary key (ADR-0068): the
+		// owner needs it to register a forwarded variant in the
+		// primary's variant set, as for any peer-put variant.
+		if obj.VaryKey != "" {
+			obj.PairedKey = stale.PairedKey
+		}
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
+		h.forwardToOwnerIfRemote(ctx, obj)
 	}
 }
 

@@ -57,6 +57,9 @@ type FastPathHandler struct {
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	policy    *KeyPolicy // nil = no query/header policy
 	onStale   func(req *api.RawRequest, key api.Key, stale *api.Object)
+	// onPeerStale is onStale for STALE objects served by the peer
+	// branch (issue #857). Nil leaves them unrefreshed.
+	onPeerStale func(req *api.RawRequest, key api.Key, stale *api.Object)
 	// uaBypass mirrors the owning Handler's compiled
 	// cache.bypass_on_user_agent patterns (issue #771, ADR-0055). When
 	// non-nil, TryHit declines matching requests so they fall through
@@ -134,6 +137,15 @@ func (f *FastPathHandler) Owner() *Handler {
 // copying.
 func (f *FastPathHandler) WithOnStale(fn func(req *api.RawRequest, key api.Key, stale *api.Object)) *FastPathHandler {
 	f.onStale = fn
+	return f
+}
+
+// WithOnPeerStale sets the callback invoked after the peer branch
+// serves a STALE object fetched from the owner (issue #857). Same
+// contract as WithOnStale; kept separate because the local-stale hook
+// is owner-gated and this one must not be.
+func (f *FastPathHandler) WithOnPeerStale(fn func(req *api.RawRequest, key api.Key, stale *api.Object)) *FastPathHandler {
+	f.onPeerStale = fn
 	return f
 }
 
@@ -386,6 +398,11 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 		resp := f.serializeResponse(req, peerObj, api.SourcePeer, now, "STALE")
 		if resp == nil {
 			return nil, false
+		}
+		// The owner never learns that its copy was served stale: refresh
+		// it from here (issue #857, slow-path twin in servePeerHit).
+		if f.onPeerStale != nil && peerObj.StaleWhileRevalidate > 0 {
+			f.onPeerStale(req, peerStaleKey(peerObj, lookupKey), peerObj)
 		}
 		return resp, true
 	default:

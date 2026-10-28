@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stale objects served through a peer are now refreshed (#857).**
+  In strong mode, only the owner of a key revalidated it, and only when
+  a client request reached the owner directly. A non-owner serving the
+  owner's stale copy did not trigger a refresh, so the object could stay
+  stale for the whole `stale-while-revalidate` window. The non-owner now
+  starts the background revalidation itself and forwards the fresh
+  object to the owner through the write-to-owner RPC, as it already
+  does after a miss. Storage stays on the owner (#509).
+- **The fast-path stale-while-revalidate trigger no longer reads the
+  connection buffer after the request ends.** The background
+  revalidation copied the request method, host and path as views into
+  the h1parser read buffer, which the next keep-alive request
+  overwrites. They are now copied.
+
 ## [0.6.1] - 2026-10-28
 
 ### Reverted

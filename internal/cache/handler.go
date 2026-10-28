@@ -1596,9 +1596,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 			// there too). Same triple gate as the 200 path below.
 			if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
 				ri := requestInfoFromCtx(ctx)
-				if h.swrTriggerAllowed(ri) {
-					h.triggerBgRevalidate(ri, key, disp.Object)
-				}
+				h.triggerBgRevalidate(ri, key, disp.Object)
 			}
 			return
 		}
@@ -1612,9 +1610,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		h.serveObject(ctx, disp.Object, now, cacheRes, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
 			ri := requestInfoFromCtx(ctx)
-			if h.swrTriggerAllowed(ri) {
-				h.triggerBgRevalidate(ri, key, disp.Object)
-			}
+			h.triggerBgRevalidate(ri, key, disp.Object)
 		}
 	case Miss:
 		if h.logCacheKeys {
@@ -2099,20 +2095,8 @@ func (h *Handler) isOwnerOrUnmanaged(key api.Key) bool {
 // background revalidation the miss path uses (triggerBgRevalidate).
 // Non-blocking: the refresh limit / revalSem backpressure inside
 // triggerBgRevalidate applies unchanged.
-//
-// The identity gate (swrTriggerAllowed, issue #846) is applied on the
-// RawRequest before materialization: Header returns the first line
-// (Authorization is single-line by construction), and CookieValue joins
-// every Cookie line so a cookie on the second line is not missed — the
-// same joined form requestInfoFromRaw would produce.
 func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.Key, stale *api.Object) {
 	if !h.isOwnerOrUnmanaged(key) {
-		return
-	}
-	if req.Header(header.Authorization) != "" {
-		return
-	}
-	if cv := req.CookieValue(); cv != "" && !h.policy.hasCookiePresence() {
 		return
 	}
 	// Materialize before the request buffer is reused by the next
@@ -3244,36 +3228,6 @@ func headFreshenAllowed(stale *api.Object, res fetchResult) bool {
 		}
 	}
 	return true
-}
-
-// swrTriggerAllowed reports whether the request that just received a
-// stale hit may trigger the background revalidation for it (issue #846,
-// audit AUD-01). doBackgroundRevalidate replays the triggering
-// request's headers on the origin-bound fetch, so a request carrying
-// Authorization or Cookie would have the origin render content for
-// THAT client — and the refresh then stores it under the shared key,
-// replacing the anonymous entry every other client is served. RFC
-// 9111 §3.5 already refuses storage of authorized responses without an
-// explicit shared-cache opt-in, but an opted-in origin (public,
-// s-maxage) can still embed per-user content, and the request Cookie
-// has no store-side gate at all (§3.4: cookies key nothing by
-// default). Refusing the trigger is the background-refresh analogue of
-// the ADR-0052/0054 collapse refusals: the stale entry is still
-// served, and the next anonymous request performs the refresh — the
-// same identity-minimization the refresh-before-expiry registry
-// applies by storing Vary-relevant headers only
-// (refresh_registry.go Register).
-//
-// Cookie-presence-keyed routes (cache.key.cookie_presence, issue #768)
-// are exempt for the Cookie half: there the Cookie header is a
-// declared variant dimension, the refresh fetch must carry it to land
-// in the right variant, and the registry already replays it
-// deliberately (TestRefreshRegistry_CookiePresenceSavesCookie).
-func (h *Handler) swrTriggerAllowed(ri RequestInfo) bool {
-	if ri.Header.Get(header.Authorization) != "" {
-		return false
-	}
-	return ri.Header.Get(header.Cookie) == "" || h.policy.hasCookiePresence()
 }
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh

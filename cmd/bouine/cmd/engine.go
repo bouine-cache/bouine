@@ -1314,6 +1314,9 @@ func (e *engine) buildFastPath(rs *runState) api.FastPathHandler {
 			continue
 		}
 		fp.WithOnStale(owner.TriggerBgRevalidateFromFastPath)
+		// Peer-served STALE objects are refreshed by the serving node
+		// and forwarded to the owner (issue #857).
+		fp.WithOnPeerStale(owner.TriggerBgRevalidateFromPeerStale)
 	}
 	e.wireFastPathPeerFetch(rs)
 

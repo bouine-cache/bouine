@@ -10,6 +10,28 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Reverted
+
+- **The SWR refresh trigger is restored for identity-bearing requests
+  (reverts #850; reopens #846 / audit AUD-01, time-boxed).** The v0.6.0
+  identity gate refused stale hits carrying `Authorization` or `Cookie`
+  from triggering the stale-while-revalidate background refresh,
+  outsourcing refresh cadence to anonymous traffic. On production,
+  where essentially every real-user request carries cookies, refresh
+  triggers collapsed the moment v0.6.0 rolled out (2026-10-28
+  09:32-09:55 UTC, all three prod continents): STALE serving jumped
+  1.3 -> 50-75 rps on the content pool and 3.5 -> 95-136 rps on
+  search, peer-fetch misses rose 150-190 -> 350-450 rps on prod-eu,
+  and bouine-l2 MISS p99 climbed ~30% (0.25 -> 0.28-0.33 s).
+  Cookie-presence-keyed routes (product-page) kept their trigger and
+  did not regress, which isolates the gate as the cause. This restores
+  the pre-v0.6.0 trigger on both paths and removes the
+  `swrTriggerAllowed` gate. #846 is deliberately reopened for the
+  window until the sanitized follow-up lands: the origin-bound refresh
+  fetch must replay declared variant dimensions only (the
+  refresh-before-expiry registry's `Register` contract), never the
+  triggering client's identity.
+
 ### Performance
 
 - **Tracing: the sampler's drop decision is hoisted ahead of span

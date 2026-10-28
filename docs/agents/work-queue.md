@@ -23,7 +23,7 @@ at the bottom. Entries older than 30 days may be pruned.
 - [WIP] opencode — internal/storage — rebase + slim #745 onto main: unset-`created_at` bans permanently poison later fills (exemptAfter normalization + opaque-walk `subjectTo` gate; cluster callback-race half already landed in c671699c and is dropped) — started: 2026-10-15 06:43 UTC — ETA: same day
 - [WIP] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_cookie` per-route cookie bypass (#762: slow path + fast path + builder wiring, tests, ADR-0054, runbook 56, changelog) — started: 2026-10-04 — ETA: same day
 - [WIP] opencode — internal/cluster — table-driven invalidation wire path (encode/decode frame helpers, generic broadcast fan-out, peer-handler factory; CCC-18/#591) — started: 2026-09-24 — ETA: same day
-- [WIP] crush — release 0.6.0 (changelog curation + promotion, chart bump, direct minor bump per maintainer request) — started: 2026-10-26 — ETA: same day
+- [WIP] crush — release 0.6.1 (changelog curation + promotion, chart bump; urgent patch for the v0.6.0 SWR refresh-trigger regression observed in production 2026-10-28) — started: 2026-10-28 — ETA: same day
 
 ## fasthttp migration — phase claims
 
@@ -48,6 +48,7 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — release 0.6.0 (changelog curation + promotion, chart bump, direct minor bump per maintainer request) — 2026-10-26
 - [DONE] crush — internal/cache, internal/observability, cmd/bouine/cmd, docs — fix the #838 long-tail regression on unstorable routes: unstorable-fill memo (ADR-0066 amendment #2 — a fill settling unstorable by explicit origin directive (no-store/private) memoizes the key for a bounded 5s window; subsequent anonymous cold include-free misses skip the fill flight and fetch their own immediately, removing the fill wait + release stagger on hot no-store/private routes while the stagger keeps guarding first-cold waves and transient errors; zero content-sharing change — every memoized request is a sequential request; metric bouine_fill_bypass_total; gates: lint clean on touched files, go test -race -short ./... green, bench-gate exit 0, conformance 349/365 unchanged, integration green) — 2026-10-26
 - [DONE] crush — release 0.5.30 (changelog curation + promotion, chart bump) — 2026-10-21
 - [DONE] crush — internal/cache, internal/config, pkg/header, cmd/bouine/cmd, docs — implement `cache.bypass_on_user_agent` per-route UA-conditioned cache bypass (issue #771: config field + validation, zero-alloc glob matcher, slow-path + fast-path gates, builder wiring, tests, ADR-0055, runbook 57, threat-model T52, changelog) — 2026-10-07

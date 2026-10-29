@@ -289,20 +289,37 @@ and refill path; the hit path never touches it. See ADR-0061.
 - **Request `Cookie`** — does NOT participate in the cache key by default.
   Per-route `cache.bypass_on_cookie: true` (ADR-0054) routes cookied
   requests entirely around the cache. Two finer-grained per-route
-  opt-ins (issue #768):
+  keying opt-ins (issues #768, #870 / ADR-0072) and one bypass opt-in:
+  - `cache.key.cookie_values: [name1, name2]` — each listed cookie's
+    trimmed VALUE joins the Vary variant key through a second synthetic
+    field (`x-bouine-cookie-values`), reduced canonically (RFC 6265
+    §5.2 trimming, last-occurrence-wins duplicates per §5.4, absent ⇒
+    empty value). The Cloudflare cache-rule `cookie.include`
+    equivalent; capped at 4 names because values (unlike presence
+    bits) are unbounded — `max_variants` still refuses over-cap
+    stores, never a wrong variant. Values are PII: they exist only
+    inside the transient variant-key hash input (ADR-0072).
   - `cache.key.cookie_presence: [name1, name2]` — each listed cookie
     name contributes one presence bit (present/absent, never its value)
     to the Vary variant key. Presence rides a synthetic Vary field
     unioned into the stored VaryValue, so store/lookup pairing, peer
     gates, and 304 revalidation hash the same bits everywhere. N names
     multiply the variant space by up to 2^N (bounded by `max_variants`).
+    The Cloudflare `cookie.check_presence` equivalent.
   - `cache.bypass_on_cookie_names: [name1, name2]` — a request
     carrying any listed cookie bypasses the cache entirely (same
     contract as `bypass_on_cookie`, scoped to the names; ubiquitous
     analytics/consent cookies alone do not trigger it).
+  Both keying lists ride the same machinery (union into the stored
+  VaryValue, cluster-identical policy or the peer gates fail safe with
+  a miss), compose with each other, and are rejected combined with the
+  bypass knobs or with `include_headers: [cookie]`. A
+  `route_defaults.cache.key.cookie_values` default merges per the
+  list-knob precedent (unset inherits wholesale, own list replaces,
+  `[]` opts out).
   In-flight sharing is refused for every cookied request
   unconditionally (ADR-0054): no request ever receives another user's
-  in-flight body, on any route.
+  in-flight body, on any route — value keying does not relax it.
 - **Response `Set-Cookie`** — a response carrying `Set-Cookie` is NOT stored
   by default. Per-route opt-in requires explicit operator acknowledgement.
 - **`Authorization` request header** — per RFC 9111 §3.5, responses to

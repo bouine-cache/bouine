@@ -22,6 +22,7 @@ code change that introduces a new failure mode.
 | [`56-cookie-bypass.md`](56-cookie-bypass.md) | Cookie bypass: cookied requests and personalized SSR routes (ADR-0054). |
 | [`57-ua-bypass.md`](57-ua-bypass.md) | User-Agent cache bypass: verified-bot / crawler freshness rules in layered deployments (ADR-0055). |
 | [`58-downstream-freshness-sync.md`](58-downstream-freshness-sync.md) | Capping downstream CDN (Cloudflare) freshness via synthesized CDN-Cache-Control (ADR-0063). |
+| [`59-cookie-values-keying.md`](59-cookie-values-keying.md) | Cookie-VALUE cache keying (`cache.key.cookie_values`), Cloudflare `cookie.include` parity, cardinality and privacy (ADR-0072). |
 | [`61-pgo-profile-refresh.md`](61-pgo-profile-refresh.md) | PGO profile refresh and custom-profile builds. |
 | [`62-config-reload.md`](62-config-reload.md) | Config reload (experimental): apply a whole file's hot-appliable changes to a running daemon. |
 | [`63-keys-introspection.md`](63-keys-introspection.md) | Cache-key introspection: keys find/top/recent without storage enumeration (#816). |

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -97,6 +98,38 @@ func TestBanSnapshot_SurrogateHit(t *testing.T) {
 	untagged := banTestObj("any.example.com", "/p/42", time.Hour)
 	untagged.SurrogateKeys = []string{"product-43"}
 	assert.False(t, s.MatchesActiveBan(untagged))
+}
+
+// TestBanSnapshot_SurrogateOnlyIsLiteral pins the classification of
+// surrogate-only bans (issue #871): they must land in the O(1)
+// surrogates set, not in opaqueBans. TestBanSnapshot_SurrogateHit
+// only checks the match outcome, which the opaque predicate walk also
+// gets right — it cannot catch a fall-through to the linear path.
+func TestBanSnapshot_SurrogateOnlyIsLiteral(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, banClassLiteralSurrogate,
+		classifyBan(patternOf(api.BanExpr{SurrogateKey: "product-42"})))
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	for i := range 8 {
+		_, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: fmt.Sprintf("product-%d", i)})
+		require.NoError(t, err)
+	}
+	snap := s.bans.snapshot()
+	assert.Len(t, snap.surrogates, 8, "surrogate-only bans must be literal set members")
+	assert.Empty(t, snap.opaqueBans, "surrogate-only bans must not take the predicate walk")
+
+	tagged := banTestObj("any.example.com", "/p/3", time.Hour)
+	tagged.SurrogateKeys = []string{"product-3"}
+	assert.True(t, s.MatchesActiveBan(tagged))
+
+	// Exemption still applies on the set path: an object stored after
+	// the ban is not subject to it.
+	fresh := banTestObj("any.example.com", "/p/3", -time.Hour)
+	fresh.SurrogateKeys = []string{"product-3"}
+	assert.False(t, s.MatchesActiveBan(fresh))
 }
 
 // TestBanSnapshot_MultiConditionNotFalsePositive pins the soundness

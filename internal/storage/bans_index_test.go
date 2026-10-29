@@ -345,8 +345,8 @@ func TestBanList_RegisterAllocsBoundedAtLargeCap(t *testing.T) {
 			next++
 		})
 	}
-	small, large := measure(1024), measure(65536)
-	t.Logf("allocs per distinct registration: cap=1024 %.2f, cap=65536 %.2f", small, large)
+	small, large := measure(banListCap), measure(65536)
+	t.Logf("allocs per distinct registration: cap=%d %.2f, cap=65536 %.2f", banListCap, small, large)
 	assert.LessOrEqual(t, small, float64(5), "registration at the default cap")
 	assert.LessOrEqual(t, large, small+1, "registration allocations must not scale with the cap")
 }

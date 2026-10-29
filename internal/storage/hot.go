@@ -190,7 +190,7 @@ const DefaultBanTTL = 24 * time.Hour
 // bytes per ban), not a per-hit or per-registration cost: what the
 // cap really bounds is retention — how long a distinct ban survives at
 // a given invalidation rate before eviction forgets it.
-const banListCap = 1024
+const banListCap = 4096
 
 // banScanCoalesceWindow bounds how eagerly Ban rescans the hot tier.
 // The eager scan is the expensive half of Ban — a full O(entries) walk

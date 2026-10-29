@@ -11,7 +11,7 @@ import (
 
 // banListBenchCaps spans the default cap to a list large enough to
 // retain minutes of a ~1k bans/s tag-invalidation storm.
-var banListBenchCaps = []int{1024, 16384, 65536, 262144}
+var banListBenchCaps = []int{4096, 16384, 65536, 262144}
 
 // benchSaturatedBanList returns a list filled to capacity with distinct
 // surrogate-only bans, the steady state under a tag-invalidation storm.

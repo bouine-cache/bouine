@@ -40,6 +40,16 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Surrogate-key bans are enforced through the O(1) snapshot set again
+  (#871).** `classifyBan` had no case for surrogate-only bans, so every
+  tag ban fell through to the opaque bucket and each hot and warm hit
+  walked every active ban predicate in turn — with the default 24 h
+  `ban_ttl`, any steady tag-invalidation rate keeps the list at its
+  1024 cap, i.e. ~1024 predicate calls per hit. Surrogate-only bans now
+  classify as literal; matching semantics (including the post-ban
+  exemption) are unchanged, and the snapshot rebuild paid after each
+  registration gets cheaper as well.
+
 - **The origin-bound request-target now carries the identity the cache
   key claims (#847, audit AUD-04).** The slow path builds the key from
   fasthttp's normalized path (percent-decoding, dot-segment resolution),

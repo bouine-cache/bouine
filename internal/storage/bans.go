@@ -262,6 +262,10 @@ func classifyBan(e banPattern) banClass {
 		if isAnchoredPrefix(e.pathRegex) {
 			return banClassPrefixPath
 		}
+	case banClassLiteralSurrogate:
+		// A surrogate key is an exact token, never a pattern: a
+		// surrogate-only ban is always a literal set member.
+		return banClassLiteralSurrogate
 	}
 	return banClassOpaque
 }

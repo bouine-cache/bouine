@@ -366,6 +366,34 @@ func BenchmarkHotGet_SubjectBans_1024_Regex(b *testing.B) {
 	}
 }
 
+// BenchmarkHotGet_SubjectBans_1024_Surrogate is the tag-invalidation
+// shape at the ban-list cap: 1024 distinct surrogate-only bans and a
+// subject object carrying non-matching tags. Must be O(1) through the
+// snapshot's surrogates set (issue #871: these used to classify opaque
+// and cost a 1024-predicate walk per hit).
+func BenchmarkHotGet_SubjectBans_1024_Surrogate(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-1024-surrogate"))
+	// Page-sized body: tag-invalidated objects are typically documents.
+	o := benchSubjectObj(k, "tagged.example.com", 16<<10)
+	o.SurrogateKeys = []string{"live-tag-a", "live-tag-b", "live-tag-c"}
+	_ = s.Put(context.Background(), k, o)
+	_, _, _ = s.Get(context.Background(), k)
+	for i := range 1024 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			SurrogateKey: "tag-" + strconv.Itoa(i),
+			CreatedAt:    time.Now().Add(-time.Hour),
+		})
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
 // BenchmarkHotStore_Ban_Eager measures a full eager scan (the spike
 // case: first ban outside the coalesce window) against a populated
 // store. Not a gate — cost is O(entries) by design.

@@ -101,10 +101,11 @@ func TestBanSnapshot_SurrogateHit(t *testing.T) {
 }
 
 // TestBanSnapshot_SurrogateOnlyIsLiteral pins the classification of
-// surrogate-only bans (issue #871): they must land in the O(1)
-// surrogates set, not in opaqueBans. TestBanSnapshot_SurrogateHit
-// only checks the match outcome, which the opaque predicate walk also
-// gets right — it cannot catch a fall-through to the linear path.
+// surrogate-only bans (issue #871): they must be enforced by the O(1)
+// surrogate set, never by the snapshot's opaqueBans walk.
+// TestBanSnapshot_SurrogateHit only checks the match outcome, which the
+// opaque predicate walk also gets right — it cannot catch a
+// fall-through to the linear path.
 func TestBanSnapshot_SurrogateOnlyIsLiteral(t *testing.T) {
 	t.Parallel()
 	require.Equal(t, banClassLiteralSurrogate,
@@ -118,7 +119,7 @@ func TestBanSnapshot_SurrogateOnlyIsLiteral(t *testing.T) {
 		require.NoError(t, err)
 	}
 	snap := s.bans.snapshot()
-	assert.Len(t, snap.surrogates, 8, "surrogate-only bans must be literal set members")
+	assert.Equal(t, 8, surrogateSetLen(&s.bans.surr), "surrogate-only bans must be surrogate-set members")
 	assert.Empty(t, snap.opaqueBans, "surrogate-only bans must not take the predicate walk")
 
 	tagged := banTestObj("any.example.com", "/p/3", time.Hour)

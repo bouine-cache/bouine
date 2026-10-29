@@ -25,21 +25,22 @@ func snapPtr(b *banListState) *banSnapshot {
 // production ban-storm rates over a list saturated at banListCap, put
 // ~7 GB of transient garbage on the heap per storm). The rebuild is
 // deferred to the next snapshot() read, so a batch of N registrations
-// costs one rebuild, not N.
+// costs one rebuild, not N. Host bans exercise it: surrogate-only bans
+// bypass the snapshot entirely (TestBanList_SurrogateBanEnforcedWithoutRebuild).
 func TestBanRegister_DoesNotRebuildSnapshotEagerly(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	defer func() { _ = s.Close(context.Background()) }()
 
-	_, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-1"})
+	_, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "one.example.com"})
 	require.NoError(t, err)
 	// Force the initial compile with a read, so the pointer captured
 	// below is the published snapshot.
-	require.True(t, s.MatchesActiveBan(surrogateObj("tag-1")))
+	require.True(t, s.MatchesActiveBan(banTestObj("one.example.com", "/p/1", time.Hour)))
 	before := snapPtr(&s.bans)
 	require.NotNil(t, before)
 
-	_, err = s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-2"})
+	_, err = s.Ban(context.Background(), api.BanExpr{HostRegex: "two.example.com"})
 	require.NoError(t, err)
 
 	assert.Same(t, before, snapPtr(&s.bans),
@@ -48,9 +49,8 @@ func TestBanRegister_DoesNotRebuildSnapshotEagerly(t *testing.T) {
 	// The next read compiles the batch: the newest ban is enforced
 	// immediately (no staleness window — the first lookup after the
 	// batch sees it).
-	obj := banTestObj("any.example.com", "/p/1", time.Hour)
-	obj.SurrogateKeys = []string{"tag-2"}
-	assert.True(t, s.MatchesActiveBan(obj), "lazy rebuild must enforce the newest ban")
+	assert.True(t, s.MatchesActiveBan(banTestObj("two.example.com", "/p/1", time.Hour)),
+		"lazy rebuild must enforce the newest ban")
 	assert.NotSame(t, before, snapPtr(&s.bans), "the read must have compiled a fresh snapshot")
 }
 
@@ -81,8 +81,12 @@ func TestBanRegister_OneRebuildPerBatch(t *testing.T) {
 // TestBanRegister_AllocBudget asserts the steady-state allocation cost
 // of registration against a list pre-filled to half the cap. Before the
 // deferred rebuild, each register copied the whole list and recompiled
-// the snapshot (~150 KB per ban at the cap); now a refresh or an
-// in-place append allocates at most the amortized append growth.
+// the snapshot (~150 KB per ban at the cap). A refresh rewrites the
+// shared ban in place and allocates nothing; a distinct surrogate ban
+// allocates the ban itself, its copied surrogate-set shard (~1 entry
+// at the default cap), and amortized list growth — and, unlike the
+// lazily rebuilt snapshot it replaces, owes no recompile on the next
+// read.
 func TestBanRegister_AllocBudget(t *testing.T) {
 	// Not parallel: testing.AllocsPerRun forbids parallel tests.
 
@@ -112,8 +116,8 @@ func TestBanRegister_AllocBudget(t *testing.T) {
 		b.register(api.BanExpr{SurrogateKey: keys[next]}, pred, time.Now())
 		next++
 	})
-	assert.LessOrEqual(t, appendAllocs, float64(2),
-		"appending a distinct ban must cost only amortized slice growth")
+	assert.LessOrEqual(t, appendAllocs, float64(4),
+		"a distinct ban must cost only the ban, one shard copy, and amortized slice growth")
 }
 
 // TestBanRegister_CapEvictionInPlace verifies the list stays capped at

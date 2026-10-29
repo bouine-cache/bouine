@@ -76,6 +76,25 @@ the curated, human-readable summary.
   Pinned by `key_origin_parity_regression_test.go`; bench gate and
   cache-tests score unchanged.
 
+### Performance
+
+- **Ban registration is O(1) amortized and tag bans no longer
+  recompile the ban snapshot (#874).** Registering a ban used to scan
+  the whole lazy list under its mutex (expiry prune + dedup) and evict
+  by shifting it, and every registration made the next hit recompile
+  the full snapshot — ~77 µs and ~295 KB of garbage per ban at the
+  1024 cap, ~31 ms and ~74 MB at a 256k list, which is what kept the
+  cap small. Dedup is now an index lookup, eviction reslices the list
+  head, and surrogate-key-only bans are published to a sharded,
+  copy-on-write surrogate set that the hit path reads lock-free — so a
+  tag ban is enforced by the very next read without any recompile.
+  The snapshot now compiles only host/path/regex bans. A storm step
+  (register + next hit) costs ~0.5–1.2 µs and 4 allocations at any
+  cap from 1k to 256k; a hit on a tagged object pays ~10 ns more than
+  the single-map lookup it replaces. An expired ban that is not at the
+  list head now lingers until the next reaper sweep (over-invalidation
+  only). The cap itself is unchanged.
+
 ## [0.6.2] - 2026-10-28
 
 ### Fixed

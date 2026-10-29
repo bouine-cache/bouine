@@ -182,6 +182,21 @@ func originRouteHandler(ctx *fasthttp.RequestCtx, ctrl *originControl) {
 		lang := string(ctx.Request.Header.Peek("Accept-Language"))
 		market := string(ctx.Request.Header.Peek("X-Region"))
 		fmt.Fprintf(ctx, "variant lang=%s market=%s", lang, market)
+	case "/ssr-values/cookie-values":
+		// Cookie-value-personalized render for the cache.key.cookie_values
+		// e2e (issue #870): the body depends ONLY on the locale cookie's
+		// value (the listed name), never on other cookies — so tests can
+		// assert unlisted cookies never fragment the variant while a
+		// locale change does.
+		locale := ""
+		for pair := range strings.SplitSeq(string(ctx.Request.Header.Peek("Cookie")), ";") {
+			name, val, _ := strings.Cut(pair, "=")
+			if strings.EqualFold(strings.TrimSpace(name), "locale") {
+				locale = strings.TrimSpace(val)
+			}
+		}
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		fmt.Fprintf(ctx, "render locale=%s", locale)
 	case "/error":
 		ctx.SetStatusCode(503)
 		ctx.WriteString("origin error")

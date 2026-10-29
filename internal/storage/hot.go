@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"runtime"
 	"slices"
@@ -92,16 +93,14 @@ type HotStore struct {
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
+// Bans are heap-allocated and shared by pointer between the ordered
+// list, the pattern index, and (for surrogate-only bans) the lock-free
+// surrogate set, so a refresh updates every view in place.
 type activeBan struct {
-	pred    banPredicate
+	pred banPredicate
+	// created is the ban's TTL anchor. Written and read only under
+	// banListState.mu.
 	created time.Time
-	// exemptAfter is the ORIGINAL expr.CreatedAt of the ban (possibly
-	// zero = no exemption). It mirrors the exemption check inside pred:
-	// objects stored after this instant are not subject to the ban
-	// (RFC 9111 §4.4 invalidation only removes responses that existed
-	// at invalidation time). The composite ban snapshot consults it directly
-	// to reject exempt objects without calling pred.
-	exemptAfter time.Time
 	// expr records the pattern fields of the api.BanExpr the predicate
 	// was compiled from (CreatedAt excluded). BanExpr patterns are
 	// strings, so this is comparable and used to dedup identical
@@ -110,6 +109,41 @@ type activeBan struct {
 	// identical bans must not leave 10k list entries that every
 	// subsequent cache hit walks).
 	pattern banPattern
+	// exemptNanos is the ban's exemption instant (see exemptAfter) as
+	// UnixNano, noExemption meaning the zero time. It mirrors the exemption check
+	// inside pred: objects stored after this instant are not subject to
+	// the ban (RFC 9111 §4.4 invalidation only removes responses that
+	// existed at invalidation time). Atomic because the surrogate set
+	// reads it on the hit path without the list mutex while a refresh
+	// may rewrite it.
+	exemptNanos atomic.Int64
+	// surrogate marks a surrogate-key-only ban: it lives in the
+	// surrogate set, not in the compiled snapshot. Immutable.
+	surrogate bool
+}
+
+// noExemption encodes the zero exemption instant in
+// activeBan.exemptNanos. math.MinInt64 rather than 0, so an exemption at
+// exactly the Unix epoch stays representable.
+const noExemption = math.MinInt64
+
+// exemptAfter returns the ban's exemption instant (zero = no
+// exemption: every object is subject).
+func (b *activeBan) exemptAfter() time.Time {
+	n := b.exemptNanos.Load()
+	if n == noExemption {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// setExemptAfter publishes a new exemption instant.
+func (b *activeBan) setExemptAfter(t time.Time) {
+	if t.IsZero() {
+		b.exemptNanos.Store(noExemption)
+		return
+	}
+	b.exemptNanos.Store(t.UnixNano())
 }
 
 // banPattern holds the comparable pattern fields of a BanExpr. Two
@@ -146,12 +180,16 @@ func patternOf(expr api.BanExpr) banPattern {
 // boot config leaves ban_ttl at zero. Unstable.
 const DefaultBanTTL = 24 * time.Hour
 
-// banListCap bounds the lazy ban list. A storm of distinct bans must
-// not degrade every cache hit linearly (matchesActiveBan walks the
-// list) or make Ban's snapshot copy quadratic. When the cap is hit,
-// the oldest bans are dropped first — they are the least likely to
-// match anything still cached (their matching entries have had the
+// banListCap is the default bound on the lazy ban list. When the cap
+// is hit, the oldest bans are dropped first — they are the least likely
+// to match anything still cached (their matching entries have had the
 // longest time to be evicted lazily or reclaimed by the reaper).
+//
+// Registration and eviction are O(1) amortized and the hit-path check
+// does not walk the list, so the cap is a memory bound (a few hundred
+// bytes per ban), not a per-hit or per-registration cost: what the
+// cap really bounds is retention — how long a distinct ban survives at
+// a given invalidation rate before eviction forgets it.
 const banListCap = 1024
 
 // banScanCoalesceWindow bounds how eagerly Ban rescans the hot tier.
@@ -830,8 +868,8 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	// (RFC 9111 §4.4 invalidation, applied lazily).
 	now := h.registerBan(expr, pred)
 
-	// Pure surrogate-key bans never need an eager scan: the compiled
-	// snapshot's surrogates set enforces them in O(1) on every lookup
+	// Pure surrogate-key bans never need an eager scan: the lock-free
+	// surrogate set enforces them in O(1) on every lookup
 	// (evictBanned reclaims the entry then), and the TTL reaper
 	// collects entries that are never accessed again. The eager scan
 	// would walk every shard under a write lock only to find the few
@@ -894,8 +932,7 @@ func isSurrogateOnlyBan(expr api.BanExpr) bool {
 // list and returns the registration wall-clock time. Identical
 // re-issued patterns refresh in place instead of duplicating; the
 // list is capped at banListCap with the oldest bans dropped first.
-// Each registration rebuilds the compiled snapshot (O(list), bounded
-// by the cap).
+// Registration is O(1) amortized; see banListState.register.
 func (h *HotStore) registerBan(expr api.BanExpr, pred banPredicate) time.Time {
 	createdAt := expr.CreatedAt
 	if createdAt.IsZero() {
@@ -1039,13 +1076,13 @@ func (h *HotStore) MatchingBans(obj *api.Object) []BanDescriptor {
 }
 
 // matchesActiveBan reports whether obj is subject to any active lazy
-// ban. It reads the compiled ban snapshot and applies the O(1)
-// rejection: literal host/path/surrogate set lookups first, anchored
-// prefixes second, and only non-rejectable (regex or multi-condition)
-// bans fall through to predicate evaluation. Pruning of expired bans
-// happens in Ban() and in the TTL reaper, not on the read path.
+// ban: the compiled snapshot (literal host/path set lookups, anchored
+// prefixes, then non-rejectable regex or multi-condition predicates)
+// and the lock-free surrogate set (one hashed lookup per surrogate key
+// on obj). Pruning of expired bans happens in Ban() and in the TTL
+// reaper, not on the read path.
 func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
-	return h.bans.snapshot().matches(obj)
+	return h.bans.matches(obj)
 }
 
 // Stats returns an atomic snapshot.

@@ -127,13 +127,14 @@ func TestBanSnapshot_DirtyBatchAmortizesToSingleRebuild(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	defer func() { _ = s.Close(context.Background()) }()
 
-	_, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-1"})
+	_, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "seed.example.com"})
 	require.NoError(t, err)
-	require.True(t, s.MatchesActiveBan(surrogateObj("tag-1"))) // initial compile
+	require.True(t, s.MatchesActiveBan(banTestObj("seed.example.com", "/p", time.Hour))) // initial compile
 	before := snapPtr(&s.bans)
 
+	// Host bans: surrogate-only bans never touch the snapshot.
 	for i := range 8 {
-		_, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: fmt.Sprintf("batch-%d", i)})
+		_, err := s.Ban(context.Background(), api.BanExpr{HostRegex: fmt.Sprintf("batch-%d.example.com", i)})
 		require.NoError(t, err)
 	}
 	assert.Same(t, before, snapPtr(&s.bans),
@@ -141,8 +142,7 @@ func TestBanSnapshot_DirtyBatchAmortizesToSingleRebuild(t *testing.T) {
 
 	// The first read after the batch compiles once and enforces every
 	// new ban immediately.
-	obj := banTestObj("any.example.com", "/p", time.Hour)
-	obj.SurrogateKeys = []string{"batch-7"}
+	obj := banTestObj("batch-7.example.com", "/p", time.Hour)
 	assert.True(t, s.MatchesActiveBan(obj),
 		"the post-batch read must enforce the newest ban")
 	assert.NotSame(t, before, snapPtr(&s.bans))

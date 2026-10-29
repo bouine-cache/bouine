@@ -135,10 +135,11 @@ func collapseFlightKey(h *Handler, primaryKey, lookupKey api.Key, obj *api.Objec
 
 // flightHeaders snapshots the declared include_headers off the request
 // into a header.Map for the flight-key hash — plus the Cookie header
-// when the route declares cookie presence, so variantKeyCore's synthetic
-// cookie-presence field can compute the presence bits through the same
-// path the storage variant key uses (policy.cookiePresenceValue over
-// the Cookie value). A fresh map (not an alias of ri.Header) because
+// when the route declares cookie keying (presence or values), so
+// variantKeyCore's synthetic cookie fields can compute the presence
+// bits / value pairs through the same path the storage variant key uses
+// (policy.cookiePresenceValue / cookieValuesValue over the Cookie
+// value). A fresh map (not an alias of ri.Header) because
 // mapVarySrc.getValue runs while the flight's other callers may still be
 // mutating their own maps. The map carries exactly the declared
 // dimensions' inputs, nothing else.
@@ -148,7 +149,7 @@ func flightHeaders(h *Handler, ri RequestInfo) header.Map {
 	for _, f := range policy.includeHeaders {
 		m.Set(f, ri.Header.Get(f))
 	}
-	if policy.hasCookiePresence() {
+	if policy.hasCookieKeying() {
 		m.Set(header.Cookie, ri.Header.CookieAll())
 	}
 	return m

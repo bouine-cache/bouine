@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -455,4 +456,154 @@ func TestCookieValues_PeerGateFailSafe(t *testing.T) {
 	require.NotEmpty(t, stored)
 	require.NotEqual(t, stored, asked,
 		"a mismatched policy must hash a different assertion — the owner gate then answers miss")
+}
+
+// FuzzCookieValuesValue checks the cookieValuesValue reduction over
+// arbitrary Cookie header values (invalid bytes, embedded ';'/'=',
+// huge values, multi-line joins) for the three invariants the cluster
+// depends on:
+//
+//  1. no panic on any input (L1 caps bound real headers, but the
+//     reduction must be robust to anything that reaches it);
+//  2. determinism — the same input reduces to the same bytes, always
+//     (two nodes reducing differently store/resolve variants under
+//     different keys);
+//  3. unlisted-append invariance — a pair whose name is not listed
+//     never changes the reduction (unlisted cookies must not fragment
+//     the variant, the Cloudflare cookie.include partition property).
+func FuzzCookieValuesValue(f *testing.F) {
+	f.Add("locale=en; currency=eur")
+	f.Add("locale=en")
+	f.Add("")
+	f.Add("locale=")
+	f.Add("locale=a; locale=b")
+	f.Add("Locale=  en-US  ; other=1")
+	f.Add("locale=\"a=b\"; junk")
+	f.Add("locale")
+	f.Add(strings.Repeat("locale=x; ", 40))
+	f.Add("locale=" + strings.Repeat("v", 300))
+	f.Add("\x00\xff locale=en\r\n")
+	f.Add("; ; locale=en ; ;")
+
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale", "currency"})
+	f.Fuzz(func(t *testing.T, cookieValue string) {
+		got := policy.cookieValuesValue(cookieValue)
+		if got != policy.cookieValuesValue(cookieValue) {
+			t.Fatalf("non-deterministic reduction for %q", cookieValue)
+		}
+		if got == "" && cookieValue != "" {
+			// Only the no-Cookie-header shape reduces to "": a
+			// non-empty Cookie line must produce the positional
+			// pairs even when every listed name is absent.
+			t.Fatalf("non-empty cookie value %q reduced to the no-header shape", cookieValue)
+		}
+		if cookieValue == "" {
+			// The empty input IS the no-header shape; appending a
+			// pair makes it a present-header input, which
+			// legitimately switches to the positional pairs (the
+			// presence convention, cookiePresenceValue).
+			return
+		}
+		if withUnlisted := policy.cookieValuesValue(cookieValue + "; unlisted=zzz"); withUnlisted != got {
+			// The appended pair's name is never listed, so the
+			// reduction must be unchanged (unlisted cookies must
+			// not fragment the variant).
+			t.Fatalf("unlisted pair changed the reduction: %q vs %q for %q", withUnlisted, got, cookieValue)
+		}
+	})
+}
+
+// TestCookieValues_MaxVariantsRefusesStores pins the cardinality
+// defense (issue #870): distinct cookie VALUES are unbounded, so the
+// existing max_variants cap is the storage backstop. With MaxVariants
+// at 2 and three distinct locale values, the first two variants store
+// and keep HITting; every request for the third value re-fetches
+// (never stored, never a wrong body) and the VaryCapHits counter
+// increments — the operator signal that the route's value cardinality
+// exceeds its cache budget.
+func TestCookieValues_MaxVariantsRefusesStores(t *testing.T) {
+	t.Parallel()
+	var capHits int
+	var originFetches atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			originFetches.Add(1)
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60, public")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("render-for-locale=" + string(ctx.Request.Header.Peek(header.Cookie))))
+		},
+		FastClient: &testFastClient{handler: func(ctx *fasthttp.RequestCtx) {
+			originFetches.Add(1)
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60, public")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("render-for-locale=" + string(ctx.Request.Header.Peek(header.Cookie))))
+		}},
+		Store:       storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		Policy:      NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale"}),
+		MaxVariants: 2,
+		VaryCapHits: counterFunc(func() { capHits++ }),
+	})
+
+	get := func(locale string) *fasthttp.RequestCtx {
+		ctx := testCtx("GET", "http://example.com/cap")
+		ctx.Request.Header.Set(header.Cookie, "locale="+locale)
+		h.ServeRequest(ctx)
+		return ctx
+	}
+
+	// Two values fill two variants (each asked twice: the second ask HITs).
+	for _, locale := range []string{"en", "fr"} {
+		require.Equal(t, "MISS", respHeader(get(locale), header.XCache))
+		require.Equal(t, "HIT", respHeader(get(locale), header.XCache))
+	}
+
+	// The third distinct value is past the cap: refused storage on
+	// every ask — permanently MISS, never a stored wrong body.
+	for range 3 {
+		require.Equal(t, "MISS", respHeader(get("de"), header.XCache),
+			"a past-cap value must never be stored")
+	}
+	require.Greater(t, capHits, 0, "the cap refusals must increment the VaryCapHits operator signal")
+
+	// The in-cap variants are unaffected: still HIT.
+	require.Equal(t, "HIT", respHeader(get("en"), header.XCache))
+	require.Equal(t, "HIT", respHeader(get("fr"), header.XCache))
+}
+
+// TestCookieValues_CookieValueNeverLogged pins the PII stance
+// (threat-model T06, issue #870): the cookie value exists only inside
+// the transient variant-key hash input — the handler's log output for
+// a value-keyed miss and hit must never contain the value.
+func TestCookieValues_CookieValueNeverLogged(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	origin := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60, public")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("render"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   origin,
+		FastClient: &testFastClient{handler: origin},
+		Store:      storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		Logger:     slog.New(slog.NewTextHandler(&buf, nil)),
+		Policy:     NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale"}),
+	})
+
+	const secret = "s3cr3t-locale-value"
+	miss := testCtx("GET", "http://example.com/privacy")
+	miss.Request.Header.Set(header.Cookie, "locale="+secret)
+	h.ServeRequest(miss)
+	require.Equal(t, "MISS", respHeader(miss, header.XCache))
+
+	hit := testCtx("GET", "http://example.com/privacy")
+	hit.Request.Header.Set(header.Cookie, "locale="+secret+"; other=1")
+	h.ServeRequest(hit)
+	require.Equal(t, "HIT", respHeader(hit, header.XCache))
+
+	out := buf.String()
+	assert.NotContains(t, out, secret,
+		"the cookie value is PII and must never appear in log output (threat-model T06)")
+	assert.NotContains(t, out, "s3cr3t",
+		"no fragment of the value may leak either")
 }

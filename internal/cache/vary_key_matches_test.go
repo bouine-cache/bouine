@@ -12,23 +12,32 @@ import (
 )
 
 // varyParityPolicies returns the KeyPolicy shapes that change the
-// assertion hash: none, exclude_headers, cookie presence, verbatim
-// Accept-Encoding, and all of them together.
+// assertion hash: none, exclude_headers, cookie presence, cookie
+// values, both cookie fields, verbatim Accept-Encoding, and all of
+// them together.
 func varyParityPolicies() map[string]*KeyPolicy {
 	exclude := NewKeyPolicy(nil, nil, map[string]bool{"x-drop": true}, nil, false, false, nil, false)
 	presence := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).
 		WithCookiePresence([]string{"consent", "session_id"})
+	values := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).
+		WithCookieValues([]string{"locale", "currency"})
+	bothCookies := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).
+		WithCookiePresence([]string{"consent"}).
+		WithCookieValues([]string{"locale"})
 	verbatim := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)
 	verbatim.SetVerbatimAE(true)
 	all := NewKeyPolicy(nil, nil, map[string]bool{"x-drop": true}, nil, false, false, nil, false).
-		WithCookiePresence([]string{"consent"})
+		WithCookiePresence([]string{"consent"}).
+		WithCookieValues([]string{"locale"})
 	all.SetVerbatimAE(true)
 	return map[string]*KeyPolicy{
-		"nil":      nil,
-		"exclude":  exclude,
-		"presence": presence,
-		"verbatim": verbatim,
-		"all":      all,
+		"nil":         nil,
+		"exclude":     exclude,
+		"presence":    presence,
+		"values":      values,
+		"bothcookies": bothCookies,
+		"verbatim":    verbatim,
+		"all":         all,
 	}
 }
 
@@ -77,6 +86,9 @@ func TestVaryKeyMatchesParity(t *testing.T) {
 		"X-Long, X-Region",
 		cookiePresence,
 		cookiePresence + ", X-Region",
+		cookieValuesField,
+		cookieValuesField + ", X-Region",
+		cookiePresence + ", " + cookieValuesField,
 		"Cookie",
 	}
 	headers := map[string]string{
@@ -143,6 +155,8 @@ func FuzzVaryKeyMatchesParity(f *testing.F) {
 	f.Add(" b, a", "B", "x \t", "a", "y")
 	f.Add("B,a,", "b", "1", "A", "2")
 	f.Add(cookiePresenceField+", X-Drop", "Cookie", " ", "Cookie", "session_id=1")
+	f.Add(cookieValuesField+", X-Drop", "Cookie", "locale=fr", "Cookie", "currency=eur")
+	f.Add(cookieValuesField, "Cookie", "locale=a; locale=b; junk==", "X-Other", "1")
 	f.Add("Accept-Encoding, Accept-Language", "accept-encoding", "br, gzip", "Accept-Language", "fr, en;q=0.5")
 	f.Add("X-Région, x", "X", "v", "x", "w")
 	f.Add(strings.Repeat("a,", 20), "A", strings.Repeat("z", 300), "a", "")

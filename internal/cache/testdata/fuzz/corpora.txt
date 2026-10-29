@@ -41,3 +41,12 @@
 # - origin field also present in include list (dedup)
 # - mixed-case and whitespace-padded fields (trim + lowercase)
 # - 16+ entry union (pathological, stays on the alloc path)
+#
+# FuzzCookieValuesValue seeds (issue #870):
+# - basic multi-pair values over the sorted name list
+# - single listed value, empty value, flag-style (no '=')
+# - duplicate listed name (last-wins, RFC 6265 §5.4)
+# - OWS-trimmed and quoted values (RFC 6265 §5.2)
+# - unlisted-only pairs (positional empty values)
+# - huge value (stack-buffer overflow fallback path)
+# - invalid bytes and empty pair fragments

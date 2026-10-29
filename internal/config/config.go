@@ -1004,6 +1004,47 @@ type RouteKey struct {
 	// the route or nodes store/resolve variants under different keys
 	// (peer gates fail safe — miss, never a wrong body).
 	CookiePresence []string `yaml:"cookie_presence,omitempty" json:"cookie_presence,omitempty"`
+	// CookieValues lists cookie names whose VALUE participates in the
+	// variant key (cache.key.cookie_values, issue #870): each listed
+	// name contributes its trimmed value (RFC 6265 §5.2), hashed into
+	// the synthetic x-bouine-cookie-values Vary field — the Cloudflare
+	// cache rule `cache_key.custom_key.cookie.include` equivalent
+	// (cookie_presence is `check_presence`). Use when the origin renders
+	// per-value content (locale, currency, experiment variant) and the
+	// value space is small and operator-known; a session-ID-valued
+	// cookie here is a hit-ratio killer (one variant per value).
+	//
+	// Cardinality: unlike presence bits (bounded 2^N), distinct values
+	// are unbounded — the list is capped at 4 names, and max_variants
+	// still bounds stored variants per primary key (a Put over the cap
+	// is refused, never a wrong variant served). The VaryDrift metric
+	// and dashboard insight surface sustained cap refusals.
+	//
+	// Cookie values are PII: they exist only inside the transient
+	// variant-key hash input — never stored (the stored VaryValue
+	// carries only the synthetic field name), never logged, never in
+	// metrics labels, never in admin output (threat-model T06).
+	//
+	// Canonicalization is pinned for cluster agreement (ADR-0072):
+	// case-insensitive name match over every Cookie line (the §4.2
+	// "; "-joined value), value trimmed of OWS and kept case-sensitive,
+	// the LAST occurrence of a duplicate listed name wins (RFC 6265
+	// §5.4 ordering — browsers send longer-path cookies first), an
+	// absent or empty-valued cookie hashes as the empty value (one
+	// variant, RFC 9111 Vary semantics).
+	//
+	// A name must not appear in both cookie_values and
+	// cookie_presence (ambiguous keying — rejected), and neither list
+	// may be combined with bypass_on_cookie / bypass_on_cookie_names
+	// (a bypassed request never reaches the cache, so keying it is
+	// dead config). Listing "cookie" in include_headers alongside
+	// either list is rejected too — the lists are the sanctioned
+	// single-keying path (threat-model T06).
+	//
+	// Like include_headers: identical across all cluster nodes serving
+	// the route or nodes store/resolve variants under different keys
+	// (peer gates fail safe — miss, never a wrong body).
+	CookieValues []string `yaml:"cookie_values,omitempty" json:"cookie_values,omitempty"`
 	// KeepQueryParams, when non-empty, restricts the cache key to only
 	// these query parameters; all others are excluded. Mutually
 	// exclusive with strip_query_params and strip_query_prefix.
@@ -1218,6 +1259,13 @@ type RouteDefaultsRequest struct {
 // sharing the type would silently accept every cache field under
 // route_defaults before its merge semantics are designed.
 type RouteDefaultsCache struct {
+	// Key holds cache-side key defaults (issue #870). Only
+	// cookie_values is mergeable today; other RouteKey fields are
+	// rejected here at decode time (strict mode), same rationale as the
+	// rest of RouteDefaultsCache — their merge semantics are designed
+	// when they are needed, not inherited by accident. Declared first
+	// (fieldalignment: the block's only nested struct with a slice).
+	Key RouteDefaultsKey `yaml:"key,omitempty" json:"key,omitempty"`
 	// DownstreamFreshness is the cache.downstream_freshness default
 	// (ADR-0063), so a CDN-fronted deployment declares the mode once
 	// instead of repeating it on every route. Every route without its
@@ -1240,6 +1288,26 @@ type RouteDefaultsCache struct {
 	// only. Patterns are validated at route_defaults' own path before
 	// the merge (validateRouteDefaults).
 	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
+}
+
+// RouteDefaultsKey is the key half of route_defaults.cache — a
+// distinct type from RouteKey for the same reason as
+// RouteDefaultsCache: sharing the type would silently accept every
+// key field under route_defaults before its merge semantics are
+// designed.
+type RouteDefaultsKey struct {
+	// CookieValues is the cache.key.cookie_values default (issue
+	// #870), so a deployment keys every route on the same locale/
+	// currency/experiment cookies instead of repeating the list on
+	// each route. Every route without its own cookie_values inherits
+	// the default wholesale; a route's own list replaces it (never a
+	// union); an explicit empty list (`cookie_values: []`) opts out.
+	// Names are validated at route_defaults' own path before the merge
+	// (validateRouteDefaults); conflicts that only exist post-merge
+	// (a route's cookie_presence overlapping the default's names, a
+	// route's bypass knobs) are reported at the route's path by
+	// per-route validation.
+	CookieValues []string `yaml:"cookie_values,omitempty" json:"cookie_values,omitempty"`
 }
 
 // DefaultForwardedMaxAppend is the X-Forwarded-For / Via chain cap applied

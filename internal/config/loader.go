@@ -772,6 +772,8 @@ func (c *Config) validateRouteDefaults(ec *errCollector) {
 		c.RouteDefaults.Cache.BypassOnUserAgent)
 	validateDownstreamFreshness(ec, "route_defaults.cache",
 		c.RouteDefaults.Cache.DownstreamFreshness)
+	validateCookieNameListCapped(ec, "route_defaults.cache.key.cookie_values",
+		c.RouteDefaults.Cache.Key.CookieValues, maxCookieValueNames)
 }
 
 // mergeRouteDefaults folds route_defaults into every route before
@@ -785,6 +787,7 @@ func (c *Config) mergeRouteDefaults() {
 	c.mergeForwardedDefaults()
 	c.mergeBypassOnUserAgentDefaults()
 	c.mergeDownstreamFreshnessDefaults()
+	c.mergeCookieValuesDefaults()
 }
 
 // mergeForwardedDefaults folds route_defaults.request.forwarded into
@@ -897,6 +900,44 @@ func (c *Config) mergeBypassOnUserAgentDefaults() {
 func bypassOnUserAgentValid(patterns []string) bool {
 	var ec errCollector
 	return validateBypassOnUserAgent(&ec, "", patterns)
+}
+
+// mergeCookieValuesDefaults folds route_defaults.cache.key.cookie_values
+// (issue #870) into every route before per-route validation, so a
+// deployment keys all its routes on the same locale/currency/experiment
+// cookies instead of repeating the list on each route. Precedence:
+//
+//   - unset route list (nil): inherits the default wholesale. The
+//     route's slice aliases the default's — config is read-only after
+//     load, and aliasing keeps the merge allocation-free.
+//   - route's own list: replaces the default wholesale (never a
+//     union) — a route's list is the complete keyed-cookie set.
+//   - explicit empty list (`cookie_values: []`, non-nil): opts out —
+//     the route keeps unkeyed semantics.
+//
+// Like downstream_freshness (unlike bypass_on_user_agent), every route
+// inherits: the knob is consumed by every cache handler (pool or
+// static) and validateRouteCache accepts the field on every route
+// kind. Idempotent and skipped when the default list is invalid
+// (validateRouteDefaults already reported it at route_defaults' own
+// path), so the route_defaults error stands alone. Conflicts that only
+// exist post-merge (a route's cookie_presence overlapping the
+// default's names, a route's bypass knobs) are reported at the route's
+// path by per-route validation.
+func (c *Config) mergeCookieValuesDefaults() {
+	d := c.RouteDefaults.Cache.Key.CookieValues
+	if len(d) == 0 {
+		return
+	}
+	var ec errCollector
+	if !validateCookieNameListCapped(&ec, "", d, maxCookieValueNames) {
+		return
+	}
+	for i := range c.Routes {
+		if r := &c.Routes[i]; r.Cache.Key.CookieValues == nil {
+			r.Cache.Key.CookieValues = d
+		}
+	}
 }
 
 // mergeDownstreamFreshnessDefaults folds
@@ -1193,7 +1234,7 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateDownstreamFreshness(ec, path, rc.DownstreamFreshness)
 	validateBypassOnUserAgent(ec, path+".bypass_on_user_agent", rc.BypassOnUserAgent)
 	validateCookieNames(ec, path, *rc)
-	validateCookiePresenceConflicts(ec, path, *rc)
+	validateCookieKeyingConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
 }
 
@@ -1301,13 +1342,22 @@ func uaPatternCharError(p string) string {
 	return ""
 }
 
-// validateCookiePresenceConflicts rejects cache.key.cookie_presence
-// combined with either bypass knob (issue #768): a bypassed request
-// never reaches the cache, so keying the variant dimension it selects
-// is dead config whose cost — presence bits multiplying the variant
-// space against max_variants — buys nothing. Rejected at load so the
-// conflict surfaces before a warm cache, not after.
-func validateCookiePresenceConflicts(ec *errCollector, path string, rc RouteCache) {
+// validateCookieKeyingConflicts rejects cache.key.cookie_values and
+// cache.key.cookie_presence combined with either bypass knob (issues
+// #768, #870): a bypassed request never reaches the cache, so keying
+// the variant dimension it selects is dead config whose cost — value
+// cardinality / presence bits multiplying the variant space against
+// max_variants — buys nothing. Rejected at load so the conflict
+// surfaces before a warm cache, not after.
+func validateCookieKeyingConflicts(ec *errCollector, path string, rc RouteCache) {
+	if len(rc.Key.CookieValues) > 0 {
+		if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+			ec.addf(path+".key.cookie_values", "is mutually exclusive with bypass_on_cookie: bypassed requests never reach the cache, so value keying is dead config")
+		}
+		if len(rc.BypassOnCookieNames) > 0 {
+			ec.addf(path+".key.cookie_values", "is mutually exclusive with bypass_on_cookie_names: bypassed requests never reach the cache, so value keying is dead config")
+		}
+	}
 	if len(rc.Key.CookiePresence) == 0 {
 		return
 	}
@@ -1339,36 +1389,51 @@ func validateCookieNames(ec *errCollector, path string, rc RouteCache) {
 	validateCookieNameList(ec, path+".bypass_on_cookie_names", rc.BypassOnCookieNames)
 }
 
-// validateCookieNameList is the shared entry-format check for
+// validateCookieNameListCapped is the shared entry-format check for
 // cookie-name lists: RFC 6265 §4.1.1 cookie-name tokens (via
 // isHTTPToken — the cookie grammar excludes header-token separators
-// already), a 16-entry cap (mirrors include_headers), and
-// case-insensitive uniqueness. Trimmed entries are compared: the cache
-// layer trims before storing, so " a " and "a" must be rejected here
-// or validation and the stored policy disagree.
-func validateCookieNameList(ec *errCollector, path string, names []string) {
-	if len(names) > 16 {
-		ec.addf(path, "capped at 16 entries, got %d", len(names))
+// already), a caller-supplied entry cap, and case-insensitive
+// uniqueness. Trimmed entries are compared: the cache layer trims
+// before storing, so " a " and "a" must be rejected here or
+// validation and the stored policy disagree. Returns whether the list
+// is fully valid (the merge gates skip inheritance on an invalid
+// default; the authoritative errors are the ones added to ec).
+func validateCookieNameListCapped(ec *errCollector, path string, names []string, max int) bool {
+	if len(names) > max {
+		ec.addf(path, "capped at %d entries, got %d", max, len(names))
+		return false
 	}
+	valid := true
 	seen := make(map[string]bool, len(names))
 	for j, raw := range names {
 		entryPath := fmt.Sprintf("%s[%d]", path, j)
 		name := strings.TrimSpace(raw)
 		if name == "" {
 			ec.addf(entryPath, "must be a non-empty cookie name")
+			valid = false
 			continue
 		}
 		lower := strings.ToLower(name)
 		if !isHTTPToken(lower) {
 			ec.addf(entryPath, "(%q) must be a valid RFC 6265 §4.1.1 cookie name: one token, no separators, whitespace, ';', '=', or commas", name)
+			valid = false
 			continue
 		}
 		if seen[lower] {
 			ec.addf(entryPath, "(%s) is a duplicate (cookie names are case-insensitive)", name)
+			valid = false
 			continue
 		}
 		seen[lower] = true
 	}
+	return valid
+}
+
+// validateCookieNameList is the 16-entry form of
+// validateCookieNameListCapped (bypass_on_cookie_names,
+// cookie_presence — both capped at 16, mirroring include_headers).
+func validateCookieNameList(ec *errCollector, path string, names []string) {
+	validateCookieNameListCapped(ec, path, names, maxCookieNames)
 }
 
 //nolint:gocyclo // 22: validation is a flat checklist of independent fields
@@ -1416,6 +1481,22 @@ func validateRefreshConfig(ec *errCollector, path string, rc RouteCache) {
 }
 
 // validateRouteKey validates cache key construction fields on a route.
+// maxCookieNames caps bypass_on_cookie_names and cookie_presence
+// entries (issues #768): the per-request scan walks the list, so an
+// unbounded list would turn an opt-in into a CPU budget knob. Mirrors
+// the include_headers cap.
+const maxCookieNames = 16
+
+// maxCookieValueNames caps cache.key.cookie_values (issue #870) at a
+// stricter bound than the presence list: distinct values multiply the
+// stored variant count per primary key (presence only bit-doubles,
+// 2^N for N names), so four value-keyed dimensions already allow an
+// unbounded × unbounded × unbounded × unbounded variant space. Bounded
+// by max_variants downstream regardless (a Put over the cap is
+// refused, never a wrong variant) — this cap rejects the config early
+// so operators learn the cardinality budget at load time.
+const maxCookieValueNames = 4
+
 func validateRouteKey(ec *errCollector, path string, rk RouteKey) {
 	if len(rk.KeepQueryParams) > 0 {
 		if len(rk.StripQueryParams) > 0 {
@@ -1435,6 +1516,7 @@ func validateRouteKey(ec *errCollector, path string, rk RouteKey) {
 	}
 	validateIncludeHeaders(ec, path, rk)
 	validateCookiePresence(ec, path, rk)
+	validateCookieValues(ec, path, rk)
 }
 
 // validateCookiePresence validates cache.key.cookie_presence (issue
@@ -1447,6 +1529,68 @@ func validateCookiePresence(ec *errCollector, path string, rk RouteKey) {
 		return
 	}
 	validateCookieNameList(ec, path+".cookie_presence", rk.CookiePresence)
+}
+
+// validateCookieValues validates cache.key.cookie_values (issue
+// #870): RFC 6265 §4.1.1 cookie-name tokens, the maxCookieValueNames
+// cap, case-insensitive uniqueness (validateCookieNameListCapped), no
+// overlap with cookie_presence (a name keyed by its value and by its
+// presence is ambiguous — the value subsumes the presence bit), and no
+// "cookie" entry in include_headers alongside either cookie list
+// (include_headers: [Cookie] hashes the whole header a second way —
+// the lists are the sanctioned single-keying path, threat-model T06).
+// The bypass conflicts are checked in validateRouteCache, where both
+// the key and the cache block are visible.
+func validateCookieValues(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.CookieValues) == 0 {
+		return
+	}
+	validateCookieNameListCapped(ec, path+".cookie_values", rk.CookieValues, maxCookieValueNames)
+	validateCookieValuesPresenceOverlap(ec, path, rk)
+	validateCookieKeyingIncludeHeaders(ec, path, rk)
+}
+
+// validateCookieValuesPresenceOverlap rejects a cookie name listed in
+// both cookie_values and cookie_presence (case-insensitive, trimmed):
+// the value-keyed dimension already splits every variant the presence
+// bit could, so the overlap is either redundant or a mistake about
+// which knob was wanted.
+func validateCookieValuesPresenceOverlap(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.CookieValues) == 0 || len(rk.CookiePresence) == 0 {
+		return
+	}
+	presence := make(map[string]bool, len(rk.CookiePresence))
+	for _, raw := range rk.CookiePresence {
+		if n := strings.TrimSpace(raw); n != "" {
+			presence[strings.ToLower(n)] = true
+		}
+	}
+	for j, raw := range rk.CookieValues {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if presence[strings.ToLower(name)] {
+			ec.addf(fmt.Sprintf("%s.cookie_values[%d]", path, j), "(%s) is also listed in cookie_presence: a cookie is keyed by its value or its presence, never both", name)
+		}
+	}
+}
+
+// validateCookieKeyingIncludeHeaders rejects listing "cookie" in
+// include_headers while cookie_values or cookie_presence is
+// configured: include_headers unions the raw Cookie header into the
+// Vary field list, keying every byte of it — combined with a cookie
+// list the same header is keyed two different ways, and operators
+// reading either knob alone would miss the other.
+func validateCookieKeyingIncludeHeaders(ec *errCollector, path string, rk RouteKey) {
+	if len(rk.CookieValues) == 0 && len(rk.CookiePresence) == 0 {
+		return
+	}
+	for j, raw := range rk.IncludeHeaders {
+		if strings.EqualFold(strings.TrimSpace(raw), "cookie") {
+			ec.addf(fmt.Sprintf("%s.include_headers[%d]", path, j), `must not list "cookie" in include_headers while cookie keying (cookie_values / cookie_presence) is configured: the cookie lists are the sanctioned single-keying path (threat-model T06)`)
+		}
+	}
 }
 
 // validateIncludeHeaders validates cache.key.include_headers: capped at

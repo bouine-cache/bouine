@@ -120,6 +120,13 @@ declare -A BUDGETS=(
     [VaryKey_CookiePresenceFast]=2
     [VaryKey_CookiePresenceRaw]=4
     [VaryKey_NoPresenceZeroCost]=2
+    # Cookie VALUES (issue #870): the presence tiers are the ceiling —
+    # measured 1/2/4 (map/fasthttp/RawRequest) for two listed names
+    # with short values; the reduction string is the one allocation.
+    [VaryKey_CookieValues]=1
+    [VaryKey_CookieValuesFast]=2
+    [VaryKey_CookieValuesRaw]=4
+    [VaryKey_NoCookieKeyingZeroCost]=2
     [H1Parse_Get]=0
     # Middleware_Miss: 12 — the traffic_class access-log attribute
     # grows the attrs slice past the small-array threshold: +1 alloc,

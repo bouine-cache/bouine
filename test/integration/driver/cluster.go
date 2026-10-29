@@ -86,6 +86,9 @@ type ClusterStack struct {
 	// maxVariants retains the MaxVariants option so RestartNode rebuilds
 	// the same config BootCluster originally wrote.
 	maxVariants int
+	// cookieValuesRoute retains the CookieValuesRoute option so
+	// RestartNode rebuilds the same config BootCluster originally wrote.
+	cookieValuesRoute bool
 }
 
 // OriginRequests returns the total number of requests the stack's
@@ -121,6 +124,13 @@ type ClusterOptions struct {
 	// refusal on local fills and the past-cap tracking of peer-puts
 	// (ADR-0068).
 	MaxVariants int
+	// CookieValuesRoute adds an /ssr-values/ route on every node with
+	// cache.key.cookie_values: [locale] (issue #870) — the cookie-value
+	// keying e2e surface: same URL + same locale value must resolve to
+	// one variant cluster-wide (peer fetches included), different
+	// values to distinct variants, and a primary-key purge must clear
+	// them all.
+	CookieValuesRoute bool
 	// WarmTier enables storage.warm_dir on every node (per-node warm
 	// directory under the stack's config dir, surviving RestartNode),
 	// so fleet-restart tests cover the warm-reload routing restoration
@@ -213,6 +223,9 @@ type nodeConfigParams struct {
 	maxVariants int
 	// warmDir renders storage.warm_dir when non-empty.
 	warmDir string
+	// cookieValuesRoute renders the /ssr-values/ cookie-values-keyed
+	// route (issue #870) when true.
+	cookieValuesRoute bool
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -232,6 +245,17 @@ func buildNodeConfig(p nodeConfigParams) string {
 	maxVariantsLine := ""
 	if p.maxVariants > 0 {
 		maxVariantsLine = fmt.Sprintf("      max_variants: %d\n", p.maxVariants)
+	}
+	cookieValuesLine := ""
+	if p.cookieValuesRoute {
+		cookieValuesLine = `  - match:
+      path_prefix: /ssr-values/
+    pool: origin
+    cache:
+      ttl_default: 60s
+      key:
+        cookie_values: [locale]
+`
 	}
 	fmt.Fprintf(&b, `  admin: "127.0.0.1:%d"
   cluster: "127.0.0.1:%d"
@@ -270,13 +294,13 @@ routes:
         # /public/webhook/echo?x=1 -> /echo?x=1.
         match: ^/public/webhook/(.*)$
         replace: /$1
-  - match: {}
+%s  - match: {}
     pool: origin
     cache:
       ttl_default: 60s
 %s`,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), warmLine, p.name, p.mode, p.seedList,
-		p.originAddr, p.preserveHost, maxVariantsLine)
+		p.originAddr, p.preserveHost, cookieValuesLine, maxVariantsLine)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -348,6 +372,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	s.preserveHost = opts.PreserveHost
 	s.warmEnabled = opts.WarmTier
 	s.maxVariants = opts.MaxVariants
+	s.cookieValuesRoute = opts.CookieValuesRoute
 
 	// Write configs and start each node.
 	for i := range 3 {
@@ -359,19 +384,20 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			tlsOpts = &opts.TLS
 		}
 		cfg := buildNodeConfig(nodeConfigParams{
-			name:         name,
-			mode:         opts.Mode,
-			httpPort:     p.http,
-			httpsPort:    p.https,
-			adminPort:    p.admin,
-			gossipPort:   p.gossip,
-			seedList:     seedList,
-			originAddr:   origin.addr,
-			hotMaxBytes:  opts.HotMaxBytes,
-			tls:          tlsOpts,
-			preserveHost: opts.PreserveHost,
-			maxVariants:  opts.MaxVariants,
-			warmDir:      s.warmDirFor(name),
+			name:              name,
+			mode:              opts.Mode,
+			httpPort:          p.http,
+			httpsPort:         p.https,
+			adminPort:         p.admin,
+			gossipPort:        p.gossip,
+			seedList:          seedList,
+			originAddr:        origin.addr,
+			hotMaxBytes:       opts.HotMaxBytes,
+			tls:               tlsOpts,
+			preserveHost:      opts.PreserveHost,
+			maxVariants:       opts.MaxVariants,
+			warmDir:           s.warmDirFor(name),
+			cookieValuesRoute: opts.CookieValuesRoute,
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
@@ -567,19 +593,20 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	}
 
 	cfg := buildNodeConfig(nodeConfigParams{
-		name:         name,
-		mode:         s.Mode,
-		httpPort:     httpPort,
-		httpsPort:    httpsPort,
-		adminPort:    adminPort,
-		gossipPort:   gossipPort,
-		seedList:     seedList,
-		originAddr:   s.origin.addr,
-		hotMaxBytes:  s.hotMaxBytes,
-		tls:          tlsOpts,
-		preserveHost: s.preserveHost,
-		maxVariants:  s.maxVariants,
-		warmDir:      s.warmDirFor(name),
+		name:              name,
+		mode:              s.Mode,
+		httpPort:          httpPort,
+		httpsPort:         httpsPort,
+		adminPort:         adminPort,
+		gossipPort:        gossipPort,
+		seedList:          seedList,
+		originAddr:        s.origin.addr,
+		hotMaxBytes:       s.hotMaxBytes,
+		tls:               tlsOpts,
+		preserveHost:      s.preserveHost,
+		maxVariants:       s.maxVariants,
+		warmDir:           s.warmDirFor(name),
+		cookieValuesRoute: s.cookieValuesRoute,
 	})
 
 	suffix := "-restart"

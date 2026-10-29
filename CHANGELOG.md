@@ -12,6 +12,29 @@ the curated, human-readable summary.
 
 ### Added
 
+- **`cache.key.cookie_values` per-route list (issue #870, ADR-0072)**:
+  the listed cookies' VALUES join the Vary variant key through a
+  second synthetic Vary field (`x-bouine-cookie-values`) — the
+  Cloudflare cache-rule `cookie.include` equivalent (`cookie_presence`
+  is `check_presence`). Same URL + same listed values ⇒ one variant
+  cluster-wide; any listed-value difference ⇒ its own variant; unlisted
+  cookies never fragment. Canonicalization is pinned for cluster
+  agreement: RFC 6265 §5.2 OWS trimming, last-occurrence-wins
+  duplicates (§5.4), all Cookie lines via the §4.2 joined value,
+  absent/empty ⇒ one empty-value variant. Capped at 4 names (values
+  are unbounded — `max_variants` refuses over-cap stores, never a
+  wrong variant); rejected combined with `bypass_on_cookie*`,
+  overlapping `cookie_presence` names, or
+  `include_headers: [cookie]`. Cookie values are PII (threat-model
+  T53): they exist only inside the transient variant-key hash input —
+  never stored, logged, or in metrics. A
+  `route_defaults.cache.key.cookie_values` default merges per the
+  list-knob precedent (inherit wholesale, replace per route, `[]`
+  opts out). In-flight sharing stays refused for every cookied
+  request (ADR-0054 unchanged). Bench gates:
+  `VaryKey_CookieValues{,Fast,Raw}` at the presence-tier ceilings
+  (1/2/4 allocs) and `VaryKey_NoCookieKeyingZeroCost` proving
+  non-keyed routes pay nothing.
 - `bouine_conn_rejections_total`: an exact counter of data-plane
   connections refused at accept because `listen.max_connections` was
   reached. The refusal used to be observable only through one warn

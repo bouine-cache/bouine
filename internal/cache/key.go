@@ -624,9 +624,16 @@ func varyAssertionHash(vary string, src varyAssertSrc, policy *KeyPolicy) (uint6
 			continue
 		}
 		var val string
-		if f == cookiePresenceField && policy.hasCookiePresence() {
+		switch {
+		case f == cookieValuesField && policy.hasCookieValues():
+			// Cookie VALUES (issue #870): the same reduced pair string
+			// variantKeyCore hashes, through the same cookieAll
+			// canonicalization — or peers reject every value-keyed
+			// exchange.
+			val = policy.cookieValuesValue(src.cookieAll())
+		case f == cookiePresenceField && policy.hasCookiePresence():
 			val = policy.cookiePresenceValue(src.cookieAll())
-		} else {
+		default:
 			val = varyAssertionValue(f, src.getValue(f), policy)
 		}
 		end := start + len(raw) + 1 + len(val) + 1
@@ -697,7 +704,15 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 		n += copyOverflow(dst, n, f)
 		n = appendByte(dst, n, '=')
 		var val string
-		if f == cookiePresenceField && policy.hasCookiePresence() {
+		switch {
+		case f == cookieValuesField && policy.hasCookieValues():
+			// Cookie VALUES (issue #870): the same reduced pair string
+			// the storage variant key hashes (cookieValuesValue over
+			// CookieAll) — the peer gates compare this stored hash to
+			// the freshly computed one, so any divergence rejects every
+			// value-keyed exchange.
+			val = policy.cookieValuesValue(reqHeader.CookieAll())
+		case f == cookiePresenceField && policy.hasCookiePresence():
 			// Cookie-presence assertion (issue #768): the same
 			// presence-bit string variantKeyCore hashes, or peers
 			// reject every presence-keyed exchange. CookieAll joins
@@ -707,7 +722,7 @@ func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy 
 			// the ";"-split never sees it and the bits hash wrong
 			// (the RawRequest-derived map keeps lines separate).
 			val = policy.cookiePresenceValue(reqHeader.CookieAll())
-		} else {
+		default:
 			val = varyAssertionValue(f, reqHeader.Get(f), policy)
 		}
 		n += copyOverflow(dst, n, val)

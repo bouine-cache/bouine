@@ -2752,3 +2752,21 @@ func TestBuildKeyPolicy_CookiePresenceWired(t *testing.T) {
 	require.NotNil(t, p, "cookie_presence must construct a policy")
 	require.NotEmpty(t, p.CookiePresenceVary(), "the policy must emit the synthetic Vary field")
 }
+
+// TestBuildKeyPolicy_CookieValuesWired verifies cache.key.cookie_values
+// reaches the route's KeyPolicy (issue #870): the built policy carries
+// the normalized value list and emits the synthetic Vary field the
+// variant-key machinery keys on. The full variant semantics (store/
+// lookup pairing, peer-gate parity, refresh replay) are pinned by
+// internal/cache's cookie_values_test.go; this test proves only the
+// config plumbing (config.RouteKey.CookieValues → KeyPolicy).
+func TestBuildKeyPolicy_CookieValuesWired(t *testing.T) {
+	t.Parallel()
+	p := buildKeyPolicy(config.RouteKey{CookieValues: []string{"locale", "Currency"}})
+	require.NotNil(t, p, "cookie_values must construct a policy")
+	require.NotEmpty(t, p.CookieValuesVary(), "the policy must emit the synthetic Vary field")
+
+	// A key block with only cookie_values must construct a policy even
+	// when every query/header/host field is unset (hasKeyPolicy gate).
+	require.NotNil(t, buildKeyPolicy(config.RouteKey{CookieValues: []string{"locale"}}))
+}

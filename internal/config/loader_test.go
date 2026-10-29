@@ -2114,6 +2114,170 @@ routes:
 	}
 }
 
+func TestParse_CookieValues_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: [locale, Currency, exp_variant]
+        cookie_presence: [consent]
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "unexpected error")
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, []string{"locale", "Currency", "exp_variant"}, cfg.Routes[0].Cache.Key.CookieValues)
+	require.Equal(t, []string{"consent"}, cfg.Routes[0].Cache.Key.CookiePresence)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidate_CookieValues_Rejections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "invalid token rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: ["a b"]
+`,
+			wantErr: "RFC 6265",
+		},
+		{
+			name: "duplicate rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: [locale, LOCALE]
+`,
+			wantErr: "duplicate",
+		},
+		{
+			name: "empty entry rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: [""]
+`,
+			wantErr: "non-empty",
+		},
+		{
+			name: "capped at 4 entries",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: [a, b, c, d, e]
+`,
+			wantErr: "capped at 4 entries",
+		},
+		{
+			name: "overlap with cookie_presence rejected",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        cookie_values: [locale]
+        cookie_presence: [LOCALE]
+`,
+			wantErr: "is also listed in cookie_presence",
+		},
+		{
+			name: "conflict with bypass_on_cookie",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie: true
+      key:
+        cookie_values: [locale]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie",
+		},
+		{
+			name: "conflict with bypass_on_cookie_names",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      bypass_on_cookie_names: [session_id]
+      key:
+        cookie_values: [locale]
+`,
+			wantErr: "mutually exclusive with bypass_on_cookie_names",
+		},
+		{
+			name: "conflict with include_headers cookie",
+			yaml: `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      key:
+        include_headers: [Cookie]
+        cookie_values: [locale]
+`,
+			wantErr: "must not list \"cookie\" in include_headers",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.yaml))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestParse_PreserveHost(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

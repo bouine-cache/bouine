@@ -42,15 +42,16 @@ func newRefreshRegistry() *refreshRegistry {
 // The header map is cloned — storing a reference to r.Header would
 // race with the HTTP server's request pooling.
 //
-// On cookie-presence routes (issue #768) the Cookie header is saved
-// too: doBackgroundRefresh replays the saved headers into the
-// conditional fetch's RequestInfo, and refreshFrom304 recomputes
-// VaryKey from that RequestInfo — a missing Cookie would rehash the
-// presence bits as all-absent and skew the VaryKey pair (the peer
-// gates then reject every refreshed object until TTL). Cookie VALUES
-// do not leak into requests beyond what the triggering request itself
-// carried to the origin; they are replayed exactly like any other
-// Vary-nominated header.
+// On cookie-keyed routes (issues #768, #870 — presence or values) the
+// Cookie header is saved too: doBackgroundRefresh replays the saved
+// headers into the conditional fetch's RequestInfo, and refreshFrom304
+// recomputes VaryKey from that RequestInfo — a missing Cookie would
+// rehash the presence bits as all-absent / the value pairs as
+// all-empty and skew the VaryKey pair (the peer gates then reject
+// every refreshed object until TTL). Cookie VALUES do not leak into
+// requests beyond what the triggering request itself carried to the
+// origin; they are replayed exactly like any other Vary-nominated
+// header.
 func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader string, persistCycles int, policy *KeyPolicy) {
 	saved := header.Map{}
 
@@ -59,12 +60,13 @@ func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader strin
 		saved.Set(header.AcceptEncoding, ae)
 	}
 
-	// Cookie-presence keying: the presence bits derive from the Cookie
-	// header, so the replay must carry it. CookieAll joins multi-line
-	// Cookie entries with the RFC 6265 §4.2 separator (the map stores
-	// them separately; GetAll's ", " join would fold one line's pair
-	// into another's value and skew the replayed presence bits).
-	if policy.hasCookiePresence() {
+	// Cookie keying (issues #768, #870 — presence bits or value pairs):
+	// the variant dimension derives from the Cookie header, so the
+	// replay must carry it. CookieAll joins multi-line Cookie entries
+	// with the RFC 6265 §4.2 separator (the map stores them separately;
+	// GetAll's ", " join would fold one line's pair into another's
+	// value and skew the replayed reduction).
+	if policy.hasCookieKeying() {
 		if cv := ri.Header.CookieAll(); cv != "" {
 			saved.Set(header.Cookie, cv)
 		}

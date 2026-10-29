@@ -150,7 +150,17 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 			continue
 		}
 		var val string
-		if f == cookiePresenceField && policy.hasCookiePresence() {
+		switch {
+		case f == cookieValuesField && policy.hasCookieValues():
+			// Synthetic cookie-VALUES field (issue #870): the hash input
+			// is the reduced "name=value" pair string over the route's
+			// listed cookie names — the Cloudflare cookie.include
+			// equivalent. Same canonical Cookie input as the presence
+			// bits (presenceCookieValue joins every line per RFC 6265
+			// §4.2), so a value pair never depends on which line a
+			// cookie landed on.
+			val = policy.cookieValuesValue(presenceCookieValue(src))
+		case f == cookiePresenceField && policy.hasCookiePresence():
 			// Synthetic cookie-presence field (issue #768): the hash
 			// input is the presence-bit string over the route's
 			// listed cookie names, never the raw Cookie value (values
@@ -158,7 +168,7 @@ func variantKeyCore[S varySource](primary api.Key, vary string, src S, policy *K
 			// presenceCookieValue canonicalizes every adapter's Cookie
 			// content into one "; "-joined §4.2 value (see its note).
 			val = policy.cookiePresenceValue(presenceCookieValue(src))
-		} else {
+		default:
 			val = varyHeaderValue(f, src.getValue(f), policy)
 		}
 		needed := len(f) + 1 + len(val) + 1 // f=val;
@@ -257,14 +267,21 @@ func variantKeySlow(primary api.Key, vary string, reqHeader header.Map, policy *
 		_, _ = h.WriteString(f)
 		_, _ = h.WriteString("=")
 		var val string
-		if f == cookiePresenceField && policy.hasCookiePresence() {
+		switch {
+		case f == cookieValuesField && policy.hasCookieValues():
+			// Cookie VALUES (issue #870): the same reduced pair string
+			// the stack-buffer path hashes — CookieAll joins every
+			// Cookie line with the §4.2 separator, composing with the
+			// reduction's ";" split exactly as on the fast path.
+			val = policy.cookieValuesValue(reqHeader.CookieAll())
+		case f == cookiePresenceField && policy.hasCookiePresence():
 			// CookieAll joins every Cookie line with the §4.2
 			// separator; presence bits over the joined value are
 			// identical to the per-line scan (GetAll's ", " join
 			// folds pairs into the previous line's last value —
 			// the bug class CookieAll exists to prevent).
 			val = policy.cookiePresenceValue(reqHeader.CookieAll())
-		} else {
+		default:
 			val = varyHeaderValue(f, reqHeader.Get(f), policy)
 		}
 		_, _ = h.WriteString(val)

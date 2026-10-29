@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"hash/maphash"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,32 +12,35 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// banSnapshot is a compiled, O(1)-rejectable view of the active ban
-// list. Registration keeps the ordered activeBan slice (source of
-// truth, used for eager scans); matchesActiveBan consults this
-// snapshot instead of walking the slice.
+// banSnapshot is a compiled, O(1)-rejectable view of the active
+// non-surrogate bans (host, path, prefix, regex, multi-condition).
+// Surrogate-key-only bans — the high-rate tag-invalidation shape — are
+// not compiled here: they live in the incrementally maintained
+// surrogateSet, so a storm of tag bans never recompiles this view.
+// Registration keeps the ordered list (source of truth, used for
+// eager scans); matchesActiveBan consults this snapshot and the
+// surrogate set instead of walking the list.
 //
 // Soundness argument (why rejection is safe): every ban requires at
 // least one non-empty condition — a host pattern, a path pattern, or a
 // surrogate key (admin validation rejects all-empty expressions). A
 // literal ban with host pattern H can only match an object whose
 // X-Bouine-Host equals H; an anchored-prefix ban ^P can only match a
-// host/path with that prefix. So when an object's host, path, and
-// surrogate keys appear in none of the sets/tries, no literal or
-// prefix ban can match it and only the opaqueBans need evaluation.
+// host/path with that prefix. So when an object's host and path
+// appear in none of the sets/tries, no literal or prefix ban can match
+// it and only the opaqueBans need evaluation.
 //
-// The check is allocation-free: header values and surrogate keys are
-// read once and compared against immutable set members.
+// The check is allocation-free: header values are read once and
+// compared against immutable set members.
 type banSnapshot struct {
-	// hosts/paths/surrogates map each literal condition to the ban's
-	// exemption time (the normalized registration instant from
-	// registerBan: the original CreatedAt when set, otherwise the
-	// moment the ban was registered). An object matches the ban iff
-	// its value equals the literal AND it is subject (StoredAt not
-	// after the exemption time).
-	hosts      map[string]time.Time
-	paths      map[string]time.Time
-	surrogates map[string]time.Time
+	// hosts/paths map each literal condition to the ban's exemption
+	// time (the normalized registration instant from registerBan: the
+	// original CreatedAt when set, otherwise the moment the ban was
+	// registered). An object matches the ban iff its value equals the
+	// literal AND it is subject (StoredAt not after the exemption
+	// time).
+	hosts map[string]time.Time
+	paths map[string]time.Time
 	// hostPrefixes and pathPrefixes hold anchored prefix patterns
 	// ("^/foo/", "^api\\."). A subject matches only if its host/path
 	// starts with the literal prefix; non-matching subjects can be
@@ -48,7 +53,7 @@ type banSnapshot struct {
 	// individual condition must be checked in combination. They are
 	// evaluated in registration (oldest-first) order via the stored
 	// predicate, after the cheap sets fail to reject.
-	opaqueBans []activeBan
+	opaqueBans []opaqueBan
 }
 
 // prefixBan is an anchored-prefix pattern compiled to its literal
@@ -60,36 +65,51 @@ type prefixBan struct {
 	prefix      string
 }
 
-// compileBanSnapshot derives the O(1) view from an ordered ban list.
-// bans must be pruned of expired entries first.
-func compileBanSnapshot(bans []activeBan) *banSnapshot {
-	snap := &banSnapshot{
-		hosts:      make(map[string]time.Time, len(bans)),
-		paths:      make(map[string]time.Time, len(bans)),
-		surrogates: make(map[string]time.Time, len(bans)),
-	}
+// opaqueBan is a ban evaluated by full predicate, with its exemption
+// instant captured at compile time (a refresh marks the snapshot dirty
+// and recompiles it).
+type opaqueBan struct {
+	exemptAfter time.Time
+	pred        banPredicate
+}
+
+// compileBanSnapshot derives the O(1) view from the non-surrogate
+// bans, skipping any already past ttl at now (they are pruned from the
+// list by the next sweep; they must not keep matching meanwhile).
+func compileBanSnapshot(bans []*activeBan, now time.Time, ttl time.Duration) *banSnapshot {
+	snap := &banSnapshot{}
 	for _, b := range bans {
+		if now.Sub(b.created) >= ttl {
+			continue
+		}
+		exempt := b.exemptAfter()
 		switch classifyBan(b.pattern) {
 		case banClassLiteralHost:
-			snap.hosts[literalHostPattern(b.pattern.hostRegex)] = b.exemptAfter
+			if snap.hosts == nil {
+				snap.hosts = make(map[string]time.Time)
+			}
+			snap.hosts[literalHostPattern(b.pattern.hostRegex)] = exempt
 		case banClassLiteralPath:
-			snap.paths[literalPathPattern(b.pattern.pathRegex)] = b.exemptAfter
-		case banClassLiteralSurrogate:
-			snap.surrogates[b.pattern.surrogateKey] = b.exemptAfter
+			if snap.paths == nil {
+				snap.paths = make(map[string]time.Time)
+			}
+			snap.paths[literalPathPattern(b.pattern.pathRegex)] = exempt
 		case banClassPrefixHost:
 			snap.hostPrefixes = append(snap.hostPrefixes, prefixBan{
 				prefix:      anchoredPrefix(b.pattern.hostRegex),
 				pred:        b.pred,
-				exemptAfter: b.exemptAfter,
+				exemptAfter: exempt,
 			})
 		case banClassPrefixPath:
 			snap.pathPrefixes = append(snap.pathPrefixes, prefixBan{
 				prefix:      anchoredPrefix(b.pattern.pathRegex),
 				pred:        b.pred,
-				exemptAfter: b.exemptAfter,
+				exemptAfter: exempt,
 			})
 		default:
-			snap.opaqueBans = append(snap.opaqueBans, b)
+			// Opaque, and defensively any surrogate-only ban that
+			// reached the compiler: the predicate walk is always sound.
+			snap.opaqueBans = append(snap.opaqueBans, opaqueBan{pred: b.pred, exemptAfter: exempt})
 		}
 	}
 	return snap
@@ -114,10 +134,10 @@ func literalPathPattern(pattern string) string {
 }
 
 // matches reports whether obj is subject to any ban in the snapshot.
-// The cheap checks run first: literal set membership for host, path,
-// and surrogate keys, then anchored-prefix HasPrefix scans. Only when
-// every cheap check fails to reject does it fall through to the
-// opaqueBans predicate walk.
+// The cheap checks run first: literal set membership for host and
+// path, then anchored-prefix HasPrefix scans. Only when every cheap
+// check fails to reject does it fall through to the opaqueBans
+// predicate walk.
 func (s *banSnapshot) matches(obj *api.Object) bool {
 	if s == nil {
 		return false
@@ -141,9 +161,9 @@ func (s *banSnapshot) matches(obj *api.Object) bool {
 	return false
 }
 
-// literalMatch evaluates the literal set checks: host, path, and
-// surrogate-key membership with per-ban exemption times. These are the
-// O(1) rejections; a miss here rules out every literal-classified ban.
+// literalMatch evaluates the literal set checks: host and path
+// membership with per-ban exemption times. These are the O(1)
+// rejections; a miss here rules out every literal-classified ban.
 func (s *banSnapshot) literalMatch(obj *api.Object) bool {
 	if len(s.hosts) > 0 {
 		if exempt, hit := s.hosts[obj.Header.Get(header.XBouineHost)]; hit && subjectTo(obj, exempt) {
@@ -155,7 +175,7 @@ func (s *banSnapshot) literalMatch(obj *api.Object) bool {
 			return true
 		}
 	}
-	return len(s.surrogates) > 0 && surrogateListed(obj.SurrogateKeys, s.surrogates, obj)
+	return false
 }
 
 // prefixMatch evaluates the anchored-prefix bans: HasPrefix is a
@@ -176,17 +196,6 @@ func (s *banSnapshot) prefixMatch(obj *api.Object) bool {
 			if strings.HasPrefix(path, pb.prefix) && subjectTo(obj, pb.exemptAfter) && pb.pred(obj) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// surrogateListed reports whether any of keys is in the banned map,
-// honoring the per-ban exemption time.
-func surrogateListed(keys []string, banned map[string]time.Time, obj *api.Object) bool {
-	for _, k := range keys {
-		if exempt, hit := banned[k]; hit && subjectTo(obj, exempt) {
-			return true
 		}
 	}
 	return false
@@ -215,7 +224,8 @@ const (
 	// conditions — membership via paths set.
 	banClassLiteralPath
 	// banClassLiteralSurrogate: single surrogate key, no patterns —
-	// membership via surrogates set.
+	// membership via the surrogateSet (never compiled into the
+	// snapshot).
 	banClassLiteralSurrogate
 	// banClassPrefixHost: single anchored-prefix host pattern.
 	banClassPrefixHost
@@ -341,26 +351,55 @@ func literalOfBody(body string) (string, bool) {
 	return b.String(), true
 }
 
-// banListState couples the authoritative ordered ban list with its
-// compiled snapshot. Mutations mark the state dirty; the snapshot is
-// recompiled lazily on the next snapshot() read, so a batch of N
-// registrations costs one O(list) compile, not N.
+// banListState is the lazy ban state: the authoritative ordered ban
+// list plus the two read-side views the hit path consults without the
+// mutex — the compiled snapshot of non-surrogate bans and the
+// surrogate set.
+//
+// Cost model (all writers hold mu; readers never do):
+//   - register: O(1) amortized. Dedup is a map lookup, eviction drops
+//     the list head by reslicing, expired heads are popped as they
+//     surface. A surrogate-only ban touches one surrogate-set shard; any
+//     other ban marks the snapshot dirty.
+//   - snapshot rebuild: O(non-surrogate bans), lazy (next read after a
+//     dirty mark), so tag-invalidation storms never pay it.
+//   - pruneExpired (reaper tick): O(list) sweep, off the hit and
+//     registration paths.
+//
+// A ban whose TTL lapses while it is not at the list head keeps
+// matching until the next reaper sweep or until it reaches the head.
+// That only over-invalidates (the ban was active and still exempts
+// objects stored after it); it never under-invalidates.
 type banListState struct {
 	// snap is published atomically so the hit path reads it without
 	// the mutex: every cache hit (hot and warm tiers, fast path
 	// included) consults it, and the mutex serializes all cores on one
 	// cache line where an uncontended load does not (issue #757).
 	snap atomic.Pointer[banSnapshot]
-	list []activeBan
+	// index maps each active pattern to its ban: O(1) dedup of
+	// re-issued bans, and the membership test for list-derived views.
+	index map[banPattern]*activeBan
+	// surr enforces surrogate-only bans, the high-rate shape.
+	surr surrogateSet
+	// list holds every active ban in registration order (oldest
+	// first). Evicting the head reslices (O(1)); append's growth
+	// reallocates and drops the consumed prefix, so the backing array
+	// stays bounded at a small multiple of the cap.
+	list []*activeBan
+	// rest is the non-surrogate subset of list, in registration order:
+	// the only input of the snapshot compile.
+	rest []*activeBan
 	// ttl is how long a ban stays in the list before prune paths drop
 	// it. Zero applies DefaultBanTTL. Configured per store via
 	// HotConfig.BanTTL (invalidation.ban_ttl) so operators can bound the
 	// blast radius of an over-broad ban.
 	ttl time.Duration
-	// dirty records that list changed since snap was compiled. Atomic
+	// capacity bounds the list. Zero applies banListCap.
+	capacity int
+	mu       sync.Mutex
+	// dirty records that rest changed since snap was compiled. Atomic
 	// so the lock-free snapshot() can check it without the mutex.
 	dirty atomic.Bool
-	mu    sync.Mutex
 }
 
 func (b *banListState) ttlOrDefault() time.Duration {
@@ -368,6 +407,13 @@ func (b *banListState) ttlOrDefault() time.Duration {
 		return DefaultBanTTL
 	}
 	return b.ttl
+}
+
+func (b *banListState) capOrDefault() int {
+	if b.capacity <= 0 {
+		return banListCap
+	}
+	return b.capacity
 }
 
 // setTTL replaces the configured ban TTL at runtime (the hot-config
@@ -388,17 +434,19 @@ func (b *banListState) currentTTL() time.Duration {
 	return b.ttl
 }
 
-// register appends (or refreshes) a ban and marks the snapshot dirty
-// without compiling it: the rebuild happens on the next snapshot()
-// read, which amortizes registration batches (invalidation storms
-// register 100+ bans/s against a list saturated at banListCap) into a
-// single O(list) compile. Enforcement is unchanged — the first lookup
-// after registration reads a fresh snapshot and sees the new ban.
+// register adds (or refreshes) a ban in O(1) amortized time.
 //
-// The list is mutated in place with zero allocations: expired bans are
-// dropped and a matching pattern refreshed during one scan, a new
-// pattern appends, and a full list evicts the oldest entry by shifting
-// in place.
+// A re-issued pattern refreshes the existing ban in place: its TTL
+// anchor and exemption instant move to createdAt, keeping its list
+// position. A new pattern appends; a full list evicts its head (the
+// oldest registration). Expired bans at the head are popped first.
+//
+// Surrogate-only bans are published to the surrogate set immediately,
+// so the very next lookup enforces them. Other bans mark the snapshot
+// dirty; the rebuild happens on the next snapshot() read, which
+// amortizes a registration batch into one compile — enforcement is
+// unchanged, the first lookup after registration reads a fresh
+// snapshot and sees the new ban.
 func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -412,52 +460,106 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	// ever", which turned any over-broad ban (e.g. host_regex ".*")
 	// into a permanent poison for every later fill.
 	exemptAfter := createdAt
-	now := time.Now()
-	pruned := b.list[:0]
-	refreshed := false
-	for _, ban := range b.list {
-		if now.Sub(ban.created) >= b.ttlOrDefault() {
-			continue
+	b.popExpiredHeadLocked(time.Now())
+	if ban := b.index[pat]; ban != nil {
+		ban.created = createdAt
+		ban.setExemptAfter(exemptAfter)
+		if !ban.surrogate {
+			b.dirty.Store(true)
 		}
-		if ban.pattern == pat {
-			ban.created = createdAt
-			ban.exemptAfter = exemptAfter
-			refreshed = true
-		}
-		pruned = append(pruned, ban)
-	}
-	b.list = pruned
-	if refreshed {
-		b.dirty.Store(true)
 		return
 	}
-	ban := activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat}
-	if len(b.list) >= banListCap {
-		copy(b.list, b.list[1:])
-		b.list[len(b.list)-1] = ban
+	for len(b.list) >= b.capOrDefault() {
+		b.evictHeadLocked()
+	}
+	ban := &activeBan{
+		pred:      pred,
+		created:   createdAt,
+		pattern:   pat,
+		surrogate: classifyBan(pat) == banClassLiteralSurrogate,
+	}
+	ban.setExemptAfter(exemptAfter)
+	if b.index == nil {
+		b.index = make(map[banPattern]*activeBan)
+	}
+	b.index[pat] = ban
+	b.list = append(b.list, ban)
+	if ban.surrogate {
+		b.surr.put(pat.surrogateKey, ban, b.capOrDefault())
+		return
+	}
+	b.rest = append(b.rest, ban)
+	b.dirty.Store(true)
+}
+
+// popExpiredHeadLocked evicts expired bans from the head of the list.
+// Amortized O(1): each ban is popped at most once. The mutex must be
+// held.
+func (b *banListState) popExpiredHeadLocked(now time.Time) {
+	ttl := b.ttlOrDefault()
+	for len(b.list) > 0 && now.Sub(b.list[0].created) >= ttl {
+		b.evictHeadLocked()
+	}
+}
+
+// evictHeadLocked drops the oldest ban from the list and every view.
+// The mutex must be held and the list non-empty.
+func (b *banListState) evictHeadLocked() {
+	ban := b.list[0]
+	b.list[0] = nil // release the ban for GC; the slot is unreachable after the reslice
+	b.list = b.list[1:]
+	delete(b.index, ban.pattern)
+	if ban.surrogate {
+		b.surr.remove(ban.pattern.surrogateKey, ban)
+		return
+	}
+	// rest keeps list order and the list head is the oldest ban of
+	// all, so an evicted non-surrogate head is rest's head too: reslice
+	// it off in O(1), like the list.
+	if len(b.rest) > 0 && b.rest[0] == ban {
+		b.rest[0] = nil
+		b.rest = b.rest[1:]
 	} else {
-		b.list = append(b.list, ban)
+		b.rest = slices.DeleteFunc(b.rest, func(r *activeBan) bool { return r == ban })
 	}
 	b.dirty.Store(true)
 }
 
-// pruneExpired rebuilds the state as of now, dropping bans older than
-// banTTL. Called by the TTL reaper each tick so a quiet day after a
-// storm does not keep taxing hits for the full 24 h window.
+// pruneExpired sweeps every ban older than the TTL out of the list
+// and its views, then recompiles the snapshot. Called by the TTL
+// reaper each tick so a quiet day after a storm does not keep taxing
+// hits for the full 24 h window. O(list), off the hit path.
 func (b *banListState) pruneExpired(now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	ttl := b.ttlOrDefault()
+	kept := b.list[:0]
+	restChanged := false
+	for _, ban := range b.list {
+		if now.Sub(ban.created) < ttl {
+			kept = append(kept, ban)
+			continue
+		}
+		delete(b.index, ban.pattern)
+		if ban.surrogate {
+			b.surr.remove(ban.pattern.surrogateKey, ban)
+		} else {
+			restChanged = true
+		}
+	}
+	clear(b.list[len(kept):])
+	b.list = kept
+	if restChanged {
+		b.rest = slices.DeleteFunc(b.rest, func(r *activeBan) bool {
+			return b.index[r.pattern] != r
+		})
+	}
 	b.rebuildLocked(now)
 }
 
 // emptyBanSnapshot is the shared zero-view served before the first
 // compile (a zero-value banListState never rebuilt its snapshot).
-// Equivalent to compileBanSnapshot(nil) but allocated once.
-var emptyBanSnapshot = &banSnapshot{
-	hosts:      map[string]time.Time{},
-	paths:      map[string]time.Time{},
-	surrogates: map[string]time.Time{},
-}
+var emptyBanSnapshot = &banSnapshot{}
 
 // snapshot returns the current compiled view without ever parking the
 // caller on the mutex. Clean (steady) state: one atomic load. When
@@ -487,21 +589,18 @@ func (b *banListState) snapshot() *banSnapshot {
 	return emptyBanSnapshot
 }
 
-// rebuildLocked prunes bans older than the configured TTL and
-// recompiles the snapshot from the surviving list, clearing the dirty
-// flag. The filter reuses the list's backing array. The mutex must be
-// held.
+// rebuildLocked recompiles the snapshot from the non-surrogate bans
+// and clears the dirty flag. O(len(rest)). The mutex must be held.
 func (b *banListState) rebuildLocked(now time.Time) {
-	pruned := b.list[:0]
-	for _, ban := range b.list {
-		if now.Sub(ban.created) >= b.ttlOrDefault() {
-			continue
-		}
-		pruned = append(pruned, ban)
-	}
-	b.list = pruned
-	b.snap.Store(compileBanSnapshot(b.list))
+	b.snap.Store(compileBanSnapshot(b.rest, now, b.ttlOrDefault()))
 	b.dirty.Store(false)
+}
+
+// matches reports whether obj is subject to any active ban: the
+// compiled snapshot first, then one surrogate-set lookup per surrogate
+// key on obj. Lock-free and allocation-free.
+func (b *banListState) matches(obj *api.Object) bool {
+	return b.snapshot().matches(obj) || b.surr.matches(obj)
 }
 
 // len reports the active ban count (tests and metrics).
@@ -528,7 +627,7 @@ func (b *banListState) descriptors(obj *api.Object, now time.Time) []BanDescript
 		if now.Sub(ban.created) >= ttl {
 			continue
 		}
-		if !subjectTo(obj, ban.exemptAfter) || !ban.pred(obj) {
+		if !subjectTo(obj, ban.exemptAfter()) || !ban.pred(obj) {
 			continue
 		}
 		out = append(out, BanDescriptor{
@@ -540,4 +639,155 @@ func (b *banListState) descriptors(obj *api.Object, now time.Time) []BanDescript
 		})
 	}
 	return out
+}
+
+// surrogateSetMinShards is the surrogate set's minimum shard count.
+// The table is sized to about two bans per shard at the list's
+// capacity (see newSurrogateTable), so both a registration's shard
+// copy and a lookup's binary search stay O(1) at any cap.
+const surrogateSetMinShards = 1024
+
+// surrogateSetSeed keys the shard hash. Process-wide: shard placement
+// only needs to be stable within one process.
+var surrogateSetSeed = maphash.MakeSeed()
+
+// surrogateEntry maps one surrogate key to its ban.
+type surrogateEntry struct {
+	ban *activeBan
+	key string
+}
+
+// surrogateShard is one immutable shard: entries sorted by key. A
+// small sorted slice instead of a map keeps the read to one hash
+// (shard selection) plus a short scan over contiguous memory, and makes
+// a copy-on-write update a single allocation.
+type surrogateShard []surrogateEntry
+
+func compareSurrogateEntry(e surrogateEntry, key string) int {
+	return strings.Compare(e.key, key)
+}
+
+// find returns the ban for key, or nil. Shards hold ~2 entries, so a
+// linear scan (length check first, then bytes) beats a binary search's
+// call overhead; larger shards fall back to the search.
+func (sh surrogateShard) find(key string) *activeBan {
+	if len(sh) <= 8 {
+		for i := range sh {
+			if sh[i].key == key {
+				return sh[i].ban
+			}
+		}
+		return nil
+	}
+	if i, ok := slices.BinarySearchFunc(sh, key, compareSurrogateEntry); ok {
+		return sh[i].ban
+	}
+	return nil
+}
+
+// surrogateSet enforces surrogate-only bans with lock-free,
+// allocation-free reads. Each shard is an immutable sorted slice
+// published through an atomic pointer; writers (serialized by
+// banListState.mu) copy the one shard they change and swap it in, so a
+// registration costs one small copy instead of a full snapshot
+// recompile, and is visible to the very next read. A refresh rewrites
+// the shared ban's atomic exemption instant and copies nothing.
+type surrogateSet struct {
+	table atomic.Pointer[surrogateTable]
+}
+
+// surrogateTable is the shard array, allocated on the first put and
+// sized from the list capacity; it is never resized.
+type surrogateTable struct {
+	shards []atomic.Pointer[surrogateShard]
+	mask   uint64
+}
+
+func newSurrogateTable(capacity int) *surrogateTable {
+	n := surrogateSetMinShards
+	for n < capacity/2 {
+		n <<= 1
+	}
+	return &surrogateTable{
+		shards: make([]atomic.Pointer[surrogateShard], n),
+		mask:   uint64(n - 1), //nolint:gosec // n is a positive power of two
+	}
+}
+
+func (t *surrogateTable) shard(key string) *atomic.Pointer[surrogateShard] {
+	return &t.shards[maphash.String(surrogateSetSeed, key)&t.mask]
+}
+
+// load returns the shard for key (nil when empty).
+func (t *surrogateTable) load(key string) surrogateShard {
+	if p := t.shard(key).Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// put publishes key → ban, allocating the table for capacity on first
+// use. Caller holds banListState.mu and guarantees key is not already
+// present (the pattern index dedups first).
+func (s *surrogateSet) put(key string, ban *activeBan, capacity int) {
+	t := s.table.Load()
+	if t == nil {
+		t = newSurrogateTable(capacity)
+		s.table.Store(t)
+	}
+	old := t.load(key)
+	i, _ := slices.BinarySearchFunc(old, key, compareSurrogateEntry)
+	next := make(surrogateShard, len(old)+1)
+	copy(next, old[:i])
+	next[i] = surrogateEntry{key: key, ban: ban}
+	copy(next[i+1:], old[i:])
+	t.shard(key).Store(&next)
+}
+
+// remove unpublishes key if it still maps to ban. Caller holds
+// banListState.mu.
+func (s *surrogateSet) remove(key string, ban *activeBan) {
+	t := s.table.Load()
+	if t == nil {
+		return
+	}
+	old := t.load(key)
+	i, ok := slices.BinarySearchFunc(old, key, compareSurrogateEntry)
+	if !ok || old[i].ban != ban {
+		return
+	}
+	if len(old) == 1 {
+		t.shard(key).Store(nil)
+		return
+	}
+	next := make(surrogateShard, len(old)-1)
+	copy(next, old[:i])
+	copy(next[i:], old[i+1:])
+	t.shard(key).Store(&next)
+}
+
+// matches reports whether any of obj's surrogate keys has an active
+// ban obj is subject to.
+func (s *surrogateSet) matches(obj *api.Object) bool {
+	if len(obj.SurrogateKeys) == 0 {
+		return false
+	}
+	t := s.table.Load()
+	if t == nil {
+		return false
+	}
+	for _, k := range obj.SurrogateKeys {
+		if ban := t.load(k).find(k); ban != nil && subjectToNanos(obj, ban.exemptNanos.Load()) {
+			return true
+		}
+	}
+	return false
+}
+
+// subjectToNanos is subjectTo for an exemption instant encoded as by
+// activeBan.setExemptAfter (noExemption = zero time). It compares
+// time.Time values rather than obj.StoredAt.UnixNano(), which is
+// undefined for a zero StoredAt.
+func subjectToNanos(obj *api.Object, exempt int64) bool {
+	return exempt == noExemption || !obj.StoredAt.After(time.Unix(0, exempt))
 }

@@ -43,8 +43,15 @@ type KeyPolicy struct {
 	// Cluster note: identical across nodes, same hazard class as
 	// include_headers.
 	cookiePresence []string
-	stripEmpty     bool // strip params with empty values
-	dedup          bool // keep first value (in request order) for duplicate params
+	// cookieValues is the route's cache.key.cookie_values list (issue
+	// #870): cookie names whose VALUES participate in the variant key
+	// (the Cloudflare cookie.include equivalent). Normalized like
+	// cookiePresence; positional over the sorted list in
+	// cookieValuesValue. Cluster note: identical across nodes — same
+	// hazard class as include_headers.
+	cookieValues []string
+	stripEmpty   bool // strip params with empty values
+	dedup        bool // keep first value (in request order) for duplicate params
 	// excludeHost, when true, omits the host segment from the primary
 	// key (cache.key.include_host: false). Read on every key build; the
 	// default (false) is today's behaviour. See includeHostKey.
@@ -75,6 +82,22 @@ type KeyPolicy struct {
 // merely adds one constant field to the key, the same as any
 // never-present header).
 const cookiePresenceField = "x-bouine-cookie-presence"
+
+// cookieValuesField is the synthetic Vary field name carrying the
+// cookie-VALUE pairs through the variant-key machinery (issue #870),
+// reserved exactly like cookiePresenceField: not a header name a
+// request can carry, so an origin sending it in Vary adds only a
+// never-present field to the key (the same constant-value argument
+// cookiePresenceField's comment makes).
+const cookieValuesField = "x-bouine-cookie-values"
+
+// maxCookieValueNames mirrors config validation's cap (loader.go):
+// cookie_values lists are capped at 4 names there. Kept as a local
+// constant so the stackVals array in cookieValuesValue and the cap the
+// config layer enforces cannot drift apart silently — the array is
+// sized defensively and a longer list (only constructible
+// programmatically, validation rejects it) falls back to a heap slice.
+const maxCookieValueNames = 4
 
 // QuerySummary returns a short description of the query-parameter
 // handling for admin key-derivation reporting (bouine keys find,
@@ -127,6 +150,34 @@ func (p *KeyPolicy) hasCookiePresence() bool {
 	return p != nil && len(p.cookiePresence) > 0
 }
 
+// hasCookieValues reports whether the route keys variants on cookie
+// values. Nil-safe.
+func (p *KeyPolicy) hasCookieValues() bool {
+	return p != nil && len(p.cookieValues) > 0
+}
+
+// hasCookieKeying reports whether the route keys variants on cookies
+// at all (presence or values). Nil-safe; the refresh registry, the
+// collapse flight headers, and effectiveVary all gate on this — the
+// Cookie header must be saved / snapshotted / unioned exactly when a
+// synthetic cookie field can join the variant key.
+func (p *KeyPolicy) hasCookieKeying() bool {
+	return p.hasCookiePresence() || p.hasCookieValues()
+}
+
+// CookieValuesVary returns the synthetic Vary field value that carries
+// the route's cookie-value pairs through effectiveVary: the
+// value-keyed dimension is unioned into the stored Vary exactly like
+// include_headers fields and the presence field (same mechanism, same
+// store/lookup pairing guarantees). Empty string when the route does
+// not key on cookie values.
+func (p *KeyPolicy) CookieValuesVary() string {
+	if p == nil || len(p.cookieValues) == 0 {
+		return ""
+	}
+	return cookieValuesField
+}
+
 // cookiePresenceValue reduces the Cookie header value(s) for this
 // request to the presence-bit string that joins the variant key: one
 // character per listed name (sorted order), "1" for present, "0" for
@@ -175,6 +226,96 @@ func (p *KeyPolicy) cookiePresenceValue(cookieValue string) string {
 		}
 	}
 	return string(bits)
+}
+
+// cookieValuesValue reduces the Cookie header value(s) for this
+// request to the value-pair string that joins the variant key:
+// "name=value" pairs positional over the sorted normalized name
+// list, joined by "; ". Deterministic and config-order independent
+// like the presence bits, so every node reduces to the same bytes.
+// Canonicalization (ADR-0072, pinned in cookie_values_test.go):
+//
+//   - names matched case-insensitively against the trimmed request
+//     pair name; values kept case-sensitive and trimmed of
+//     leading/trailing OWS (RFC 6265 §5.2), DQUOTEs kept (§5.2 rule 6)
+//   - a duplicate listed name: the LAST occurrence wins (RFC 6265
+//     §5.4 — browsers send longer-path cookies first)
+//   - an absent or empty-valued listed cookie contributes the empty
+//     value — exactly one variant, matching include_headers'
+//     absent-header semantics (RFC 9111 Vary)
+//   - no Cookie header at all reduces to "" (the presence
+//     convention: a request that carries no cookies hashes the
+//     constant-empty contribution)
+//
+// The "; " pair separator composes with the ";" pair split without
+// folding: an RFC 6265 cookie-value can never contain ";" or ","
+// (§4.1 cookie-octet exclusions), so no value can forge a pair
+// boundary. One allocation: the joined string — the pair values ride
+// a stack array (≤4 names) and the builder slice never escapes
+// except through the string conversion. Value-keyed-route costs
+// only: routes without cookie_values never take this branch.
+func (p *KeyPolicy) cookieValuesValue(cookieValue string) string {
+	if !p.hasCookieValues() || cookieValue == "" {
+		return ""
+	}
+	n := len(p.cookieValues)
+	var stackVals [maxCookieValueNames]string
+	var vals []string
+	if n <= maxCookieValueNames {
+		vals = stackVals[:n]
+	} else {
+		vals = make([]string, n)
+	}
+	for pair := range strings.SplitSeq(cookieValue, ";") {
+		name, val, _ := strings.Cut(pair, "=")
+		token := trimCookieOWS(name)
+		if token == "" {
+			continue
+		}
+		// Linear scan over the sorted list: value lists are small
+		// (≤4, config-capped), and each pair matches at most one name
+		// (config validation rejects case-insensitive duplicates).
+		for i, listed := range p.cookieValues {
+			if len(listed) == len(token) && asciiEqualFoldStrings(token, listed) {
+				// Last occurrence wins: overwrite without a check.
+				vals[i] = trimCookieOWS(val)
+				break
+			}
+		}
+	}
+	total := 0
+	for i, listed := range p.cookieValues {
+		total += len(listed) + 1 + len(vals[i]) + 2
+	}
+	total -= 2 // no separator after the last pair
+	b := make([]byte, total)
+	off := 0
+	for i, listed := range p.cookieValues {
+		if i > 0 {
+			b[off] = ';'
+			b[off+1] = ' '
+			off += 2
+		}
+		off += copy(b[off:], listed)
+		b[off] = '='
+		off++
+		off += copy(b[off:], vals[i])
+	}
+	return string(b)
+}
+
+// trimCookieOWS strips the RFC 6265 §5.2 optional whitespace (SP,
+// HTAB) from both ends of a cookie name or value. Same trimming
+// cookiePresenceValue applies inline to names.
+func trimCookieOWS(s string) string {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
 }
 
 // shouldStripParam returns true if the query param should be excluded
@@ -323,10 +464,13 @@ func NewKeyPolicy(stripParams, keepParams, excludeHeaders map[string]bool, strip
 // only at policy construction; mutating a policy after the handler is
 // serving is already forbidden.
 func (p *KeyPolicy) computeDerivedVary() {
-	fields := make([]string, 0, len(p.includeHeaders)+1)
+	fields := make([]string, 0, len(p.includeHeaders)+len(p.cookiePresence)+len(p.cookieValues)+1)
 	fields = append(fields, p.includeHeaders...)
 	if p.hasCookiePresence() {
 		fields = append(fields, cookiePresenceField)
+	}
+	if p.hasCookieValues() {
+		fields = append(fields, cookieValuesField)
 	}
 	sort.Strings(fields)
 	uniq := fields[:0]
@@ -347,17 +491,31 @@ func (p *KeyPolicy) WithCookiePresence(names []string) *KeyPolicy {
 	if p == nil {
 		return nil
 	}
-	p.cookiePresence = normalizeCookiePresence(names)
+	p.cookiePresence = normalizeCookieNameList(names)
 	p.computeDerivedVary()
 	return p
 }
 
-// normalizeCookiePresence trims, lowercases, sorts, and dedupes the
-// cookie-presence list. The presence bits are positional over this
-// canonical form (cookiePresenceValue), so every node must reduce the
-// config to the same order — which validation's duplicate rejection
-// and this normalization together guarantee.
-func normalizeCookiePresence(names []string) []string {
+// WithCookieValues sets the cookie-values list after construction
+// (issue #870), mirroring WithCookiePresence. Same mutation rule: a
+// policy serving a handler must never change — stored VaryKeys would
+// no longer match freshly computed ones.
+func (p *KeyPolicy) WithCookieValues(names []string) *KeyPolicy {
+	if p == nil {
+		return nil
+	}
+	p.cookieValues = normalizeCookieNameList(names)
+	p.computeDerivedVary()
+	return p
+}
+
+// normalizeCookieNameList trims, lowercases, sorts, and dedupes a
+// cookie-name list (cookie_presence, cookie_values). The reduction
+// (cookiePresenceValue / cookieValuesValue) is positional over this
+// canonical form, so every node must reduce the config to the same
+// order — which validation's duplicate rejection and this
+// normalization together guarantee.
+func normalizeCookieNameList(names []string) []string {
 	if len(names) == 0 {
 		return nil
 	}
@@ -395,29 +553,27 @@ func (p *KeyPolicy) hasIncludeHeaders() bool {
 
 // flightVary returns the declared-dimensions field list the collapse
 // flight key must hash when the flight key is the primary key:
-// include_headers plus the synthetic cookie-presence field when
-// declared, pre-joined as a field-list string. Both dimensions union
-// into the STORED Vary the same way (effectiveVary), and the flight key
-// hashes them through the same varyHeaderValue normalization as the
-// storage variant key — any divergence between the two keyings is a
-// wrong-body handoff.
+// include_headers plus the synthetic cookie fields when declared,
+// pre-joined as a field-list string. This is derivedVary — the same
+// sorted, deduplicated, ", "-joined shape effectiveVary stores — read
+// as a constant instead of re-derived per cold miss. Both dimensions
+// union into the STORED Vary the same way (effectiveVary), and the
+// flight key hashes them through the same varyHeaderValue
+// normalization as the storage variant key — any divergence between
+// the two keyings is a wrong-body handoff. variantKeyCore re-sorts
+// the split fields, so the joined order is cosmetic; sharing one
+// derivation guarantees the field SETS can never diverge.
 func (p *KeyPolicy) flightVary() string {
 	if p == nil {
 		return ""
 	}
-	if !p.hasCookiePresence() {
-		return p.includeJoined
-	}
-	if p.includeJoined == "" {
-		return cookiePresenceField
-	}
-	return p.includeJoined + ", " + cookiePresenceField
+	return p.derivedVary
 }
 
 // hasFlightDimensions reports whether the route declares include_headers
-// or cookie presence. Nil-safe.
+// or cookie keying (presence or values). Nil-safe.
 func (p *KeyPolicy) hasFlightDimensions() bool {
-	return p.hasIncludeHeaders() || p.hasCookiePresence()
+	return p.hasIncludeHeaders() || p.hasCookieKeying()
 }
 
 // SetVerbatimAE sets the Accept-Encoding key policy. Called once at

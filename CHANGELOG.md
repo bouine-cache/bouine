@@ -93,7 +93,11 @@ the curated, human-readable summary.
   cap from 1k to 256k; a hit on a tagged object pays ~10 ns more than
   the single-map lookup it replaces. An expired ban that is not at the
   list head now lingers until the next reaper sweep (over-invalidation
-  only). The cap itself is unchanged.
+  only). The cap itself rises from 1024 to 4096: with O(1) registration
+  and a lock-free hit path it is now only a memory bound (~a few hundred
+  bytes per ban, so ~1-2 MB at 4096), and the larger retention window
+  means a distinct ban survives 4x longer under a tag-invalidation
+  storm before eviction forgets it.
 
 ## [0.6.2] - 2026-10-28
 

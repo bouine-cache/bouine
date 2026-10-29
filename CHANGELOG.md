@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-29
+
 ### Added
 
 - `bouine_conn_rejections_total`: an exact counter of data-plane
@@ -41,7 +43,7 @@ the curated, human-readable summary.
 ### Fixed
 
 - **Surrogate-key bans are enforced through the O(1) snapshot set again
-  (#871).** `classifyBan` had no case for surrogate-only bans, so every
+  (#871, #873).** `classifyBan` had no case for surrogate-only bans, so every
   tag ban fell through to the opaque bucket and each hot and warm hit
   walked every active ban predicate in turn — with the default 24 h
   `ban_ttl`, any steady tag-invalidation rate keeps the list at its
@@ -51,7 +53,7 @@ the curated, human-readable summary.
   registration gets cheaper as well.
 
 - **The origin-bound request-target now carries the identity the cache
-  key claims (#847, audit AUD-04).** The slow path builds the key from
+  key claims (#847, #876, audit AUD-04).** The slow path builds the key from
   fasthttp's normalized path (percent-decoding, dot-segment resolution),
   but the raw request-target used to be forwarded verbatim — so
   `/a/../b` and `/b` shared one cache key while the origin saw two
@@ -79,7 +81,7 @@ the curated, human-readable summary.
 ### Performance
 
 - **Ban registration is O(1) amortized and tag bans no longer
-  recompile the ban snapshot (#874).** Registering a ban used to scan
+  recompile the ban snapshot (#874, #875).** Registering a ban used to scan
   the whole lazy list under its mutex (expiry prune + dedup) and evict
   by shifting it, and every registration made the next hit recompile
   the full snapshot — ~77 µs and ~295 KB of garbage per ban at the
@@ -98,6 +100,12 @@ the curated, human-readable summary.
   bytes per ban, so ~1-2 MB at 4096), and the larger retention window
   means a distinct ban survives 4x longer under a tag-invalidation
   storm before eviction forgets it.
+
+- **Passively ejected origin targets are restored after 30 s by default
+  (#859, #876).** A target ejected for a 5xx streak (or another passive
+  trigger) used to stay down until a manual action or restart; it is now
+  re-admitted automatically after a short cooldown so a transient origin
+  error self-heals without operator intervention.
 
 ## [0.6.2] - 2026-10-28
 
@@ -3666,7 +3674,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.3
 [0.6.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.2
 [0.6.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.1
 [0.6.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.0

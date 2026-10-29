@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -349,4 +350,88 @@ func TestCookieValues_EffectiveVaryUnion(t *testing.T) {
 	// case preserved — the union path is what lowercases).
 	plain := effectiveVary(headerMap(header.Vary, "Accept-Encoding"), nil)
 	require.Equal(t, "Accept-Encoding", plain)
+}
+
+// TestCollapseFlightKey_CookieValues pins the value half of the
+// declared-dimension keying: a route that keys stored variants on
+// cookie values (issue #870) must key the cold flight on the same
+// dimension, so callers with different values never share one flight
+// (the wrong-body handoff shape), while callers with the same value do.
+func TestCollapseFlightKey_CookieValues(t *testing.T) {
+	t.Parallel()
+
+	policy := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale", "currency"})
+	primary := api.NewKeyFromBytes([16]byte{1})
+
+	enUS := RequestInfo{Header: header.Map{}}
+	enUS.Header.Set(header.Cookie, "locale=en; currency=usd; theme=dark")
+	enUSAgain := RequestInfo{Header: header.Map{}}
+	enUSAgain.Header.Set(header.Cookie, "locale=en; currency=usd; session=zzz; other=y")
+	gbp := RequestInfo{Header: header.Map{}}
+	gbp.Header.Set(header.Cookie, "locale=en; currency=gbp")
+	frFR := RequestInfo{Header: header.Map{}}
+	frFR.Header.Set(header.Cookie, "locale=fr; currency=usd")
+	anon := RequestInfo{Header: header.Map{}}
+
+	h := NewHandler(HandlerConfig{Policy: policy})
+
+	kEnUS := collapseFlightKey(h, primary, primary, nil, enUS)
+	kEnUSAgain := collapseFlightKey(h, primary, primary, nil, enUSAgain)
+	kGBP := collapseFlightKey(h, primary, primary, nil, gbp)
+	kFrFR := collapseFlightKey(h, primary, primary, nil, frFR)
+	kAnon := collapseFlightKey(h, primary, primary, nil, anon)
+
+	require.NotEqual(t, api.Key{}, kEnUS, "a value-keyed route keeps a shared cold flight")
+	require.NotEqual(t, primary, kEnUS, "the flight key must carry the value dimension")
+	require.Equal(t, kEnUS, kEnUSAgain, "same listed values must key the same flight regardless of unlisted cookies")
+	require.NotEqual(t, kEnUS, kGBP, "different currency values must never share a flight")
+	require.NotEqual(t, kEnUS, kFrFR, "different locale values must never share a flight")
+	require.NotEqual(t, kEnUS, kAnon, "a value and no value must never share a flight")
+	// Parity with the storage variant key for the same dimensions.
+	require.Equal(t,
+		VariantKey(primary, cookieValuesField, enUS.Header, policy),
+		kEnUS)
+}
+
+// TestCookieValues_RefreshRegistryReplaysCookie mirrors the presence
+// variant (issue #768): a value-keyed route with refresh-before-expiry
+// must save the Cookie header in the registry so doBackgroundRefresh
+// replays it and refreshFrom304 recomputes VaryKey from the same value
+// pairs the store path hashed. Without the save, the replayed request
+// would be cookie-less, the pairs would rehash as all-empty, and the
+// peer gates would reject every refreshed object until TTL.
+func TestCookieValues_RefreshRegistryReplaysCookie(t *testing.T) {
+	t.Parallel()
+	origin := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("render"))
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:            origin,
+		FastClient:          &testFastClient{handler: origin},
+		Store:               store,
+		Logger:              slog.Default(),
+		RefreshBeforeExpiry: true,
+		Policy:              NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale"}),
+	})
+
+	cookied := testCtx("GET", "http://example.com/p")
+	cookied.Request.Header.Set(header.Cookie, "locale=fr; theme=dark")
+	h.ServeRequest(cookied)
+	require.Equal(t, "MISS", respHeader(cookied, header.XCache))
+
+	primaryKey := h.buildKey(cookied)
+	ri := requestInfoFromCtx(cookied)
+	variantKey := VariantKey(primaryKey, h.policy.CookieValuesVary(), ri.Header, h.policy)
+
+	entry := h.refreshRegistry.Lookup(variantKey)
+	require.NotNil(t, entry, "value-keyed variant must be refresh-registered")
+
+	require.Equal(t, "locale=fr; theme=dark", entry.header.Get(header.Cookie))
+	stored := BuildVaryKey(h.policy.CookieValuesVary(), ri.Header, h.policy)
+	replayed := BuildVaryKey(h.policy.CookieValuesVary(), entry.header, h.policy)
+	require.Equal(t, stored, replayed)
 }

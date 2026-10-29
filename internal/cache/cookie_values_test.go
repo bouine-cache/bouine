@@ -435,3 +435,24 @@ func TestCookieValues_RefreshRegistryReplaysCookie(t *testing.T) {
 	replayed := BuildVaryKey(h.policy.CookieValuesVary(), entry.header, h.policy)
 	require.Equal(t, stored, replayed)
 }
+
+// TestCookieValues_PeerGateFailSafe pins the cluster mismatch
+// fail-safe: a node whose policy disagrees with the storer's (rolling
+// deploy, divergent config) computes a different VaryKey assertion, so
+// the owner-side variant gate (obj.VaryKey != req.VaryKey) rejects the
+// ask with a miss — never a wrong body. The integration twin
+// (TestStrong_CookieValuesClusterPartitioning) proves the agreeing
+// case converges; this pins the disagreeing case failing closed.
+func TestCookieValues_PeerGateFailSafe(t *testing.T) {
+	t.Parallel()
+	storer := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false).WithCookieValues([]string{"locale"})
+	asker := NewKeyPolicy(nil, nil, nil, nil, false, false, nil, false)
+	hdr := headerMap(header.Cookie, "locale=en")
+	vary := storer.CookieValuesVary()
+
+	stored := BuildVaryKey(vary, hdr, storer)
+	asked := BuildVaryKey(vary, hdr, asker)
+	require.NotEmpty(t, stored)
+	require.NotEqual(t, stored, asked,
+		"a mismatched policy must hash a different assertion — the owner gate then answers miss")
+}

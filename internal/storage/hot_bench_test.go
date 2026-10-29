@@ -330,16 +330,16 @@ func BenchmarkHotGet_SubjectBans_256(b *testing.B) {
 	}
 }
 
-// BenchmarkHotGet_SubjectBans_1024 is the worst case at the ban-list
+// BenchmarkHotGet_SubjectBans_4096 is the worst case at the ban-list
 // cap: before the composite snapshot ~10 µs (literal bans) to ~23 µs
-// (regex bans) per hit; after, O(1).
-func BenchmarkHotGet_SubjectBans_1024(b *testing.B) {
+// (regex bans) per hit per 1k bans; after, O(1).
+func BenchmarkHotGet_SubjectBans_4096(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	defer func() { _ = s.Close(context.Background()) }()
-	k := testkey.Hash([]byte("bench-subject-1024"))
+	k := testkey.Hash([]byte("bench-subject-4096"))
 	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
 	_, _, _ = s.Get(context.Background(), k)
-	benchSeedSubjectBans(s, 1024, "literal")
+	benchSeedSubjectBans(s, banListCap, "literal")
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -348,16 +348,16 @@ func BenchmarkHotGet_SubjectBans_1024(b *testing.B) {
 	}
 }
 
-// BenchmarkHotGet_SubjectBans_1024_Regex keeps 1024 regex bans active:
-// the composite snapshot cannot fully collapse regex bans, but the
-// common rejection path still exits after the host/path set checks.
-func BenchmarkHotGet_SubjectBans_1024_Regex(b *testing.B) {
+// BenchmarkHotGet_SubjectBans_4096_Regex keeps banListCap regex bans
+// active: the composite snapshot cannot fully collapse regex bans, but
+// the common rejection path still exits after the host/path set checks.
+func BenchmarkHotGet_SubjectBans_4096_Regex(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	defer func() { _ = s.Close(context.Background()) }()
-	k := testkey.Hash([]byte("bench-subject-1024-regex"))
+	k := testkey.Hash([]byte("bench-subject-4096-regex"))
 	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
 	_, _, _ = s.Get(context.Background(), k)
-	benchSeedSubjectBans(s, 1024, "opaque")
+	benchSeedSubjectBans(s, banListCap, "opaque")
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -366,21 +366,21 @@ func BenchmarkHotGet_SubjectBans_1024_Regex(b *testing.B) {
 	}
 }
 
-// BenchmarkHotGet_SubjectBans_1024_Surrogate is the tag-invalidation
-// shape at the ban-list cap: 1024 distinct surrogate-only bans and a
-// subject object carrying non-matching tags. Must be O(1) through the
-// snapshot's surrogates set (issue #871: these used to classify opaque
-// and cost a 1024-predicate walk per hit).
-func BenchmarkHotGet_SubjectBans_1024_Surrogate(b *testing.B) {
+// BenchmarkHotGet_SubjectBans_4096_Surrogate is the tag-invalidation
+// shape at the ban-list cap: banListCap distinct surrogate-only bans and
+// a subject object carrying non-matching tags. Must be O(1) through the
+// surrogate set (issue #871: these used to classify opaque and cost a
+// cap-sized predicate walk per hit).
+func BenchmarkHotGet_SubjectBans_4096_Surrogate(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	defer func() { _ = s.Close(context.Background()) }()
-	k := testkey.Hash([]byte("bench-subject-1024-surrogate"))
+	k := testkey.Hash([]byte("bench-subject-4096-surrogate"))
 	// Page-sized body: tag-invalidated objects are typically documents.
 	o := benchSubjectObj(k, "tagged.example.com", 16<<10)
 	o.SurrogateKeys = []string{"live-tag-a", "live-tag-b", "live-tag-c"}
 	_ = s.Put(context.Background(), k, o)
 	_, _, _ = s.Get(context.Background(), k)
-	for i := range 1024 {
+	for i := range banListCap {
 		_, _ = s.Ban(context.Background(), api.BanExpr{
 			SurrogateKey: "tag-" + strconv.Itoa(i),
 			CreatedAt:    time.Now().Add(-time.Hour),

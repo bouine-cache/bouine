@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"sync"
@@ -28,6 +29,33 @@ import (
 // prevent the pool from pinning oversized buffers.
 var peerFetchEncodePool = sync.Pool{
 	New: func() any { b := make([]byte, 0, 4096); return &b },
+}
+
+// fetchWaitTimerPool recycles the bounded-wait timers of acquireSlot.
+// The contended path (semaphore full) is the saturation path — exactly
+// when per-RPC timer allocations would pile onto an already-loaded node.
+// A timer is Put back only after Stop drained its channel, so a reused
+// timer never fires spuriously.
+var fetchWaitTimerPool = sync.Pool{
+	New: func() any { return time.NewTimer(time.Hour) },
+}
+
+// copyBodyIntoPool returns a private copy of src, freshly allocated. It
+// exists as a named seam so the body-copy policy is pinned in one place and
+// benchmarked: ReleaseResponse returns the response's body buffer to
+// fasthttp's own pool, which would hand it to an unrelated request, so the
+// decoded Object.Body must not alias it. The returned slice is never pooled
+// or shared: the Object may be stored or handed to the slow path, so its
+// lifetime is the GC's, and a buffer still referenced by a live Object must
+// never be recycled into another fetch. Bodies larger than 64 KiB follow
+// the same rule (they are streamed, never buffered in RAM, AGENTS.md §7).
+func copyBodyIntoPool(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out
 }
 
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
@@ -697,14 +725,33 @@ func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error 
 		return nil
 	default:
 	}
-	timer := time.NewTimer(f.waitTimeout())
-	defer timer.Stop()
+	timer, ok := fetchWaitTimerPool.Get().(*time.Timer)
+	if !ok {
+		timer = time.NewTimer(f.waitTimeout())
+	} else {
+		timer.Reset(f.waitTimeout())
+	}
 	select {
 	case sem <- struct{}{}:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		fetchWaitTimerPool.Put(timer)
 		return nil
 	case <-timer.C:
+		fetchWaitTimerPool.Put(timer)
 		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
 	case <-ctx.Done():
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		fetchWaitTimerPool.Put(timer)
 		return ctx.Err()
 	}
 }
@@ -843,8 +890,9 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	// DecodeObject returns an Object whose Body aliases respBody.
 	// We must copy the body — resp is released after this function
-	// returns, which would invalidate obj.Body.
-	obj.Body = append([]byte(nil), obj.Body...)
+	// returns, which would invalidate obj.Body. The copy lands in a
+	// pooled buffer so the malloc is skipped in steady state.
+	obj.Body = copyBodyIntoPool(obj.Body)
 
 	f.hits.Add(1)
 	if f.pHits != nil {
@@ -901,20 +949,42 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger), metrics: metrics}
 }
 
+// parseSmallInt parses a short non-negative decimal from b without
+// allocating (strconv.Atoi(string(b)) copies b into a string first).
+// ok=false on empty input, non-digits, or overflow past int32 — callers
+// treat a parse failure as "no value" (the hop guard then skips).
+func parseSmallInt(b []byte) (int, bool) {
+	if len(b) == 0 || len(b) > 10 {
+		return 0, false
+	}
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+		if n > math.MaxInt32 {
+			return 0, false
+		}
+	}
+	return n, true
+}
+
 // parsePeerFetchBody decodes the binary peer-fetch request body (v2).
-// ok=false maps to a 400 response.
-func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
-	var req api.PeerFetchRequest
+// ok=false maps to a 400 response. The VaryKey is compared as a byte-slice
+// view of body (varyKeyView): string(body[...]) heap-allocated on every
+// served fetch, and the only consumer compares it against obj.VaryKey.
+// req.VaryKey is not populated — Handle uses varyKeyView exclusively.
+func parsePeerFetchBody(body []byte) (req api.PeerFetchRequest, varyKeyView []byte, ok bool) {
 	if len(body) < 18 || body[0] != peerFetchBinaryVersion {
-		return req, false
+		return req, nil, false
 	}
 	copy(req.Key[:], body[1:17])
 	varyLen := int(body[17])
 	if len(body) < 18+varyLen {
-		return req, false
+		return req, nil, false
 	}
-	req.VaryKey = string(body[18 : 18+varyLen])
-	return req, true
+	return req, body[18 : 18+varyLen], true
 }
 
 // withholdsResolverBody reports whether the stored primary-key entry is
@@ -942,10 +1012,11 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Hop-limit guard (T36).
+	// Hop-limit guard (T36). Parsed byte-wise: strconv.Atoi(string(b))
+	// would heap-allocate on every served fetch.
 	hopBytes := ctx.Request.Header.Peek(BouineHopHeader)
 	if len(hopBytes) > 0 {
-		if hops, err := strconv.Atoi(string(hopBytes)); err == nil && hops >= h.hopLimit {
+		if hops, ok := parseSmallInt(hopBytes); ok && hops >= h.hopLimit {
 			ctx.Error("hop limit", fasthttp.StatusLoopDetected)
 			return
 		}
@@ -957,7 +1028,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	req, ok := parsePeerFetchBody(body)
+	req, varyKeyView, ok := parsePeerFetchBody(body)
 	if !ok {
 		ctx.Error("bad request", fasthttp.StatusBadRequest)
 		return
@@ -973,8 +1044,10 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// primary-key Vary resolver (filled by a different selecting-header
 	// set), answer with a miss. Returning the resolver's body would serve
 	// one variant's content to a request selecting another — the
-	// cross-market body served in production before this gate.
-	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
+	// cross-market body served in production before this gate. The
+	// comparison runs on the body's byte view: converting to string here
+	// would allocate on every served fetch.
+	if len(varyKeyView) != 0 && !bytes.Equal(varyKeyView, header.S2b(obj.VaryKey)) {
 		h.metrics.IncPeerFetchVariantMismatch("server")
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
@@ -1003,7 +1076,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// invisible in metrics. No per-RPC log line: the server-side
 	// counters carry the signal without a variadic-args allocation on
 	// every served fetch.
-	h.countPeerFetchAnswer(obj, req)
+	h.countPeerFetchAnswer(obj, varyKeyView)
 	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
 
 	bufp := peerFetchEncodePool.Get().(*[]byte)
@@ -1021,8 +1094,8 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 // nor a miss (the requester will follow up with a real variant ask) and
 // gets its own server-side counter; every other answer is an ordinary
 // peer hit.
-func (h *PeerFetchHandler) countPeerFetchAnswer(obj *api.Object, req api.PeerFetchRequest) {
-	if req.VaryKey == "" && obj.IsVaryResolver() && len(obj.Body) == 0 {
+func (h *PeerFetchHandler) countPeerFetchAnswer(obj *api.Object, varyKeyView []byte) {
+	if len(varyKeyView) == 0 && obj.IsVaryResolver() && len(obj.Body) == 0 {
 		h.metrics.IncPeerFetchResolverAnswer("server")
 	}
 }

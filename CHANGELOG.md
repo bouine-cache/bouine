@@ -21,6 +21,14 @@ the curated, human-readable summary.
   unchanged: the peer fetch hit/miss counters, the resolver-metadata
   and variant-mismatch server-side counters, and the RPC duration
   histogram all remain.
+- Serving-side peer-fetch parsing no longer allocates per RPC: the Vary
+  assertion is compared as a byte view of the request body
+  (`bytes.Equal` against the stored key) instead of a
+  `string(body[...])` copy, and the hop-limit header is parsed
+  byte-wise instead of `strconv.Atoi(string(...))`. The contended
+  semaphore-wait path in `acquireSlot` recycles its `time.Timer`
+  through a pool instead of allocating one per queued RPC under
+  saturation.
 
 ## [0.6.3] - 2026-10-29
 

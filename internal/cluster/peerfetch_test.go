@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -104,11 +106,11 @@ func TestParsePeerFetchBody_RejectsBadFraming(t *testing.T) {
 
 	badVersion := append([]byte(nil), body...)
 	badVersion[0] = peerFetchBinaryVersion + 1
-	_, ok := parsePeerFetchBody(badVersion)
+	_, _, ok := parsePeerFetchBody(badVersion)
 	require.False(t, ok, "unknown version must be rejected")
 
 	short := body[:17]
-	_, ok = parsePeerFetchBody(short)
+	_, _, ok = parsePeerFetchBody(short)
 	require.False(t, ok, "truncated frame must be rejected")
 }
 
@@ -1190,4 +1192,273 @@ func TestPeerFetcher_DialTimeoutIsSubsecond(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, elapsed, PeerFetchTimeout+200*time.Millisecond,
 		"dial to a dead address must fail within the RPC budget (dial %+v), took %s", peerDialTimeout, elapsed)
+}
+
+func TestParseSmallInt(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"", 0, false},
+		{"0", 0, true},
+		{"1", 1, true},
+		{"42", 42, true},
+		{"007", 7, true},
+		{"2147483647", math.MaxInt32, true},
+		{"2147483648", 0, false}, // overflow past MaxInt32
+		{"12345678901", 0, false},
+		{"1234567890", 1234567890, true}, // 10 digits, under MaxInt32
+		{"-1", 0, false},
+		{"1a", 0, false},
+		{" 1", 0, false},
+		{"1 ", 0, false},
+		{"99999999999999999999", 0, false}, // >10 digits
+	}
+	for _, c := range cases {
+		got, ok := parseSmallInt([]byte(c.in))
+		require.Equal(t, c.ok, ok, "input %q", c.in)
+		if c.ok {
+			require.Equal(t, c.want, got, "input %q", c.in)
+		}
+	}
+}
+
+func TestParsePeerFetchBody_VaryKeyView(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(7)
+	vary := "ushashushash12"
+	body := encodePeerFetchRequest(api.PeerFetchRequest{Key: key, VaryKey: vary})
+
+	req, view, ok := parsePeerFetchBody(body)
+	require.True(t, ok)
+	require.Equal(t, key, req.Key)
+	require.Equal(t, vary, string(view))
+	// The view must alias the input buffer, not copy it.
+	require.Equal(t, unsafe.Pointer(&body[18]), unsafe.Pointer(&view[0]))
+
+	// Empty VaryKey: view is an empty (possibly nil-cap) slice, ok still true.
+	bodyNoVary := encodePeerFetchRequest(api.PeerFetchRequest{Key: key})
+	_, view0, ok := parsePeerFetchBody(bodyNoVary)
+	require.True(t, ok)
+	require.Len(t, view0, 0)
+
+	// Truncated VaryKey: varyLen says 5, only 2 bytes present -> reject.
+	trunc := append([]byte(nil), body...)
+	trunc[17] = byte(len(vary) + 10)
+	_, _, ok = parsePeerFetchBody(trunc)
+	require.False(t, ok)
+}
+
+func TestPeerFetchHandler_VaryGateByteCompare(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(9)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("variant-body"),
+		VaryKey:    "variantA",
+		VaryValue:  "X-Region",
+	}
+	obj.Header = header.NewMap(1)
+	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Matching assertion: 200 with the body.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "variantA"}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	got, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, []byte("variant-body"), got.Body)
+
+	// Mismatched assertion: 404 (variant-mismatch gate fires).
+	ctx = postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "variantB"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
+
+	// Blank assertion against a variant entry: served (any variant allowed).
+	ctx = postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+}
+
+func TestPeerFetchHandler_HopGuardByteParse(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(11)
+	obj := &api.Object{Key: key, StatusCode: 200, Body: []byte("x")}
+	obj.Header = header.NewMap(0)
+	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
+	h := NewPeerFetchHandler(store, 2) // hopLimit=2
+
+	for _, hop := range []string{"2", "3", "99"} {
+		ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+		ctx.Request.Header.Set(BouineHopHeader, hop)
+		h.Handle(ctx)
+		require.Equal(t, fasthttp.StatusLoopDetected, ctx.Response.StatusCode(), "hop %s", hop)
+	}
+	// Non-numeric / oversized hop values are ignored (parse failure = no guard trip),
+	// matching the previous strconv.Atoi error path.
+	for _, hop := range []string{"abc", "99999999999"} {
+		ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+		ctx.Request.Header.Set(BouineHopHeader, hop)
+		h.Handle(ctx)
+		require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "hop %q", hop)
+	}
+	// hop=1 passes the guard.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 1)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+}
+
+func TestCopyBodyIntoPool(t *testing.T) {
+	t.Parallel()
+	// Empty input -> nil.
+	require.Nil(t, copyBodyIntoPool(nil))
+
+	// Small body: contents correct, and a private copy.
+	src := bytes.Repeat([]byte("A"), 100)
+	out := copyBodyIntoPool(src)
+	require.Equal(t, src, out)
+	// Mutating src afterwards must not affect out (it is a copy).
+	src[0] = 'B'
+	require.Equal(t, byte('A'), out[0])
+	require.Equal(t, 100, cap(out), "result is a fresh exact-size allocation")
+
+	// Large body (>64 KiB): same private-copy contract, exact-size allocation.
+	big := bytes.Repeat([]byte("Z"), 100*1024)
+	outBig := copyBodyIntoPool(big)
+	require.Equal(t, big, outBig)
+	require.Equal(t, 100*1024, cap(outBig))
+
+	// Exactly at the boundary: 64 KiB.
+	cap64 := bytes.Repeat([]byte("C"), 64*1024)
+	out64 := copyBodyIntoPool(cap64)
+	require.Equal(t, cap64, out64)
+	require.Equal(t, 64*1024, cap(out64))
+
+	// Concurrency: two goroutines copying different same-size bodies must
+	// never observe each other's bytes (no shared buffer).
+	const n = 200
+	a := bytes.Repeat([]byte("a"), 4096)
+	b := bytes.Repeat([]byte("b"), 4096)
+	var wg sync.WaitGroup
+	errs := make(chan string, 2*n)
+	for range n {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if got := copyBodyIntoPool(a); !bytes.Equal(got, a) {
+				errs <- "a corrupted"
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if got := copyBodyIntoPool(b); !bytes.Equal(got, b) {
+				errs <- "b corrupted"
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
+	}
+}
+
+func TestAcquireSlot_TimerPoolReuse(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+
+	// Fill the semaphore so acquireSlot takes the contended path.
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := f.acquireSlot(ctx, sem)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// The timer must have been returned to the pool: assert the pool is
+	// non-empty after the contended runs (a pooled timer was Put back).
+	poolLen := 0
+	if v := fetchWaitTimerPool.Get(); v != nil {
+		poolLen = 1
+		fetchWaitTimerPool.Put(v)
+	}
+	require.Equal(t, 1, poolLen, "contended acquireSlot must return its timer to the pool")
+}
+
+func TestPeerFetcher_Fetch_BodyIsIndependentCopy(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(3)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       bytes.Repeat([]byte("Q"), 4096),
+		ETag:       `"e"`,
+	}
+	obj.Header = header.NewMap(4)
+	encoded := storage.EncodeObject(obj)
+
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(encoded)
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	got, err := f.Fetch(context.Background(), api.PeerInfo{AdminAddr: srv.Addr}, api.PeerFetchRequest{Key: key})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, obj.Body, got.Body)
+	// The returned body must not alias the (released) fasthttp response buffer:
+	// fetch again and verify the first body is unchanged.
+	got2, err := f.Fetch(context.Background(), api.PeerInfo{AdminAddr: srv.Addr}, api.PeerFetchRequest{Key: key})
+	require.NoError(t, err)
+	require.Equal(t, obj.Body, got.Body, "second fetch must not corrupt the first object's body")
+	require.Equal(t, obj.Body, got2.Body)
+}
+
+func TestAcquireSlot_ContendedPaths(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+	f.fetchWaitTimeout = 30 * time.Millisecond
+
+	t.Run("ShedOnTimeout", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		err := f.acquireSlot(context.Background(), sem)
+		require.ErrorIs(t, err, ErrPeerFetchShed)
+	})
+
+	t.Run("CtxCancelWhileQueued", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		err := f.acquireSlot(ctx, sem)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("AcquiresAfterContention", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			<-sem
+		}()
+		start := time.Now()
+		err := f.acquireSlot(context.Background(), sem)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, time.Since(start), 4*time.Millisecond)
+	})
+
+	t.Run("HappyPathNonBlocking", func(t *testing.T) {
+		sem := make(chan struct{}, 1)
+		err := f.acquireSlot(context.Background(), sem)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(sem))
+	})
 }

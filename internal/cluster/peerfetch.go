@@ -759,14 +759,15 @@ func (f *PeerFetcher) releaseFetchSlot() {
 	<-f.fetchSem
 }
 
-// recordPeerMiss counts and logs one peer-fetch miss (404 answer).
-func (f *PeerFetcher) recordPeerMiss(req api.PeerFetchRequest, peer api.PeerInfo) {
+// recordPeerMiss counts one peer-fetch miss (404 answer). No per-RPC
+// log line: on a strong cluster every peer fetch paid a variadic-args
+// allocation for a record the SampledLogger drops 999/1000 times; the
+// miss/hit counters and the duration histogram carry the signal.
+func (f *PeerFetcher) recordPeerMiss() {
 	f.misses.Add(1)
 	if f.pMisses != nil {
 		f.pMisses.Inc()
 	}
-	f.logger.Info("peer fetch miss",
-		"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
 }
 
 // Fetch asks a peer for a cached object. varyKey, when non-empty, is the
@@ -824,7 +825,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	f.recordPeerSuccess(addr)
 
 	if resp.StatusCode() == fasthttp.StatusNotFound {
-		f.recordPeerMiss(req, peer)
+		f.recordPeerMiss()
 		return nil, nil // peer miss
 	}
 	if resp.StatusCode() != fasthttp.StatusOK {
@@ -858,9 +859,6 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if f.pDuration != nil {
 		f.pDuration.Observe(lat.Seconds())
 	}
-	f.logger.Info("peer fetch hit",
-		"key", req.Key, "peer", peer.Addr, "hops", req.Hops,
-		"dur_ms", latMs)
 	return obj, nil
 }
 
@@ -946,14 +944,10 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 
 	// Hop-limit guard (T36).
 	hopBytes := ctx.Request.Header.Peek(BouineHopHeader)
-	hops := 0
 	if len(hopBytes) > 0 {
-		if parsed, err := strconv.Atoi(string(hopBytes)); err == nil {
-			hops = parsed
-			if hops >= h.hopLimit {
-				ctx.Error("hop limit", fasthttp.StatusLoopDetected)
-				return
-			}
+		if hops, err := strconv.Atoi(string(hopBytes)); err == nil && hops >= h.hopLimit {
+			ctx.Error("hop limit", fasthttp.StatusLoopDetected)
+			return
 		}
 	}
 
@@ -971,7 +965,6 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 
 	obj, _, err := h.store.Get(ctx, req.Key)
 	if err != nil || obj == nil {
-		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
@@ -983,8 +976,6 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// cross-market body served in production before this gate.
 	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
 		h.metrics.IncPeerFetchVariantMismatch("server")
-		h.logger.Info("served peer fetch miss: variant mismatch",
-			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
@@ -1001,18 +992,18 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// variant. A peer fetch for a REAL variant key never lands here:
 	// variant entries carry a non-empty VaryKey.
 	if withholdsResolverBody(obj) {
-		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
-			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
 
-	// The ADR-0068 answer class gets its own log line and counter: a
+	// The ADR-0068 answer class keeps its own counter: a
 	// resolver-metadata answer is not a hit (no servable content) and
 	// not a miss either (the requester will follow up with a real
 	// variant ask). Without the distinction the two-step resolution is
-	// invisible in logs and metrics.
-	h.logPeerFetchAnswer(obj, req, hops)
+	// invisible in metrics. No per-RPC log line: the server-side
+	// counters carry the signal without a variadic-args allocation on
+	// every served fetch.
+	h.countPeerFetchAnswer(obj, req)
 	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
 
 	bufp := peerFetchEncodePool.Get().(*[]byte)
@@ -1024,20 +1015,16 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	}
 }
 
-// logPeerFetchAnswer records the answer class of a served peer fetch:
+// countPeerFetchAnswer records the answer class of a served peer fetch:
 // the ADR-0068 resolver-metadata answer (blank-assertion ask against
 // the metadata-only resolver) is neither a hit (no servable content)
 // nor a miss (the requester will follow up with a real variant ask) and
-// gets its own log line and server-side counter; every other answer
-// logs as the ordinary peer hit.
-func (h *PeerFetchHandler) logPeerFetchAnswer(obj *api.Object, req api.PeerFetchRequest, hops int) {
+// gets its own server-side counter; every other answer is an ordinary
+// peer hit.
+func (h *PeerFetchHandler) countPeerFetchAnswer(obj *api.Object, req api.PeerFetchRequest) {
 	if req.VaryKey == "" && obj.IsVaryResolver() && len(obj.Body) == 0 {
 		h.metrics.IncPeerFetchResolverAnswer("server")
-		h.logger.Info("served peer fetch resolver metadata",
-			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
-		return
 	}
-	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
 }
 
 // Put forwards obj to the owner peer via the write-to-owner RPC. Used in

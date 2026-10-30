@@ -1207,14 +1207,18 @@ func TestParseSmallInt(t *testing.T) {
 		{"42", 42, true},
 		{"007", 7, true},
 		{"2147483647", math.MaxInt32, true},
-		{"2147483648", 0, false}, // overflow past MaxInt32
-		{"12345678901", 0, false},
-		{"1234567890", 1234567890, true}, // 10 digits, under MaxInt32
+		{"2147483648", math.MaxInt32, true}, // saturates, ok stays true so the guard fires
+		{"4294967296", math.MaxInt32, true}, // would wrap to 0 if the check ran after the multiply
+		{"9999999999", math.MaxInt32, true},
+		{"99999999999", math.MaxInt32, true},
+		{"99999999999999999999999", math.MaxInt32, true},
+		{"12345678901", math.MaxInt32, true},
+		{"1234567890", 1234567890, true},
 		{"-1", 0, false},
+		{"+2", 0, false}, // sign rejected: guard fails closed on this input
 		{"1a", 0, false},
 		{" 1", 0, false},
 		{"1 ", 0, false},
-		{"99999999999999999999", 0, false}, // >10 digits
 	}
 	for _, c := range cases {
 		got, ok := parseSmallInt([]byte(c.in))
@@ -1289,33 +1293,33 @@ func TestPeerFetchHandler_HopGuardByteParse(t *testing.T) {
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 2) // hopLimit=2
 
-	for _, hop := range []string{"2", "3", "99"} {
+	for _, hop := range []string{"2", "3", "99", "9999999999", "99999999999999999999999"} {
 		ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 		ctx.Request.Header.Set(BouineHopHeader, hop)
 		h.Handle(ctx)
 		require.Equal(t, fasthttp.StatusLoopDetected, ctx.Response.StatusCode(), "hop %s", hop)
 	}
-	// Non-numeric / oversized hop values are ignored (parse failure = no guard trip),
-	// matching the previous strconv.Atoi error path.
-	for _, hop := range []string{"abc", "99999999999"} {
+	// A present but unparseable hop header fails CLOSED (508), not open:
+	// the guard exists for hostile peers.
+	for _, hop := range []string{"abc", "-1", "+2", " 2", "2x"} {
 		ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 		ctx.Request.Header.Set(BouineHopHeader, hop)
 		h.Handle(ctx)
-		require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "hop %q", hop)
+		require.Equal(t, fasthttp.StatusLoopDetected, ctx.Response.StatusCode(), "hop %q", hop)
 	}
 	// hop=1 passes the guard.
 	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 1)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
-func TestCopyBodyIntoPool(t *testing.T) {
+func TestCloneBody(t *testing.T) {
 	t.Parallel()
 	// Empty input -> nil.
-	require.Nil(t, copyBodyIntoPool(nil))
+	require.Nil(t, cloneBody(nil))
 
 	// Small body: contents correct, and a private copy.
 	src := bytes.Repeat([]byte("A"), 100)
-	out := copyBodyIntoPool(src)
+	out := cloneBody(src)
 	require.Equal(t, src, out)
 	// Mutating src afterwards must not affect out (it is a copy).
 	src[0] = 'B'
@@ -1324,13 +1328,13 @@ func TestCopyBodyIntoPool(t *testing.T) {
 
 	// Large body (>64 KiB): same private-copy contract, exact-size allocation.
 	big := bytes.Repeat([]byte("Z"), 100*1024)
-	outBig := copyBodyIntoPool(big)
+	outBig := cloneBody(big)
 	require.Equal(t, big, outBig)
 	require.Equal(t, 100*1024, cap(outBig))
 
 	// Exactly at the boundary: 64 KiB.
 	cap64 := bytes.Repeat([]byte("C"), 64*1024)
-	out64 := copyBodyIntoPool(cap64)
+	out64 := cloneBody(cap64)
 	require.Equal(t, cap64, out64)
 	require.Equal(t, 64*1024, cap(out64))
 
@@ -1345,13 +1349,13 @@ func TestCopyBodyIntoPool(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if got := copyBodyIntoPool(a); !bytes.Equal(got, a) {
+			if got := cloneBody(a); !bytes.Equal(got, a) {
 				errs <- "a corrupted"
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if got := copyBodyIntoPool(b); !bytes.Equal(got, b) {
+			if got := cloneBody(b); !bytes.Equal(got, b) {
 				errs <- "b corrupted"
 			}
 		}()
@@ -1367,24 +1371,41 @@ func TestAcquireSlot_TimerPoolReuse(t *testing.T) {
 	t.Parallel()
 	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
 	defer f.Close(context.Background())
+	f.fetchWaitTimeout = 5 * time.Millisecond
 
-	// Fill the semaphore so acquireSlot takes the contended path.
+	// Hammer the contended path from many goroutines. Behavior under
+	// -race is the assertion: every arm of acquireSlot must Stop+drain
+	// its timer exactly once before returning it to the pool, so no
+	// reused timer may fire spuriously or be Put twice.
 	sem := make(chan struct{}, 1)
 	sem <- struct{}{}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	err := f.acquireSlot(ctx, sem)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-
-	// The timer must have been returned to the pool: assert the pool is
-	// non-empty after the contended runs (a pooled timer was Put back).
-	poolLen := 0
-	if v := fetchWaitTimerPool.Get(); v != nil {
-		poolLen = 1
-		fetchWaitTimerPool.Put(v)
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+			defer cancel()
+			_ = f.acquireSlot(ctx, sem) // DeadlineExceeded every time
+		}()
 	}
-	require.Equal(t, 1, poolLen, "contended acquireSlot must return its timer to the pool")
+	wg.Wait()
+
+	// A reused timer must not fire early: after the pool has been warmed,
+	// draw a timer and verify it does not fire before its Reset duration.
+	v := fetchWaitTimerPool.Get()
+	require.NotNil(t, v)
+	tm := v.(*time.Timer)
+	tm.Reset(50 * time.Millisecond)
+	select {
+	case <-tm.C:
+		t.Fatal("pooled timer fired before its reset duration elapsed")
+	case <-time.After(10 * time.Millisecond):
+	}
+	if !tm.Stop() {
+		<-tm.C
+	}
+	fetchWaitTimerPool.Put(tm)
 }
 
 func TestPeerFetcher_Fetch_BodyIsIndependentCopy(t *testing.T) {
@@ -1461,4 +1482,33 @@ func TestAcquireSlot_ContendedPaths(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, len(sem))
 	})
+}
+
+// TestParseSmallInt32BitSafety proves the bounds check runs before the
+// multiply, so the accumulation cannot wrap negative on 32-bit int builds
+// (GOARCH=386/arm): 4294967296 would wrap to 0 with a post-multiply check.
+func TestParseSmallInt32BitSafety(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"2147483648", "4294967296", "9999999999", "99999999999999999999999"} {
+		b := []byte(in)
+		n := int32(0)
+		saturated := false
+		for _, c := range b {
+			d := int32(c - '0')
+			if n > (math.MaxInt32-d)/10 {
+				n = math.MaxInt32
+				saturated = true
+				break
+			}
+			n = n*10 + d
+		}
+		require.False(t, n < 0, "input %q wrapped negative on 32-bit: %d", in, n)
+		require.True(t, saturated, "input %q must saturate, got %d", in, n)
+	}
+	// And the real function agrees on the 64-bit build.
+	for _, in := range []string{"2147483648", "4294967296", "9999999999"} {
+		got, ok := parseSmallInt([]byte(in))
+		require.True(t, ok)
+		require.Equal(t, math.MaxInt32, got, "input %q", in)
+	}
 }

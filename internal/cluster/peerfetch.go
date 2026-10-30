@@ -40,16 +40,15 @@ var fetchWaitTimerPool = sync.Pool{
 	New: func() any { return time.NewTimer(time.Hour) },
 }
 
-// copyBodyIntoPool returns a private copy of src, freshly allocated. It
-// exists as a named seam so the body-copy policy is pinned in one place and
-// benchmarked: ReleaseResponse returns the response's body buffer to
-// fasthttp's own pool, which would hand it to an unrelated request, so the
-// decoded Object.Body must not alias it. The returned slice is never pooled
-// or shared: the Object may be stored or handed to the slow path, so its
-// lifetime is the GC's, and a buffer still referenced by a live Object must
-// never be recycled into another fetch. Bodies larger than 64 KiB follow
-// the same rule (they are streamed, never buffered in RAM, AGENTS.md §7).
-func copyBodyIntoPool(src []byte) []byte {
+// cloneBody returns a private copy of src, freshly allocated. The peer-fetch
+// body must not alias the pooled fasthttp response buffer: ReleaseResponse
+// returns it to fasthttp's pool, which would hand it to an unrelated
+// request. The returned slice is never pooled or shared — the Object may be
+// stored or handed to the slow path, so its lifetime is the GC's, and a
+// buffer still referenced by a live Object must never be recycled into
+// another fetch (a pooled hand-out races under concurrent Fetch calls; see
+// TestPeerFetcher_PipelineConcurrentFetches).
+func cloneBody(src []byte) []byte {
 	if len(src) == 0 {
 		return nil
 	}
@@ -890,9 +889,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	// DecodeObject returns an Object whose Body aliases respBody.
 	// We must copy the body — resp is released after this function
-	// returns, which would invalidate obj.Body. The copy lands in a
-	// pooled buffer so the malloc is skipped in steady state.
-	obj.Body = copyBodyIntoPool(obj.Body)
+	// returns, which would invalidate obj.Body. The copy is always a
+	// fresh allocation: a pooled buffer handed out as Object.Body would
+	// race under concurrent fetches.
+	obj.Body = cloneBody(obj.Body)
 
 	f.hits.Add(1)
 	if f.pHits != nil {
@@ -949,12 +949,14 @@ func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger), metrics: metrics}
 }
 
-// parseSmallInt parses a short non-negative decimal from b without
-// allocating (strconv.Atoi(string(b)) copies b into a string first).
-// ok=false on empty input, non-digits, or overflow past int32 — callers
-// treat a parse failure as "no value" (the hop guard then skips).
+// parseSmallInt parses a non-negative decimal from b without allocating
+// (strconv.Atoi(string(b)) copies b into a string first). Unlike Atoi it
+// rejects a leading '+'/'-' and saturates values above math.MaxInt32 at
+// math.MaxInt32 with ok=true, so a huge hop count still trips the hop
+// guard instead of being ignored. The bounds check runs BEFORE the
+// multiply so it cannot wrap on 32-bit int builds.
 func parseSmallInt(b []byte) (int, bool) {
-	if len(b) == 0 || len(b) > 10 {
+	if len(b) == 0 {
 		return 0, false
 	}
 	n := 0
@@ -962,10 +964,11 @@ func parseSmallInt(b []byte) (int, bool) {
 		if c < '0' || c > '9' {
 			return 0, false
 		}
-		n = n*10 + int(c-'0')
-		if n > math.MaxInt32 {
-			return 0, false
+		d := int(c - '0')
+		if n > (math.MaxInt32-d)/10 { // overflow-proof on 32- and 64-bit int
+			return math.MaxInt32, true
 		}
+		n = n*10 + d
 	}
 	return n, true
 }
@@ -1013,10 +1016,13 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Hop-limit guard (T36). Parsed byte-wise: strconv.Atoi(string(b))
-	// would heap-allocate on every served fetch.
+	// would heap-allocate on every served fetch. A present but
+	// unparseable header fails CLOSED (508): the guard exists for
+	// hostile peers, and a garbage hop value must not be served.
 	hopBytes := ctx.Request.Header.Peek(BouineHopHeader)
 	if len(hopBytes) > 0 {
-		if hops, ok := parseSmallInt(hopBytes); ok && hops >= h.hopLimit {
+		hops, ok := parseSmallInt(hopBytes)
+		if !ok || hops >= h.hopLimit {
 			ctx.Error("hop limit", fasthttp.StatusLoopDetected)
 			return
 		}

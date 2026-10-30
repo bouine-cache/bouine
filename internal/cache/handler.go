@@ -1246,16 +1246,18 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 // (false, nil) when the key was not in the store, and (true, err) when
 // the store operation failed.
 func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, error) {
-	// Collect variant keys for the primary key.
+	// Collect variant keys for the primary key. Snapshot under
+	// variantMu: iterating the live set after the unlock races
+	// concurrent variant registrations writing the same map and raises
+	// an unrecoverable concurrent-map fatal (issue #880).
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
-	h.variantMu.Unlock()
-
 	keys := make([]api.Key, 0, len(set)+1)
 	keys = append(keys, primaryKey)
 	for vk := range set {
 		keys = append(keys, vk)
 	}
+	h.variantMu.Unlock()
 
 	owned := false
 	for _, key := range keys {
@@ -3786,11 +3788,23 @@ func (h *Handler) reserveVariantSlotFromPeer(reqCtx context.Context, primaryKey,
 	h.reserveVariantSlotMode(reqCtx, primaryKey, storeKey, true)
 }
 
+// liveVariantSet returns the tracked variant set for primaryKey,
+// registering an empty set when the entry is absent (a concurrent
+// Purge may have detached it). Called with variantMu held.
+func (h *Handler) liveVariantSet(primaryKey api.Key) map[api.Key]struct{} {
+	set := h.variantSets[primaryKey]
+	if set == nil {
+		set = make(map[api.Key]struct{})
+		h.variantSets[primaryKey] = set
+	}
+	return set
+}
+
 // reconcileStaleIncarnation reconciles the variant set for a primary
 // key whose incarnation may have been evicted. Called with variantMu
 // held; releases it around the store probes — a lock must never span
-// an I/O call — and reacquires before returning the (possibly
-// pruned) set for primaryKey.
+// an I/O call — and reacquires before returning the (possibly pruned)
+// set for primaryKey.
 //
 // Single-node (ownerFn nil): the node holds everything, so a primary
 // absent from the store means a prior evicted incarnation — its whole
@@ -3806,13 +3820,19 @@ func (h *Handler) reserveVariantSlotFromPeer(reqCtx context.Context, primaryKey,
 // shape this ADR exists to close (caught by the e2e suite's past-cap
 // purge test). Liveness is decided per tracked variant instead: only
 // entries gone from the LOCAL store are pruned.
-func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey api.Key, set map[api.Key]struct{}) map[api.Key]struct{} {
+//
+// The tracked set is re-read from variantSets under the lock on every
+// return path, never carried across an unlock: a concurrent Purge may
+// have detached the caller's map while the lock was released, and a
+// registration into a detached map is invisible to the next cluster
+// purge (issue #880).
+func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey api.Key) map[api.Key]struct{} {
 	h.variantMu.Unlock()
 	probeCtx := context.WithoutCancel(reqCtx)
 	pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
 	if pkObj != nil {
 		h.variantMu.Lock()
-		return set
+		return h.liveVariantSet(primaryKey)
 	}
 	if h.ownerFn == nil {
 		h.variantMu.Lock()
@@ -3820,10 +3840,19 @@ func (h *Handler) reconcileStaleIncarnation(reqCtx context.Context, primaryKey a
 		h.variantSets[primaryKey] = fresh
 		return fresh
 	}
+	// Snapshot the tracked keys UNDER the lock, then release it around
+	// the per-variant store probes: iterating the live set without the
+	// lock races concurrent registrations writing the same map and
+	// raises an unrecoverable concurrent-map fatal (issue #880).
+	// pruneDeadVariants reacquires the lock and returns the surviving
+	// set.
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
 	keys := make([]api.Key, 0, len(set))
 	for k := range set {
 		keys = append(keys, k)
 	}
+	h.variantMu.Unlock()
 	return h.pruneDeadVariants(reqCtx, primaryKey, keys)
 }
 
@@ -3841,11 +3870,7 @@ func (h *Handler) pruneDeadVariants(reqCtx context.Context, primaryKey api.Key, 
 		}
 	}
 	h.variantMu.Lock()
-	set := h.variantSets[primaryKey]
-	if set == nil {
-		set = make(map[api.Key]struct{})
-		h.variantSets[primaryKey] = set
-	}
+	set := h.liveVariantSet(primaryKey)
 	for _, k := range dead {
 		delete(set, k)
 	}
@@ -3861,11 +3886,7 @@ func (h *Handler) pruneDeadVariants(reqCtx context.Context, primaryKey api.Key, 
 // where an absent primary really does retire the whole set.
 func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, storeKey api.Key, fromPeer bool) bool {
 	h.variantMu.Lock()
-	set := h.variantSets[primaryKey]
-	if set == nil {
-		set = make(map[api.Key]struct{})
-		h.variantSets[primaryKey] = set
-	}
+	set := h.liveVariantSet(primaryKey)
 	if _, exists := set[storeKey]; exists {
 		h.variantMu.Unlock()
 		return true
@@ -3877,7 +3898,7 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 	// "stale" means depends on the deployment shape — see
 	// reconcileStaleIncarnation.
 	if len(set) > 0 && !fromPeer {
-		set = h.reconcileStaleIncarnation(reqCtx, primaryKey, set)
+		set = h.reconcileStaleIncarnation(reqCtx, primaryKey)
 	}
 	if len(set) < h.maxVariants {
 		set[storeKey] = struct{}{}

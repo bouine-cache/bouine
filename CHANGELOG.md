@@ -35,6 +35,20 @@ the curated, human-readable summary.
   and deliberately not jittered (it is an operator bound). Zero keeps
   today's semantics. Closes #877.
 
+### Fixed
+
+- `concurrent map iteration and map write` process fatal (since v0.6.0,
+  issue #880): in cluster mode, `reconcileStaleIncarnation` iterated the
+  live `variantSets` map with `variantMu` released around the store
+  probes, racing concurrent Vary registrations writing the same map
+  under the lock; Go raises an unrecoverable fatal there and the pod
+  dies with the whole in-memory hot tier. `SoftPurge` had the same
+  unlocked iteration. Both now snapshot the keys under the lock and
+  only iterate the snapshot; the tracked set is re-read under the lock
+  after every unlock window so a registration can no longer land in a
+  map detached by a concurrent `Purge` (which would hide the variant
+  from the next cluster-wide URL purge).
+
 ## [0.6.3] - 2026-10-29
 
 ### Added

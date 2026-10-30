@@ -6721,3 +6721,81 @@ func TestReserveVariantSlot_ClusterReconcileKeepsLiveVariants(t *testing.T) {
 	require.NotContains(t, set, dead, "an evicted variant must be pruned")
 	require.Contains(t, set, fourth)
 }
+
+// TestReserveVariantSlot_ConcurrentReconcileNoMapRace is the regression
+// test for issue #880: on a cluster-mode node that stores a primary's
+// VARIANTS but not the PRIMARY (the ring assigns their owners
+// independently), every local fill runs reconcileStaleIncarnation, which
+// releases variantMu around the store probes. Before the fix it
+// iterated the live variant set with the lock released — and SoftPurge
+// did the same — while concurrent fills registered variants under the
+// lock; Go raises an unrecoverable "concurrent map iteration and map
+// write" fatal there, killing the process. This stress loop runs the
+// production melee (fills + soft purges on the same primary) and must
+// stay silent under -race.
+func TestReserveVariantSlot_ConcurrentReconcileNoMapRace(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	remoteOwner := func(api.Key) (api.PeerInfo, bool) {
+		return api.PeerInfo{Addr: "owner:1"}, false
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:    func(ctx *fasthttp.RequestCtx) {},
+		FastClient:  &testFastClient{handler: func(ctx *fasthttp.RequestCtx) {}},
+		Store:       store,
+		Logger:      slog.Default(),
+		OwnerFn:     remoteOwner,
+		MaxVariants: 64,
+	})
+
+	req := testCtx("GET", "http://example.com/race")
+	primaryKey := h.buildKey(req)
+	hdr := headerFromCtx(req)
+
+	// The primary is NOT in the local store (this node is not its
+	// owner) but the variant set is non-empty with LIVE entries, so
+	// every local fill takes the reconciliation path and every soft
+	// purge sweeps the same set.
+	const live = 24
+	tracked := make([]api.Key, 0, live)
+	for i := range live {
+		k := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+		k[15] ^= byte(i + 1)
+		require.NoError(t, store.Put(context.Background(), k, &api.Object{
+			Key: k, StatusCode: 200, TTL: time.Hour,
+			StoredAt: time.Now(), Header: header.Map{},
+		}))
+		tracked = append(tracked, k)
+	}
+	h.variantMu.Lock()
+	h.variantSets[primaryKey] = map[api.Key]struct{}{}
+	for _, k := range tracked {
+		h.variantSets[primaryKey][k] = struct{}{}
+	}
+	h.variantMu.Unlock()
+
+	const goroutines = 8
+	const rounds = 64
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range rounds {
+				// Fresh variant key per round: not yet in the set, so
+				// the fill registers it (a map write) under the lock.
+				fresh := VariantKey(primaryKey, "X-Test-Variant", hdr, nil)
+				fresh[15] ^= byte(100 + g*rounds + r)
+				h.reserveVariantSlot(context.Background(), primaryKey, fresh)
+				h.SoftPurge(context.Background(), primaryKey)
+			}
+		}()
+	}
+	wg.Wait()
+
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	h.variantMu.Unlock()
+	require.NotNil(t, set, "the variant set must survive the concurrent fills and soft purges")
+}

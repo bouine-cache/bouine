@@ -3220,6 +3220,79 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	require.False(t, bytes.Contains(expected, []byte("X-Sensitive: secret")))
 }
 
+// TestRefreshFrom304_SWROverrideReapplied pins the ADR-0072 guarantee on
+// the revalidation path: a 304 whose merged Cache-Control carries the
+// origin's (much wider) swr directive cannot revert the operator's
+// bounded stale window — the route override is re-applied after the
+// merge, mirroring the OverrideTTL re-application above. Without a
+// route override the stamped window is preserved as-is (the 304's own
+// directive never widens it either).
+func TestRefreshFrom304_SWROverrideReapplied(t *testing.T) {
+	t.Parallel()
+	newHandler := func(swrOverride time.Duration) *Handler {
+		store := storage.NewHotStore(storage.HotConfig{
+			MaxBytes:  1 << 20,
+			NumShards: 2,
+		})
+		return NewHandler(HandlerConfig{
+			Upstream:    origin200("body"),
+			FastClient:  &testFastClient{handler: origin200("body")},
+			Store:       store,
+			SWROverride: swrOverride,
+		})
+	}
+	// The 304 merges an origin swr far wider than the operator bound.
+	res := fetchResult{
+		StatusCode: 304,
+		Header: fromHeaderMap(headerMap(
+			header.CacheControl, "max-age=60, stale-while-revalidate=90000",
+			header.ETag, `"v1"`)),
+	}
+	ri := requestInfoFromURL("GET", "http://example.com/test")
+
+	t.Run("override reapplied over merged origin swr", func(t *testing.T) {
+		t.Parallel()
+		h := newHandler(30 * time.Second)
+		stale := &api.Object{
+			Key:        BuildKeyFromURL("http://example.com/test", nil),
+			StatusCode: 200,
+			Header:     headerMap(header.CacheControl, "max-age=60, stale-while-revalidate=90000", header.ETag, `"v1"`),
+			Body:       []byte("body"),
+			BodySize:   4,
+			StoredAt:   time.Now().Add(-time.Minute),
+			TTL:        time.Minute,
+			ETag:       `"v1"`,
+			// What buildObject stamped at store time under the override.
+			StaleWhileRevalidate: 30 * time.Second,
+		}
+		stale.CacheControl = stale.Header.Get(header.CacheControl)
+
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		require.Equal(t, 30*time.Second, refreshed.StaleWhileRevalidate,
+			"a 304 must not revert the route's bounded SWR window to the origin's 90000s")
+	})
+
+	t.Run("stamped window preserved without override", func(t *testing.T) {
+		t.Parallel()
+		h := newHandler(0)
+		stale := &api.Object{
+			Key:                  BuildKeyFromURL("http://example.com/test", nil),
+			StatusCode:           200,
+			Header:               headerMap(header.CacheControl, "max-age=60, stale-while-revalidate=90000", header.ETag, `"v1"`),
+			Body:                 []byte("body"),
+			BodySize:             4,
+			StoredAt:             time.Now().Add(-time.Minute),
+			TTL:                  time.Minute,
+			ETag:                 `"v1"`,
+			StaleWhileRevalidate: 90000 * time.Second,
+		}
+		stale.CacheControl = stale.Header.Get(header.CacheControl)
+
+		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
+		require.Equal(t, 90000*time.Second, refreshed.StaleWhileRevalidate)
+	})
+}
+
 // blockingStore wraps a real HotStore but blocks Put after blockCh is
 // signalled. This lets tests hold an SWR goroutine inside store.Put while
 // Handler.Close is called, proving Close drains the goroutine before
@@ -3794,6 +3867,65 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 	obj := (&Handler{fp: fillPolicy{defaultSWR: 30 * time.Second}}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
+}
+
+// TestBuildObject_SWROverride pins the ADR-0072 precedence: a route
+// swr_override bounds the stored SWR window regardless of the origin's
+// directive, and wins over the defaultSWR floor; error statuses keep
+// the origin's directives (same content/error split as the TTL
+// override, ADR-0059).
+func TestBuildObject_SWROverride(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		fp         fillPolicy
+		statusCode int
+		cacheCtrl  string
+		want       time.Duration
+	}{
+		{
+			name:       "override wins over origin swr",
+			fp:         fillPolicy{swrOverride: 30 * time.Second},
+			statusCode: 200,
+			cacheCtrl:  "max-age=60, stale-while-revalidate=3600",
+			want:       30 * time.Second,
+		},
+		{
+			name:       "override wins over default swr floor",
+			fp:         fillPolicy{defaultSWR: 120 * time.Second, swrOverride: 30 * time.Second},
+			statusCode: 200,
+			cacheCtrl:  "max-age=60",
+			want:       30 * time.Second,
+		},
+		{
+			name:       "origin swr kept when no override",
+			fp:         fillPolicy{},
+			statusCode: 200,
+			cacheCtrl:  "max-age=60, stale-while-revalidate=3600",
+			want:       3600 * time.Second,
+		},
+		{
+			name:       "error status keeps origin swr despite override",
+			fp:         fillPolicy{swrOverride: 30 * time.Second},
+			statusCode: 404,
+			cacheCtrl:  "max-age=60, stale-while-revalidate=3600",
+			want:       3600 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := fetchResult{
+				StatusCode: tc.statusCode,
+				Header:     fromHeaderMap(headerMap(header.CacheControl, tc.cacheCtrl)),
+				Body:       []byte("hello"),
+			}
+			r := testCtx("GET", "http://example.com/")
+			obj := (&Handler{fp: tc.fp}).buildObject(api.Key{}, requestInfoFromCtx(r), res, res.Header.ToMap(), nil, time.Now())
+			require.NotNil(t, obj)
+			assert.Equal(t, tc.want, obj.StaleWhileRevalidate)
+		})
+	}
 }
 
 func TestBuildObject_SIEDefault(t *testing.T) {

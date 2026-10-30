@@ -859,6 +859,23 @@ type RouteCache struct {
 	// refresh fetch. Default 10s. Range 5s-120s.
 	RefreshTimeout       time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
 	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate,omitempty" json:"stale_while_revalidate,omitempty"`
+	// SWROverride, when > 0, forces the stale-while-revalidate window
+	// stamped onto stored objects to this value regardless of what the
+	// upstream sends — the SWR sibling of TTLOverride (ADR-0011, and
+	// its own ADR-0072). StaleWhileRevalidate above is only a default:
+	// it applies when the origin sends no stale-while-revalidate, so an
+	// origin directive (e.g. swr=90000 on pages tuned for a downstream
+	// CDN) always wins over it. SWROverride exists for exactly that
+	// case: bounding bouine's own stale window on price-bearing pages
+	// without touching the origin. Like TTLOverride it governs content
+	// responses only (status < 400) — error objects keep the origin's
+	// directives and the negative-caching ladder (ADR-0059) — and it
+	// is not jittered: the value is an operator bound, and jittering it
+	// could serve past the configured window. Takes precedence over both
+	// the origin directive and stale_while_revalidate. Zero (default) =
+	// today's semantics: origin swr wins when present, the default
+	// applies when absent.
+	SWROverride time.Duration `yaml:"swr_override,omitempty" json:"swr_override,omitempty"`
 	// NegativeTTL is the route's negative-caching policy, written as
 	// one key with two forms:
 	//

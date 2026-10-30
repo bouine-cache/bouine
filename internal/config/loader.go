@@ -1146,19 +1146,31 @@ func validateStatic(ec *errCollector, path string, sc StaticConfig) {
 	}
 }
 
+// validateNonNegativeDurations rejects negative values for the
+// plain-duration cache knobs in one pass: they share the same
+// "must be >= 0" contract, and a flat table keeps the cyclomatic
+// weight of validateRouteCache down (it was at the gocyclo limit
+// before swr_override joined the list).
+func validateNonNegativeDurations(ec *errCollector, path string, rc *RouteCache) {
+	for _, d := range []struct {
+		name string
+		val  time.Duration
+	}{
+		{"ttl_override", rc.TTLOverride},
+		{"ttl_default", rc.TTLDefault},
+		{"stale_while_revalidate", rc.StaleWhileRevalidate},
+		{"swr_override", rc.SWROverride},
+		{"stale_if_error", rc.StaleIfError},
+	} {
+		if d.val < 0 {
+			ec.addf(path+"."+d.name, "must be >= 0, got %v", d.val)
+		}
+	}
+}
+
 func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
-	if rc.TTLOverride < 0 {
-		ec.addf(path+".ttl_override", "must be >= 0, got %v", rc.TTLOverride)
-	}
-	if rc.TTLDefault < 0 {
-		ec.addf(path+".ttl_default", "must be >= 0, got %v", rc.TTLDefault)
-	}
-	if rc.StaleWhileRevalidate < 0 {
-		ec.addf(path+".stale_while_revalidate", "must be >= 0, got %v", rc.StaleWhileRevalidate)
-	}
-	if rc.StaleIfError < 0 {
-		ec.addf(path+".stale_if_error", "must be >= 0, got %v", rc.StaleIfError)
-	}
+	validateNonNegativeDurations(ec, path, rc)
+	validateStatusTTL(ec, path+".negative_ttl", &rc.NegativeTTL)
 	validateStatusTTL(ec, path+".negative_ttl", &rc.NegativeTTL)
 	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
 		ec.addf(path+".jitter_percent", "must be 0–50, got %d", rc.JitterPercent)

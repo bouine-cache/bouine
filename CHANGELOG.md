@@ -22,6 +22,19 @@ the curated, human-readable summary.
   and variant-mismatch server-side counters, and the RPC duration
   histogram all remain.
 
+### Added
+
+- `swr_override` per-route cache knob (ADR-0072): when set, it replaces
+  the stale-while-revalidate window stamped onto stored objects
+  regardless of the origin directive — the SWR sibling of `ttl_override`.
+  `stale_while_revalidate` remains a floor that only applies when the
+  origin sends no swr; with origins tuned for a downstream CDN
+  (e.g. swr=90000), the route value was ignored and the stale window
+  followed the origin. The override is gated to content responses
+  (status < 400, like the TTL override), re-applied on 304 revalidation,
+  and deliberately not jittered (it is an operator bound). Zero keeps
+  today's semantics. Closes #877.
+
 ## [0.6.3] - 2026-10-29
 
 ### Added

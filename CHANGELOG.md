@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- Cluster peer-fetch RPCs no longer emit a per-request info log line:
+  `peer fetch hit`/`peer fetch miss` (fetcher side) and `served peer
+  fetch hit`/`miss`/`variant mismatch`/`resolver metadata` (serving
+  side) are gone. Every peer-served request on a strong cluster paid a
+  variadic-args allocation (128 B, 3 allocs, measured) for a record
+  the sampled logger drops 999 out of 1000 times. The signal is
+  unchanged: the peer fetch hit/miss counters, the resolver-metadata
+  and variant-mismatch server-side counters, and the RPC duration
+  histogram all remain.
+
 ## [0.6.3] - 2026-10-29
 
 ### Added

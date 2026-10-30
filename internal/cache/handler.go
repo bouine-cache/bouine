@@ -652,6 +652,14 @@ type HandlerConfig struct {
 	// must-revalidate) are always honoured; OverrideTTL only replaces
 	// the numeric freshness lifetime.
 	OverrideTTL time.Duration
+	// SWROverride, when > 0, forces the stale-while-revalidate window
+	// stamped onto stored objects to this value regardless of what the
+	// upstream sends — the SWR sibling of OverrideTTL (ADR-0072).
+	// DefaultSWR above is only a floor for origins that send no swr;
+	// SWROverride wins over both the origin directive and DefaultSWR.
+	// Content responses only (status < 400), not jittered — see
+	// fillPolicy.swrOverrideFor.
+	SWROverride time.Duration
 	// DefaultTTL is the operator-configured TTL used when the origin sends
 	// no explicit freshness (no max-age, no Expires, no Last-Modified).
 	// Zero means fall back to heuristic or treat as uncacheable.
@@ -1015,6 +1023,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		defaultTTL:  cfg.DefaultTTL,
 		overrideTTL: cfg.OverrideTTL,
 		defaultSWR:  cfg.DefaultSWR,
+		swrOverride: cfg.SWROverride,
 		defaultSIE:  cfg.DefaultSIE,
 		jitterPct:   cfg.JitterPercent,
 	}
@@ -3341,6 +3350,16 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, ri RequestI
 	if ttl := h.fp.overrideTTLFor(refreshed.StatusCode); ttl > 0 {
 		refreshed.TTL = ttl
 	}
+	// Re-apply the route's SWR override so a 304 whose merged
+	// Cache-Control carries an swr directive cannot revert bouine's
+	// bounded stale window back to the upstream's (ADR-0072), the same
+	// guarantee the TTL re-application above gives OverrideTTL. A 304
+	// never widens the window past what the operator configured at
+	// store time. No-op when the route sets no override: the cloned
+	// object keeps its stamped window.
+	if swr := h.fp.swrOverrideFor(refreshed.StatusCode); swr > 0 {
+		refreshed.StaleWhileRevalidate = swr
+	}
 	// RFC 9111 §4.2.3: a 304 is an origin response too — its round-trip
 	// delay ages the freshened object exactly like a full response's
 	// (corrected_age_value = Age + response_delay), floored by apparent
@@ -4700,7 +4719,14 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 		clStr := strconv.AppendInt(clBuf[:0], obj.BodySize, 10)
 		obj.Header.Set(header.ContentLength, string(clStr))
 	}
-	if respCC.StaleWhileRevalidSet {
+	// Precedence (ADR-0072): the route override bounds the window
+	// regardless of the origin directive; without it the origin's swr
+	// wins when present and defaultSWR is only a floor for origins
+	// that send none. Content responses only — errors keep the origin
+	// directives and the negative ladder (ADR-0059).
+	if swr := h.fp.swrOverrideFor(obj.StatusCode); swr > 0 {
+		obj.StaleWhileRevalidate = swr
+	} else if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
 	} else if h.fp.defaultSWR > 0 {
 		obj.StaleWhileRevalidate = h.fp.defaultSWR
@@ -4769,17 +4795,19 @@ func serializeHead(obj *api.Object, skipCDC bool) []byte {
 
 // fillPolicy owns the route's freshness knobs applied on every fill
 // path — the negative-caching table, the default/override TTLs, the
-// SWR/SIE floors stamped onto stored objects, and the TTL jitter.
-// buildObject, the ADR-0063 sync-mode fill cap, and the 304-refresh
-// override all consume it, so the stored clock, the advertised cap,
-// and the revalidated lifetime can never diverge. The knobs previously
-// rode call sites as adjacent time.Duration parameters — a transposed
-// pair compiled and silently served wrong grace windows.
+// SWR/SIE floors and the SWR override stamped onto stored objects, and
+// the TTL jitter. buildObject, the ADR-0063 sync-mode fill cap, and the
+// 304-refresh re-application all consume it, so the stored clock, the
+// advertised cap, and the revalidated lifetime can never diverge. The
+// knobs previously rode call sites as adjacent time.Duration
+// parameters — a transposed pair compiled and silently served wrong
+// grace windows.
 type fillPolicy struct {
 	neg         *StatusTTL
 	defaultTTL  time.Duration // operator fallback when origin sends no freshness
 	overrideTTL time.Duration // wins over origin freshness for content responses (status < 400); error statuses keep the negative-caching ladder (ADR-0059)
-	defaultSWR  time.Duration // operator-level stale-while-revalidate floor
+	defaultSWR  time.Duration // operator-level stale-while-revalidate floor, applied only when the origin sends no swr
+	swrOverride time.Duration // wins over the origin's swr for content responses (status < 400); not jittered (ADR-0072)
 	defaultSIE  time.Duration // operator-level stale-if-error floor
 	jitterPct   int
 }
@@ -4809,6 +4837,21 @@ func (fp *fillPolicy) overrideTTLFor(status int) time.Duration {
 		return 0
 	}
 	return JitterTTL(fp.overrideTTL, fp.jitterPct)
+}
+
+// swrOverrideFor returns the route's stale-while-revalidate override
+// for a content status, or 0 when the route sets none. The override
+// wins over the upstream's swr directive AND over defaultSWR for
+// content responses (status < 400); error responses keep the origin's
+// directives, mirroring the TTL override's content/error split
+// (ADR-0059). Unlike the TTL override the value is deliberately NOT
+// jittered: the window is an operator bound on the origin's swr
+// (ADR-0072), and jitter would serve past the configured window.
+func (fp *fillPolicy) swrOverrideFor(status int) time.Duration {
+	if fp.swrOverride <= 0 || status >= 400 {
+		return 0
+	}
+	return fp.swrOverride
 }
 
 // computeTTL derives the freshness lifetime for a response. Precedence

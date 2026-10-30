@@ -601,6 +601,16 @@ TTL ladder (origin explicit freshness > `negative_ttl` > heuristic >
 `ttl_default`), so an override never pins errors fresh beyond what the
 origin or the negative policy sanctioned (ADR-0059).
 
+`stale_while_revalidate` is a *floor*, not a bound: it applies only when
+the origin sends no `stale-while-revalidate` directive, so an origin
+tuned for a downstream CDN (e.g. `swr=90000`) always wins over it. To
+bound bouine's own stale window regardless of the origin, set
+`swr_override` — the SWR sibling of `ttl_override` (ADR-0072). It
+replaces the window stamped onto stored objects for content responses
+(status < 400), is re-applied on 304 revalidation, and is not jittered
+(it is an operator bound). `downstream_freshness: sync` advertises the
+bounded window downstream automatically.
+
 Route matching (`RouteMatch`) is first-match-wins in **declaration
 order** — the same precedence rule the traffic-class classifier uses.
 `match.host` is an exact host or a single leading `*.` wildcard

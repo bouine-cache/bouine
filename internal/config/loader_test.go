@@ -87,6 +87,7 @@ routes:
     cache:
       ttl_default: 60s
       stale_while_revalidate: 30s
+      swr_override: 30s
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err, "parse")
@@ -96,6 +97,7 @@ routes:
 		t.Fatalf("unexpected routes: %+v", cfg.Routes)
 	}
 	require.Equal(t, float64(5), cfg.UpstreamPools[0].Health.Active.Interval.Seconds())
+	require.Equal(t, 30*time.Second, cfg.Routes[0].Cache.SWROverride, "swr_override must parse onto the route cache")
 }
 
 func TestLoad_FromDisk(t *testing.T) {
@@ -366,6 +368,7 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 	}{
 		{"ttl_default", func(rc *RouteCache) { rc.TTLDefault = -1 }},
 		{"stale_while_revalidate", func(rc *RouteCache) { rc.StaleWhileRevalidate = -1 }},
+		{"swr_override", func(rc *RouteCache) { rc.SWROverride = -1 }},
 		{"stale_if_error", func(rc *RouteCache) { rc.StaleIfError = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 6 * time.Minute }},

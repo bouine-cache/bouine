@@ -15,15 +15,15 @@ a stored object only when the origin response carries no
 store-time precedence in `buildObject`). When the origin *does* send one,
 the origin's value wins and the operator knob is ignored.
 
-That is the wrong default for origins fronted by a downstream CDN. Real
-deployment (bouine-l1 in front of front-office, issue #877): product pages
-carry route meta `CDN-Cache-Control: public, max-age=90000,
-stale-while-revalidate=90000` — 25h+25h, tuned for edge caching. The
-operator pins storage freshness with `ttl_override: 30s` and sets
-`stale_while_revalidate: 30s` expecting a bounded stale window. Verified on
-preprod (v0.6.3): stale serving was still active 120s after store — the
-origin's 25h directive governed the stale window, and the route value was
-ignored. Steady state stays healthy (every STALE triggers a background
+That is the wrong default for origins fronted by a downstream CDN. A real
+deployment hit exactly this (issue #877: a bouine tier fronting an SSR
+storefront): product pages carry route meta `CDN-Cache-Control: public,
+max-age=90000, stale-while-revalidate=90000` — 25h+25h, tuned for edge
+caching at a downstream CDN. The operator pins storage freshness with
+`ttl_override: 30s` and sets `stale_while_revalidate: 30s` expecting a
+bounded stale window. Verified on a preprod deployment (v0.6.3): stale
+serving was still active 120s after store — the origin's 25h directive
+governed the stale window, and the route value was ignored. Steady state stays healthy (every STALE triggers a background
 revalidation that restores a fresh HIT within seconds), but under a
 sustained origin failure these price-bearing pages would serve stale
 content for up to 25h — exactly the class of page for which the operator

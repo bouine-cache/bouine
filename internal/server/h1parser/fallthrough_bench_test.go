@@ -48,7 +48,7 @@ func BenchmarkH1Parse_FallThrough(b *testing.B) {
 		// and the fall-through prefix (rebuilt head) is self-contained,
 		// so each iteration is a complete request lifecycle.
 		conn := &mockConn{r: bytes.NewReader(raw)}
-		if _, err := parser.handleFallThrough(conn, req, nil); err != nil {
+		if _, _, err := parser.handleFallThrough(conn, req, nil); err != nil {
 			b.Fatalf("handleFallThrough: %v", err)
 		}
 	}

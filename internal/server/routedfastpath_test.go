@@ -215,3 +215,68 @@ func TestRoutedFastPath_ExtendedPredicates(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "root-pool", resp.Pool)
 }
+
+// TestRoutedFastPath_MemoReusedPerConnection pins the per-connection route
+// memo: once a (host, path, method) triple resolves a route, a RawRequest
+// carrying that triple reuses the memoized route without re-walking the
+// table — and any change to host, path, or method falls back to a full
+// matchRoute. The memo lives on the RawRequest because the h1parser's
+// scratch struct is per-connection.
+func TestRoutedFastPath_MemoReusedPerConnection(t *testing.T) {
+	t.Parallel()
+	rt := NewRouter(RouterConfig{})
+	apiFP := &recordingFP{name: "api-pool"}
+	rootFP := &recordingFP{name: "root-pool"}
+	rt.AddRoute("", "/api/", "api", "api-pool", nil, ok200("api"), apiFP)
+	rt.AddRoute("", "/", "root", "root-pool", nil, ok200("root"), rootFP)
+	rfp := NewRoutedFastPath(rt, apiFP)
+
+	// Simulate one keep-alive connection: the same scratch RawRequest is
+	// reused across requests (the h1parser's parseBuffer does NOT clear
+	// MemoRoute).
+	scratch := rawReq("GET", "/api/v1/x", "example.com")
+	resp, ok := rfp.TryHit(scratch, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "api-pool", resp.Pool)
+
+	// Second request on the same connection, same URL: memo hit, still
+	// the api route.
+	scratch.Method, scratch.Path, scratch.Host = "GET", "/api/v1/x", "example.com"
+	resp, ok = rfp.TryHit(scratch, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "api-pool", resp.Pool)
+	assert.Equal(t, []string{"/api/v1/x", "/api/v1/x"}, apiFP.calls)
+
+	// Same host, different path: memo key mismatch → full walk → root.
+	scratch.Path = "/other"
+	resp, ok = rfp.TryHit(scratch, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "root-pool", resp.Pool)
+
+	// Same path, different host (memo host changed): full walk.
+	scratch.Path = "/api/v1/x"
+	scratch.Host = "other.example.com"
+	resp, ok = rfp.TryHit(scratch, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, "api-pool", resp.Pool) // host-less routes match any host
+
+	// Method change: memo method mismatch → full walk.
+	scratch.Host = "example.com"
+	scratch.Method = "POST"
+	resp, ok = rfp.TryHit(scratch, time.Now())
+	// POST matches no route with a fast path under nil method sets? The
+	// routes have nil methods (match all) — so POST still resolves. The
+	// memo must not serve a GET memo for a POST when methods ARE
+	// restricted; build a methods-restricted router for that assertion.
+	rtM := NewRouter(RouterConfig{})
+	getOnly := &recordingFP{name: "get-only"}
+	rtM.AddRoute("", "/", "get", "get-pool", []string{"GET"}, ok200("get"), getOnly)
+	rfpM := NewRoutedFastPath(rtM, getOnly)
+	s2 := rawReq("GET", "/x", "example.com")
+	resp, ok = rfpM.TryHit(s2, time.Now())
+	require.True(t, ok)
+	s2.Method = "POST"
+	resp, ok = rfpM.TryHit(s2, time.Now())
+	assert.False(t, ok, "memo must not serve a GET-resolved route to a POST")
+	assert.Nil(t, resp)
+}

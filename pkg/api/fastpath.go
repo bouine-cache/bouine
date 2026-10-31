@@ -42,6 +42,15 @@ const OwnerResolverContextKey = "bouine.owner_resolver"
 // Unstable.
 //
 //nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
+// RouteMemo is an opaque per-connection route-resolution memo handle.
+// The h1parser reuses one RawRequest scratch across a connection's
+// keep-alive requests, so a memo stored on RawRequest is naturally
+// per-connection. The type is opaque to this leaf package: the server
+// layer stores a *routeEntry in it. Nil means "no memo".
+//
+// Unstable.
+type RouteMemo any
+
 type RawRequest struct {
 	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
 	// leads the struct so the scalar tail stays in the final cache
@@ -134,6 +143,13 @@ type RawRequest struct {
 	// crosses into the next keep-alive request. Nil unless the fast path
 	// fetched a resolver-shaped answer.
 	OwnerResolver *Object
+	// MemoRoute is the server layer's per-connection route-resolution memo
+	// (RouteMemo). The h1parser's per-request soft reset clears it only on
+	// connection reuse boundaries it controls — in fact it must NOT be
+	// cleared per request, because the scratch is per-connection: the memo
+	// intentionally survives across the connection's keep-alive requests.
+	// Nil on hand-built RawRequests.
+	MemoRoute RouteMemo
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

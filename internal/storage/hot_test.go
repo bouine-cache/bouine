@@ -199,15 +199,15 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 	// 4 shards, 4096 bytes total = 1024 per shard.
 	s := NewHotStore(HotConfig{MaxBytes: 4096, NumShards: 4})
 
-	// Body 460 keeps a single entry (~998 B with the 336 B object
-	// struct, ADR-0051) under the 1024 B/shard budget, so the final
-	// HotBytes assert is deterministic — overshoot beyond one entry
-	// per shard is drained by the ASYNC sweeper and would race the
-	// Stats() read. Two entries per shard still exceed the budget,
-	// which is what this test exercises.
+	// Body 380 keeps a single entry (~998 B with the 336 B object struct
+	// and the 88 B cache-line-padded hotEntry, ADR-0051) under the
+	// 1024 B/shard budget, so the final HotBytes assert is deterministic
+	// — overshoot beyond one entry per shard is drained by the ASYNC
+	// sweeper and would race the Stats() read. Two entries per shard
+	// still exceed the budget, which is what this test exercises.
 	for i := range 100 {
 		k := testkey.Key(uint64(i))
-		_ = s.Put(context.Background(), k, obj(k, 460))
+		_ = s.Put(context.Background(), k, obj(k, 380))
 	}
 
 	st := s.Stats()
@@ -501,14 +501,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 352 (PairedKey, ADR-0068), hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
+	// objectStructSize: 352 (PairedKey, ADR-0068), hotEntrySize: 88 (windowHits padded to its own cache line), sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 352 + 32 + 40 + 32 +
+	want := int64(5) + 352 + 88 + 40 + 32 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)

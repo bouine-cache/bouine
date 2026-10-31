@@ -732,7 +732,8 @@ func runChurnScenario(t *testing.T) churnResult {
 	)
 
 	// Size hot to hold ~50 entries (slightly above the working set of 40).
-	hotMaxBytes := int64(50 * 2500) // ~50 entries at ~2500 bytes/entry
+	// ~2556 bytes/entry with the 88 B cache-line-padded hotEntry.
+	hotMaxBytes := int64(50 * 2556)
 
 	ts := tieredStore484(t, hotMaxBytes)
 	ts.warmSyncBatchSize = 1000

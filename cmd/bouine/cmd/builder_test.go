@@ -990,7 +990,7 @@ func TestBuildPools_DefaultsWhenUnset(t *testing.T) {
 	c := pools["defaults"].ResolvedClientConfig()
 	require.Equal(t, 10*time.Second, c.DialTimeout)
 	require.Equal(t, 30*time.Second, c.KeepAlive)
-	require.Equal(t, 64, c.MaxConnsPerHost)
+	require.Equal(t, 128, c.MaxConnsPerHost)
 	require.Equal(t, 30*time.Second, c.ResponseHeaderTimeout)
 	require.Equal(t, 90*time.Second, c.MaxIdleConnDuration)
 }

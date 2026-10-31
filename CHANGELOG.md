@@ -12,6 +12,17 @@ the curated, human-readable summary.
 
 ### Changed
 
+- Raised three built-in defaults to give high-concurrency and
+  high-Vary-cardinality deployments more headroom before hitting a cap:
+  `connect.max_connections` per origin host 64 → 128
+  (~16x Little's-law headroom at 3k req/s), `cluster.peer_max_conns_per_host`
+  8 → 16 (16 conns × 16 pending = 256 concurrent peer fetches per peer,
+  doubling the old HTTP/2 capacity), and the per-primary-key variant cap
+  `cache.max_variants` default 1024 → 2048. All three remain overridable
+  per pool / cluster / route; `0` still selects the new defaults.
+
+### Changed
+
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
   ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its

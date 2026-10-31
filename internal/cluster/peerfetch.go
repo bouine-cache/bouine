@@ -103,7 +103,7 @@ const maxPeerFetchBytes int64 = 64 << 20
 
 // Default pipelining configuration (issue #521, Phase 6.4).
 const (
-	defaultPeerMaxConnsPerHost = 8
+	defaultPeerMaxConnsPerHost = 16
 	// defaultPeerMaxIdleConnDur must stay below the peer's admin-server
 	// idle timeout (default 300s, internal/admin/server.go). The client
 	// must close idle connections before the server reaps them,
@@ -113,8 +113,8 @@ const (
 	// listen.idle_timeout).
 	defaultPeerMaxIdleConnDur = 120 * time.Second
 	// peerMaxPendingRequests is the maximum number of pending pipelined
-	// requests per connection. With 8 connections × 16 pending = 128
-	// concurrent peer fetches per peer, matching the old HTTP/2 capacity.
+	// requests per connection. With 16 connections × 16 pending = 256
+	// concurrent peer fetches per peer, doubling the old HTTP/2 capacity.
 	peerMaxPendingRequests = 16
 	// peerDialTimeout bounds one TCP dial to a peer. Peer traffic is
 	// intra-cluster (same VPC, usually the same zone): healthy dials
@@ -205,7 +205,7 @@ type PeerFetcherConfig struct {
 // PeerFetcher issues cache-lookup RPCs to peer nodes using HTTP/1.1
 // pipelining (fasthttp.PipelineClient) for efficient connection reuse.
 // Each peer address gets its own PipelineClient with a small number
-// of connections (default 8) that pipeline up to 16 concurrent requests
+// of connections (default 16) that pipeline up to 16 concurrent requests
 // per connection, reducing connection pool memory by ~85% compared to
 // the non-pipelined approach.
 //
@@ -357,7 +357,7 @@ func (f *PeerFetcher) UnretireAddress(addr string) {
 }
 
 // NewPeerFetcherWithConfig creates a PeerFetcher with full pipelining
-// configuration. MaxConnsPerHost and MaxIdleConnDuration default to 8
+// configuration. MaxConnsPerHost and MaxIdleConnDuration default to 16
 // and 120s respectively when zero.
 func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
 	hopLimit := cfg.HopLimit
@@ -466,7 +466,7 @@ func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
 // getPipelineClient returns the PipelineClient for the given peer
 // address, creating one on first use, or nil once the fetcher is closed
 // (Close dropped the map). Each PipelineClient maintains a small pool
-// of pipelined connections (default 8) that can handle up to 16
+// of pipelined connections (default 16) that can handle up to 16
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
 //

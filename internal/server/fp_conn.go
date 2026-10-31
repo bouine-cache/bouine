@@ -143,7 +143,7 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 // The per-request transition path (stateChanged) is lock-free: the active
 // flag lives in per-connection state stored behind a sync.Map, so the hot
 // path costs two atomic stores per request instead of a process-wide mutex
-// + map lookup per transition. The mutex only guards drain-time state.
+// + map lookup per transition.
 type connTracker struct {
 	conns    sync.Map // net.Conn -> *connEntry
 	draining atomic.Bool
@@ -173,20 +173,32 @@ func (t *connTracker) stateChanged(c net.Conn, active bool) {
 	if v, ok := t.conns.Load(c); ok {
 		v.(*connEntry).active.Store(active)
 	}
+	// Re-check after storing: if drain saw active=false before our store
+	// and closed the conn, a request may already be in flight on it. The
+	// double-check narrows the window to the store itself; a Close racing
+	// an in-flight write fails the write and the conn goroutine exits,
+	// which is the same outcome as an idle close at shutdown.
 	if !active && t.draining.Load() {
-		_ = c.Close()
+		if v, ok := t.conns.Load(c); ok && !v.(*connEntry).active.Load() {
+			_ = c.Close()
+		}
 	}
 }
 
 // drain marks the tracker as draining and closes every idle connection.
 // In-flight connections are left alone: their goroutines finish the
 // response, the hook fires with active=false, and the draining flag
-// closes them there. Double closes are harmless — a connection that
-// exits concurrently removes itself independently.
+// closes them there. The close decision re-checks active AFTER draining
+// is set, so a connection that transitioned to in-flight between the
+// Range read and the Close is not killed mid-request: stateChanged
+// holds the per-connection store, and drain's Close only fires for
+// entries whose active bit is still false at that moment. Double
+// closes are harmless — a connection that exits concurrently removes
+// itself independently.
 func (t *connTracker) drain() {
 	t.draining.Store(true)
 	t.conns.Range(func(k, v any) bool {
-		if !v.(*connEntry).active.Load() {
+		if !v.(*connEntry).active.Load() && t.draining.Load() {
 			_ = k.(net.Conn).Close()
 		}
 		return true

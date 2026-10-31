@@ -67,9 +67,13 @@ type Pool struct {
 
 // Target is a single upstream endpoint.
 type Target struct {
-	url           *url.URL
-	metrics       *Metrics
-	addr          string
+	url     *url.URL
+	metrics *Metrics
+	addr    string
+	// originPrefix is scheme://host precomputed once at construction; the
+	// fetch paths append the request URI to it without re-deriving the
+	// scheme+host or allocating a concat per fetch.
+	originPrefix  []byte
 	passiveErrors atomic.Int64
 	// lastSuccessUnix is the Unix-nanosecond timestamp of the most
 	// recent fetch completed with a non-5xx response (a 304 counts — a
@@ -536,6 +540,13 @@ func newTarget(addr string) (*Target, error) {
 		return nil, fmt.Errorf("parse target %q: %w", addr, err)
 	}
 	t := &Target{addr: u.Host, url: u}
+	// newTarget prepends "http://" when addr has no scheme, so u.Scheme is
+	// always non-empty here; the fallback is defensive only.
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	t.originPrefix = []byte(scheme + "://" + u.Host)
 	t.healthy.Store(true)
 	return t, nil
 }
@@ -567,7 +578,13 @@ func (p *Pool) pick() *Target {
 // health checking (consecutive-5xx ejection) is applied on response.
 func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 	conc5xx := consecutive5xx
+	return p.fastHandler(conc5xx)
+}
 
+// fastHandler is the FastHandler body as a named method so the CodeQL
+// request-forgery barrier can attach to it by signature (closures cannot
+// be addressed in the barrier model).
+func (p *Pool) fastHandler(conc5xx int) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		t := p.pick()
 		if t == nil {
@@ -579,13 +596,20 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		defer t.metrics.decActiveConnection(p.Name, t.addr)
 		originStart := time.Now()
 
-		scheme := t.url.Scheme
-		if scheme == "" {
-			scheme = "http"
-		}
-		uri := scheme + "://" + t.url.Host + string(ctx.Path())
+		// Absolute-form URI assembled from the precomputed scheme://host
+		// prefix into a stack buffer. A request-target over 8 KiB grows
+		// uri to a heap backing array via append (correct, just not
+		// stack-resident; the fast path caps URIs at 8 KiB, the slow
+		// fall-through can exceed it). SetRequestURIBytes copies into the
+		// pooled request's own URI buffer, so no per-request string
+		// concat. stackBuf is per-handler-invocation: FastHandler runs one
+		// invocation per request, never concurrently on itself.
+		var stackBuf [8192]byte
+		uri := append(stackBuf[:0], t.originPrefix...)
+		uri = append(uri, ctx.Path()...)
 		if q := ctx.QueryArgs(); q.Len() > 0 {
-			uri += "?" + string(q.QueryString())
+			uri = append(uri, '?')
+			uri = append(uri, q.QueryString()...)
 		}
 
 		req := fasthttp.AcquireRequest()
@@ -594,7 +618,7 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		defer fasthttp.ReleaseResponse(resp)
 
 		req.Header.SetMethod(string(ctx.Method()))
-		req.SetRequestURI(uri)
+		req.SetRequestURIBytes(uri)
 		req.Header.SetHost(t.url.Host)
 		// Preserve the client's Host on the wire for preserve_host
 		// pools (same UseHostHeader mechanism as doSingleFetch): the
@@ -709,6 +733,13 @@ type PoolFastClient struct {
 	pool         *Pool
 	client       *fasthttp.Client
 	streamClient *fasthttp.Client
+	// uriScratch is a per-client scratch buffer for the absolute-form
+	// origin URI (precomputed scheme://host prefix + request URI). One
+	// buffer per PoolFastClient, used only inside doSingleFetch, which is
+	// sequential per client goroutine at the call site — but hedged
+	// fetches run attempts concurrently, so guard it with a mutex.
+	uriScratch   []byte
+	uriScratchMu sync.Mutex
 	hedgeTimeout time.Duration
 }
 
@@ -763,18 +794,28 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	if t == nil {
 		return fmt.Errorf("no healthy upstream")
 	}
-	// Rewrite the request URI to the selected target.
-	scheme := t.url.Scheme
-	if scheme == "" {
-		scheme = "http"
-	}
+	// Rewrite the request URI to the selected target, using the
+	// precomputed scheme://host prefix into the client's scratch buffer.
+	// Header.RequestURI() returns the raw stored target verbatim; it is
+	// origin-form (path+query) only because every production caller sets
+	// it via SetRequestURIBytes(h.originURI(...)) — the originURI choke
+	// point canonicalizes absolute-form input down to path+query. No URI
+	// parse is needed here. SetRequestURIBytes copies into the pooled
+	// request's own URI buffer BEFORE the scratch is released, so the
+	// request never aliases it (hedged attempts run doSingleFetch
+	// concurrently on the same client; the mutex serializes scratch use).
+	c.uriScratchMu.Lock()
+	c.uriScratch = append(c.uriScratch[:0], t.originPrefix...)
+	c.uriScratch = append(c.uriScratch, req.Header.RequestURI()...)
+	uri := c.uriScratch
 	// The dialed host is always the operator-configured pool target;
 	// only the request's own path/query is appended — the same data
 	// flow as Do and FastHandler, which carry the already-accepted
 	// go/request-forgery alerts. Suppressing here keeps this
 	// duplicated sink from adding a third alert.
 	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
-	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+	req.SetRequestURIBytes(uri)
+	c.uriScratchMu.Unlock()
 	// With an absolute-form request URI, fasthttp's Request.Write
 	// replaces the Host header with the URI's host (the pool target)
 	// unless UseHostHeader is set. Preserving the request's own Host

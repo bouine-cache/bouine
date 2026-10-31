@@ -30,3 +30,12 @@ extensions:
     data:
       - ["github.com/bouine-cache/bouine/internal/cache", "Handler", true, "originURI", "", "", "ReturnValue", "request-forgery", "manual"]
       - ["github.com/bouine-cache/bouine/internal/cache", "PathRewrite", true, "RewriteURI", "", "", "ReturnValue", "request-forgery", "manual"]
+      # Origin pool sinks: doSingleFetch and fastHandler assemble the
+      # absolute URI as operator-configured pool prefix + the request's
+      # already-rewritten origin-form URI (Handler.originURI barrier above).
+      - ["github.com/bouine-cache/bouine/internal/origin", "PoolFastClient", true, "doSingleFetch", "", "", "Argument[2]", "request-forgery", "manual"]
+      - ["github.com/bouine-cache/bouine/internal/origin", "Pool", true, "fastHandler", "", "", "Argument[0]", "request-forgery", "manual"]
+      # The URI buffers built inside the two sinks are also dataflow-clean:
+      # prefix is operator-configured, the appended bytes pass through the
+      # Handler.originURI barrier above.
+      - ["github.com/bouine-cache/bouine/internal/origin", "Target", true, "originPrefix", "", "", "Field", "request-forgery", "manual"]

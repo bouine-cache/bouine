@@ -413,8 +413,8 @@ type Cluster struct {
 	// PeerMaxConnsPerHost limits the number of HTTP/1.1 pipelined
 	// connections per peer. With pipelining (PipelineClient), each
 	// connection handles MaxPendingRequests concurrent in-flight
-	// requests. Default 8, which with 16 pending requests gives 128
-	// concurrent peer fetches per peer — matching the old HTTP/2
+	// requests. Default 16, which with 16 pending requests gives 256
+	// concurrent peer fetches per peer — doubling the old HTTP/2
 	// capacity. Set to 1 to disable pipelining.
 	PeerMaxConnsPerHost int `yaml:"peer_max_conns_per_host,omitempty" json:"peer_max_conns_per_host,omitempty"`
 	// PeerMaxIdleConnDuration controls how long idle peer connections
@@ -530,7 +530,7 @@ type ConnectPolicy struct {
 	KeepAlive time.Duration `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
 	// MaxConnections caps the number of concurrent connections per
 	// upstream host (fasthttp.Client.MaxConnsPerHost). Zero applies a
-	// 64 built-in default. This is per-host, not per-pool: a pool with
+	// 128 built-in default. This is per-host, not per-pool: a pool with
 	// N targets gets N × MaxConnections. This is distinct from
 	// Listen.MaxConnections, which caps total TCP connections to the
 	// data plane.
@@ -804,7 +804,7 @@ type RouteCache struct {
 	// variant storage is skipped (and vary_cap_hits_total increments) —
 	// requests keep being proxied, only caching is affected. Guards
 	// against Vary explosion (RFC 9110 §12.5.5). Zero (default) applies
-	// the built-in default (1024). Negative values are rejected; there is
+	// the built-in default (2048). Negative values are rejected; there is
 	// no upper bound, but the cap itself cannot be disabled.
 	MaxVariants int `yaml:"max_variants,omitempty" json:"max_variants,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +

@@ -255,7 +255,7 @@
                     "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
                   },
                   "max_connections": {
-                    "description": "Max concurrent connections per origin host. Default 64.",
+                    "description": "Max concurrent connections per origin host. Default 128.",
                     "type": "integer",
                     "minimum": 1
                   },

@@ -88,7 +88,7 @@ config:
   #     connect:
   #       timeout: 10s                  # TCP dial timeout (default 10s)
   #       keep_alive: 30s               # TCP keep-alive probe interval (default 30s)
-  #       max_connections: 64           # per origin host (default 64)
+  #       max_connections: 128          # per origin host (default 128)
   #       max_idle_conn_duration: 90s   # idle pooled-connection lifetime (default 90s);
   #                                     # keep below any LB idle timeout in the path (AWS NLB: 350s)
   #       response_header_timeout: 30s  # origin wait default inherited by routes without cache.fetch_timeout; keep < 5m (data plane safety net)

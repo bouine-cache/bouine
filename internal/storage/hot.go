@@ -201,12 +201,36 @@ const banListCap = 4096
 // next lookup and reclaimed by the TTL reaper if never looked up again.
 const banScanCoalesceWindow = 50 * time.Millisecond
 
+//nolint:govet // fieldalignment: entries (sync.Map) leads so its pointer-heavy header stays in the GC scan prefix
 type shard struct {
-	entries     map[api.Key]*hotEntry
+	// entries is a sync.Map so the hit path's read (Get) is a lock-free
+	// atomic load in steady state instead of an RWMutex RLock whose
+	// readerCount cache line is written by every reader on every core.
+	// All mutations (Put/Delete/evict/reap/ban) still take mu (write
+	// lock) and use Store/Delete, so writers stay serialized.
+	entries     sync.Map // api.Key -> *hotEntry
 	evict       evictor.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
 	mu          sync.RWMutex
+}
+
+// syncMapLen counts entries (cold path: Stats, ban scans).
+func syncMapLen(m *sync.Map) int {
+	n := 0
+	m.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+// loadEntry reads one entry from the shard's sync.Map under its type
+// assertion. Callers that already hold the write lock can use
+// s.entries.Load directly; this helper keeps the read sites uniform.
+func loadEntry(s *shard, key api.Key) (*hotEntry, bool) {
+	v, ok := s.entries.Load(key)
+	if !ok {
+		return nil, false
+	}
+	return v.(*hotEntry), true
 }
 
 type hotEntry struct {
@@ -224,13 +248,23 @@ type hotEntry struct {
 	windowHits atomic.Int64
 }
 
-// hotEntryPool reuses hotEntry structs across Put/Delete cycles to avoid
-// per-Put allocation. Reset on acquire; not returned to pool if the
-// entry's windowHits counter is non-zero (shouldn't happen since Delete
-// clears it, but defensive).
+// hotEntry values are published once (Put) and never mutated afterwards:
+// eviction and Delete remove them from the shard's sync.Map without
+// touching the struct (a lock-free reader may still hold it). This is
+// what makes the lock-free Get read safe. The trade-off is one small
+// allocation per Put instead of pool recycling — measured as
+// insignificant against the miss path's cost, and the hit path (the
+// one that matters) is untouched.
 var hotEntryPool = sync.Pool{
 	New: func() any { return new(hotEntry) },
 }
+
+// releaseEntry drops the entry's mutable links WITHOUT writing to the
+// shared struct fields a lock-free reader may be reading: it only
+// resets the eviction-list entry pointer via the pool path. The hotEntry
+// itself is returned to the pool only when its windowHits is zero and no
+// reader can hold it — which the sync.Map Delete guarantees (the value
+// is no longer reachable via Load).
 
 // newEvictList builds a per-shard eviction list from the HotConfig's
 // algorithm selection. SIEVE is the default (zero-value config). When
@@ -397,7 +431,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 
 	shards := make([]shard, n)
 	for i := range shards {
-		shards[i].entries = make(map[api.Key]*hotEntry)
+		// entries is a zero-value sync.Map; no init needed
 		shards[i].evict = newEvictList(cfg)
 	}
 	reaperInterval := defaultReaperInterval
@@ -456,15 +490,51 @@ func (h *HotStore) shard(key api.Key) *shard {
 func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
 	s := h.shard(key)
 
-	// Fast path: read lock. If the entry exists and its visited bit is
-	// already set, no write is needed — just return the object.
-	s.mu.RLock()
-	e := s.entries[key]
-	if e != nil && e.entry.Visited() {
-		e.windowHits.Add(1)
-		stored := e.obj
-		ret := h.detachBody(stored)
-		s.mu.RUnlock()
+	// Fast path: lock-free read. sync.Map.Load is a single atomic load
+	// once the map is in read-only mode (steady state — after the last
+	// write), so the hit path no longer pays the shard RWMutex's
+	// readerCount cache-line write that every core contended on.
+	// If the entry exists and its visited bit is already set, no write
+	// is needed — just return the object.
+	if v, ok := s.entries.Load(key); ok {
+		e := v.(*hotEntry)
+		if e.entry.Visited() {
+			e.windowHits.Add(1)
+			stored := e.obj
+			ret := h.detachBody(stored)
+			if h.matchesActiveBan(ret) {
+				h.evictBanned(s, key, stored)
+				h.stats.misses.Add(1)
+				return nil, "", nil
+			}
+			h.stats.hits.Add(1)
+			return ret, api.SourceHot, nil
+		}
+		// Entry exists but visited bit is false: fall through to the
+		// slow path below (write lock sets the bit via SIEVE Access).
+		s.mu.Lock()
+		var stored *api.Object
+		if v2, ok2 := s.entries.Load(key); ok2 {
+			e = v2.(*hotEntry)
+			s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
+				return e.entry
+			})
+			// Atomic increment: the warm-tier encoder reads Hits outside
+			// the shard lock (tiered.writeHotOnlyToWarm → encodeObject),
+			// so the read/write pair must not race (issue #218).
+			atomic.AddUint64(&e.obj.Hits, 1)
+			e.windowHits.Add(1)
+			stored = e.obj
+		}
+		var ret *api.Object
+		if stored != nil {
+			ret = h.detachBody(stored)
+		}
+		s.mu.Unlock()
+		if ret == nil {
+			h.stats.misses.Add(1)
+			return nil, "", nil
+		}
 		if h.matchesActiveBan(ret) {
 			h.evictBanned(s, key, stored)
 			h.stats.misses.Add(1)
@@ -473,48 +543,9 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 		h.stats.hits.Add(1)
 		return ret, api.SourceHot, nil
 	}
-	s.mu.RUnlock()
 
-	if e == nil {
-		h.stats.misses.Add(1)
-		return nil, "", nil
-	}
-
-	// Slow path: visited bit is false. Upgrade to write lock, re-check
-	// (entry may have been evicted between RUnlock and Lock), then set it.
-	s.mu.Lock()
-	e = s.entries[key]
-	var stored *api.Object
-	if e != nil {
-		s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
-			return e.entry
-		})
-		// Atomic increment: the warm-tier encoder reads Hits outside
-		// the shard lock (tiered.writeHotOnlyToWarm → encodeObject),
-		// so the read/write pair must not race (issue #218). The lock
-		// already serializes writers; the atomic store pairs with the
-		// encoder's atomic load.
-		atomic.AddUint64(&e.obj.Hits, 1)
-		e.windowHits.Add(1)
-		stored = e.obj
-	}
-	var ret *api.Object
-	if stored != nil {
-		ret = h.detachBody(stored)
-	}
-	s.mu.Unlock()
-
-	if ret == nil {
-		h.stats.misses.Add(1)
-		return nil, "", nil
-	}
-	if h.matchesActiveBan(ret) {
-		h.evictBanned(s, key, stored)
-		h.stats.misses.Add(1)
-		return nil, "", nil
-	}
-	h.stats.hits.Add(1)
-	return ret, api.SourceHot, nil
+	h.stats.misses.Add(1)
+	return nil, "", nil
 }
 
 // detachBody returns an object whose Body the caller can safely alias
@@ -583,17 +614,12 @@ func (h *HotStore) flushSlabFrees(bodies [][]byte) {
 func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if cur, ok := s.entries[key]; ok && cur.obj == obj {
+	if cur, ok := loadEntry(s, key); ok && cur.obj == obj {
 		h.notifyEvict(key, cur, &slabFrees, evictReasonBan)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.entry)
-		delete(s.entries, key)
+		s.entries.Delete(key)
 		h.stats.evictions.Add(1)
-		cur.obj = nil
-		cur.entry = nil
-		cur.hasBackup = false
-		cur.windowHits.Store(0)
-		hotEntryPool.Put(cur)
 	}
 	s.mu.Unlock()
 	h.flushSlabFrees(slabFrees)
@@ -676,35 +702,25 @@ func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
 		if !ok {
 			break
 		}
-		if old, exists := s.entries[evKey]; exists {
+		if old, exists := loadEntry(s, evKey); exists {
 			recordEviction(&logs, evKey, old, "inline_overshoot")
 			h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 			s.bytes -= objSize(old.obj)
-			delete(s.entries, evKey)
+			s.entries.Delete(evKey)
 			h.stats.evictions.Add(1)
-			old.obj = nil
-			old.entry = nil
-			old.hasBackup = false
-			old.windowHits.Store(0)
-			hotEntryPool.Put(old)
 		}
 	}
 	if s.bytes+size > perShardMax {
 		stillOver = true
 	}
 
-	if old, exists := s.entries[key]; exists {
+	if old, exists := loadEntry(s, key); exists {
 		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.entry)
 		if old.hasBackup {
 			s.backedCount--
 		}
-		old.obj = nil
-		old.entry = nil
-		old.hasBackup = false
-		old.windowHits.Store(0)
-		hotEntryPool.Put(old)
 	}
 
 	se, _ := s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
@@ -714,7 +730,9 @@ func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.entry = se
-	s.entries[key] = e
+	e.hasBackup = false
+	e.windowHits.Store(0)
+	s.entries.Store(key, e)
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
@@ -766,9 +784,11 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 	s.mu.Lock()
 
 	deadline := time.Now().Add(reaperShardBudget)
-	for key, e := range s.entries {
+	s.entries.Range(func(k, v any) bool {
+		key := k.(api.Key)
+		e := v.(*hotEntry)
 		if time.Now().After(deadline) {
-			break
+			return false
 		}
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
@@ -782,21 +802,17 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			// always win.
 			if e.obj.KeepGrace && h.mayReap != nil && !h.mayReap(e.obj) {
 				h.stats.graceHolds.Add(1)
-				continue
+				return true
 			}
 			recordEviction(&logs, key, e, "expired")
 			h.notifyEvict(key, e, &slabFrees, evictReasonReaper)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
-			delete(s.entries, key)
+			s.entries.Delete(key)
 			h.stats.evictions.Add(1)
-			e.obj = nil
-			e.entry = nil
-			e.hasBackup = false
-			e.windowHits.Store(0)
-			hotEntryPool.Put(e)
 		}
-	}
+		return true
+	})
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
 	h.flushSlabFrees(slabFrees)
@@ -821,17 +837,12 @@ func (h *HotStore) sweeper() {
 				if !ok {
 					break
 				}
-				if old, exists := s.entries[evKey]; exists {
+				if old, exists := loadEntry(s, evKey); exists {
 					recordEviction(&logs, evKey, old, "sweeper_overshoot")
 					h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 					s.bytes -= objSize(old.obj)
-					delete(s.entries, evKey)
+					s.entries.Delete(evKey)
 					h.stats.evictions.Add(1)
-					old.obj = nil
-					old.entry = nil
-					old.hasBackup = false
-					old.windowHits.Store(0)
-					hotEntryPool.Put(old)
 				}
 			}
 			s.mu.Unlock()
@@ -847,7 +858,7 @@ func (h *HotStore) sweeper() {
 func (h *HotStore) Has(key api.Key) bool {
 	s := h.shard(key)
 	s.mu.RLock()
-	_, ok := s.entries[key]
+	_, ok := loadEntry(s, key)
 	s.mu.RUnlock()
 	return ok
 }
@@ -857,16 +868,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s := h.shard(key)
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if e, ok := s.entries[key]; ok {
+	if e, ok := loadEntry(s, key); ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.entry)
 		h.notifyEvict(key, e, &slabFrees, evictReasonDelete)
-		delete(s.entries, key)
-		e.obj = nil
-		e.entry = nil
-		e.hasBackup = false
-		e.windowHits.Store(0)
-		hotEntryPool.Put(e)
+		s.entries.Delete(key)
 	}
 	s.mu.Unlock()
 	h.flushSlabFrees(slabFrees)
@@ -985,21 +991,19 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 	n := 0
 	var slabFrees [][]byte
 	s.mu.Lock()
-	for key, e := range s.entries {
+	s.entries.Range(func(k, v any) bool {
+		key := k.(api.Key)
+		e := v.(*hotEntry)
 		if pred(e.obj) {
 			h.notifyEvict(key, e, &slabFrees, evictReasonBan)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
-			delete(s.entries, key)
+			s.entries.Delete(key)
 			h.stats.evictions.Add(1)
 			n++
-			e.obj = nil
-			e.entry = nil
-			e.hasBackup = false
-			e.windowHits.Store(0)
-			hotEntryPool.Put(e)
 		}
-	}
+		return true
+	})
 	s.mu.Unlock()
 	h.flushSlabFrees(slabFrees)
 	return n, nil
@@ -1122,7 +1126,7 @@ func (h *HotStore) Stats() api.Stats {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		hotEntries += int64(len(s.entries))
+		hotEntries += int64(syncMapLen(&s.entries))
 		hotBytes += s.bytes
 		s.mu.RUnlock()
 	}
@@ -1143,9 +1147,9 @@ func (h *HotStore) Stats() api.Stats {
 func (h *HotStore) WindowHits(key api.Key) int64 {
 	s := h.shard(key)
 	s.mu.RLock()
-	e := s.entries[key]
+	e, ok := loadEntry(s, key)
 	var n int64
-	if e != nil {
+	if ok && e != nil {
 		n = e.windowHits.Load()
 	}
 	s.mu.RUnlock()
@@ -1190,7 +1194,7 @@ func (h *HotStore) SetBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && !e.hasBackup {
+	if e, ok := loadEntry(s, key); ok && !e.hasBackup {
 		e.hasBackup = true
 		s.backedCount++
 	}
@@ -1203,7 +1207,7 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && e.hasBackup {
+	if e, ok := loadEntry(s, key); ok && e.hasBackup {
 		e.hasBackup = false
 		s.backedCount--
 	}
@@ -1234,7 +1238,7 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 		if !ok {
 			return k, false
 		}
-		if he, exists := s.entries[k]; exists {
+		if he, exists := loadEntry(s, k); exists {
 			if he.hasBackup {
 				s.backedCount--
 				return k, true
@@ -1267,16 +1271,17 @@ func (h *HotStore) Keys() []api.Key {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		totalEntries += len(s.entries)
+		totalEntries += syncMapLen(&s.entries)
 		s.mu.RUnlock()
 	}
 	keys := make([]api.Key, 0, totalEntries)
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k := range s.entries {
-			keys = append(keys, k)
-		}
+		s.entries.Range(func(k, _ any) bool {
+			keys = append(keys, k.(api.Key))
+			return true
+		})
 		s.mu.RUnlock()
 	}
 	return keys
@@ -1300,11 +1305,12 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		for _, e := range s.entries {
-			if !e.hasBackup {
+		s.entries.Range(func(_, v any) bool {
+			if !v.(*hotEntry).hasBackup {
 				total++
 			}
-		}
+			return true
+		})
 		s.mu.RUnlock()
 	}
 	if total == 0 {
@@ -1327,20 +1333,19 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 		}
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k, e := range s.entries {
+		s.entries.Range(func(k, v any) bool {
+			e := v.(*hotEntry)
 			if e.hasBackup {
-				continue
+				return true
 			}
 			if skipped < offset {
 				skipped++
-				continue
+				return true
 			}
-			keys = append(keys, k)
+			keys = append(keys, k.(api.Key))
 			needed--
-			if needed <= 0 {
-				break
-			}
-		}
+			return needed > 0
+		})
 		s.mu.RUnlock()
 	}
 

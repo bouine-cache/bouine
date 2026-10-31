@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
@@ -137,33 +138,31 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 
 // connTracker holds the fast-path listener's live connections with their
 // idle/in-flight state, so shutdown can close idle connections while
-// letting in-flight responses finish (see serveFastPath). The state
-// hook costs one locked map update per request transition — O(1), no
-// allocation, off the hit path's zero-alloc budget.
+// letting in-flight responses finish (see serveFastPath).
+//
+// The per-request transition path (stateChanged) is lock-free: the active
+// flag lives in per-connection state stored behind a sync.Map, so the hot
+// path costs two atomic stores per request instead of a process-wide mutex
+// + map lookup per transition. The mutex only guards drain-time state.
 type connTracker struct {
-	conns    map[net.Conn]*connEntry
-	draining bool
-	mu       sync.Mutex
+	conns    sync.Map // net.Conn -> *connEntry
+	draining atomic.Bool
 }
 
 type connEntry struct {
-	active bool
+	active atomic.Bool
 }
 
 func newConnTracker() *connTracker {
-	return &connTracker{conns: make(map[net.Conn]*connEntry)}
+	return &connTracker{}
 }
 
 func (t *connTracker) add(c net.Conn) {
-	t.mu.Lock()
-	t.conns[c] = &connEntry{}
-	t.mu.Unlock()
+	t.conns.Store(c, &connEntry{})
 }
 
 func (t *connTracker) remove(c net.Conn) {
-	t.mu.Lock()
-	delete(t.conns, c)
-	t.mu.Unlock()
+	t.conns.Delete(c)
 }
 
 // stateChanged is the h1parser conn-state hook: active=true while a
@@ -171,13 +170,10 @@ func (t *connTracker) remove(c net.Conn) {
 // During drain, a connection going idle is closed right away so it
 // never parks on the next keep-alive read.
 func (t *connTracker) stateChanged(c net.Conn, active bool) {
-	t.mu.Lock()
-	if entry, ok := t.conns[c]; ok {
-		entry.active = active
+	if v, ok := t.conns.Load(c); ok {
+		v.(*connEntry).active.Store(active)
 	}
-	closeIdle := !active && t.draining
-	t.mu.Unlock()
-	if closeIdle {
+	if !active && t.draining.Load() {
 		_ = c.Close()
 	}
 }
@@ -186,14 +182,13 @@ func (t *connTracker) stateChanged(c net.Conn, active bool) {
 // In-flight connections are left alone: their goroutines finish the
 // response, the hook fires with active=false, and the draining flag
 // closes them there. Double closes are harmless — a connection that
-// exits concurrently removes itself under the same lock.
+// exits concurrently removes itself independently.
 func (t *connTracker) drain() {
-	t.mu.Lock()
-	t.draining = true
-	for c, entry := range t.conns {
-		if !entry.active {
-			_ = c.Close()
+	t.draining.Store(true)
+	t.conns.Range(func(k, v any) bool {
+		if !v.(*connEntry).active.Load() {
+			_ = k.(net.Conn).Close()
 		}
-	}
-	t.mu.Unlock()
+		return true
+	})
 }

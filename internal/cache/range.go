@@ -22,7 +22,7 @@ type rangeWriter interface {
 // synthesized CDN-Cache-Control cap as the corresponding 200 serve
 // (ADR-0063 behavior matrix), and the origin's CDC-family lines are
 // skipped in the stored-header copy (invariant I3).
-func (h *Handler) serveRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, now time.Time, src api.Source) bool {
+func (h *Handler) serveRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, now time.Time) bool {
 	rangeHeader := ri.Header.Get(header.Range)
 	if rangeHeader == "" {
 		return false
@@ -52,7 +52,6 @@ func (h *Handler) serveRange(w rangeWriter, ri RequestInfo, obj *api.Object, sta
 		w.SetHeader(header.Warning, `110 - "Response is Stale"`)
 	}
 	w.SetHeader(header.XCache, xCache)
-	w.SetHeader(header.XCacheSource, string(src))
 	h.setRangeCDC(w, obj, stale, now)
 
 	if len(ranges) == 1 {

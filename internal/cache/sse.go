@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"errors"
 
-	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -36,10 +35,11 @@ import (
 //     a few dozen concurrent streams starve every other request on the
 //     route.
 //
-// BYPASS responses carry X-Cache-Source: origin on every branch that
-// dispatched a fetch (success or fetch-error 502/504). The no-client 502
-// below, like the shed 503, keeps the empty source — the origin was
-// never reached — which the metrics layer labels "bouine".
+// BYPASS responses record api.SourceOrigin on the XBouineSource
+// UserValue on every branch that dispatched a fetch (success or
+// fetch-error 502/504). The no-client 502 below, like the shed 503,
+// keeps the empty source — the origin was never reached — which the
+// metrics layer labels "bouine".
 //
 // Cache-invalidation semantics for POST/PUT/DELETE are preserved: on a
 // 2xx/3xx response the affected keys are purged as soon as the status is
@@ -51,7 +51,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		// wiping every header written before it, so it must run first
 		// and the attribution headers after — the same order as the
 		// sibling 50x branches (handleBypassFast, streamBypass,
-		// handleCacheMiss). No X-Cache-Source: no fetch was ever
+		// handleCacheMiss). No source UserValue: no fetch was ever
 		// dispatched, so the metrics layer labels this response
 		// "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
@@ -68,7 +68,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		}
 		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -77,13 +77,13 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	// (same anti-spoofing rule as streamBypass).
 	dst := &ctx.Response.Header
 	for k, v := range sf.resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSourceLegacy)) {
 			continue
 		}
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	ctx.SetStatusCode(sf.StatusCode)
 	h.applyResponseRewrites(dst)
 

@@ -38,8 +38,10 @@ func TestStrong_PeerServedStaleIsRevalidated(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	resp := s.GetWithHost(t, nonOwner, path, host)
 	require.Equal(t, "STALE", resp.Header.Get("X-Cache"))
-	require.Equal(t, "peer", resp.Header.Get("X-Cache-Source"))
 	require.Equal(t, primed, string(resp.Body), "the stale copy is served while it is refreshed")
+	require.Greater(t, s.MetricValueWithLabels(t, nonOwner,
+		"bouine_requests_total", `cache_result="STALE",source="peer"`), 0.0,
+		"the stale peer serve must be attributed source=peer on the metrics channel")
 
 	// The refresh runs in the background and is forwarded to the owner;
 	// the next peer fetches return the new body.
@@ -50,11 +52,14 @@ func TestStrong_PeerServedStaleIsRevalidated(t *testing.T) {
 }
 
 // nonOwnerNode returns an alive node that serves path from a peer, i.e.
-// a node that does not own the key.
+// a node that does not own the key. The wire header is gone, so the
+// peer serve is identified through the source label on the node's
+// requests metric.
 func nonOwnerNode(t *testing.T, s *driver.ClusterStack, path, host string) int {
 	t.Helper()
 	for _, i := range s.AliveNodes() {
-		if s.GetWithHost(t, i, path, host).Header.Get("X-Cache-Source") == "peer" {
+		if s.GetWithHost(t, i, path, host).Header.Get("X-Cache") == "HIT" &&
+			s.MetricValueWithLabels(t, i, "bouine_requests_total", `source="peer"`) > 0 {
 			return i
 		}
 	}

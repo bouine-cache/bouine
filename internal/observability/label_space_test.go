@@ -26,7 +26,7 @@ func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, "origin")
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		ctx.SetStatusCode(404)
 	})
 	ctx := &fasthttp.RequestCtx{}
@@ -129,7 +129,7 @@ func TestTrafficClass_LabelSpaceClosed(t *testing.T) {
 	// UserValue form is the only reader; an inbound header is noise).
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "HIT")
-		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.SetUserValue(header.XBouineSource, "hot")
 		ctx.SetStatusCode(200)
 	})
 	ctx := &fasthttp.RequestCtx{}
@@ -182,7 +182,7 @@ func TestTrafficClass_AlwaysPresent(t *testing.T) {
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, "origin")
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		ctx.SetStatusCode(200)
 	})
 	ctx := &fasthttp.RequestCtx{}

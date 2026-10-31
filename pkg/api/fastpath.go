@@ -151,6 +151,13 @@ type RawRequest struct {
 	// intentionally survives across the connection's keep-alive requests.
 	// Nil on hand-built RawRequests.
 	MemoRoute RouteMemo
+	// Source is the served response's source (hot/warm/peer), set by the
+	// fast path on a hit. The h1parser transfers it to the fallback
+	// RequestCtx under header.XBouineSource so the fallback's metrics
+	// middleware reports the same source label; never emitted on the
+	// wire. Reset to "" by the parser's per-request soft reset;
+	// zero value = unset.
+	Source string
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

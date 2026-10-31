@@ -294,12 +294,12 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			ctx.SetUserValue(header.XBouineSource, "origin")
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
 		// ctx.Error resets the response, so the attribution headers are
-		// written after it. No X-Cache-Source: neither a client nor an
+		// written after it. No source UserValue: neither a client nor an
 		// upstream is wired, so no fetch was dispatched — the metrics
 		// layer labels this response "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
@@ -315,7 +315,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		}
 		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -323,13 +323,13 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	// Copy origin response headers, skipping bouine attribution headers.
 	dst := &ctx.Response.Header
 	for k, v := range sf.resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSourceLegacy)) {
 			continue
 		}
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	ctx.SetStatusCode(sf.StatusCode)
 	h.applyResponseRewrites(dst)
 
@@ -389,7 +389,7 @@ func (h *Handler) streamMiss(
 		}
 		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -402,7 +402,7 @@ func (h *Handler) streamMiss(
 		removeCDCFamily(dst)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	// RFC 9111 §4.2.3 / §5.1: a cache generating a response computes Age
 	// from the corrected initial age — the origin's Age plus the
 	// response delay, floored by apparent age from Date skew. Overwrites
@@ -841,7 +841,7 @@ func (h *Handler) streamMissBuffered(
 		close(inflight.stored)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		releaseStreamFetch(sf)
 		return

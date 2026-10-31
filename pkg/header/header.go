@@ -225,16 +225,12 @@ const (
 	// response: "HIT", "MISS", "STALE", "BYPASS", or "REVALIDATED".
 	XCache = "X-Cache"
 
-	// XCacheSource — bouine's cache source header set on every served
-	// response: "hot", "warm", "peer", or "origin" — the last whenever
-	// a fetch was dispatched (misses, BYPASS, failed-fetch errors).
-	// Empty for responses bouine synthesized itself without contacting
-	// the origin (only-if-cached 504, shed 503, no-client-no-upstream
-	// 502) — the metrics layer labels that slot "bouine" (see
-	// api.SourceBouine). Split from X-Cache so operators can
-	// distinguish where a HIT was served from without scraping the
-	// storage layer.
-	XCacheSource = "X-Cache-Source"
+	// XCacheSourceLegacy — the pre-removal wire name of the served-source
+	// header. bouine no longer emits X-Cache-Source (the source rides the
+	// XBouineSource UserValue), but origin responses may still carry it,
+	// so proxy-copy loops must keep filtering it out to prevent spoofing
+	// a stale client-visible attribution header.
+	XCacheSourceLegacy = "X-Cache-Source"
 
 	// XBouineHost — stored on cached objects to record the request Host
 	// at storage time. Used by ban/purge predicates and the dashboard.
@@ -264,6 +260,14 @@ const (
 	// header); the value comes from the configured classifier, never
 	// from request input. The middleware reads the UserValue only.
 	XBouineTrafficClass = "X-Bouine-Traffic-Class"
+
+	// XBouineSource — the cache layer sets the served response's
+	// source (hot/warm/peer/origin, or empty for bouine-synthesized
+	// responses) under this name as a fasthttp UserValue (not a wire
+	// header); the metrics middleware reads the UserValue as the
+	// source label. Keeping it off the wire removes a per-request
+	// header write from every served response.
+	XBouineSource = "X-Bouine-Source"
 
 	// BouineHop — carries the current peer-fetch hop count for cluster
 	// loop detection.

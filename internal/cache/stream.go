@@ -323,7 +323,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	// Copy origin response headers, skipping bouine attribution headers.
 	dst := &ctx.Response.Header
 	for k, v := range sf.resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte("X-Cache-Source")) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSourceLegacy)) {
 			continue
 		}
 		dst.AddBytesKV(k, v)

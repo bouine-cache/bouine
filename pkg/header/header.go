@@ -225,6 +225,13 @@ const (
 	// response: "HIT", "MISS", "STALE", "BYPASS", or "REVALIDATED".
 	XCache = "X-Cache"
 
+	// XCacheSourceLegacy — the pre-removal wire name of the served-source
+	// header. bouine no longer emits X-Cache-Source (the source rides the
+	// XBouineSource UserValue), but origin responses may still carry it,
+	// so proxy-copy loops must keep filtering it out to prevent spoofing
+	// a stale client-visible attribution header.
+	XCacheSourceLegacy = "X-Cache-Source"
+
 	// XBouineHost — stored on cached objects to record the request Host
 	// at storage time. Used by ban/purge predicates and the dashboard.
 	XBouineHost = "X-Bouine-Host"

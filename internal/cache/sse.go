@@ -77,7 +77,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	// (same anti-spoofing rule as streamBypass).
 	dst := &ctx.Response.Header
 	for k, v := range sf.resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte("X-Cache-Source")) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSourceLegacy)) {
 			continue
 		}
 		dst.AddBytesKV(k, v)

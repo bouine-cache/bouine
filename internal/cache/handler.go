@@ -4031,7 +4031,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte("X-Cache-Source")) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSourceLegacy)) {
 			continue
 		}
 		dst.AddBytesKV(k, v)

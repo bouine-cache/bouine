@@ -34,6 +34,17 @@ const OwnerShedContextKey = "bouine.owner_shed"
 // on a fast-path fall-through (see RawRequest.OwnerResolver).
 const OwnerResolverContextKey = "bouine.owner_resolver"
 
+// RouteMemo is an opaque per-connection route-resolution memo handle.
+// The h1parser reuses one RawRequest scratch across a connection's
+// keep-alive requests, so a memo stored on RawRequest is naturally
+// per-connection. The type is opaque to this leaf package: the server
+// layer stores a *routeEntry in it. Nil means "no memo".
+//
+// Unstable.
+//
+//nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
+type RouteMemo any
+
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
 // from a pooled read buffer — all string fields are slices of that buffer,
 // so they are valid only until the buffer is reused. The FastPathHandler
@@ -42,15 +53,6 @@ const OwnerResolverContextKey = "bouine.owner_resolver"
 // Unstable.
 //
 //nolint:govet // fieldalignment: 8-byte saving stays in one size class; order groups hot strings first
-// RouteMemo is an opaque per-connection route-resolution memo handle.
-// The h1parser reuses one RawRequest scratch across a connection's
-// keep-alive requests, so a memo stored on RawRequest is naturally
-// per-connection. The type is opaque to this leaf package: the server
-// layer stores a *routeEntry in it. Nil means "no memo".
-//
-// Unstable.
-type RouteMemo any
-
 type RawRequest struct {
 	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
 	// leads the struct so the scalar tail stays in the final cache

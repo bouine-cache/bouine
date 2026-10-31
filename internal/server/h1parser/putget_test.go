@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/valyala/fasthttp"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // REGRESSION: a fallback-served request with a body (PUT) followed by a
@@ -33,7 +34,7 @@ func TestFallbackPUTWithBodyThenGET(t *testing.T) {
 
 	go func() {
 		body := `{"id":"x"}`
-		_, _ = client.Write([]byte(fmt.Sprintf("PUT /c HTTP/1.1\r\nHost: h\r\nContent-Length: %d\r\n\r\n%s", len(body), body)))
+		_, _ = fmt.Fprintf(client, "PUT /c HTTP/1.1\r\nHost: h\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
 		time.Sleep(100 * time.Millisecond)
 		_, _ = client.Write([]byte("GET /g HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"))
 	}()
@@ -74,8 +75,7 @@ func TestFallbackPUTWithBodyPipelinedGET(t *testing.T) {
 
 	go func() {
 		body := `{"id":"x"}`
-		_, _ = client.Write([]byte(fmt.Sprintf("PUT /c HTTP/1.1\r\nHost: h\r\nContent-Length: %d\r\n\r\n%s", len(body), body) +
-			"GET /h HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"))
+		_, _ = fmt.Fprintf(client, "PUT /c HTTP/1.1\r\nHost: h\r\nContent-Length: %d\r\n\r\n%sGET /h HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n", len(body), body)
 	}()
 
 	br := bufio.NewReader(client)

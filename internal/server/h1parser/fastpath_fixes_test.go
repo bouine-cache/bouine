@@ -70,7 +70,7 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	_, ftErr := parser.handleFallThrough(serverConn, req, excess)
+	_, _, ftErr := parser.handleFallThrough(serverConn, req, excess)
 	require.NoError(t, ftErr)
 	_ = serverConn.Close()
 	<-done

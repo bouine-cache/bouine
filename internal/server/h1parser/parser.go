@@ -303,11 +303,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 		p.markActive(conn)
 		if fallThrough {
 			res, left, err := p.serveFallThroughRequest(conn, req, excess, &deadline, &writeDeadline)
-			if res == serveContinueLeftover {
-				excess = left
-			} else {
-				excess = nil
-			}
+			excess = adoptLeftover(res, left, excess)
 			if res == serveClose || err != nil {
 				return err
 			}
@@ -321,15 +317,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 		// call below is only reached when p.fastPath is nil.
 		if p.fastPath != nil {
 			res, left, err := p.serveFastHit(conn, req, excess, &deadline, &writeDeadline)
-			// On a miss, serveFastHit runs the fallback itself and
-			// returns its outcome; left is the fallback reader's
-			// leftover (pipelined bytes buffered past the body). On a
-			// hit, left is nil and the parser's own excess stays valid.
-			if res == serveContinueLeftover {
-				excess = left
-			} else if res != serveContinue {
-				excess = nil
-			}
+			excess = adoptLeftover(res, left, excess)
 			if err != nil {
 				return err
 			}
@@ -347,16 +335,28 @@ func (p *Parser) Serve(conn net.Conn) error {
 		// Miss path (only when no fast path is wired): call the fallback
 		// handler with a fasthttp.RequestCtx.
 		res, left, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline)
-		if res == serveContinueLeftover {
-			excess = left
-		} else {
-			excess = nil
-		}
+		excess = adoptLeftover(res, left, excess)
 		if res == serveClose || err != nil {
 			return err
 		}
 		p.markIdle(conn)
 	}
+}
+
+// adoptLeftover picks the next request's prefix after one loop iteration.
+// The caller passes the parser's current excess (valid on a fast-path hit)
+// and the fallback reader's leftover (valid after a fallback-served
+// request): a fallback result (serveContinueLeftover) means the parser's
+// excess was consumed as the request body, so the leftover replaces it;
+// anything else keeps the parser excess on a hit and clears it otherwise.
+func adoptLeftover(res serveResult, left, parserExcess []byte) []byte {
+	if res == serveContinueLeftover {
+		return left
+	}
+	if res == serveContinue {
+		return parserExcess
+	}
+	return nil
 }
 
 // serveFastMiss runs the blocking fallback for a request the fast path

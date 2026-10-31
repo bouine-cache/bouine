@@ -251,20 +251,13 @@ type hotEntry struct {
 // hotEntry values are published once (Put) and never mutated afterwards:
 // eviction and Delete remove them from the shard's sync.Map without
 // touching the struct (a lock-free reader may still hold it). This is
-// what makes the lock-free Get read safe. The trade-off is one small
-// allocation per Put instead of pool recycling — measured as
-// insignificant against the miss path's cost, and the hit path (the
-// one that matters) is untouched.
+// what makes the lock-free Get read safe. The pool still recycles the
+// struct on Put — safe because a Delete/evict guarantees no reader can
+// hold the value afterwards (it is unreachable via Load), and the writer
+// holds the shard lock while reusing it.
 var hotEntryPool = sync.Pool{
 	New: func() any { return new(hotEntry) },
 }
-
-// releaseEntry drops the entry's mutable links WITHOUT writing to the
-// shared struct fields a lock-free reader may be reading: it only
-// resets the eviction-list entry pointer via the pool path. The hotEntry
-// itself is returned to the pool only when its windowHits is zero and no
-// reader can hold it — which the sync.Map Delete guarantees (the value
-// is no longer reachable via Load).
 
 // newEvictList builds a per-shard eviction list from the HotConfig's
 // algorithm selection. SIEVE is the default (zero-value config). When

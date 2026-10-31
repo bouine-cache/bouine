@@ -46,11 +46,13 @@ type RoutedFastPath struct {
 // (the hot-only benchmark shape, and any CDN-fronted fleet pinned to one
 // hostname per backend) hits the memo every request. Allocated once per
 // (connection, host, path) change, not per request.
+//
+//nolint:govet // fieldalignment: pointer leads so the GC scan prefix stays minimal; strings follow
 type routeMemo struct {
+	re     *routeEntry
 	host   string
 	path   string
 	method string
-	re     *routeEntry
 }
 
 // NewRoutedFastPath wraps a Router. release must implement the
@@ -86,18 +88,7 @@ func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPa
 	// (the hot-only shape) every request after the first hits the memo.
 	if memo, _ := req.MemoRoute.(*routeMemo); memo != nil && memo.host == req.Host &&
 		memo.path == req.Path && memo.method == req.Method {
-		re := memo.re
-		if re.fastPath == nil {
-			return nil, false
-		}
-		resp, ok := re.fastPath.TryHit(req, now)
-		if !ok || resp == nil {
-			return resp, ok
-		}
-		if r.router.trafficClassify != nil {
-			resp.TrafficClass = r.router.trafficClassify.Classify(req.Host)
-		}
-		return resp, true
+		return r.serveRoute(memo.re, req, now)
 	}
 	re := r.router.matchRoute(req.Host, req.Path, req.Method)
 	if re != nil {
@@ -106,13 +97,19 @@ func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPa
 			memo = &routeMemo{}
 			req.MemoRoute = memo
 		}
+		memo.re = re
 		memo.host = req.Host
 		memo.path = req.Path
 		memo.method = req.Method
-		memo.re = re
 	} else {
 		req.MemoRoute = nil
 	}
+	return r.serveRoute(re, req, now)
+}
+
+// serveRoute delegates to the matched route's fast path and stamps the
+// traffic class; re may be nil (no route matched).
+func (r *RoutedFastPath) serveRoute(re *routeEntry, req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
 	if re == nil || re.fastPath == nil {
 		return nil, false
 	}

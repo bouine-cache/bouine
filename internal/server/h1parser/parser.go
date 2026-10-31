@@ -366,6 +366,7 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 		dur := p.nowFunc().Sub(now)
 		p.metricsHook(resp.Pool, resp.TrafficClass, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
+		req.Source = resp.Source
 	}
 	closeConn := resp.CloseConn
 	p.fastPath.Release(resp)
@@ -481,6 +482,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.OwnerGateReject = false
 	req.OwnerShed = false
 	req.OwnerResolver = nil
+	req.Source = ""
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -877,6 +879,9 @@ func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	}
 	if req.OwnerResolver != nil {
 		ctx.SetUserValue(api.OwnerResolverContextKey, req.OwnerResolver)
+	}
+	if req.Source != "" {
+		ctx.SetUserValue(header.XBouineSource, req.Source)
 	}
 }
 

@@ -203,10 +203,11 @@ func TestStrong_PurgeBatchEndToEnd(t *testing.T) {
 // (issue #636) end-to-end: the branch is always enabled on strong-mode
 // clusters (ADR-0069), so a plain-key miss on a NON-owner node must be
 // served by
-// the owner through FastPathHandler.tryPeerFetch, with X-Cache-Source:
-// peer, WITHOUT the origin seeing the request (the slow-path
-// alternative would fetch from origin on the owner-miss hint, so a
-// no-origin delta around a MISS-on-this-node is proof the branch ran).
+// the owner through FastPathHandler.tryPeerFetch, with source "peer" on
+// the metrics channel, WITHOUT the origin seeing the request (the
+// slow-path alternative would fetch from origin on the owner-miss hint,
+// so a no-origin delta around a MISS-on-this-node is proof the branch
+// ran).
 //
 // The cache key includes the request Host, so every request uses the
 // driver.CrossNodeHost header: all three nodes compute the SAME ring
@@ -255,7 +256,7 @@ func TestStrong_FastPathPeerFetch(t *testing.T) {
 	for _, n := range s.AliveNodes() {
 		resp := serveWithoutOrigin(n)
 		require.Equal(t, 200, resp.StatusCode)
-		if src := resp.Header.Get("X-Cache-Source"); src == "peer" {
+		if s.MetricValueWithLabels(t, n, "bouine_requests_total", `source="peer"`) > 0 {
 			peerHits++
 			require.Equal(t, "HIT", resp.Header.Get("X-Cache"),
 				"a fast-path peer fetch is served as a HIT, source peer")

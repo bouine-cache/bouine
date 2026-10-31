@@ -14,20 +14,32 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-func TestHandler_XCacheSource_MissThenHit(t *testing.T) {
+// The X-Cache-Source wire header is gone: the served source rides the
+// XBouineSource UserValue for the metrics layer. These tests pin the
+// UserValue on every serving branch and pin the wire header's absence.
+
+func requireNoCacheSourceWireHeader(t *testing.T, ctx *fasthttp.RequestCtx) {
+	t.Helper()
+	require.Empty(t, respHeader(ctx, "X-Cache-Source"),
+		"X-Cache-Source must not be emitted on the wire")
+}
+
+func TestHandler_SourceUserValue_MissThenHit(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
 	ctx1 := testCtx("GET", "http://example.com/foo")
 	serveRequest(h, ctx1)
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx1, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx1))
+	requireNoCacheSourceWireHeader(t, ctx1)
 
 	ctx2 := testCtx("GET", "http://example.com/foo")
 	serveRequest(h, ctx2)
-	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
+	require.Equal(t, string(api.SourceHot), respSource(ctx2))
+	requireNoCacheSourceWireHeader(t, ctx2)
 }
 
-func TestHandler_XCacheSource_Bypass(t *testing.T) {
+func TestHandler_SourceUserValue_Bypass(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
@@ -36,10 +48,11 @@ func TestHandler_XCacheSource_Bypass(t *testing.T) {
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
 	// BYPASS responses are proxied uncached from the origin, so they
 	// are attributed to it — not to the empty default slot.
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
+func TestHandler_SourceUserValue_OnlyIfCached_504(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
@@ -49,21 +62,23 @@ func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
 	require.Equal(t, 504, respCode(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
 	// The 504 is synthesized by bouine itself (the origin was never
-	// contacted): the wire source stays empty, which the metrics layer
+	// contacted): the source stays empty, which the metrics layer
 	// labels "bouine".
-	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
+	require.Equal(t, "", respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_InvalidateAndProxy_Origin(t *testing.T) {
+func TestHandler_SourceUserValue_InvalidateAndProxy_Origin(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
 	ctx := testCtx("POST", "http://example.com/res")
 	serveRequest(h, ctx)
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
+func TestHandler_SourceUserValue_FetchAndStore_Error_Origin(t *testing.T) {
 	t.Parallel()
 	bigUpstream := func(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(200)
@@ -82,10 +97,11 @@ func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 	serveRequest(h, ctx)
 
 	require.Equal(t, 502, respCode(ctx))
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_Conditional304_Hot(t *testing.T) {
+func TestHandler_SourceUserValue_Conditional304_Hot(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
@@ -97,10 +113,11 @@ func TestHandler_XCacheSource_Conditional304_Hot(t *testing.T) {
 
 	require.Equal(t, 304, respCode(ctx2))
 	require.Equal(t, "HIT", respHeader(ctx2, header.XCache))
-	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
+	require.Equal(t, string(api.SourceHot), respSource(ctx2))
+	requireNoCacheSourceWireHeader(t, ctx2)
 }
 
-func TestHandler_XCacheSource_PeerHit(t *testing.T) {
+func TestHandler_SourceUserValue_PeerHit(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
@@ -129,10 +146,11 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 	serveRequest(h, ctx)
 
 	require.Equal(t, "HIT", respHeader(ctx, header.XCache))
-	require.Equal(t, string(api.SourcePeer), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourcePeer), respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
+func TestHandler_SourceUserValue_Range_Hot(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
@@ -149,13 +167,14 @@ func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
 
 	require.Equal(t, 206, respCode(ctx2))
 	require.Equal(t, "HIT", respHeader(ctx2, header.XCache))
-	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
+	require.Equal(t, string(api.SourceHot), respSource(ctx2))
+	requireNoCacheSourceWireHeader(t, ctx2)
 }
 
-func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
+func TestHandler_SourceUserValue_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
 	t.Parallel()
 	spoofUpstream := func(ctx *fasthttp.RequestCtx) {
-		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.Response.Header.Set("X-Cache-Source", "hot")
 		ctx.Response.Header.Set(header.XCache, "HIT")
 		ctx.SetStatusCode(200)
 		_, _ = ctx.Write([]byte("ok"))
@@ -165,14 +184,15 @@ func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
 	ctx := testCtx("POST", "http://example.com/spoof")
 	serveRequest(h, ctx)
 
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
-func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
+func TestHandler_SourceUserValue_Bypass_SpoofPrevention(t *testing.T) {
 	t.Parallel()
 	spoofUpstream := func(ctx *fasthttp.RequestCtx) {
-		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.Response.Header.Set("X-Cache-Source", "hot")
 		ctx.Response.Header.Set(header.XCache, "HIT")
 		ctx.SetStatusCode(200)
 		_, _ = ctx.Write([]byte("ok"))
@@ -183,9 +203,9 @@ func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
 	serveRequest(h, ctx)
 
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
-	// The origin-supplied spoofed source must be overwritten by the
-	// bypass attribution, never pass through.
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	// The origin-supplied spoofed source must not pass through.
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
+	requireNoCacheSourceWireHeader(t, ctx)
 }
 
 func TestHandler_Conditional304_ETagCanonical(t *testing.T) {

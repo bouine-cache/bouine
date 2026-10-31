@@ -171,6 +171,15 @@ func respHeader(ctx *fasthttp.RequestCtx, key string) string {
 	return string(ctx.Response.Header.Peek(key))
 }
 
+// respSource returns the served source recorded on the XBouineSource
+// UserValue (the metric label channel; the wire header is gone).
+func respSource(ctx *fasthttp.RequestCtx) string {
+	if s, ok := ctx.UserValue(header.XBouineSource).(string); ok {
+		return s
+	}
+	return ""
+}
+
 // respBody returns the response body as a string from a RequestCtx.
 func respBody(ctx *fasthttp.RequestCtx) string {
 	return string(ctx.Response.Body())

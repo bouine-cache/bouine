@@ -32,11 +32,11 @@ type Object struct {
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
 	// composedHead is the per-second fully serialized fast-path response
 	// head (status line + static + dynamic headers), keyed by unix second
-	// and the per-request composition inputs (cacheResult, source,
-	// Connection trailer). See composedHead's doc. Not serialized to
-	// disk; loads leave it nil. atomic.Pointer for race-safe lazy
-	// init, same pattern as serializedHead. Entries are immutable once
-	// stored — updates replace the pointer, never mutate in place.
+	// and the per-request composition inputs (cacheResult, Connection
+	// trailer). See composedHead's doc. Not serialized to disk; loads
+	// leave it nil. atomic.Pointer for race-safe lazy init, same pattern
+	// as serializedHead. Entries are immutable once stored — updates
+	// replace the pointer, never mutate in place.
 	composedHeadPtr atomic.Pointer[composedHead] `json:"-"`
 	// ETag is the strong or weak entity tag from the origin.
 	ETag string `json:"etag,omitempty"`
@@ -150,11 +150,11 @@ func (o *Object) StoreSerializedHead(head []byte) {
 
 // composedHead is the fast-path's per-second composed response header
 // block: status line + static headers + dynamic headers (Age, Date,
-// X-Cache, X-Cache-Source, Warning, Connection trailer). Every input
-// is constant within one wall-clock second, so the fully serialized
-// bytes are a pure function of (object, unix second, cacheResult,
-// source, closeConn). A hit inside a cached second reuses the bytes
-// instead of re-appending them per request.
+// X-Cache, Warning, Connection trailer). Every input is constant
+// within one wall-clock second, so the fully serialized bytes are a
+// pure function of (object, unix second, cacheResult, closeConn).
+// A hit inside a cached second reuses the bytes instead of
+// re-appending them per request.
 //
 // The head lives in a dedicated heap buffer owned by the object —
 // never a pool buffer — because it is aliased by every response
@@ -168,7 +168,6 @@ type composedHead struct {
 	unix        int64
 	statusEnd   int
 	cacheResult string
-	src         Source
 	closeConn   bool
 	head        []byte
 }
@@ -177,10 +176,9 @@ type composedHead struct {
 // second and composition inputs, or nil when nothing matching is
 // cached. The returned statusEnd splits the status line from the
 // header block (Buffers layout [0]=status, [1]=headers). Thread-safe.
-func (o *Object) ComposedHeadFor(now time.Time, cacheResult string, src Source, closeConn bool) (head []byte, statusEnd int) {
+func (o *Object) ComposedHeadFor(now time.Time, cacheResult string, closeConn bool) (head []byte, statusEnd int) {
 	c := o.composedHeadPtr.Load()
-	if c == nil || c.unix != now.Unix() || c.cacheResult != cacheResult ||
-		c.src != src || c.closeConn != closeConn {
+	if c == nil || c.unix != now.Unix() || c.cacheResult != cacheResult || c.closeConn != closeConn {
 		return nil, 0
 	}
 	return c.head, c.statusEnd
@@ -190,11 +188,10 @@ func (o *Object) ComposedHeadFor(now time.Time, cacheResult string, src Source, 
 // concurrent stores for identical inputs write identical content, so
 // the race is benign. A store for different inputs (new second or
 // variant) replaces the previous entry.
-func (o *Object) StoreComposedHead(now time.Time, cacheResult string, src Source, closeConn bool, statusEnd int, head []byte) {
+func (o *Object) StoreComposedHead(now time.Time, cacheResult string, closeConn bool, statusEnd int, head []byte) {
 	o.composedHeadPtr.Store(&composedHead{
 		unix:        now.Unix(),
 		cacheResult: cacheResult,
-		src:         src,
 		closeConn:   closeConn,
 		statusEnd:   statusEnd,
 		head:        head,

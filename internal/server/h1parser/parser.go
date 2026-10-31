@@ -281,18 +281,24 @@ func (p *Parser) Serve(conn net.Conn) error {
 	// reset to zero after each fall-through.
 	var writeDeadline time.Time
 
+	// excess carries pipelined bytes past the previous request's header
+	// terminator into the next parseRequest call, so a hit followed by a
+	// pipelined request loops the fast path instead of falling through.
+	var excess []byte
 	for {
 		if err := p.refreshReadDeadline(conn, &deadline); err != nil {
 			return err
 		}
 
-		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf, &scratch)
+		req, fallThrough, next, err := p.parseRequest(conn, &readBuf, &scratch, excess)
 		if err != nil {
 			return err
 		}
+		excess = next
 		p.markActive(conn)
 		if fallThrough {
 			res, err := p.serveFallThroughRequest(conn, req, excess, &deadline, &writeDeadline)
+			excess = nil
 			if res == serveClose || err != nil {
 				return err
 			}
@@ -309,6 +315,11 @@ func (p *Parser) Serve(conn net.Conn) error {
 			case res == serveClose:
 				return nil
 			case res == serveContinue:
+				// serveContinue from serveFastHit means the hit was
+				// served; `excess` still holds any pipelined bytes and
+				// is passed as the prefix to the next parseRequest, so a
+				// pipelined request loops the fast path instead of
+				// falling through to the slow handler.
 				p.markIdle(conn)
 				continue
 			}
@@ -318,6 +329,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if res, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline); res == serveClose || err != nil {
 			return err
 		}
+		excess = nil
 		p.markIdle(conn)
 	}
 }
@@ -378,12 +390,20 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	if len(excess) == 0 {
 		return serveContinue, nil
 	}
-	// The client pipelined bytes past this request's header block (a
-	// body or the start of the next request). They are still unread on
-	// the socket. Re-enter the fallback handler with the buffered bytes
-	// so it consumes them with proper framing instead of the next
-	// parseRequest iteration discarding them.
-	return p.serveFallThroughRequest(conn, req, excess, deadline, wd)
+	// The client pipelined bytes past this request's header block. If
+	// those bytes are the start of another plain request (no body
+	// framing on this one — a CL/TE header would have set
+	// DisqualifyFastPath and we would not be here), the Serve loop
+	// re-parses them from the buffer on the next iteration and tries
+	// the fast path again — no slow-path fall-through for pipelined
+	// hits. Only fall through when the excess cannot be the start of a
+	// plain request (the previous request carried a body, which the
+	// scan flags disqualify, so any excess is at least ambiguous → let
+	// the fallback frame it). serveFastHit is only reached for
+	// qualified GET/HEAD, so a non-empty excess here is always a
+	// pipelined next request head: hand it back up via serveContinue
+	// and let the loop re-parse it.
+	return serveContinue, nil
 }
 
 // fastPathMissResult runs the fallback handler for a request the fast
@@ -420,11 +440,29 @@ func writeBadRequest(conn net.Conn) error {
 // scratch is the caller's reusable RawRequest; the returned request
 // aliases it and is valid only until the next parseRequest call on the
 // same connection (the header strings alias readBuf).
-func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
+// prefix carries pipelined bytes left in readBuf by the previous request
+// (the part past its header terminator). Empty for a fresh connection or
+// after a request that consumed everything buffered.
+func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scratch *api.RawRequest, prefix []byte) (*api.RawRequest, bool, []byte, error) {
 	buf := readBuf[:0]
+	if len(prefix) > 0 {
+		// Pipelined bytes from the previous request are still buffered:
+		// copy them to the front (they are a suffix of readBuf, so the
+		// copy may overlap — copy handles that) and skip the first read.
+		n := copy(buf[:cap(buf)], prefix)
+		buf = buf[:n]
+	}
 
 	headerEnd := -1
 	for {
+		if len(buf) > 0 {
+			// Buffered (pipelined) bytes may already contain the next
+			// request's terminator — scan before reading more.
+			if idx := findHeaderEnd(buf); idx >= 0 {
+				headerEnd = idx
+				break
+			}
+		}
 		n, err := conn.Read(buf[len(buf):cap(buf)])
 		if n > 0 {
 			buf = buf[:len(buf)+n]

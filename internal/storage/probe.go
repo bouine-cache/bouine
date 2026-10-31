@@ -46,10 +46,10 @@ func keyStateFromObject(st *api.KeyState, obj *api.Object) {
 func (h *HotStore) Probe(key api.Key) (api.KeyState, bool) {
 	s := h.shard(key)
 	s.mu.RLock()
-	e := s.entries[key]
+	e, ok := loadEntry(s, key)
 	var st api.KeyState
 	var obj *api.Object
-	if e != nil {
+	if ok && e != nil {
 		obj = e.obj
 		st.Present = true
 		st.Tier = "hot"

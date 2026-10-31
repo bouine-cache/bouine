@@ -487,6 +487,15 @@ func TestObjSize_OrphanedValuesCounted(t *testing.T) {
 	assert.Equal(t, int64(27), delta)
 }
 
+// TestHotEntrySizeConstMatches pins the hotEntrySize accounting const to
+// the real struct size — a padding change that drifts the const would
+// silently skew MaxBytes accounting.
+func TestHotEntrySizeConstMatches(t *testing.T) {
+	t.Parallel()
+	got := int64(unsafe.Sizeof(hotEntry{}))
+	require.Equal(t, hotEntrySize, got, "hotEntrySize const must equal unsafe.Sizeof(hotEntry{})")
+}
+
 func TestObjSize_ExactValue(t *testing.T) {
 	t.Parallel()
 	hdr := headerMap("Content-Type", "text/html", "X-Custom", "val")

@@ -133,11 +133,11 @@ func TestHotStore_Put_VaryResolverBodyDuplicated(t *testing.T) {
 
 	vShard := s.shard(variantKey)
 	vShard.mu.RLock()
-	storedVariant := vShard.entries[variantKey].obj
+	storedVariant := mustLoad(vShard, variantKey).obj
 	vShard.mu.RUnlock()
 	rShard := s.shard(primaryKey)
 	rShard.mu.RLock()
-	storedResolver := rShard.entries[primaryKey].obj
+	storedResolver := mustLoad(rShard, primaryKey).obj
 	rShard.mu.RUnlock()
 
 	require.Equal(t, body, storedVariant.Body)
@@ -630,7 +630,7 @@ func TestHotStore_SetBacked(t *testing.T) {
 	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := loadEntry(sh, k); !ok || !e.hasBackup {
 		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -708,8 +708,8 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	// obscuring the re-insert MarkVisited behavior under test.
 	shard := &s.shards[0]
 	shard.mu.Lock()
-	shard.entries[k1].entry.ClearVisited()
-	shard.entries[k2].entry.ClearVisited()
+	clearVisitedHelper(shard, k1)
+	clearVisitedHelper(shard, k2)
 	shard.mu.Unlock()
 
 	// First eviction: k1 (visited=false) is swept and re-inserted at
@@ -724,7 +724,7 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	// and k3 is evicted — proving the re-insert MarkVisited is
 	// load-bearing.
 	shard.mu.Lock()
-	shard.entries[k3].entry.ClearVisited()
+	clearVisitedHelper(shard, k3)
 	shard.mu.Unlock()
 
 	// Second eviction: k1 (visited=true from re-insert) gets a second
@@ -778,7 +778,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := loadEntry(sh, k); !ok || !e.hasBackup {
 		t.Fatal("entry should have hasBackup after re-marking")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -1127,7 +1127,7 @@ func TestHot_484_FreshInsertVisited(t *testing.T) {
 
 	// Freshly inserted entry should have visited=true.
 	ts.hot.shards[0].mu.RLock()
-	entry, exists := ts.hot.shards[0].entries[k]
+	entry, exists := loadEntry(&ts.hot.shards[0], k)
 	require.True(t, exists, "k should be in hot")
 	visited := entry.entry.Visited()
 	ts.hot.shards[0].mu.RUnlock()
@@ -1365,4 +1365,19 @@ func TestMatchesActiveBan_ConcurrentReadsAndBan(t *testing.T) {
 
 	stop.Store(true)
 	wg.Wait()
+}
+
+func mustLoad(s *shard, k api.Key) *hotEntry {
+	e, ok := loadEntry(s, k)
+	if !ok {
+		panic("entry missing")
+	}
+	return e
+}
+
+func clearVisitedHelper(s *shard, k api.Key) {
+	e, ok := loadEntry(s, k)
+	if ok {
+		e.entry.ClearVisited()
+	}
 }

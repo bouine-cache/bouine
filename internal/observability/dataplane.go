@@ -3,6 +3,7 @@ package observability
 import (
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -356,7 +357,8 @@ const (
 	// ORIGIN=3,BOUINE=4. The set is declared once, as data, in
 	// TestSourceLabelSetClosed, which fails when any encoding of it
 	// (this bound, sourceIndex, sourceIndexBytes, normaliseSource, the
-	// middleware index switch) drifts out of sync.
+	// middleware index switch) drifts out of sync. The value enters via
+	// the XBouineSource UserValue, not a wire header.
 	metricSourceSlots = 5
 	// metricClassSlots bounds the traffic_class axis: "unclassified"
 	// (index 0) + the config cap of 8 classes. Static array bound so
@@ -511,6 +513,19 @@ func sourceIndexBytes(s []byte) int {
 	default:
 		return -1
 	}
+}
+
+// sourceUserValueBytes returns the XBouineSource UserValue as a []byte
+// without allocating, or nil when the cache layer did not set it. The
+// value is a string stored by the cache layer (a config-closed set, not
+// request input), so the no-copy view is safe for the zero-alloc switch.
+//
+//nolint:gosec // G103: read-only slice from a config-closed string, never mutated
+func sourceUserValueBytes(v any) []byte {
+	if s, ok := v.(string); ok {
+		return unsafe.Slice(unsafe.StringData(s), len(s)) //nolint:gosec // G103: read-only slice from a config-closed string
+	}
+	return nil
 }
 
 // PreResolveRoutes builds the pool table for the given upstream pool
@@ -889,11 +904,11 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		}
 		status := statusString(statusCode)
 		pool, route, class := attribution(ctx)
-		// Classify X-Cache and X-Cache-Source from the raw header bytes.
-		// The byte switches are zero-alloc (the compiler elides string([]byte)
-		// in switch positions); the label strings for the metrics paths are
-		// derived from the classification below instead of converting the
-		// header values per request.
+		// Classify X-Cache from the raw header bytes. The byte switch is
+		// zero-alloc (the compiler elides string([]byte) in switch
+		// positions); the label string for the metrics path is derived
+		// from the classification instead of converting the header value
+		// per request.
 		xCacheBytes := ctx.Response.Header.Peek(header.XCache)
 		cacheResultIdx := cacheResultIndexBytes(xCacheBytes)
 		var cacheResult string
@@ -917,7 +932,12 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 				cacheResult = "UNKNOWN"
 			}
 		}
-		srcIdx := sourceIndexBytes(ctx.Response.Header.Peek(header.XCacheSource))
+		// The source rides the XBouineSource UserValue the cache layer
+		// sets, never a response header, so a client or origin cannot
+		// spoof the label through the wire. Empty (bouine-synthesized:
+		// only-if-cached 504, shed 503) and unknown values both collapse
+		// into the closed set's default "bouine" slot.
+		srcIdx := sourceIndexBytes(sourceUserValueBytes(ctx.UserValue(header.XBouineSource)))
 		var source string
 		switch srcIdx {
 		case 0:
@@ -929,9 +949,6 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		case 3:
 			source = string(api.SourceOrigin)
 		default:
-			// Empty (bouine-synthesized: only-if-cached 504, shed 503) and
-			// unknown or spoofed header values both collapse into the
-			// closed set's default "bouine" slot.
 			source = string(api.SourceBouine)
 		}
 
@@ -1212,13 +1229,15 @@ func normaliseCacheResult(xCache string) string {
 	}
 }
 
-// normaliseSource maps X-Cache-Source header values to a stable Prometheus
-// label. Empty (bouine-synthesized responses: only-if-cached 504, shed
-// 503) and unknown values both default to the "bouine" label — the closed
-// source set is hot/warm/peer/origin/bouine, so a spoofed or
-// misconfigured X-Cache-Source response header can never mint a label
-// outside it (the same named-fallback pattern as upstream_pool
-// "_default" and traffic_class "unclassified").
+// normaliseSource maps the cache layer's source value to a stable
+// Prometheus label. Empty (bouine-synthesized responses: only-if-cached
+// 504, shed 503) and unknown values both default to the "bouine" label —
+// the closed source set is hot/warm/peer/origin/bouine, so a spoofed or
+// misconfigured source can never mint a label outside it (the same
+// named-fallback pattern as upstream_pool "_default" and traffic_class
+// "unclassified"). The input now comes from the XBouineSource UserValue,
+// not from a wire header, so origin- or client-supplied values never
+// reach this function at all.
 func normaliseSource(xCacheSource string) string {
 	switch xCacheSource {
 	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin), string(api.SourceBouine):

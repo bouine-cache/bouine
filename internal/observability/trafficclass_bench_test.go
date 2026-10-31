@@ -26,7 +26,7 @@ func benchTrafficClassShape(class string) func(*fasthttp.RequestCtx) {
 	return func(ctx *fasthttp.RequestCtx) {
 		ctx.SetUserValue(header.XBouineTrafficClass, class)
 		ctx.Response.Header.Set("X-Cache", "MISS")
-		ctx.Response.Header.Set("X-Cache-Source", "origin")
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		ctx.SetStatusCode(200)
 	}
 }

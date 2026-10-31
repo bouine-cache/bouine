@@ -24,7 +24,7 @@ func BenchmarkGate_Middleware_Miss(b *testing.B) {
 	m.SetAccessLog(NoopLogger{}, 0) // sampling off: worst case for the log path
 	inner := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("X-Cache", "MISS")
-		ctx.Response.Header.Set("X-Cache-Source", "origin")
+		ctx.SetUserValue("X-Bouine-Source", "origin")
 		ctx.SetStatusCode(200)
 	}
 	h := m.FastHTTPMiddleware(inner)
@@ -51,7 +51,7 @@ func BenchmarkGate_Middleware_Miss_NoLog(b *testing.B) {
 	m.PreResolveTrafficClasses(nil)
 	inner := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("X-Cache", "MISS")
-		ctx.Response.Header.Set("X-Cache-Source", "origin")
+		ctx.SetUserValue("X-Bouine-Source", "origin")
 		ctx.SetStatusCode(200)
 	}
 	h := m.FastHTTPMiddleware(inner)

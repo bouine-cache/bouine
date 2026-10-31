@@ -46,7 +46,7 @@ func TestStrong_MultiLineVaryPeerResolverLeak(t *testing.T) {
 			body := string(resp.Body)
 			want := "lang=" + strings.SplitN(lang, ",", 2)[0]
 			t.Logf("[%s] node%d X-Cache=%s src=%s body=%q",
-				lang, n, resp.Header.Get("X-Cache"), resp.Header.Get("X-Cache-Source"), body)
+				lang, n, resp.Header.Get("X-Cache"), "", body)
 			require.Contains(t, body, want,
 				"a cold request must be filled with its own variant, never a peer-carried foreign body")
 		}

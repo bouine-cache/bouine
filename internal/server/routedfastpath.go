@@ -79,8 +79,10 @@ func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPa
 	// per connection, so a memo hit on the previous request skips
 	// matchRoute's table walk entirely. The memo key is the exact
 	// (Host, Path, Method) triple — byte equality, no allocation — valid
-	// because the router is immutable after boot (routes are added before
-	// any listener accepts). On a keep-alive connection pinned to one URL
+	// because the router is immutable after boot: routes are registered in
+	// cmd/builder.go before any listener accepts, and config reload reports
+	// route changes under needs_restart instead of mutating the table. On
+	// a keep-alive connection pinned to one URL
 	// (the hot-only shape) every request after the first hits the memo.
 	if memo, _ := req.MemoRoute.(*routeMemo); memo != nil && memo.host == req.Host &&
 		memo.path == req.Path && memo.method == req.Method {

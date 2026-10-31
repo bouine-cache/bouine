@@ -144,9 +144,8 @@ type RawRequest struct {
 	// fetched a resolver-shaped answer.
 	OwnerResolver *Object
 	// MemoRoute is the server layer's per-connection route-resolution memo
-	// (RouteMemo). The h1parser's per-request soft reset clears it only on
-	// connection reuse boundaries it controls — in fact it must NOT be
-	// cleared per request, because the scratch is per-connection: the memo
+	// (RouteMemo). The h1parser's per-request soft reset deliberately does
+	// NOT clear it: the scratch RawRequest is per-connection, so the memo
 	// intentionally survives across the connection's keep-alive requests.
 	// Nil on hand-built RawRequests.
 	MemoRoute RouteMemo

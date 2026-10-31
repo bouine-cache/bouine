@@ -52,7 +52,7 @@ func TestRace_HitsVsWarmEncode(t *testing.T) {
 		shard := ts.hot.shard(key)
 		shard.mu.Lock()
 		defer shard.mu.Unlock()
-		if e := shard.entries[key]; e != nil {
+		if e, ok := loadEntry(shard, key); ok && e != nil {
 			e.entry.ClearVisited()
 		}
 	}
@@ -139,7 +139,7 @@ func TestRace_HitsVsCloneRefresh(t *testing.T) {
 		shard := ts.hot.shard(key)
 		shard.mu.Lock()
 		defer shard.mu.Unlock()
-		if e := shard.entries[key]; e != nil {
+		if e, ok := loadEntry(shard, key); ok && e != nil {
 			e.entry.ClearVisited()
 		}
 	}

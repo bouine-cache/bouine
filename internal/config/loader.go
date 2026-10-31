@@ -1793,7 +1793,7 @@ func (c *Config) validateClusterStorage(ec *errCollector) {
 // complexity under the gocyclo limit.
 func (c *Config) validatePeerFetchConfig(ec *errCollector) {
 	if c.Cluster.PeerMaxConnsPerHost < 0 {
-		ec.addf("cluster.peer_max_conns_per_host", "must be >= 0 (0 = default 8), got %d",
+		ec.addf("cluster.peer_max_conns_per_host", "must be >= 0 (0 = default 16), got %d",
 			c.Cluster.PeerMaxConnsPerHost)
 	}
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {

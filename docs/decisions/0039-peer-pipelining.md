@@ -35,7 +35,7 @@ in a `sync.Map`, created lazily via `LoadOrStore`.
 
 Two new config fields under `cluster:`:
 
-- `peer_max_conns_per_host` (default 8) — maximum pipelined connections
+- `peer_max_conns_per_host` (default 16) — maximum pipelined connections
   per peer address.
 - `peer_max_idle_conn_duration` (default 120s) — idle timeout for
   peer connections.
@@ -54,8 +54,8 @@ semaphore and add tail latency.
 ### Pipeline depth
 
 `fasthttp.PipelineClient` uses `MaxPendingRequests=16` (hardcoded as
-`peerMaxPendingRequests`). With 8 connections × 16 pending = 128
-concurrent fetches per peer, matching the effective concurrency of the
+`peerMaxPendingRequests`). With 16 connections × 16 pending = 256
+concurrent fetches per peer, doubling the effective concurrency of the
 previous HTTP/2 plan.
 
 ### Broadcast separation

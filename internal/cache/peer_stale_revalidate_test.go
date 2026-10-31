@@ -101,7 +101,7 @@ func TestServePeerHit_StaleTriggersRevalidateAndForwardsToOwner(t *testing.T) {
 	f.h.ServeRequest(ctx)
 	require.Equal(t, 200, respCode(ctx))
 	assert.Equal(t, "STALE", respHeader(ctx, header.XCache))
-	assert.Equal(t, string(api.SourcePeer), respHeader(ctx, header.XCacheSource))
+	assert.Equal(t, string(api.SourcePeer), respSource(ctx))
 	assert.Equal(t, "old", respBody(ctx), "the stale copy is served while revalidating")
 
 	fresh := f.waitPut(t)

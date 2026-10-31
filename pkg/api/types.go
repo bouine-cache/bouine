@@ -21,10 +21,10 @@ const (
 	CacheResultBypass CacheResult = "bypass"
 )
 
-// Source describes where a cached response was served from. It is the
-// value carried by the X-Cache-Source response header and the `source`
-// Prometheus label on data-plane request metrics. Clients MUST tolerate
-// unknown values.
+// Source describes where a cached response was served from. It feeds the
+// `source` Prometheus label on data-plane request metrics (carried to
+// the middleware as a fasthttp UserValue, not as a response header).
+// Clients MUST tolerate unknown values.
 //
 // Stable.
 type Source string
@@ -44,9 +44,9 @@ const (
 	// SourceBouine — the response was synthesized by bouine itself (an
 	// only-if-cached 504, a shed 503, or the no-client-no-upstream 502):
 	// no tier and no origin fetch is behind it. Carried as an empty
-	// X-Cache-Source on the wire; the metrics layer labels that default
-	// slot "bouine" (the same named-fallback pattern as upstream_pool
-	// "_default" and traffic_class "unclassified").
+	// source; the metrics layer labels that default slot "bouine" (the
+	// same named-fallback pattern as upstream_pool "_default" and
+	// traffic_class "unclassified").
 	SourceBouine Source = "bouine"
 )
 

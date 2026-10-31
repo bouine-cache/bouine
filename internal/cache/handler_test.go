@@ -3070,7 +3070,7 @@ func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 	require.Less(t, elapsed, 1500*time.Millisecond, "fetch timeout must abort the slow origin")
 	require.Equal(t, 504, respCode(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
 }
 
 // TestDoFetchDeadlineRespectedByFastClient verifies the foreground fetch
@@ -4904,7 +4904,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 	rr2 := r2
 	h.ServeRequest(rr2)
 	assert.Equal(t, "HIT", respHeader(rr2, header.XCache), "peer-fetched object should be served as HIT")
-	assert.Equal(t, "peer", respHeader(rr2, header.XCacheSource), "second request should also come from peer")
+	assert.Equal(t, "peer", respSource(rr2), "second request should also come from peer")
 
 	// Peer-fetch promotion must not trigger a write-to-owner RPC: the
 	// object came FROM the owner, forwarding it back would be redundant.
@@ -4960,7 +4960,7 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 // cold variant cache must not serve the owner's primary-key (Vary resolver)
 // entry as if it were the requested variant. Before the gate, the owner
 // returned the first market's body for a second market's request and the
-// non-owner served it as a HIT (X-Cache-Source: peer) without touching origin.
+// non-owner served it as a HIT (source "peer") without touching origin.
 func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
@@ -5052,7 +5052,7 @@ func TestHandleCacheMiss_PeerFetchMatchingVariantServes(t *testing.T) {
 	r := testCtxWithHeader("GET", "http://example.com/vary-peer-match", "X-Region", "fr")
 	h.ServeRequest(r)
 	require.Equal(t, "HIT", respHeader(r, header.XCache))
-	require.Equal(t, "peer", respHeader(r, header.XCacheSource))
+	require.Equal(t, "peer", respSource(r))
 	require.Equal(t, "market=fr", respBody(r))
 }
 

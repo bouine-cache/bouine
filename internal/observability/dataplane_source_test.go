@@ -198,7 +198,7 @@ func TestFastHTTPMiddleware_SourceLabel(t *testing.T) {
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "HIT")
-		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.SetUserValue(header.XBouineSource, "hot")
 		ctx.SetStatusCode(200)
 		ctx.Write([]byte("ok"))
 	})
@@ -232,7 +232,7 @@ func TestFastHTTPMiddleware_SourceLabel(t *testing.T) {
 }
 
 // TestFastHTTPMiddleware_SourceLabel_Default pins the renamed default
-// source slot: a response whose X-Cache-Source is empty (a bouine-
+// source slot: a response whose source UserValue is empty (a bouine-
 // synthesized 503/504 — the origin was never reached) or unknown
 // (spoofed) must land on the closed set's "bouine" label, never on an
 // empty or minted one. BYPASS traffic itself is attributed "origin" by
@@ -249,7 +249,7 @@ func TestFastHTTPMiddleware_SourceLabel_Default(t *testing.T) {
 
 	spoofH := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "BYPASS")
-		ctx.Response.Header.Set(header.XCacheSource, "evil-tier-99999")
+		ctx.SetUserValue(header.XBouineSource, "evil-tier-99999")
 		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
 	})
 
@@ -292,7 +292,7 @@ func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, "origin")
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		ctx.SetStatusCode(200)
 		ctx.Write([]byte("body"))
 	})
@@ -387,8 +387,8 @@ func TestSourceLabelSetClosed(t *testing.T) {
 		assert.Equal(t, s, normaliseSource(s), "normaliseSource(%q) passes through", s)
 	}
 
-	// The wire alias of the bouine slot: an empty X-Cache-Source and any
-	// unknown or spoofed value all collapse into it.
+	// The wire alias of the bouine slot: an empty source UserValue and
+	// any unknown or spoofed value all collapse into it.
 	last := len(set) - 1
 	assert.Equal(t, last, sourceIndex(""), "empty wire value aliases the bouine slot")
 	assert.Equal(t, last, sourceIndexBytes([]byte("")), "empty wire value aliases the bouine slot")

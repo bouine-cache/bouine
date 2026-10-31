@@ -925,7 +925,6 @@ func TestSkipStaticHeader(t *testing.T) {
 	t.Parallel()
 	noCache := map[string]bool{}
 	assert.True(t, skipStaticHeader(header.XCache, noCache, nil, false))
-	assert.True(t, skipStaticHeader(header.XCacheSource, noCache, nil, false))
 	assert.True(t, skipStaticHeader(header.Warning, noCache, nil, false))
 	assert.False(t, skipStaticHeader("Content-Type", noCache, nil, false))
 }
@@ -1644,7 +1643,7 @@ func rawHeaderMap(req *api.RawRequest) header.Map {
 
 // TestFastPathHandler_PeerHit verifies the acceptance criteria of issue
 // #636: on a local miss with a remote owner, the fast path consults the
-// owner, peer-fetches, and serves the object with X-Cache-Source: peer —
+// owner, peer-fetches, and serves the object with source "peer" —
 // with the variant assertion derived from the request's selecting
 // headers ("" for a plain key, the recomputed variant key when the peer
 // object Varies). Freshness and the response CC are evaluated like any
@@ -1679,7 +1678,7 @@ func TestFastPathHandler_PeerHit(t *testing.T) {
 	assert.Equal(t, 13, resp.BytesOut)
 	require.GreaterOrEqual(t, len(resp.Buffers), 3)
 	assert.Equal(t, "Hello, World!", string(resp.Buffers[2]))
-	assert.Contains(t, string(resp.Buffers[1]), "X-Cache-Source: peer")
+	assert.NotContains(t, string(resp.Buffers[1]), "X-Cache-Source")
 	fpKey, varyAssertion, calls := stub.snapshot()
 	assert.Equal(t, key, fpKey)
 	assert.Equal(t, "", varyAssertion, "plain key miss sends an empty Vary assertion")

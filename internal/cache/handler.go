@@ -1738,7 +1738,8 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		// Range requests need the full RequestInfo for ServeRange.
 		if hasRangeHeader(ctx) {
 			ri := requestInfoFromCtx(ctx)
-			if h.serveRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, now, src) {
+			if h.serveRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, now) {
+				setSourceUserValue(ctx, src)
 				return
 			}
 		}
@@ -2207,7 +2208,7 @@ func (h *Handler) serveResolver304(ctx *fasthttp.RequestCtx, resolver *api.Objec
 				dst.SetCanonical(header.S2b(header.CDNCacheControl), header.S2b(cdcStrict))
 			}
 			dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
-			dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			setSourceUserValue(ctx, src)
 			ctx.SetStatusCode(fasthttp.StatusNotModified)
 			h.applyResponseRewrites(dst)
 			return true
@@ -2431,7 +2432,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 			}
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			setSourceUserValue(ctx, src)
 			ctx.SetStatusCode(fasthttp.StatusNotModified)
 			return true
 		}
@@ -2448,7 +2449,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 			}
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			setSourceUserValue(ctx, src)
 			ctx.SetStatusCode(fasthttp.StatusNotModified)
 			return true
 		}
@@ -2459,7 +2460,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 						ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 					}
 					ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-					ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+					setSourceUserValue(ctx, src)
 					ctx.SetStatusCode(fasthttp.StatusNotModified)
 					return true
 				}
@@ -2472,9 +2473,9 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 // handleBypass handles the BYPASS path (requests with no-store or
 // no-cache directives). It delegates to handleBypassFast, which fetches
 // the origin response via FastClient and writes it directly to the
-// *fasthttp.RequestCtx, then overwrites bouine's attribution headers
-// (X-Cache, X-Cache-Source) so an origin-supplied value cannot spoof
-// the source metric label or X-Cache result. BYPASS responses carry
+// *fasthttp.RequestCtx, then overwrites bouine's attribution header
+// (X-Cache) so an origin-supplied value cannot spoof the cache_result
+// metric label or X-Cache result. BYPASS responses carry
 // api.SourceOrigin on every branch that dispatched something toward the
 // origin (a fetch or the in-process upstream); the shed 503
 // (writeShed503), the no-client-no-upstream 502, and the
@@ -2506,14 +2507,14 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 			}
 			h.upstream(ctx)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			ctx.SetUserValue(header.XBouineSource, "origin")
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
 		// RFC 9111 §5.2.2.2: no fast client configured and no upstream
 		// fallback (misconfiguration) — surface 502, not a panic. The
 		// error body resets the response, so X-Cache is written after.
-		// No X-Cache-Source: no fetch was dispatched, so the metrics
+		// No source UserValue: no fetch was dispatched, so the metrics
 		// layer labels this response "bouine", not "origin".
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
@@ -2575,15 +2576,16 @@ const (
 // serveObject writes a cached object to the client with the appropriate
 // X-Cache header and Age. Stale responses also get Warning: 110 per
 // RFC 7234 §5.5.3. src is the storage-tier source (hot/warm/peer),
-// set as X-Cache-Source via SetCanonical (zero alloc).
+// recorded on the XBouineSource UserValue (zero alloc) for the metrics
+// layer instead of a wire header.
 //
 // On the first hit, a pre-built *fasthttp.ResponseHeader is constructed
 // from the stored headers (excluding hop-by-hop, internal, no-cache fields,
 // and dynamic headers). On subsequent hits, CopyTo copies the pre-built
 // header into the response, replacing N SetCanonical calls with a single
-// bulk copyArgs. Only 4 dynamic headers (Age, X-Cache, X-Cache-Source,
-// Warning) are set per request. The body is set via SetBodyRaw (zero-copy
-// from the immutable cached body).
+// bulk copyArgs. Only 3 dynamic headers (Age, X-Cache, Warning) are set
+// per request. The body is set via SetBodyRaw (zero-copy from the
+// immutable cached body).
 func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := &ctx.Response.Header
 
@@ -2598,7 +2600,7 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	ageStr := strconv.AppendInt(ageBuf[:0], ageSeconds, 10)
 	dst.SetCanonical(header.S2b(header.Age), ageStr)
 
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+	setSourceUserValue(ctx, src)
 
 	switch result {
 	case cacheHit:
@@ -2978,7 +2980,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			}
 			writeUpstreamError(ctx, res.Err)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			ctx.SetUserValue(header.XBouineSource, "origin")
 			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
@@ -3074,7 +3076,7 @@ func (h *Handler) serveFillFollower(ctx *fasthttp.RequestCtx, lookupKey api.Key,
 // (the fetch-semaphore wait bound expired and no stale object is in
 // scope). Distinct from the 502 origin-failure mapping: the origin was
 // never contacted, so clients should retry shortly (issue #562). No
-// X-Cache-Source is set — the origin was never reached.
+// source UserValue is set — the origin was never reached.
 func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
 	ctx.Error("origin fetch queue full", fasthttp.StatusServiceUnavailable)
 	ctx.Response.Header.SetCanonical(header.S2b(header.RetryAfter), header.S2b("1"))
@@ -3093,7 +3095,7 @@ func (h *Handler) writeBufferedResult(
 	dst := &ctx.Response.Header
 	res.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	// Same corrected Age as the flight leader's response (RFC 9111
 	// §4.2.3): origin Age + the leader's response delay. Followers of
 	// one flight must not report a different initial age than the
@@ -3231,7 +3233,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		}
 		writeUpstreamError(ctx, res.Err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -3448,7 +3450,7 @@ func (h *Handler) freshenFromHead(
 	var ageBuf [16]byte
 	ageStr := strconv.AppendInt(ageBuf[:0], int64(ComputeAge(refreshed, now).Seconds()), 10)
 	dst.SetCanonical(header.S2b(header.Age), ageStr)
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+	setSourceUserValue(ctx, src)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
 	// Write-through status: the client gets the HEAD response's status
 	// (e.g. 410), while the stored entry keeps its own.
@@ -3651,7 +3653,7 @@ func (h *Handler) writeAndMaybeStore(
 	}
 	// Overwrite origin-supplied attribution headers (prevent spoofing).
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	// Cache the ToMap() result — used below for header lookups (Age,
 	// Set-Cookie, Vary) and passed to buildObject. Each ToMap() call
 	// invokes FromFastHTTP which allocates a new header.Map.
@@ -3937,7 +3939,7 @@ func (h *Handler) reserveVariantSlotMode(reqCtx context.Context, primaryKey, sto
 func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
@@ -3978,7 +3980,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		// branches (revalidate, streamBypass, handleSSE).
 		writeUpstreamError(ctx, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
@@ -3988,20 +3990,20 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
 			"key", h.buildKey(ctx), "limit", h.maxResponseBytes)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		ctx.SetUserValue(header.XBouineSource, "origin")
 		ctx.Error("upstream response too large", fasthttp.StatusBadGateway)
 		return
 	}
 
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte("X-Cache-Source")) {
 			continue
 		}
 		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	ctx.SetUserValue(header.XBouineSource, "origin")
 	ctx.SetStatusCode(resp.StatusCode())
 	h.applyResponseRewrites(dst)
 	_, _ = ctx.Write(resp.Body())
@@ -4785,7 +4787,7 @@ func (h *Handler) buildObject(key api.Key, ri RequestInfo, res fetchResult, resM
 // \r\n) at cache-fill time. The H1 fast-path uses this to write headers
 // directly via net.Buffers without iterating the header map per request.
 //
-// Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning), internal
+// Excludes dynamic headers (Age, X-Cache, Warning), internal
 // headers (X-Bouine-*), no-cache fields stripped per RFC 9111 §5.2.2.4,
 // and fields listed in the stored response's Connection header
 // (RFC 9110 §7.6.1 — the fast path must match the slow path's

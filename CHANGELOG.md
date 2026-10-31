@@ -12,6 +12,24 @@ the curated, human-readable summary.
 
 ### Changed
 
+- The `X-Cache-Source` response header is no longer emitted on any
+  served response. The served source (hot/warm/peer/origin, empty for
+  bouine-synthesized responses) now travels only on the internal
+  `X-Bouine-Source` request UserValue, which the metrics middleware
+  reads for the `source` Prometheus label; the h1parser carries it from
+  the fast path into the fall-through. This removes one header line
+  (~20 B on the wire) plus one `SetCanonical`/append per request from
+  every hit (fast path: 3 fewer appended bytes per request, composed
+  heads no longer key on the source) and one `Peek` + byte-switch from
+  the metrics middleware per request. Measured on
+  `BenchmarkGate_FastPath_Hit`: ~143 ns/op before, ~141 ns/op after
+  (within noise, allocs/op stays 0); `Middleware_Miss_NoLog` drops
+  ~330 -> ~263 ns/op (~20%) now that the middleware no longer parses a
+  response header for the source label. The `source` label values and
+  the closed label set are unchanged.
+
+### Changed
+
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
   ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its

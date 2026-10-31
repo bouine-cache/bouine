@@ -34,15 +34,15 @@ func TestStrong_DataPlaneInvalidatePropagates(t *testing.T) {
 
 	// Warm every node and identify the owner: in strong mode only the
 	// owner stores the object, so its GET is served from the local store
-	// (X-Cache-Source: hot) while non-owners peer-fetch (X-Cache-Source:
-	// peer). Record each node's pre-invalidation body.
+	// (source "hot" on the metrics channel) while non-owners peer-fetch
+	// (source "peer"). Record each node's pre-invalidation body.
 	preBody := make(map[int]string)
 	owner := -1
 	for _, i := range s.AliveNodes() {
 		resp := s.GetWithHost(t, i, path, crossNodeHost)
 		require.Equal(t, "HIT", resp.Header.Get("X-Cache"), "node %d must serve a HIT after warm-up", i)
 		preBody[i] = string(resp.Body)
-		if resp.Header.Get("X-Cache-Source") == "hot" {
+		if s.MetricValueWithLabels(t, i, "bouine_requests_total", `source="hot"`) > 0 {
 			owner = i
 		}
 	}

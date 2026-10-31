@@ -107,7 +107,7 @@ func (h *Handler) write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src ap
 			appendServeCDCDirectives(cdcBuf[:0], obj, now, result))
 	}
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
-	ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+	setSourceUserValue(ctx, src)
 	ctx.SetStatusCode(fasthttp.StatusNotModified)
 	if rw != nil {
 		rw(&ctx.Response.Header)
@@ -118,4 +118,26 @@ func (h *Handler) write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src ap
 // a zero-allocation Peek.
 func hasRangeHeader(ctx *fasthttp.RequestCtx) bool {
 	return len(ctx.Request.Header.Peek(header.Range)) > 0
+}
+
+// setSourceUserValue records the served source on the XBouineSource
+// UserValue for the metrics layer, skipping the UserValue store when the
+// source is empty (bouine-synthesized responses). Each case stores a
+// string literal, which the compiler keeps in the binary's read-only
+// data: boxing it into any is free, so steady-state hits stay
+// zero-alloc (the router's existing XBouineRoute/XBouinePool stores
+// follow the same shape).
+func setSourceUserValue(ctx *fasthttp.RequestCtx, src api.Source) {
+	switch src {
+	case api.SourceHot:
+		ctx.SetUserValue(header.XBouineSource, "hot")
+	case api.SourceWarm:
+		ctx.SetUserValue(header.XBouineSource, "warm")
+	case api.SourcePeer:
+		ctx.SetUserValue(header.XBouineSource, "peer")
+	case api.SourceOrigin:
+		ctx.SetUserValue(header.XBouineSource, "origin")
+	case api.SourceBouine:
+		ctx.SetUserValue(header.XBouineSource, "bouine")
+	}
 }

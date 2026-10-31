@@ -67,7 +67,7 @@ func TestHandler_UpstreamFallbackWhenFastClientNil(t *testing.T) {
 	require.Equal(t, "BYPASS", respHeader(rr4, header.XCache))
 	// The bypass response came from the upstream (the origin here), so
 	// the source is attributed to it.
-	require.Equal(t, string(api.SourceOrigin), respHeader(rr4, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(rr4))
 	require.Equal(t, "static-body", respBody(rr4))
 	require.Equal(t, 3, calls)
 }
@@ -125,8 +125,8 @@ func TestHandler_UpstreamFallbackNoUpstream502(t *testing.T) {
 	require.Equal(t, fasthttp.StatusBadGateway, respCode(rr2))
 	require.Equal(t, "BYPASS", respHeader(rr2, header.XCache))
 	// No fetch was ever dispatched (no client, no upstream wired): the
-	// 502 is synthesized by bouine itself, so the wire source stays
+	// 502 is synthesized by bouine itself, so the wire header stays
 	// empty — the metrics layer labels it "bouine" (the same predicate
 	// as the shed 503 and the only-if-cached 504, not "origin").
-	require.Equal(t, "", respHeader(rr2, header.XCacheSource))
+	require.Equal(t, "", respSource(rr2))
 }

@@ -72,7 +72,7 @@ func TestIsUpstreamTimeout(t *testing.T) {
 
 // TestUpstreamTimeout_Bypass_504 pins the BYPASS-path contract: a timed-out
 // upstream fetch surfaces as 504 Gateway Timeout (RFC 9110 §15.6.5) with
-// the body "upstream timeout" and the X-Cache/X-Cache-Source attribution,
+// the body "upstream timeout" and the X-Cache attribution and source UserValue,
 // while a non-timeout failure keeps 502 Bad Gateway on the same path.
 func TestUpstreamTimeout_Bypass_504(t *testing.T) {
 	t.Parallel()
@@ -85,7 +85,7 @@ func TestUpstreamTimeout_Bypass_504(t *testing.T) {
 	require.Equal(t, 504, respCode(ctx))
 	require.Equal(t, "upstream timeout", respBody(ctx))
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
 
 	// Every other upstream failure keeps 502 on the same path.
 	h.fastClient = &errorFastClient{}
@@ -95,7 +95,7 @@ func TestUpstreamTimeout_Bypass_504(t *testing.T) {
 
 	require.Equal(t, 502, respCode(ctx2))
 	require.Equal(t, "BYPASS", respHeader(ctx2, header.XCache))
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx2, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx2))
 }
 
 // TestUpstreamTimeout_Revalidate_MustRevalidate_504 pins the revalidation
@@ -129,7 +129,7 @@ func TestUpstreamTimeout_Revalidate_MustRevalidate_504(t *testing.T) {
 
 	require.Equal(t, 504, respCode(rr))
 	require.Equal(t, "MISS", respHeader(rr, header.XCache))
-	require.Equal(t, string(api.SourceOrigin), respHeader(rr, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(rr))
 }
 
 // TestUpstreamTimeout_InvalidateAndProxy_504 pins the invalidating-method
@@ -145,5 +145,5 @@ func TestUpstreamTimeout_InvalidateAndProxy_504(t *testing.T) {
 
 	require.Equal(t, 504, respCode(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
 }

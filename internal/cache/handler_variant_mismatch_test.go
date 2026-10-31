@@ -71,7 +71,7 @@ func TestHandleCacheMiss_PeerFetchVariantMismatchMetric(t *testing.T) {
 	rFr := testCtxWithHeader("GET", "http://example.com/vary-metric", "X-Region", "fr")
 	h.ServeRequest(rFr)
 	require.Equal(t, "HIT", respHeader(rFr, header.XCache))
-	require.Equal(t, "peer", respHeader(rFr, header.XCacheSource))
+	require.Equal(t, "peer", respSource(rFr))
 	require.Equal(t, "market=fr", respBody(rFr))
 	assert.Equal(t, int32(1), mismatches.Load(), "matching variant must not fire the callback")
 

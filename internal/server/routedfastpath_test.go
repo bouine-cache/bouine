@@ -260,23 +260,18 @@ func TestRoutedFastPath_MemoReusedPerConnection(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "api-pool", resp.Pool) // host-less routes match any host
 
-	// Method change: memo method mismatch → full walk.
-	scratch.Host = "example.com"
-	scratch.Method = "POST"
-	resp, ok = rfp.TryHit(scratch, time.Now())
-	// POST matches no route with a fast path under nil method sets? The
-	// routes have nil methods (match all) — so POST still resolves. The
-	// memo must not serve a GET memo for a POST when methods ARE
-	// restricted; build a methods-restricted router for that assertion.
+	// Method change on a method-restricted route: the memo must not serve
+	// a GET-resolved route to a POST. Build a methods-restricted router for
+	// that assertion (the routes above have nil method sets and match all).
 	rtM := NewRouter(RouterConfig{})
 	getOnly := &recordingFP{name: "get-only"}
 	rtM.AddRoute("", "/", "get", "get-pool", []string{"GET"}, ok200("get"), getOnly)
 	rfpM := NewRoutedFastPath(rtM, getOnly)
 	s2 := rawReq("GET", "/x", "example.com")
-	resp, ok = rfpM.TryHit(s2, time.Now())
+	_, ok = rfpM.TryHit(s2, time.Now())
 	require.True(t, ok)
 	s2.Method = "POST"
-	resp, ok = rfpM.TryHit(s2, time.Now())
+	resp2, ok := rfpM.TryHit(s2, time.Now())
 	assert.False(t, ok, "memo must not serve a GET-resolved route to a POST")
-	assert.Nil(t, resp)
+	assert.Nil(t, resp2)
 }

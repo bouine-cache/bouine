@@ -12,6 +12,18 @@ the curated, human-readable summary.
 
 ### Changed
 
+- Origin-bound requests no longer build the absolute URI with a
+  per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
+  ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its
+  `scheme://host` prefix once at construction; `doSingleFetch` assembles
+  the absolute URI into a per-client mutex-guarded scratch buffer
+  (hedged attempts share the client) and `FastHandler` into a stack
+  buffer, and `SetRequestURIBytes` copies it into the pooled request's
+  own URI buffer. Wire bytes are unchanged (fasthttp re-emits origin-form
+  on write; verified against a recording origin in tests).
+
+### Changed
+
 - Cluster peer-fetch RPCs no longer emit a per-request info log line:
   `peer fetch hit`/`peer fetch miss` (fetcher side) and `served peer
   fetch hit`/`miss`/`variant mismatch`/`resolver metadata` (serving

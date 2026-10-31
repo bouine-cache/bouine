@@ -36,8 +36,6 @@ the curated, human-readable summary.
   response header for the source label. The `source` label values and
   the closed label set are unchanged.
 
-### Changed
-
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
   ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its

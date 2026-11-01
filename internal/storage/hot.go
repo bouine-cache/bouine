@@ -212,7 +212,12 @@ type shard struct {
 	evict       evictor.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
-	mu          sync.RWMutex
+	// hitStripes carries the per-window hit counters (one per stripe,
+	// addressed by key hash) so the hit path's increment never shares a
+	// cache line with the entry's read-only fields or with other keys'
+	// counters. 64 stripes x 8 B = 512 B per shard.
+	hitStripes [windowHitsStripeCount]atomic.Int64
+	mu         sync.RWMutex
 }
 
 // syncMapLen counts entries (cold path: Stats, ban scans).
@@ -233,26 +238,14 @@ func loadEntry(s *shard, key api.Key) (*hotEntry, bool) {
 	return v.(*hotEntry), true
 }
 
-//nolint:govet // fieldalignment: windowHits deliberately leads and is padded to its own cache line (hit-path false sharing)
+//nolint:govet // fieldalignment: entries (sync.Map) leads so its pointer-heavy header stays in the GC scan prefix
 type hotEntry struct {
-	// windowHits is a per-TTL-window hit counter, incremented on every
-	// Get (both fast and slow paths). Unlike Object.Hits (which only
-	// increments on the SIEVE slow path), this is a true access count.
-	// Reset to 0 on every Put (new hotEntry created). Used by the cache
-	// layer's refresh popularity gate.
-	// It leads the struct and is padded to its own cache line: on the hit
-	// path it is the only hot field written (obj/entry/hasBackup are read
-	// only), so isolating it removes false sharing between the counter and
-	// the cold read fields on every Get.
-	windowHits atomic.Int64
-	_          [56]byte // pad: windowHits alone owns the first 64 B line
-	obj        *api.Object
-	entry      *evictor.Entry[api.Key]
+	obj   *api.Object
+	entry *evictor.Entry[api.Key]
 	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
 	hasBackup bool
-	_         [7]byte // round the struct to 88 B
 }
 
 // hotEntry values are published once (Put) and never mutated afterwards:
@@ -264,6 +257,23 @@ type hotEntry struct {
 // holds the shard lock while reusing it.
 var hotEntryPool = sync.Pool{
 	New: func() any { return new(hotEntry) },
+}
+
+// windowHitsStripeCount is the number of per-shard striped counters that
+// back the per-window hit count (formerly a field on hotEntry). Each stripe
+// owns its own 64 B cache line, so concurrent hit-path increments land on
+// different lines instead of serializing on one shared line — the same
+// false-sharing removal #887 measured, without growing hotEntry from 32 B
+// to 88 B (which tripled per-entry accounting and shrank effective cache
+// capacity at a fixed hot budget). 64 stripes cap counter aliasing at high
+// core counts while keeping the array small (512 B per shard).
+const windowHitsStripeCount = 64
+
+// windowHitsStripe returns the stripe slot for hash h (the key's Hash64,
+// already computed by the caller for shard selection) within one shard:
+// one hash indexes both the shard and the stripe.
+func windowHitsStripe(s *shard, h64 uint64) *atomic.Int64 {
+	return &s.hitStripes[h64&(windowHitsStripeCount-1)]
 }
 
 // newEvictList builds a per-shard eviction list from the HotConfig's
@@ -495,7 +505,9 @@ func (h *HotStore) shard(key api.Key) *shard {
 // Slow path (visited=false, i.e. first access after eviction hand sweep):
 // upgrades to a write lock to set the bit.
 func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
-	s := h.shard(key)
+	h64 := key.Hash64()
+	s := &h.shards[h64&h.mask]
+	stripe := &s.hitStripes[h64&(windowHitsStripeCount-1)]
 
 	// Fast path: lock-free read. sync.Map.Load is a single atomic load
 	// once the map is in read-only mode (steady state — after the last
@@ -506,7 +518,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	if v, ok := s.entries.Load(key); ok {
 		e := v.(*hotEntry)
 		if e.entry.Visited() {
-			e.windowHits.Add(1)
+			stripe.Add(1)
 			stored := e.obj
 			ret := h.detachBody(stored)
 			if h.matchesActiveBan(ret) {
@@ -530,7 +542,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 			// the shard lock (tiered.writeHotOnlyToWarm → encodeObject),
 			// so the read/write pair must not race (issue #218).
 			atomic.AddUint64(&e.obj.Hits, 1)
-			e.windowHits.Add(1)
+			stripe.Add(1)
 			stored = e.obj
 		}
 		var ret *api.Object
@@ -640,8 +652,9 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 //nolint:funlen // 52 statements: eviction loop is inherently linear; extracting would harm readability
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
-	s := h.shard(key)
-	shardIdx := int(key.Hash64() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	h64 := key.Hash64()
+	s := &h.shards[h64&h.mask]
+	shardIdx := int(h64 & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	// Move the body off the Go heap before acquiring the shard lock so
@@ -707,7 +720,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	e.obj = stored
 	e.entry = se
 	e.hasBackup = false
-	e.windowHits.Store(0)
+	windowHitsStripe(s, h64).Store(0)
 	s.entries.Store(key, e)
 	s.bytes += size
 	s.mu.Unlock()
@@ -1121,12 +1134,13 @@ func (h *HotStore) Stats() api.Stats {
 // evaluate the popularity gate. Objects in the warm tier only (not in
 // hot) return 0 — they are not being actively served from the hot tier.
 func (h *HotStore) WindowHits(key api.Key) int64 {
-	s := h.shard(key)
+	h64 := key.Hash64()
+	s := &h.shards[h64&h.mask]
 	s.mu.RLock()
 	e, ok := loadEntry(s, key)
 	var n int64
 	if ok && e != nil {
-		n = e.windowHits.Load()
+		n = windowHitsStripe(s, h64).Load()
 	}
 	s.mu.RUnlock()
 	return n
@@ -1330,7 +1344,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 
 const (
 	objectStructSize    int64 = 352 // unsafe.Sizeof(api.Object{}) — 336 → 352: PairedKey, the Vary resolver's mirror pointer (ADR-0068). Update when fields are added.
-	hotEntrySize        int64 = 88  // unsafe.Sizeof(hotEntry{}): windowHits padded to its own 64 B cache line + obj/entry pointers + hasBackup
+	hotEntrySize        int64 = 24  // unsafe.Sizeof(hotEntry{}): obj/entry pointers + hasBackup; windowHits counters live in per-shard stripes, not in the entry
 	sieveEntrySize      int64 = 40  // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32  // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).

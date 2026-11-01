@@ -44,7 +44,8 @@ func keyStateFromObject(st *api.KeyState, obj *api.Object) {
 // stays Present with Banned=true: the next data-plane Get reclaims it
 // and counts a miss.
 func (h *HotStore) Probe(key api.Key) (api.KeyState, bool) {
-	s := h.shard(key)
+	h64 := key.Hash64()
+	s := &h.shards[h64&h.mask]
 	s.mu.RLock()
 	e, ok := loadEntry(s, key)
 	var st api.KeyState
@@ -54,7 +55,7 @@ func (h *HotStore) Probe(key api.Key) (api.KeyState, bool) {
 		st.Present = true
 		st.Tier = "hot"
 		keyStateFromObject(&st, obj)
-		st.WindowHits = e.windowHits.Load()
+		st.WindowHits = windowHitsStripe(s, h64).Load()
 		st.BackedToWarm = e.hasBackup
 	}
 	s.mu.RUnlock()

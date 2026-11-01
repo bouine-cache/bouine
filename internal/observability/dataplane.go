@@ -944,19 +944,20 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header, len(ctx.Request.Header.Peek(header.Cookie)) > 0)
 
 		if m.accessLog != nil {
-			msg := accessLogMessage(cacheResult, statusCode)
-			attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, class, elapsed, statusCode)
-			if statusCode != fasthttp.StatusOK {
+			// Sampling gate FIRST: buildFastHTTPAccessLogAttrs allocates a
+			// 20-element []any (with string conversions for method/host/
+			// path/remote) per request — building it before the 1:100
+			// sampling check paid that cost on 99% of requests that were
+			// then dropped. Non-200s always log, so they keep the attrs.
+			keyVal := ctx.UserValue("cacheKey")
+			var key api.Key
+			if k, ok := keyVal.(api.Key); ok {
+				key = k
+			}
+			if statusCode != fasthttp.StatusOK || m.shouldLogAccess(key) {
+				msg := accessLogMessage(cacheResult, statusCode)
+				attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, class, elapsed, statusCode)
 				m.accessLog.Info(msg, attrs...)
-			} else {
-				keyVal := ctx.UserValue("cacheKey")
-				var key api.Key
-				if k, ok := keyVal.(api.Key); ok {
-					key = k
-				}
-				if m.shouldLogAccess(key) {
-					m.accessLog.Info(msg, attrs...)
-				}
 			}
 		}
 	}
@@ -1138,7 +1139,7 @@ func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultId
 	if route != "_default" {
 		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs, cookied)
 	}
-	m.Rings.URL.RecordURL(string(path), route, cacheResult)
+	m.Rings.URL.RecordURLBytes(path, route, cacheResult)
 	if m.Rings.HeaderRing != nil && (cacheResultIdx == 1 || cacheResultIdx == 4) { // MISS or BYPASS
 		m.Rings.HeaderRing.SampleFastHTTP(route, hdr, status)
 	}

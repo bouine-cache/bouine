@@ -59,14 +59,13 @@ type outcome uint8
 
 const (
 	outHot outcome = iota
-	outPeer
 	outMiss
 	outBypass
 	outOther
 	outCount
 )
 
-var outcomeNames = [outCount]string{"HIT/hot", "HIT/peer", "MISS", "BYPASS", "OTHER"}
+var outcomeNames = [outCount]string{"HIT", "MISS", "BYPASS", "OTHER"}
 
 const nodesPerTier = 3
 
@@ -246,7 +245,7 @@ func (l *loadGen) worker(paths func() string) {
 				continue
 			}
 			l.sent.Add(1)
-			l.rec.record(node, classify(resp.Header.Peek("X-Cache"), resp.Header.Peek("X-Cache-Source")), lat)
+			l.rec.record(node, classify(resp.Header.Peek("X-Cache")), lat)
 		}
 	}
 }
@@ -255,16 +254,12 @@ var (
 	bHIT    = []byte("HIT")
 	bMISS   = []byte("MISS")
 	bBYPASS = []byte("BYPASS")
-	bHot    = []byte("hot")
-	bPeer   = []byte("peer")
 )
 
-func classify(xc, xcs []byte) outcome {
+func classify(xc []byte) outcome {
 	switch {
-	case bytes.Equal(xc, bHIT) && bytes.Equal(xcs, bHot):
+	case bytes.Equal(xc, bHIT):
 		return outHot
-	case bytes.Equal(xc, bHIT) && bytes.Equal(xcs, bPeer):
-		return outPeer
 	case bytes.Equal(xc, bMISS):
 		return outMiss
 	case bytes.Equal(xc, bBYPASS):

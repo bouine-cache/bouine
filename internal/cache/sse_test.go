@@ -67,7 +67,7 @@ func TestSSE_HintedGet_StreamsUncached(t *testing.T) {
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
 	// BYPASS is proxied uncached from the origin: attributed to it,
 	// matching the miss and streamBypass paths.
-	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, string(api.SourceOrigin), respSource(ctx))
 	require.Equal(t, sseEvents, respBody(ctx))
 
 	// The fetch slot must be released as soon as the headers are in hand:
@@ -102,7 +102,7 @@ func TestSSE_HintedNoFastClient_502(t *testing.T) {
 
 	require.Equal(t, fasthttp.StatusBadGateway, respCode(ctx))
 	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
-	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
+	require.Equal(t, "", respSource(ctx))
 }
 
 // TestSSE_HintedRequestNotCollapsed proves hinted SSE requests are excluded

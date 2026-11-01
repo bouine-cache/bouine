@@ -43,7 +43,7 @@ func TestStrong_MultiLineVaryVariantIsolation(t *testing.T) {
 	})
 	body := string(resp.Body)
 	fmt.Printf("node1 it-IT: X-Cache=%s src=%s body=%q\n",
-		resp.Header.Get("X-Cache"), resp.Header.Get("X-Cache-Source"), body)
+		resp.Header.Get("X-Cache"), "", body)
 	require.NotContains(t, body, "lang=fr-FR", "must not serve the french variant body")
 	require.Contains(t, body, "lang=it-IT", "node1 must fetch its own italian variant")
 

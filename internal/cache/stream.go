@@ -29,6 +29,17 @@ var streamBufPool = sync.Pool{
 
 const maxStreamBufRetain = 1 << 20
 
+// streamChunkPool reuses the 32 KiB copy scratch for origin body streaming
+// (teeStreamToClient's read loop and streamCopyFlush). A fresh make per
+// call was the single largest allocation source on the miss path (~72% of
+// all allocated bytes under a miss storm): one 32 KiB buffer per stream
+// per read. Pooled, the steady state allocates nothing — the buffer is
+// only retained while the stream is live, and released with the tee
+// buffer when the body completes.
+var streamChunkPool = sync.Pool{
+	New: func() any { b := make([]byte, streamChunkSize); return &b },
+}
+
 // streamFetchResult carries the origin response state needed to stream
 // the body to the client while concurrently buffering it for the cache.
 // When buffered is true, the body is already in resp.Body() (the client
@@ -254,7 +265,9 @@ const streamChunkSize = 32 * 1024
 // 4 KiB bufio pipe buffer and the client sees them in multi-kilobyte
 // batches — or only at stream end.
 func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
-	buf := make([]byte, streamChunkSize)
+	bufPtr := streamChunkPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer streamChunkPool.Put(bufPtr)
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
@@ -1069,7 +1082,9 @@ func (h *Handler) teeStreamToClient(
 		h.streamingBufferBytes.Add(-int64(lastReported))
 	}()
 
-	chunk := make([]byte, 32*1024)
+	chunkPtr := streamChunkPool.Get().(*[]byte)
+	chunk := *chunkPtr
+	defer streamChunkPool.Put(chunkPtr)
 	for {
 		n, readErr := bodyStream.Read(chunk)
 		if n > 0 {

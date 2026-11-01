@@ -61,8 +61,8 @@ func TestCachanerHot_Eviction(t *testing.T) {
 	// freq-policy test.
 	shard := &s.shards[0]
 	shard.mu.Lock()
-	shard.entries[k1].entry.ClearVisited()
-	shard.entries[k2].entry.ClearVisited()
+	clearVisitedHelper(shard, k1)
+	clearVisitedHelper(shard, k2)
 	shard.mu.Unlock()
 
 	// Access k1 to give it freq > 0 (protected from eviction).
@@ -108,7 +108,7 @@ func TestCachanerHot_FreqProtectsHotKey(t *testing.T) {
 	// entirely (see #484).
 	shard := &s.shards[0]
 	shard.mu.Lock()
-	shard.entries[hot].entry.ClearVisited()
+	clearVisitedHelper(shard, hot)
 	shard.mu.Unlock()
 
 	// Insert cold keys, but re-access the hot key before each insertion

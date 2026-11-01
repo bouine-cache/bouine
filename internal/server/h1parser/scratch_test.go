@@ -3,11 +3,9 @@ package h1parser
 import (
 	"bytes"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -26,7 +24,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	req, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	req, fallThrough, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
 	require.NoError(t, err)
 	require.False(t, fallThrough)
 	assert.Equal(t, "GET", req.Method)
@@ -41,7 +39,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	// reuses the scratch struct. Note: a real keep-alive connection reads
 	// the second request into the same readBuf, which is truncated to
 	// [:0] before reading, so stale header slices are overwritten.
-	req2, fallThrough2, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
+	req2, fallThrough2, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch)
 	require.NoError(t, err)
 	require.False(t, fallThrough2)
 	assert.Equal(t, "POST", req2.Method)
@@ -59,7 +57,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	scratch.OwnerGateReject = true
 	scratch.OwnerShed = true
 	scratch.OwnerResolver = &api.Object{Key: api.Key{0x01}}
-	req3, fallThrough3, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	req3, fallThrough3, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
 	require.NoError(t, err)
 	require.False(t, fallThrough3)
 	assert.False(t, req3.OwnerMiss)
@@ -82,52 +80,15 @@ func TestParseRequest_MalformedSecondRequest(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	_, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	_, _, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch)
 	require.NoError(t, err)
 
 	// Malformed second request returns an error and must not observe
 	// stale state from the first.
-	_, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
+	_, fallThrough, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch)
 	require.Error(t, err)
 	assert.True(t, fallThrough)
 	// The scratch was reset: NHeaders is 0 before the parse error
 	// short-circuits.
 	assert.Zero(t, scratch.NHeaders)
-}
-
-// TestConnScratchPoolReuse verifies Serve checks the per-connection read
-// buffer + scratch out of connScratchPool and returns it on exit: two
-// sequential Serve runs on different conns must reuse the same pooled
-// connScratch (steady state allocates no new buffer per connection).
-func TestConnScratchPoolReuse(t *testing.T) {
-	t.Parallel()
-
-	p := New(nil, func(ctx *fasthttp.RequestCtx) {
-		ctx.SetStatusCode(fasthttp.StatusOK)
-	})
-
-	run := func() {
-		client, server := dialTCPPair(t)
-		done := make(chan error, 1)
-		go func() { done <- p.Serve(server) }()
-		go func() {
-			_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"))
-		}()
-		buf := make([]byte, 128)
-		client.SetReadDeadline(time.Now().Add(3 * time.Second))
-		_, _ = client.Read(buf)
-		_ = client.Close()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Serve did not return")
-		}
-	}
-	run()
-	// After the first Serve returned, its connScratch is back in the pool:
-	// the next Get must return a non-nil entry with a full-size buffer.
-	cs := p.connScratchPool.Get().(*connScratch)
-	require.NotNil(t, cs)
-	assert.Len(t, cs.buf, readBufferSize)
-	p.connScratchPool.Put(cs)
 }

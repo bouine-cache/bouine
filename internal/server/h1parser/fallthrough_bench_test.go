@@ -11,11 +11,13 @@ import (
 )
 
 // BenchmarkH1Parse_FallThrough measures the full fall-through request
-// cost: rebuildRequestHead, prefixConn, pooled *bufio.Reader checkout,
-// fasthttp re-parse, and response write. Tracked for allocation
-// regressions on the miss path — the hit path has its own zero-alloc
-// gate (BenchmarkGate_H1Parse_Get). The reader checkout must not
-// allocate in the steady state: the 16 KiB bufio.Reader is pooled
+// cost with the production raw-head replay: the original wire bytes are
+// passed straight through as the prefix (no rebuildRequestHead
+// allocation), plus prefixConn, pooled *bufio.Reader checkout, fasthttp
+// re-parse, and response write. Tracked for allocation regressions on
+// the miss path — the hit path has its own zero-alloc gate
+// (BenchmarkGate_H1Parse_Get). The reader checkout must not allocate in
+// the steady state: the 16 KiB bufio.Reader is pooled
 // (Parser.fallReaderPool), where it previously dominated allocation
 // volume under load (~50% of all allocated bytes at a ~43% fall-through
 // rate). Not a BenchmarkGate_*: the miss path is outside the hit-path
@@ -45,10 +47,11 @@ func BenchmarkH1Parse_FallThrough(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		// Fresh conn per iteration: mockConn's reader aliases nothing,
-		// and the fall-through prefix (rebuilt head) is self-contained,
-		// so each iteration is a complete request lifecycle.
+		// and the raw head prefix is self-contained, so each iteration is
+		// a complete request lifecycle through the production fall-through
+		// path (raw wire bytes replayed, not re-serialized).
 		conn := &mockConn{r: bytes.NewReader(raw)}
-		if _, _, err := parser.handleFallThrough(conn, req, nil); err != nil {
+		if _, err := parser.handleFallThrough(conn, req, nil, raw); err != nil {
 			b.Fatalf("handleFallThrough: %v", err)
 		}
 	}

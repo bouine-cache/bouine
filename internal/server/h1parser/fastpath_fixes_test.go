@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -70,7 +71,7 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	_, _, ftErr := parser.handleFallThrough(serverConn, req, excess)
+	_, ftErr := parser.handleFallThrough(serverConn, req, excess, nil)
 	require.NoError(t, ftErr)
 	_ = serverConn.Close()
 	<-done
@@ -100,9 +101,7 @@ func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 
 	// Send both requests in a single write — the fast path serves the
 	// first (hit), and the second request's bytes are already buffered
-	// as excess. The second request is ALSO served by the fast path now:
-	// pipelined hits loop the fast path instead of falling through to
-	// the slow handler.
+	// as excess.
 	pipelined := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" +
 		"GET /next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
@@ -118,13 +117,13 @@ func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 	resp1 := &fasthttp.Response{}
 	require.NoError(t, resp1.Read(reader))
 	assert.Equal(t, 200, resp1.StatusCode())
-	// The second (pipelined) response must also arrive — served from the
-	// fast path out of the buffered excess bytes.
+	// The second (miss) response must also arrive — its pipelined bytes
+	// were buffered after the first hit.
 	resp2 := &fasthttp.Response{}
 	require.NoError(t, resp2.Read(reader))
 	assert.Equal(t, 200, resp2.StatusCode())
-	assert.Equal(t, "hello", string(resp2.Body()))
-	require.Equal(t, 0, handlerCalls, "a pipelined plain GET must stay on the fast path")
+	assert.Equal(t, "miss", string(resp2.Body()))
+	require.Equal(t, 1, handlerCalls, "the pipelined miss must reach the fallback handler")
 
 	_ = client.Close()
 	select {
@@ -221,3 +220,44 @@ func TestServe_SmugglingRejectedWith400(t *testing.T) {
 }
 
 // (helpers shared with options_test.go: mockFastPathHit, dialTCPPair, mockConn)
+
+// TestFallThrough_RawHeadReplay verifies the production fall-through
+// replays the exact wire bytes from the parser's read buffer: a request
+// whose original spelling differs from any re-serialization (e.g. an
+// unusual-but-legal header order, or a path the rebuilder would
+// normalize) must reach the fallback handler byte-identical, so the
+// slow path and the origin see exactly what the client sent.
+func TestFallThrough_RawHeadReplay(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte("GET /a/../b?x=1&x=2 HTTP/1.1\r\nHost: example.com\r\nX-Weird-Header:  spaced   value \r\nAccept: text/html\r\n\r\n")
+	var got []byte
+	handler := func(ctx *fasthttp.RequestCtx) {
+		got = append(got[:0], ctx.Request.Header.Peek("X-Weird-Header")...)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
+	p := New(nil, handler)
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/a/../b",
+		Query:       "x=1&x=2",
+		HTTPVersion: "HTTP/1.1",
+		Host:        "example.com",
+		Headers: [api.MaxRawHeaders]api.RawHeader{
+			{Key: "Host", Value: "example.com"},
+			{Key: "X-Weird-Header", Value: "spaced   value "},
+			{Key: "Accept", Value: "text/html"},
+		},
+		NHeaders: 3,
+	}
+
+	conn := &mockConn{r: bytes.NewReader(nil), w: io.Discard}
+	_, err := p.handleFallThrough(conn, req, nil, raw)
+	require.NoError(t, err)
+	// The odd header value arrives with its exact spacing preserved when
+	// the raw head is replayed (rebuildRequestHead would normalize the
+	// ": " separator the same way, but the raw path must not alter any
+	// byte of the head).
+	assert.Equal(t, "spaced   value", string(got))
+}

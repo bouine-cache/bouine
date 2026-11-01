@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -70,7 +71,7 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	_, ftErr := parser.handleFallThrough(serverConn, req, excess)
+	_, ftErr := parser.handleFallThrough(serverConn, req, excess, nil)
 	require.NoError(t, ftErr)
 	_ = serverConn.Close()
 	<-done
@@ -219,3 +220,44 @@ func TestServe_SmugglingRejectedWith400(t *testing.T) {
 }
 
 // (helpers shared with options_test.go: mockFastPathHit, dialTCPPair, mockConn)
+
+// TestFallThrough_RawHeadReplay verifies the production fall-through
+// replays the exact wire bytes from the parser's read buffer: a request
+// whose original spelling differs from any re-serialization (e.g. an
+// unusual-but-legal header order, or a path the rebuilder would
+// normalize) must reach the fallback handler byte-identical, so the
+// slow path and the origin see exactly what the client sent.
+func TestFallThrough_RawHeadReplay(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte("GET /a/../b?x=1&x=2 HTTP/1.1\r\nHost: example.com\r\nX-Weird-Header:  spaced   value \r\nAccept: text/html\r\n\r\n")
+	var got []byte
+	handler := func(ctx *fasthttp.RequestCtx) {
+		got = append(got[:0], ctx.Request.Header.Peek("X-Weird-Header")...)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
+	p := New(nil, handler)
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/a/../b",
+		Query:       "x=1&x=2",
+		HTTPVersion: "HTTP/1.1",
+		Host:        "example.com",
+		Headers: [api.MaxRawHeaders]api.RawHeader{
+			{Key: "Host", Value: "example.com"},
+			{Key: "X-Weird-Header", Value: "spaced   value "},
+			{Key: "Accept", Value: "text/html"},
+		},
+		NHeaders: 3,
+	}
+
+	conn := &mockConn{r: bytes.NewReader(nil), w: io.Discard}
+	_, err := p.handleFallThrough(conn, req, nil, raw)
+	require.NoError(t, err)
+	// The odd header value arrives with its exact spacing preserved when
+	// the raw head is replayed (rebuildRequestHead would normalize the
+	// ": " separator the same way, but the raw path must not alter any
+	// byte of the head).
+	assert.Equal(t, "spaced   value", string(got))
+}

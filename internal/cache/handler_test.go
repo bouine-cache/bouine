@@ -4313,7 +4313,7 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0, false)
 	// Should be registered in the refresh registry.
 	assert.Equal(t, 1, h.refreshRegistry.Len())
 	// Should be scheduled in the scheduler.
@@ -4339,7 +4339,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        30 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0, false)
 	// Negative-cached-eligible objects should NOT be scheduled for refresh.
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
@@ -4360,7 +4360,7 @@ func TestStoreObject_HealthyStatusStillRefreshesWithoutPolicy(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        30 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0, false)
 	assert.Equal(t, 1, h.refreshRegistry.Len())
 }
 
@@ -4385,7 +4385,7 @@ func TestStoreObject_StatusTTLCached5xxSkipRefresh(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        10 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0, false)
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
 

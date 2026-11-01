@@ -12,6 +12,24 @@ the curated, human-readable summary.
 
 ### Changed
 
+- Store fills no longer heap-copy the body twice (ADR-0073). Every fill
+  path already builds an exact-size, cache-owned body copy for the
+  singleflight flight; `HotStore.Put` then cloned that copy again via
+  `CloneForStorage` — on the rc1 5krps stress profile the second copy
+  held 479.86 MB (84.7% of inuse heap) and churned ~5.1 GB per 30 min,
+  and the GC-assist pressure it created starved the fetch queue into
+  5,868 sheds at a TTL-expiry wave. Fill sites now hand the body over
+  through the new `PutOwned` store capability (consumer-declared
+  `ownedBodyStore` interface, threaded from a `fetchResult.bodyOwned`
+  flag set only where the body is exact-size and cache-owned): the
+  stored entry aliases the fill's bytes (slab mode still copies into
+  slab memory; header maps stay deep-cloned). The tee and buffered
+  fills also release the fetch-semaphore slot at origin-body-complete,
+  before the store admission, so shard-lock eviction work no longer
+  extends the fetch-queue wait; and the 32 KiB tee/stream read scratch
+  is pooled. Cacheable-miss gate benchmark: 18→17 allocs/op, −24%
+  B/op; `Handler_CacheMiss_Cacheable` budget tightened accordingly.
+
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
   ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its

@@ -35,8 +35,10 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		s.fastPath,
 		s.inner.Handler,
 		h1parser.WithScheme(scheme),
-		// CoarseNow: ~2-4ns vs ~25-40ns for time.Now on Linux. The 1ms
-		// clock resolution is sufficient — deadlines are second-scale.
+		// CoarseNow: vDSO-serviced time.Now on Linux (no syscall trap).
+		// A prior revision used clock_gettime(CLOCK_REALTIME_COARSE),
+		// which is not vDSO-serviced — it trapped 3x per hit request
+		// and 5x per miss (see platform_linux.go).
 		h1parser.WithNowFunc(platform.CoarseNow),
 		h1parser.WithIdleReadTimeout(s.idleTimeout),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),

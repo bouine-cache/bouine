@@ -12,6 +12,18 @@ the curated, human-readable summary.
 
 ### Changed
 
+- Cut per-request and per-connection syscall counts on the Linux data
+  plane (measured with strace under load): the hot-path clock switched
+  from `clock_gettime(CLOCK_REALTIME_COARSE)` — not vDSO-serviced, so
+  every read trapped (3 syscalls per fast-path hit, 5 per miss, 15% of
+  total CPU at 396k hits/s) — to vDSO-backed `time.Now`; accepted
+  connections no longer pay 7 redundant setsockopt (Go's runtime
+  already sets TCP_NODELAY and TCP keep-alive defaults at accept).
+  Totals per hit request: 11.5 → ~8 syscalls; per accepted connection
+  on a connection-churn workload: 39 → 26. Behavior note: kernel-level
+  TCP keep-alive probes on client connections are now off (matching
+  NGINX's default, `so_keepalive` unset); dead peers are reaped by the
+  h1parser's idle read deadline (`listen.idle_timeout`) instead.
 - Raised three built-in defaults to give high-concurrency and
   high-Vary-cardinality deployments more headroom before hitting a cap:
   `connect.max_connections` per origin host 64 → 128

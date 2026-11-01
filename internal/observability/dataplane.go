@@ -131,9 +131,11 @@ type DataPlaneMetrics struct {
 	// Cloudflare batching metrics.
 	CFBatchFlushed *prometheus.CounterVec // labels: kind
 	// nowFunc returns the current time. Defaults to time.Now; the engine
-	// injects platform.CoarseNow (~2-4ns vs ~25-40ns) to reduce hit-path
-	// CPU cost. Injected rather than imported directly to respect the L7
-	// layering rule (observability cannot import internal/platform).
+	// injects platform.CoarseNow (vDSO time.Now on Linux — no syscall
+	// trap; see platform_linux.go for why the syscall-backed coarse
+	// clock was removed). Injected rather than imported directly to
+	// respect the L7 layering rule (observability cannot import
+	// internal/platform).
 	nowFunc          func() time.Time
 	ResponseBytesOut *prometheus.CounterVec
 	// poolTable holds per-pool slot tables indexed by pool ID. Slots

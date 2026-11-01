@@ -248,13 +248,16 @@ func (p *Parser) serveFallThroughRequest(conn net.Conn, req *api.RawRequest, exc
 // and misses until the client sends Connection: close, the parser
 // hits a read error, or the idle deadline expires.
 func (p *Parser) Serve(conn net.Conn) error {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetKeepAlive(true)
-		_ = tcp.SetNoDelay(true) // Critical: prevents Nagle's 40ms delay on small hit responses.
-	}
-	// TCP_QUICKACK tells the kernel to ACK received packets immediately
-	// instead of delaying, reducing perceived latency for keep-alive
-	// clients. No-op on non-Linux.
+	// Neither SetKeepAlive(true) nor SetNoDelay(true) is issued here:
+	// net.newTCPConn (Go's TCPConn constructor, run for accepted
+	// connections too) already applies setNoDelay(fd, true) to every
+	// TCPConn, and the ListenConfig accept path enables TCP keep-alive
+	// unless configured off — the explicit calls here were duplicate
+	// setsockopt syscalls on every accepted connection.
+	// TCP_QUICKACK is still per-connection and not inherited: it tells
+	// the kernel to ACK received packets immediately instead of
+	// delaying, reducing perceived latency for keep-alive clients.
+	// No-op on non-Linux.
 	platform.SetTCPQuickAckConn(conn)
 
 	var readBuf [readBufferSize]byte

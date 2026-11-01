@@ -318,6 +318,13 @@ func (s *Listener) logReusePortStart(addr string, n int) {
 func (s *Listener) serveSingle(ctx context.Context) error {
 	lc := net.ListenConfig{
 		Control: setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept, false),
+		// KeepAlive: -1 skips the runtime's accept-time TCP keep-alive
+		// setsockopt batch — measured 5 setsockopt syscalls per accepted
+		// connection on Linux (SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT).
+		// Dead peers are reaped by the h1parser's idle read deadline
+		// (listen.idle_timeout) at coarser granularity; NGINX likewise
+		// leaves client keep-alive off unless so_keepalive is configured.
+		KeepAlive: -1,
 	}
 	ln, err := lc.Listen(ctx, "tcp", s.addr)
 	if err != nil {
@@ -376,7 +383,11 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 	}
 
 	control := setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept, true)
-	lc := net.ListenConfig{Control: control}
+	lc := net.ListenConfig{
+		Control: control,
+		// See serveSingle: skip accept-time keep-alive setsockopts.
+		KeepAlive: -1,
+	}
 
 	listeners := make([]net.Listener, 0, n)
 	var firstAddr string

@@ -23,20 +23,23 @@ var (
 	procSelfCgroupPath = "/proc/self/cgroup"
 )
 
-// CoarseNow returns a wall-clock timestamp with ~1ms resolution using
-// CLOCK_REALTIME_COARSE. This is ~10-20x faster than time.Now() on the
-// hot path (~2-4ns vs ~25-40ns via vDSO). The 1ms resolution is sufficient
-// for cache Age headers (second granularity) and TTL evaluation.
+// CoarseNow returns a wall-clock timestamp for second-scale uses
+// (Age/Date headers, TTL evaluation, deadline refresh thresholds).
 //
-// CLOCK_REALTIME_COARSE (not MONOTONIC_COARSE) is used because Age
-// computation and StoredAt comparison require wall time, not monotonic
-// time. MONOTONIC_COARSE returns seconds-since-boot which produces
-// nonsensical Age values.
-func CoarseNow() time.Time {
-	var ts unix.Timespec
-	_ = unix.ClockGettime(unix.CLOCK_REALTIME_COARSE, &ts)
-	return time.Unix(ts.Sec, ts.Nsec)
-}
+// It is time.Now(), deliberately: the runtime services clock_gettime
+// through the vDSO (~25-40ns, no syscall trap). The previous
+// implementation called unix.ClockGettime(CLOCK_REALTIME_COARSE)
+// directly, which is NOT vDSO-serviced — every call trapped, and the
+// injected hot-path clock paid 3 real syscalls per fast-path hit
+// (deadline check, Date/Age serve, duration) and 5 per miss. Measured
+// on Linux under load: clock_gettime was 15% of total CPU at 396k
+// hits/s (go tool pprof, unix.ClockGettime cum), and 188ns/call vs
+// 31.6ns for vDSO time.Now in a tight loop.
+//
+// Monotonic readings (present in time.Now, absent in the old
+// time.Unix construction) additionally make deadline.Sub and
+// duration.Sub immune to wall-clock steps.
+func CoarseNow() time.Time { return time.Now() }
 
 // SetTCPFastOpen enables TCP Fast Open on a listener socket, allowing
 // data in the SYN packet and saving 1 RTT for the first request.
@@ -91,9 +94,13 @@ func SetTCPQuickAck(fd int) error {
 // equivalent of SetTCPQuickAck, called after accept on each new
 // connection. On non-Linux platforms the no-op stub in platform_other.go
 // makes this a zero-cost call.
+//
+// It deliberately does NOT also set TCP_NODELAY: net.newTCPConn
+// (tcpsock.go) already applies setNoDelay(fd, true) to every TCPConn —
+// accepted ones included — so an explicit call here was a duplicate
+// setsockopt syscall per accepted connection.
 func SetTCPQuickAckConn(conn net.Conn) {
 	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetNoDelay(true)
 		if rc, err := tcp.SyscallConn(); err == nil {
 			_ = rc.Control(func(fd uintptr) {
 				_ = SetTCPQuickAck(int(fd))

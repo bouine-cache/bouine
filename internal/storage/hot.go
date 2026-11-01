@@ -209,19 +209,26 @@ type shard struct {
 	mu          sync.RWMutex
 }
 
+//nolint:govet // fieldalignment: windowHits deliberately leads and is padded to its own cache line (hit-path false sharing)
 type hotEntry struct {
-	obj   *api.Object
-	entry *evictor.Entry[api.Key]
-	// hasBackup is true when the object also exists in a slower tier.
-	// Eviction prefers these entries because they can be recovered
-	// from disk.
-	hasBackup bool
 	// windowHits is a per-TTL-window hit counter, incremented on every
 	// Get (both fast and slow paths). Unlike Object.Hits (which only
 	// increments on the SIEVE slow path), this is a true access count.
 	// Reset to 0 on every Put (new hotEntry created). Used by the cache
 	// layer's refresh popularity gate.
+	// It leads the struct and is padded to its own cache line: on the hit
+	// path it is the only hot field written (obj/entry/hasBackup are read
+	// only), so isolating it removes false sharing between the counter and
+	// the cold read fields on every Get.
 	windowHits atomic.Int64
+	_          [56]byte // pad: windowHits alone owns the first 64 B line
+	obj        *api.Object
+	entry      *evictor.Entry[api.Key]
+	// hasBackup is true when the object also exists in a slower tier.
+	// Eviction prefers these entries because they can be recovered
+	// from disk.
+	hasBackup bool
+	_         [7]byte // round the struct to 88 B
 }
 
 // hotEntryPool reuses hotEntry structs across Put/Delete cycles to avoid
@@ -286,10 +293,17 @@ func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason st
 	})
 }
 
+// hotStats holds the store-wide counters. Each counter gets its own cache
+// line: hits/misses are incremented on every Get from all cores, and a
+// shared line would make those atomic adds serialize across cores (measured
+// 6.9 ns/op at 1 P vs 52-57 ns/op at 8 P on one line).
 type hotStats struct {
 	hits       atomic.Int64
+	_          [56]byte
 	misses     atomic.Int64
+	_          [56]byte
 	evictions  atomic.Int64
+	_          [56]byte
 	graceHolds atomic.Int64
 }
 
@@ -1318,9 +1332,9 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 
 const (
 	objectStructSize    int64 = 352 // unsafe.Sizeof(api.Object{}) — 336 → 352: PairedKey, the Vary resolver's mirror pointer (ADR-0068). Update when fields are added.
-	hotEntrySize        int64 = 32
-	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
-	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
+	hotEntrySize        int64 = 88  // unsafe.Sizeof(hotEntry{}): windowHits padded to its own 64 B cache line + obj/entry pointers + hasBackup
+	sieveEntrySize      int64 = 40  // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
+	mapPerEntryOverhead int64 = 32  // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header
 	headerValuesSlice  int64 = 24 // []string slice header

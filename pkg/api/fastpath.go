@@ -159,7 +159,6 @@ type RawRequest struct {
 	// wire. Reset to "" by the parser's per-request soft reset;
 	// zero value = unset.
 	Source string
-
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

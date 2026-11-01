@@ -215,8 +215,6 @@ type shard struct {
 	mu          sync.RWMutex
 }
 
-
-//nolint:govet // fieldalignment: windowHits deliberately leads and is padded to its own cache line (hit-path false sharing)
 // syncMapLen counts entries (cold path: Stats, ban scans).
 func syncMapLen(m *sync.Map) int {
 	n := 0
@@ -235,6 +233,8 @@ func loadEntry(s *shard, key api.Key) (*hotEntry, bool) {
 	return v.(*hotEntry), true
 }
 
+//
+//nolint:govet // fieldalignment: windowHits deliberately leads and is padded to its own cache line (hit-path false sharing)
 type hotEntry struct {
 	// windowHits is a per-TTL-window hit counter, incremented on every
 	// Get (both fast and slow paths). Unlike Object.Hits (which only

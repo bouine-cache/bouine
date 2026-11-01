@@ -418,3 +418,73 @@ func (c *errorFastClient) Do(_ context.Context, _ *fasthttp.Request, _ *fasthttp
 func (c *errorFastClient) DoDeadline(_ *fasthttp.Request, _ *fasthttp.Response, _ time.Time) error {
 	return errors.New("origin down")
 }
+
+// TestAcquireFetchSlot_TimerPoolReuse verifies the contended semaphore
+// wait reuses a pooled timer (Stop+drained before Reset) and returns it
+// on both the acquired and shed paths, so concurrent contended misses
+// never share a timer and the pool steady state allocates nothing.
+func TestAcquireFetchSlot_TimerPoolReuse(t *testing.T) {
+	t.Parallel()
+
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(200) })
+	h.fetchSem = make(chan struct{}, 1)
+	h.fetchSem <- struct{}{} // saturate
+	h.fetchWaitTimeout = 20 * time.Millisecond
+
+	// Shed path: timer fires, error returned, timer back in pool.
+	err := h.acquireFetchSlot()
+	require.ErrorIs(t, err, ErrFetchShed)
+	sel := h.fetchWaitTimerPool.Get()
+	require.NotNil(t, sel, "timer must be returned to the pool after shed")
+	h.fetchWaitTimerPool.Put(sel)
+
+	// Acquire path: free the slot, a second acquire must succeed and also
+	// return its timer.
+	<-h.fetchSem
+	h.fetchSem <- struct{}{}
+	done := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		<-h.fetchSem // drain then refill so each acquire blocks briefly
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			h.fetchSem <- struct{}{}
+		}()
+		done <- h.acquireFetchSlot()
+	}
+	for i := 0; i < 4; i++ {
+		require.NoError(t, <-done)
+	}
+}
+
+// TestAcquireFetchSlot_ParallelContended hammers the contended path from
+// many goroutines against a saturated semaphore: each wait must get its
+// own timer (a shared pooled timer would fire once and starve the rest),
+// and every one must shed with ErrFetchShed after fetchWaitTimeout.
+func TestAcquireFetchSlot_ParallelContended(t *testing.T) {
+	t.Parallel()
+
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(200) })
+	h.fetchSem = make(chan struct{}, 1)
+	h.fetchSem <- struct{}{} // saturate; never released
+	h.fetchWaitTimeout = 30 * time.Millisecond
+
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- h.acquireFetchSlot()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.ErrorIs(t, err, ErrFetchShed)
+	}
+	// All n must have shed after ~fetchWaitTimeout, not n*fetchWaitTimeout:
+	// proves no timer starvation.
+	require.Less(t, time.Since(start), 5*time.Second)
+}

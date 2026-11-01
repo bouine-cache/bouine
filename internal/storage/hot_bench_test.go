@@ -149,6 +149,38 @@ func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 	})
 }
 
+// BenchmarkHotGet_NoBans_ParallelWide runs the same hit path against 64k
+// distinct keys (no working-set reuse): each hit also contends on the
+// striped windowHits counter, so this bench exposes cache-line ping-pong
+// that the 1k-key variant hides when keys pile onto few stripes.
+// Run with: go test -bench BenchmarkHotGet_NoBans_ParallelWide -cpu 1,4,8,10
+func BenchmarkHotGet_NoBans_ParallelWide(b *testing.B) {
+	const keys = 64 << 10
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 64})
+	defer func() { _ = s.Close(context.Background()) }()
+	ks := make([]api.Key, keys)
+	for i := range ks {
+		ks[i] = testkey.Key(uint64(i + 1))
+		_ = s.Put(context.Background(), ks[i], obj(ks[i], 512))
+	}
+	for _, k := range ks {
+		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx := context.Background()
+		var i uint64
+		for pb.Next() {
+			k := ks[i%keys]
+			i++
+			_, _, _ = s.Get(ctx, k)
+		}
+	})
+}
+
 // BenchmarkHotGet_WithBan_Parallel is the contended baseline: one active
 // ban forces matchesActiveBan past the atomic fast path onto the global
 // bansMu. Comparing this against the NoBans variant quantifies the lock's

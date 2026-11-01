@@ -75,7 +75,7 @@ func TestFallThrough_StreamedResponseRearmsWriteDeadline(t *testing.T) {
 	counting := &writeDeadlineCountingConn{Conn: serverConn}
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = parser.handleFallThrough(counting, sseRawReq(), nil)
+		_, _, _ = parser.handleFallThrough(counting, sseRawReq(), nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -120,7 +120,7 @@ func TestFallThrough_BufferedResponseKeepsSingleArm(t *testing.T) {
 	counting := &writeDeadlineCountingConn{Conn: serverConn}
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = parser.handleFallThrough(counting, sseRawReq(), nil)
+		_, _, _ = parser.handleFallThrough(counting, sseRawReq(), nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()

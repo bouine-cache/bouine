@@ -37,6 +37,24 @@ type RoutedFastPath struct {
 	release api.FastPathHandler // Release target; TryHit never called on it
 }
 
+// routeMemo is the per-connection route-resolution memo stored on
+// RawRequest.MemoRoute. host is the exact request Host string the route
+// was resolved for (byte equality — no folding, no allocation) and path
+// the exact Path that matched; re is the matched routeEntry. A memo hit
+// requires byte-equal Host AND Path, so the memo re-validates nothing:
+// on a keep-alive connection the host is constant and single-URL load
+// (the hot-only benchmark shape, and any CDN-fronted fleet pinned to one
+// hostname per backend) hits the memo every request. Allocated once per
+// (connection, host, path) change, not per request.
+//
+//nolint:govet // fieldalignment: pointer leads so the GC scan prefix stays minimal; strings follow
+type routeMemo struct {
+	re     *routeEntry
+	host   string
+	path   string
+	method string
+}
+
 // NewRoutedFastPath wraps a Router. release must implement the
 // receiver-agnostic Release contract described on RoutedFastPath; it
 // may be one of the per-route handlers. The router must be fully
@@ -59,7 +77,39 @@ func NewRoutedFastPath(rt *Router, release api.FastPathHandler) *RoutedFastPath 
 // config-owned string, empty when no classifier is configured (read
 // as "unclassified" by the metrics consumer).
 func (r *RoutedFastPath) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
+	// Per-connection route memo: the h1parser reuses one RawRequest scratch
+	// per connection, so a memo hit on the previous request skips
+	// matchRoute's table walk entirely. The memo key is the exact
+	// (Host, Path, Method) triple — byte equality, no allocation — valid
+	// because the router is immutable after boot: routes are registered in
+	// cmd/builder.go before any listener accepts, and config reload reports
+	// route changes under needs_restart instead of mutating the table. On
+	// a keep-alive connection pinned to one URL
+	// (the hot-only shape) every request after the first hits the memo.
+	if memo, _ := req.MemoRoute.(*routeMemo); memo != nil && memo.host == req.Host &&
+		memo.path == req.Path && memo.method == req.Method {
+		return r.serveRoute(memo.re, req, now)
+	}
 	re := r.router.matchRoute(req.Host, req.Path, req.Method)
+	if re != nil {
+		memo, _ := req.MemoRoute.(*routeMemo)
+		if memo == nil {
+			memo = &routeMemo{}
+			req.MemoRoute = memo
+		}
+		memo.re = re
+		memo.host = req.Host
+		memo.path = req.Path
+		memo.method = req.Method
+	} else {
+		req.MemoRoute = nil
+	}
+	return r.serveRoute(re, req, now)
+}
+
+// serveRoute delegates to the matched route's fast path and stamps the
+// traffic class; re may be nil (no route matched).
+func (r *RoutedFastPath) serveRoute(re *routeEntry, req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
 	if re == nil || re.fastPath == nil {
 		return nil, false
 	}

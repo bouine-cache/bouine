@@ -29,6 +29,15 @@ var streamBufPool = sync.Pool{
 
 const maxStreamBufRetain = 1 << 20
 
+// streamChunkPool recycles the fixed-size 32 KiB read scratch used by the
+// tee fill and the unbuffered stream copier. Fixed-size, fully overwritten
+// by every Read, so recycling needs no reset. One allocation per fill was
+// pure churn on the rc1 5krps profile: 10.95GB of teeStreamToClient's
+// 30-minute alloc_space was the per-fill chunk + body copy.
+var streamChunkPool = sync.Pool{
+	New: func() any { return new([streamChunkSize]byte) },
+}
+
 // streamFetchResult carries the origin response state needed to stream
 // the body to the client while concurrently buffering it for the cache.
 // When buffered is true, the body is already in resp.Body() (the client
@@ -254,7 +263,11 @@ const streamChunkSize = 32 * 1024
 // 4 KiB bufio pipe buffer and the client sees them in multi-kilobyte
 // batches — or only at stream end.
 func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
-	buf := make([]byte, streamChunkSize)
+	// Pooled as an array pointer: Put's interface argument would otherwise
+	// box (and allocate) a slice header on every streamed response.
+	cp := streamChunkPool.Get().(*[streamChunkSize]byte)
+	defer streamChunkPool.Put(cp)
+	buf := cp[:]
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
@@ -861,6 +874,10 @@ func (h *Handler) streamMissBuffered(
 	// #598) has no raw response; its body is already an exact-size,
 	// independently-owned copy produced by upstreamFetchResult, and it
 	// travels on the streamFetchResult body field below.
+	// The upstream-fallback body and the cacheable copy below are
+	// exact-size, cache-owned slices the store may alias (PutOwned); the
+	// stolen buffer is neither, so it keeps the cloning Put.
+	bodyOwned := sf.resp == nil || cacheable
 	var body []byte
 	switch {
 	case sf.resp == nil:
@@ -898,6 +915,7 @@ func (h *Handler) streamMissBuffered(
 		Header:     fromHeaderMap(owned),
 		Body:       body,
 		Delay:      sf.Delay,
+		bodyOwned:  bodyOwned,
 	}
 	publishFillVerdict(inflight, res, res.Header)
 	// stored closes at function exit: after the store attempt below on
@@ -928,13 +946,18 @@ func (h *Handler) streamMissBuffered(
 		h.unstorableMemo.note(primaryKey)
 	}
 
+	// Origin fetch complete (body owned above, headers detached into res):
+	// the fetch-semaphore slot and the pooled origin response go back now,
+	// before the store admission — shard-lock store work must never extend
+	// the fetch-queue wait.
+	releaseStreamFetch(sf)
+
 	if !isHEAD {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
 
 	if cacheable && !isHEAD {
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
-			releaseStreamFetch(sf)
 			return
 		}
 		storeKey := primaryKey
@@ -942,7 +965,6 @@ func (h *Handler) streamMissBuffered(
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 			if storeKey != primaryKey {
 				if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
-					releaseStreamFetch(sf)
 					return
 				}
 			}
@@ -953,11 +975,10 @@ func (h *Handler) streamMissBuffered(
 			// (ADR-0068, #824) — buildResolver blanks the VaryKey the
 			// previous ad-hoc clone left set here.
 			primaryObj := buildResolver(obj, primaryKey)
-			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
+			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0, false)
 			h.forwardToOwnerIfRemote(ctx, primaryObj)
 		}
 	}
-	releaseStreamFetch(sf)
 }
 
 // takeResponseBody transfers ownership of resp's body into an
@@ -1035,11 +1056,17 @@ func (h *Handler) streamMissTee(
 // incrementally as the tee buffer grows, and a closure-based defer
 // subtracts the final value on exit. An in-loop check against
 // maxStreamingBufferBytes stops buffering (but continues streaming to
-// the client) once the global cap is exceeded, preventing all 32
-// fetchSem slots from accumulating full buffers simultaneously under
-// slow-origin conditions. Note that bytes.Buffer grows by doubling, so
-// actual allocated memory can be up to 2x the tracked Len(); the global
-// cap is set at 50% of the theoretical worst case to account for this.
+// the client) once the global cap is exceeded, bounding concurrent tee
+// buffers under slow-origin conditions. Note that bytes.Buffer grows by
+// doubling, so actual allocated memory can be up to 2x the tracked
+// Len(); the global cap is set at 50% of the theoretical worst case to
+// account for this.
+//
+// The fetch-semaphore slot and the pooled origin response are released
+// at origin-body-complete — before the settle/store tail — so the store
+// admission (shard lock, inline SIEVE eviction, stored-object build)
+// never extends the fetch-queue wait. Buffers that outlive the hold stay
+// bounded by the global streaming cap and the per-response cap.
 func (h *Handler) teeStreamToClient(
 	w *bufio.Writer,
 	bodyStream io.Reader,
@@ -1069,7 +1096,9 @@ func (h *Handler) teeStreamToClient(
 		h.streamingBufferBytes.Add(-int64(lastReported))
 	}()
 
-	chunk := make([]byte, 32*1024)
+	cp := streamChunkPool.Get().(*[streamChunkSize]byte)
+	defer streamChunkPool.Put(cp)
+	chunk := cp[:]
 	for {
 		n, readErr := bodyStream.Read(chunk)
 		if n > 0 {
@@ -1104,7 +1133,9 @@ func (h *Handler) teeStreamToClient(
 	// Copy the tee buffer into an exact-size slice. Stealing the buffer's
 	// backing array instead (buf.Bytes()) would persist the doubling-growth
 	// slack in the stored cache object — the hot tier pins that slack for
-	// the object's lifetime. The copy keeps stored bodies right-sized.
+	// the object's lifetime. The copy keeps stored bodies right-sized — and,
+	// being cache-owned, it is handed to the store below
+	// (fetchResult.bodyOwned) instead of being cloned a second time.
 	bodyCopy := make([]byte, buf.Len())
 	copy(bodyCopy, buf.Bytes())
 
@@ -1120,15 +1151,26 @@ func (h *Handler) teeStreamToClient(
 		Header:     fromHeaderMap(sf.Header.ToMap()),
 		Body:       bodyCopy,
 		Delay:      sf.Delay,
+		bodyOwned:  true,
 	}
-	h.settleTeeFill(inflight, res, sf, storeKey, primaryKey, ri, resMap, fillTTL, bodyComplete, cacheExceeded, totalBytes)
+
+	// The origin fetch is complete: the pooled response, request, and
+	// fetch-semaphore slot go back now — BEFORE the settle/store tail.
+	// Holding the slot through the store admission (shard lock, inline
+	// SIEVE eviction, stored-object build) stretches the fetch-queue wait
+	// exactly when TTL-expiry waves saturate the semaphore and GC churns
+	// on the fill heap; queued fetches shed to 503 after fetchWaitTimeout.
+	// res owns everything the settle needs — the header conversion above
+	// detached the pooled response's headers — so the early release is
+	// race-free.
+	releaseStreamFetch(sf)
+
+	h.settleTeeFill(inflight, res, storeKey, primaryKey, ri, resMap, fillTTL, bodyComplete, cacheExceeded, totalBytes)
 
 	if buf.Cap() <= maxStreamBufRetain {
 		buf.Reset()
 		streamBufPool.Put(buf)
 	}
-
-	releaseStreamFetch(sf)
 }
 
 // settleTeeFill publishes the tee fill's verdict to the flight and
@@ -1149,7 +1191,6 @@ func (h *Handler) teeStreamToClient(
 func (h *Handler) settleTeeFill(
 	inflight *inflightStream,
 	res fetchResult,
-	sf *streamFetchResult,
 	storeKey, primaryKey api.Key,
 	ri RequestInfo,
 	resMap header.Map,
@@ -1161,7 +1202,9 @@ func (h *Handler) settleTeeFill(
 		publishStreamUnshareable(inflight)
 		return
 	}
-	publishFillVerdict(inflight, res, sf.Header)
+	// res.Header is the owned conversion built before the pooled response
+	// was released — the client-state gate must not read pooled state.
+	publishFillVerdict(inflight, res, res.Header)
 	defer close(inflight.stored)
 	if cacheExceeded || (h.maxObjectSize > 0 && totalBytes > h.maxObjectSize) {
 		return
@@ -1173,7 +1216,7 @@ func (h *Handler) settleTeeFill(
 		// (ADR-0068, #824) — buildResolver blanks the VaryKey the
 		// previous ad-hoc clone left set here.
 		primaryObj := buildResolver(obj, primaryKey)
-		h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0)
+		h.storeObject(bgCtx, primaryKey, primaryObj, ri, false, 0, false)
 		h.forwardToOwnerIfRemote(bgCtx, primaryObj)
 	}
 }
@@ -1287,7 +1330,7 @@ func (h *Handler) storeStreamedObject(
 		// Plain objects keep a zero PairedKey.
 		obj.PairedKey = primaryKey
 	}
-	h.storeObject(ctx, key, obj, ri, false, 0)
+	h.storeObject(ctx, key, obj, ri, false, 0, res.bodyOwned)
 	h.forwardToOwnerIfRemote(ctx, obj)
 	return obj
 }

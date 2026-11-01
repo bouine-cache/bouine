@@ -243,6 +243,15 @@ type fetchResult struct {
 	// origin leaves the response already aged on arrival. Zero on the
 	// upstream-fallback path (in-process handler, no network).
 	Delay time.Duration
+	// bodyOwned marks Body as an exact-size, cache-owned allocation that
+	// the store may alias via the ownedBodyStore capability instead of
+	// heap-copying it again in CloneForStorage. True on every fill site
+	// that builds the copy itself (tee, buffered fallback, doFetch,
+	// doFetchBg, doRefillFetch, upstream fallback, POST store); false
+	// when Body aliases a buffer the caller may reuse
+	// (takeResponseBody's stolen fasthttp buffer) or shares bytes with a
+	// still-stored object (revalidation refresh).
+	bodyOwned bool
 }
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -1490,7 +1499,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
-		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
+		h.storeObject(ctx, key, refreshed, ri, true, staleHits, false)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
@@ -1504,7 +1513,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, effectiveVary(resMap, h.policy))
 		obj := h.buildObject(key, ri, res, resMap, nil, time.Now())
 		obj.Hits = 0
-		h.storeObject(ctx, key, obj, ri, true, staleHits)
+		h.storeObject(ctx, key, obj, ri, true, staleHits, res.bodyOwned)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
@@ -1633,7 +1642,7 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 		h.reserveVariantSlotFromPeer(ctx, obj.PairedKey, obj.Key)
 	}
 	ri := RequestInfo{Method: "GET", Header: obj.Header.Clone()}
-	h.storeObject(ctx, obj.Key, obj, ri, false, 0)
+	h.storeObject(ctx, obj.Key, obj, ri, false, 0, false)
 }
 
 // buildKey constructs the cache key, applying the route's KeyPolicy
@@ -2870,6 +2879,7 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		bodyOwned:  true,
 		Delay:      time.Since(fetchStart),
 	}
 }
@@ -3284,7 +3294,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		// carries the merged 304 declaration; purging first removes the
 		// old resolver even if the refreshed variant re-lands elsewhere.
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
-		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
+		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0, false)
 		// RFC 9111 §4.3.1 (validation model): a 304 from the origin means
 		// the stored response's conditionals are satisfied. The client's
 		// own conditional is evaluated against the freshened validators —
@@ -3472,7 +3482,7 @@ func (h *Handler) freshenFromHead(
 	refreshed := h.refreshFrom304(stale, res, ri, now)
 	// Drift check before the store (ADR-0058), mirroring the 304 branch.
 	h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
-	h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
+	h.storeObject(ctx, lookupKey, refreshed, ri, false, 0, false)
 	// The HEAD client's own conditional is evaluated against the
 	// freshened entry, mirroring the 304 branch (§4.3.1).
 	if h.tryConditional304Fast(ctx, refreshed, src, "REVALIDATED", cacheRevalidated, now, h.rewriteHook()) {
@@ -3641,7 +3651,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, ri, time.Now())
 		h.detectVaryDrift(ctx, stale, ri, res.StatusCode, refreshed.VaryValue)
-		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
+		h.storeObject(ctx, key, refreshed, ri, true, staleHits, false)
 		// A non-owner refreshing a peer-served stale copy (issue #857)
 		// delivers it to the owner; no-op on the owner itself.
 		h.forwardToOwnerIfRemote(ctx, refreshed)
@@ -3666,7 +3676,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		if obj.VaryKey != "" {
 			obj.PairedKey = stale.PairedKey
 		}
-		h.storeObject(ctx, key, obj, ri, true, staleHits)
+		h.storeObject(ctx, key, obj, ri, true, staleHits, res.bodyOwned)
 		h.forwardToOwnerIfRemote(ctx, obj)
 	}
 }
@@ -3773,7 +3783,7 @@ func (h *Handler) writeAndMaybeStore(
 			// reachability). Plain objects keep a zero PairedKey.
 			obj.PairedKey = primaryKey
 		}
-		h.storeObject(ctx, storeKey, obj, ri, false, 0)
+		h.storeObject(ctx, storeKey, obj, ri, false, 0, res.bodyOwned)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
 		// from this or other non-owners hit instead of going to origin
@@ -3787,7 +3797,7 @@ func (h *Handler) writeAndMaybeStore(
 			// private copy of every page and Vary URLs cost 2x their body
 			// in RAM.
 			primaryObj := buildResolver(obj, primaryKey)
-			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
+			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0, false)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.
 			h.forwardToOwnerIfRemote(ctx, primaryObj)
@@ -4112,13 +4122,14 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		StatusCode: resp.StatusCode(),
 		Header:     fromHeaderMap(hdr),
 		Body:       body,
+		bodyOwned:  true,
 	}
 	now := time.Now()
 	obj := h.buildObject(key, getRI, res, hdr, nil, now)
 	if obj == nil {
 		return
 	}
-	h.storeObject(ctx, key, obj, getRI, false, 0)
+	h.storeObject(ctx, key, obj, getRI, false, 0, res.bodyOwned)
 }
 
 func (h *Handler) buildLocationKey(ctx *fasthttp.RequestCtx, loc string) api.Key {
@@ -4146,6 +4157,16 @@ func (h *Handler) buildLocationKey(ctx *fasthttp.RequestCtx, loc string) api.Key
 	return BuildKey(ri, h.policy)
 }
 
+// ownedBodyStore is the optional store capability fill paths use when
+// fetchResult.bodyOwned is set: the store takes the body as the stored
+// bytes (no second heap copy) instead of cloning it. Declared in the
+// consumer, the cache layer, per the layering rule; HotStore and
+// TieredStore implement it. Stores without the capability (test fakes,
+// exotic backends) keep the cloning Put semantics.
+type ownedBodyStore interface {
+	PutOwned(ctx context.Context, key api.Key, obj *api.Object) error
+}
+
 // storeObject stores obj under key. When refresh-before-expiry
 // is enabled, it also registers the key in the refresh registry and
 // schedules a background refresh at TTL - margin. Every path that
@@ -4164,7 +4185,16 @@ func (h *Handler) buildLocationKey(ctx *fasthttp.RequestCtx, loc string) api.Key
 // staleHits is the per-window hit count from the store's WindowHits
 // method, read before the refresh store. For non-refresh stores
 // (isRefresh=false), staleHits is 0 and unused.
-func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
+//
+// bodyOwned is true when obj.Body is an exact-size, cache-owned copy
+// the fetch built (threaded from fetchResult.bodyOwned); the store then
+// aliases it via ownedBodyStore instead of cloning. False for bodies
+// that alias a caller-reusable buffer or bytes shared with a
+// still-stored object (revalidation refresh, peer decode) — those keep
+// the defensive clone: the stored body must be immutable and, with the
+// slab on, must never point at a region eviction can free while the
+// old entry still serves it.
+func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64, bodyOwned bool) {
 	// In strong cluster mode, only the owner stores. A non-owner that
 	// fetches from origin (after a peer-fetch miss) serves the response
 	// to the client but does not cache it locally — the object is
@@ -4177,36 +4207,50 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 			return
 		}
 	}
-	_ = h.store.Put(ctx, key, obj)
-	if h.shouldRegisterRefresh(obj, ri) {
-		// An error status covered by the negative-caching policy skips
-		// proactive refresh: re-fetching an origin already returning
-		// errors amplifies the outage.
-		if h.fp.neg.Cacheable(obj.StatusCode) {
-			return
-		}
-		if !isRefresh && h.refreshReactiveFirst {
-			return
-		}
-		if isRefresh && h.refreshMinHits > 0 && !h.shouldRefresh(staleHits, obj) {
-			if h.refreshPersistCycles > 0 && h.refreshRegistry.DecrementPersist(key) {
-				h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
-				h.refreshMetrics.IncTotal("persist_cycle")
-				return
-			}
-			if h.refreshRegistry != nil {
-				h.refreshRegistry.Unregister(key)
-			}
-			h.refreshMetrics.IncSkips("below_min_hits")
-			return
-		}
-		var varyHeader string
-		if obj.Header.Len() > 0 {
-			varyHeader = obj.VaryValue
-		}
-		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles, h.policy)
-		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
+	if ob, ok := h.store.(ownedBodyStore); ok && bodyOwned {
+		_ = ob.PutOwned(ctx, key, obj)
+	} else {
+		_ = h.store.Put(ctx, key, obj)
 	}
+	h.registerRefresh(key, obj, ri, isRefresh, staleHits)
+}
+
+// registerRefresh handles the refresh-before-expiry half of storeObject:
+// policy-gated registration in the refresh registry and scheduling of the
+// background refresh at TTL - margin. Extracted so the ownership dispatch
+// above stays inside storeObject's complexity budget. The gates, in order:
+// negative-cached error statuses never re-fetch (re-fetching an origin
+// already returning errors amplifies the outage); reactive-first routes
+// register only on the reactive path; popularity-gated background
+// refreshes fall back to persist cycles before unregistering.
+func (h *Handler) registerRefresh(key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
+	if !h.shouldRegisterRefresh(obj, ri) {
+		return
+	}
+	if h.fp.neg.Cacheable(obj.StatusCode) {
+		return
+	}
+	if !isRefresh && h.refreshReactiveFirst {
+		return
+	}
+	if isRefresh && h.refreshMinHits > 0 && !h.shouldRefresh(staleHits, obj) {
+		if h.refreshPersistCycles > 0 && h.refreshRegistry.DecrementPersist(key) {
+			h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
+			h.refreshMetrics.IncTotal("persist_cycle")
+			return
+		}
+		if h.refreshRegistry != nil {
+			h.refreshRegistry.Unregister(key)
+		}
+		h.refreshMetrics.IncSkips("below_min_hits")
+		return
+	}
+	var varyHeader string
+	if obj.Header.Len() > 0 {
+		varyHeader = obj.VaryValue
+	}
+	h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles, h.policy)
+	h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 }
 
 // triggerShedRefill schedules a bounded background origin fetch that
@@ -4357,7 +4401,7 @@ func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key)
 		return
 	}
 	obj := h.buildObject(key, ri, res, resMap, nil, time.Now())
-	h.storeObject(ctx, key, obj, ri, true, 0)
+	h.storeObject(ctx, key, obj, ri, true, 0, res.bodyOwned)
 	h.forwardToOwnerIfRemote(ctx, obj)
 }
 
@@ -4394,6 +4438,7 @@ func (h *Handler) doRefillFetch(ctx context.Context, req *fasthttp.Request) (res
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		bodyOwned:  true,
 	}
 }
 
@@ -4510,6 +4555,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		bodyOwned:  true,
 		Delay:      time.Since(fetchStart),
 	}
 }
@@ -4595,6 +4641,7 @@ func upstreamFetchResult(ctx *fasthttp.RequestCtx) fetchResult {
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
+		bodyOwned:  true,
 	}
 }
 

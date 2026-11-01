@@ -449,8 +449,26 @@ func newOriginClient(cc clientConfig) *fasthttp.Client {
 		// and admin servers already use 64 KiB (server/listener.go);
 		// the origin client must not be the smaller pipe.
 		ReadBufferSize: 64 << 10,
+		// The write buffer carries one full serialized origin request per
+		// flush. GET/HEAD misses serialize to well under 4 KiB, but a
+		// request with a large Cookie header or a POST body prefix can
+		// exceed it, forcing a mid-request flush (extra write syscall and
+		// a latency bubble on the origin connection). 16 KiB covers the
+		// realistic header block head/U+200Bthroom without inflating
+		// per-conn memory on idle pools.
+		WriteBufferSize: 16 << 10,
 		Dial: func(addr string) (net.Conn, error) {
-			return dialer.Dial("tcp", addr)
+			conn, err := dialer.Dial("tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			// Origin fetches are latency-bound per request: disable
+			// Nagle so the (now single, buffered) request write goes
+			// out immediately instead of waiting for an ACK.
+			if tc, ok := conn.(*net.TCPConn); ok {
+				_ = tc.SetNoDelay(true)
+			}
+			return conn, nil
 		},
 	}
 }
@@ -733,14 +751,13 @@ type PoolFastClient struct {
 	pool         *Pool
 	client       *fasthttp.Client
 	streamClient *fasthttp.Client
-	// uriScratch is a per-client scratch buffer for the absolute-form
-	// origin URI (precomputed scheme://host prefix + request URI). One
-	// buffer per PoolFastClient, used only inside doSingleFetch, which is
-	// sequential per client goroutine at the call site — but hedged
-	// fetches run attempts concurrently, so guard it with a mutex.
-	uriScratch   []byte
-	uriScratchMu sync.Mutex
-	hedgeTimeout time.Duration
+	// uriScratchPool recycles per-attempt buffers for the absolute-form
+	// origin URI (precomputed scheme://host prefix + request URI).
+	// Hedged fetches run doSingleFetch attempts concurrently on the same
+	// client, so each attempt owns its buffer from this pool instead of
+	// sharing one mutex-guarded scratch.
+	uriScratchPool sync.Pool
+	hedgeTimeout   time.Duration
 }
 
 // Do performs an origin fetch via fasthttp. When the pool configures
@@ -795,7 +812,7 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 		return fmt.Errorf("no healthy upstream")
 	}
 	// Rewrite the request URI to the selected target, using the
-	// precomputed scheme://host prefix into the client's scratch buffer.
+	// precomputed scheme://host prefix into a per-attempt pooled buffer.
 	// Header.RequestURI() returns the raw stored target verbatim; it is
 	// origin-form (path+query) only because every production caller sets
 	// it via SetRequestURIBytes(h.originURI(...)) — the originURI choke
@@ -803,11 +820,17 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// parse is needed here. SetRequestURIBytes copies into the pooled
 	// request's own URI buffer BEFORE the scratch is released, so the
 	// request never aliases it (hedged attempts run doSingleFetch
-	// concurrently on the same client; the mutex serializes scratch use).
-	c.uriScratchMu.Lock()
-	c.uriScratch = append(c.uriScratch[:0], t.originPrefix...)
-	c.uriScratch = append(c.uriScratch, req.Header.RequestURI()...)
-	uri := c.uriScratch
+	// concurrently on the same client; the pool gives each attempt its
+	// own buffer, so no mutex is needed).
+	scratchAny := c.uriScratchPool.Get()
+	var uri []byte
+	if scratchAny == nil {
+		uri = make([]byte, 0, len(t.originPrefix)+8192)
+	} else {
+		uri = (*scratchAny.(*[]byte))[:0]
+	}
+	uri = append(uri, t.originPrefix...)
+	uri = append(uri, req.Header.RequestURI()...)
 	// The dialed host is always the operator-configured pool target;
 	// only the request's own path/query is appended — the same data
 	// flow as Do and FastHandler, which carry the already-accepted
@@ -815,7 +838,7 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 	// duplicated sink from adding a third alert.
 	// lgtm[go/request-forgery] — see docs/security/threat-model.md (T06/T07)
 	req.SetRequestURIBytes(uri)
-	c.uriScratchMu.Unlock()
+	c.uriScratchPool.Put(&uri)
 	// With an absolute-form request URI, fasthttp's Request.Write
 	// replaces the Host header with the URI's host (the pool target)
 	// unless UseHostHeader is set. Preserving the request's own Host

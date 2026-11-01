@@ -805,7 +805,15 @@ type URLRing struct {
 // urlSuffixSegs non-empty path segments joined with "/", e.g.
 // "/api/v1/users/123?foo=bar" → "/api/v1/users".
 func urlKey(path string) string {
-	if path == "" || path == "/" {
+	return urlKeyBytes([]byte(path))
+}
+
+// urlKeyBytes is urlKey over raw bytes: the returned key aliases the
+// input when no truncation is needed at the segment boundary... it always
+// copies into a string, but only AFTER the caller's sampling gate, so
+// sampled-out requests never pay the conversion.
+func urlKeyBytes(path []byte) string {
+	if len(path) == 0 || (len(path) == 1 && path[0] == '/') {
 		return "/"
 	}
 	segs := 0
@@ -826,7 +834,7 @@ func urlKey(path string) string {
 	if end == 0 {
 		end = len(path)
 	}
-	return path[:end]
+	return string(path[:end])
 }
 
 // SetSampleRate configures 1-in-N sampling for RecordURL. A rate of
@@ -846,12 +854,19 @@ func (r *URLRing) SampleRate() int {
 // When sampling is enabled (sampleRate > 0), only 1-in-N calls proceed
 // past the atomic counter check — the remaining calls return in ~5 ns.
 func (r *URLRing) RecordURL(path, route, xCache string) {
+	r.RecordURLBytes([]byte(path), route, xCache)
+}
+
+// RecordURLBytes is RecordURL over the raw path bytes: the 1-in-N sampling
+// gate runs BEFORE any string conversion, so sampled-out calls never
+// allocate. The conversion happens only on the calls that record.
+func (r *URLRing) RecordURLBytes(path []byte, route, xCache string) {
 	if rate := r.sampleRate.Load(); rate > 0 {
 		if r.sampleCounter.Add(1)%rate != 0 {
 			return
 		}
 	}
-	key := urlKey(path)
+	key := urlKeyBytes(path)
 	v, ok := r.entries.Load(key)
 	if !ok {
 		if r.size.Load() >= URLRingCap {

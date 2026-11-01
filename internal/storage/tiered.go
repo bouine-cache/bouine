@@ -556,7 +556,26 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 	if err := t.hot.Put(ctx, key, obj); err != nil {
 		return err
 	}
+	return t.warmBack(key, obj)
+}
 
+// PutOwned is Put for callers that hand over obj.Body (see HotStore's
+// PutOwned for the ownership contract). The warm-tier encode below reads
+// obj.Body after the hot tier stored it — read-only, so aliasing is
+// safe — and the WAL/warm records get their own encoded buffer.
+func (t *TieredStore) PutOwned(ctx context.Context, key api.Key, obj *api.Object) error {
+	if err := t.hot.PutOwned(ctx, key, obj); err != nil {
+		return err
+	}
+	return t.warmBack(key, obj)
+}
+
+// warmBack mirrors obj into the warm tier and the WAL when it qualifies.
+// KeepGrace objects (stayin_alive routes, ADR-0051) are eagerly warm-backed
+// regardless of BodyThreshold: a warm copy turns hot SIEVE pressure into a
+// demotion instead of a deletion, and Protect shields the copy from warm
+// eviction while the hot tier holds it.
+func (t *TieredStore) warmBack(key api.Key, obj *api.Object) error {
 	// ADR-0068: resolvers always warm-back regardless of body size.
 	// lookup() finds warm variants only through the entry at the
 	// primary key — the resolver IS the routing metadata — so a

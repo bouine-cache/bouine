@@ -602,15 +602,10 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 // Put stores an object. If the shard is over budget, SIEVE eviction
 // runs inline for up to inlineEvictCap victims, then signals the
 // background sweeper for any remaining overshoot. Entries with a backup
-// are evicted first (cheap: recoverable from disk).
-//
-//nolint:funlen // 52 statements: eviction loop is inherently linear; extracting would harm readability
+// are evicted first (cheap: recoverable from disk). Fill paths whose
+// body is already an exact-size, cache-owned copy should call PutOwned
+// instead — see its doc for the ownership contract.
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
-	size := objSize(obj)
-	s := h.shard(key)
-	shardIdx := int(key.Hash64() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
-	perShardMax := h.maxBytes / int64(len(h.shards))
-
 	// Move the body off the Go heap before acquiring the shard lock so
 	// the per-region mutex in slab.Alloc doesn't extend shard lock hold
 	// time. A nil slab (disabled by default, or unavailable) or a failed
@@ -631,7 +626,43 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			ownedBody = slabBuf
 		}
 	}
-	stored := obj.CloneForStorage(ownedBody)
+	return h.putStored(key, obj.CloneForStorage(ownedBody))
+}
+
+// PutOwned is Put for callers that hand over obj.Body: the body is
+// already cache-owned, exact-size, and immutable after the call, so the
+// stored entry aliases it instead of heap-copying it a second time. The
+// fill paths build an exact-size body copy for the singleflight flight
+// anyway; cloning that copy again inside Put doubled the fill path's
+// body allocations (84.7% of inuse heap — 479.86MB — was held by
+// CloneForStorage copies on the rc1 5krps profile). The header map is
+// still deep-cloned: the serialized head served on every hit is built
+// from stored headers, so a caller mutating its map after the call must
+// never change what the cache serves.
+//
+// The slab path still copies into slab memory — moving the body off the
+// Go heap is the point of the slab. An Alloc failure keeps the
+// transferred body: the caller already promised immutability, so
+// aliasing the heap slice is exactly as safe as the slab-off case.
+// Callers must treat obj.Body as immutable after PutOwned returns: hit
+// writevs and flight followers alias the same bytes.
+func (h *HotStore) PutOwned(_ context.Context, key api.Key, obj *api.Object) error {
+	ownedBody := obj.Body
+	if h.slab != nil && len(obj.Body) > 0 {
+		if slabBuf := h.slab.Alloc(len(obj.Body)); slabBuf != nil {
+			copy(slabBuf, obj.Body)
+			ownedBody = slabBuf
+		}
+	}
+	return h.putStored(key, obj.CloneForStorage(ownedBody))
+}
+
+//nolint:funlen // 52 statements: eviction loop is inherently linear; extracting would harm readability
+func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
+	size := objSize(stored)
+	s := h.shard(key)
+	shardIdx := int(key.Hash64() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	var logs []evictionLog
 	var slabFrees [][]byte

@@ -304,9 +304,9 @@ func writeUpstreamError(ctx *fasthttp.RequestCtx, connErrReason string) {
 
 // defaultOriginMaxConnsPerHost caps persistent connections per origin host
 // in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
-// Little's Law requires ~8 concurrent connections; 64 gives ~8x headroom
+// Little's Law requires ~8 concurrent connections; 128 gives ~16x headroom
 // for traffic growth while bounding FD usage.
-const defaultOriginMaxConnsPerHost = 64
+const defaultOriginMaxConnsPerHost = 128
 
 // clientConfig holds the resolved (defaults applied) origin client
 // settings. Produced once at pool construction and shared by every

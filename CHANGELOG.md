@@ -12,6 +12,7 @@ the curated, human-readable summary.
 
 ### Changed
 
+
 - The `X-Cache-Source` response header is no longer emitted on any
   served response. The served source (hot/warm/peer/origin, empty for
   bouine-synthesized responses) now travels only on the internal
@@ -27,6 +28,16 @@ the curated, human-readable summary.
   ~330 -> ~263 ns/op (~20%) now that the middleware no longer parses a
   response header for the source label. The `source` label values and
   the closed label set are unchanged.
+- Raised three built-in defaults to give high-concurrency and
+  high-Vary-cardinality deployments more headroom before hitting a cap:
+  `connect.max_connections` per origin host 64 → 128
+  (~16x Little's-law headroom at 3k req/s), `cluster.peer_max_conns_per_host`
+  8 → 16 (16 conns × 16 pending = 256 concurrent peer fetches per peer,
+  doubling the old HTTP/2 capacity), and the per-primary-key variant cap
+  `cache.max_variants` default 1024 → 2048. All three remain overridable
+  per pool / cluster / route; `0` still selects the new defaults.
+
+### Changed
 
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,

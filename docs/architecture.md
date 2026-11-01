@@ -400,8 +400,8 @@ Internal HTTP/1.1 over mTLS (port `:8443` by default, ADR-0035). On miss: owner 
 two-hop fallback, then origin. Cuckoo-filter-based digests gossiped every 5s
 to short-circuit fetches for keys known absent from peers. `Bouine-Hop` header
 bounds traversal depth (default 2). HTTP/1.1 pipelining is enabled for peer
-fetch via `fasthttp.PipelineClient` — 8 connections per peer with pipeline
-depth 16 (128 concurrent fetches) — replacing the previous `fasthttp.Client`
+fetch via `fasthttp.PipelineClient` — 16 connections per peer with pipeline
+depth 16 (256 concurrent fetches) — replacing the previous `fasthttp.Client`
 with 256 connections per host. This reduces per-peer connection memory by
 ~97% (12.8 MiB → 400 KiB). Each peer address gets its own `PipelineClient`
 cached in a `sync.Map` (ADR-0039).

@@ -45,7 +45,7 @@ func TestHandleFallThrough_ServesResponse(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+		_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -106,7 +106,7 @@ func TestHandleFallThrough_TransfersOwnerMissHint(t *testing.T) {
 
 			done := make(chan struct{}, 1)
 			go func() {
-				_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+				_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 				_ = serverConn.Close()
 				done <- struct{}{}
 			}()
@@ -168,7 +168,7 @@ func TestHandleFallThrough_TransfersOwnerResolver(t *testing.T) {
 
 			done := make(chan struct{}, 1)
 			go func() {
-				_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+				_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 				_ = serverConn.Close()
 				done <- struct{}{}
 			}()
@@ -230,7 +230,7 @@ func TestHandleFallThrough_TransfersOwnerShedHint(t *testing.T) {
 
 			done := make(chan struct{}, 1)
 			go func() {
-				_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+				_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 				_ = serverConn.Close()
 				done <- struct{}{}
 			}()
@@ -289,7 +289,7 @@ func TestHandleFallThrough_TransfersOwnerGateRejectHint(t *testing.T) {
 
 			done := make(chan struct{}, 1)
 			go func() {
-				_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+				_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 				_ = serverConn.Close()
 				done <- struct{}{}
 			}()
@@ -341,7 +341,7 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _, _ = parser.handleFallThrough(serverConn, req, nil)
+		_, _, _ = parser.handleFallThrough(serverConn, req, nil, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -396,7 +396,7 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _, _ = parser.handleFallThrough(serverConn, req, excess)
+		_, _, _ = parser.handleFallThrough(serverConn, req, excess, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -471,7 +471,7 @@ func TestHandleFallThrough_PoolReaderReset(t *testing.T) {
 	}
 
 	// First fall-through serves and releases its reader to the pool.
-	_, _, err := parser.handleFallThrough(&mockConn{}, req("/first"), nil)
+	_, _, err := parser.handleFallThrough(&mockConn{}, req("/first"), nil, nil)
 	require.NoError(t, err, "first handleFallThrough")
 	require.Equal(t, []string{"/first"}, gotPaths)
 
@@ -484,7 +484,7 @@ func TestHandleFallThrough_PoolReaderReset(t *testing.T) {
 
 	// The second fall-through checks out that same entry on another
 	// connection: the stale buffered bytes must be gone.
-	_, _, err = parser.handleFallThrough(&mockConn{}, req("/second"), nil)
+	_, _, err = parser.handleFallThrough(&mockConn{}, req("/second"), nil, nil)
 	require.NoError(t, err, "second handleFallThrough")
 	require.Equal(t, []string{"/first", "/second"}, gotPaths,
 		"stale reader state must not corrupt the next fall-through")

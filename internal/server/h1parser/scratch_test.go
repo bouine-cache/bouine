@@ -26,7 +26,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	req, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	req, fallThrough, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
 	require.NoError(t, err)
 	require.False(t, fallThrough)
 	assert.Equal(t, "GET", req.Method)
@@ -41,7 +41,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	// reuses the scratch struct. Note: a real keep-alive connection reads
 	// the second request into the same readBuf, which is truncated to
 	// [:0] before reading, so stale header slices are overwritten.
-	req2, fallThrough2, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
+	req2, fallThrough2, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
 	require.NoError(t, err)
 	require.False(t, fallThrough2)
 	assert.Equal(t, "POST", req2.Method)
@@ -59,7 +59,7 @@ func TestParseRequest_ScratchReuse(t *testing.T) {
 	scratch.OwnerGateReject = true
 	scratch.OwnerShed = true
 	scratch.OwnerResolver = &api.Object{Key: api.Key{0x01}}
-	req3, fallThrough3, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	req3, fallThrough3, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
 	require.NoError(t, err)
 	require.False(t, fallThrough3)
 	assert.False(t, req3.OwnerMiss)
@@ -82,12 +82,12 @@ func TestParseRequest_MalformedSecondRequest(t *testing.T) {
 	var readBuf [readBufferSize]byte
 	var scratch api.RawRequest
 
-	_, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
+	_, _, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(first))}, &readBuf, &scratch, nil)
 	require.NoError(t, err)
 
 	// Malformed second request returns an error and must not observe
 	// stale state from the first.
-	_, fallThrough, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
+	_, fallThrough, _, _, err := parser.parseRequest(&mockConn{r: bytes.NewReader([]byte(second))}, &readBuf, &scratch, nil)
 	require.Error(t, err)
 	assert.True(t, fallThrough)
 	// The scratch was reset: NHeaders is 0 before the parse error

@@ -70,10 +70,14 @@ func newOriginStreamClient(cc clientConfig) *fasthttp.Client {
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
 		ReadTimeout:         0,
 		WriteTimeout:        5 * time.Minute,
+		WriteBufferSize:     16 << 10,
 		Dial: func(addr string) (net.Conn, error) {
 			conn, err := dialer.Dial("tcp", addr)
 			if err != nil {
 				return nil, err
+			}
+			if tc, ok := conn.(*net.TCPConn); ok {
+				_ = tc.SetNoDelay(true)
 			}
 			return &sseReadConn{Conn: conn, idle: sseReadIdle}, nil
 		},

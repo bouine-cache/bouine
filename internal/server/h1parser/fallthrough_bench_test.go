@@ -51,7 +51,7 @@ func BenchmarkH1Parse_FallThrough(b *testing.B) {
 		// a complete request lifecycle through the production fall-through
 		// path (raw wire bytes replayed, not re-serialized).
 		conn := &mockConn{r: bytes.NewReader(raw)}
-		if _, err := parser.handleFallThrough(conn, req, nil, raw); err != nil {
+		if _, _, err := parser.handleFallThrough(conn, req, nil, raw); err != nil {
 			b.Fatalf("handleFallThrough: %v", err)
 		}
 	}

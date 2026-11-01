@@ -99,6 +99,23 @@ func StripRequestURI(prefix, uri []byte) []byte {
 // 100ms sheds the excess while still absorbing short queueing bursts.
 const defaultFetchWaitTimeout = 100 * time.Millisecond
 
+// copyOutboundHeaders copies the inbound request headers onto the outbound
+// origin request, skipping hop-by-hop headers (RFC 9110 §7.6.1) that apply
+// only to the client-facing connection and must not be forwarded. Skipping
+// them also shrinks the per-fetch header copy and the wire writes on the
+// origin connection. The three hot miss-path callers all funnel through
+// here so the skip list lives in exactly one place.
+func copyOutboundHeaders(dst *fasthttp.RequestHeader, src *fasthttp.RequestHeader) {
+	for k, v := range src.All() {
+		switch string(k) {
+		case header.Connection, header.KeepAlive, header.TransferEncoding,
+			header.TE, header.Trailer, header.Upgrade, header.ProxyConnection:
+			continue
+		}
+		dst.AddBytesKV(k, v)
+	}
+}
+
 // headerFromCtx extracts request headers as header.Map from a fasthttp RequestCtx.
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 	hm := header.NewMap(ctx.Request.Header.Len())
@@ -2123,9 +2140,7 @@ func (h *Handler) revalidateResolverMiss(ctx *fasthttp.RequestCtx, primaryKey ap
 	revalReq.Header.SetMethodBytes(ctx.Method())
 	revalReq.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	revalReq.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		revalReq.Header.AddBytesKV(k, v)
-	}
+	copyOutboundHeaders(&revalReq.Header, &ctx.Request.Header)
 	// Normalize AE to the bucket token so the filled variant matches the
 	// key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&revalReq.Header)
@@ -3203,9 +3218,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	revalReq.Header.SetMethodBytes(ctx.Method())
 	revalReq.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	revalReq.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		revalReq.Header.AddBytesKV(k, v)
-	}
+	copyOutboundHeaders(&revalReq.Header, &ctx.Request.Header)
 	// Normalize AE to the bucket token so the revalidated variant
 	// matches the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&revalReq.Header)
@@ -3994,9 +4007,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	req.Header.SetMethodBytes(ctx.Method())
 	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		req.Header.AddBytesKV(k, v)
-	}
+	copyOutboundHeaders(&req.Header, &ctx.Request.Header)
 	// Client-identity headers (request.forwarded, issue #769) on the
 	// outbound copy only — see applyForwardedCtx.
 	h.applyForwardedCtx(&req.Header, ctx)
@@ -4466,9 +4477,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	req.Header.SetMethodBytes(ctx.Method())
 	req.SetRequestURIBytes(h.originURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		req.Header.AddBytesKV(k, v)
-	}
+	copyOutboundHeaders(&req.Header, &ctx.Request.Header)
 	// Normalize AE to the bucket token so the stored variant matches
 	// the key's bucket claim (see rewriteOutboundAE).
 	h.rewriteOutboundAE(&req.Header)

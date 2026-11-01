@@ -88,6 +88,13 @@ type Parser struct {
 	// does not pay 64 KiB per entry.
 	oversizeReaderPool sync.Pool
 
+	// connScratchPool hands each connection's Serve loop its read buffer
+	// + scratch RawRequest from a pool instead of growing the goroutine
+	// stack by ~20 KiB per connection (~100 MiB RSS at 5k conns). Checked
+	// out at Serve entry, returned on exit; the buffers are never shared
+	// across concurrent connections.
+	connScratchPool sync.Pool
+
 	scheme    string
 	idleRead  time.Duration
 	writeTime time.Duration
@@ -108,7 +115,21 @@ func New(fastPath api.FastPathHandler, fallback fasthttp.RequestHandler, opts ..
 	}
 	p.fallReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, readBufferSize) }
 	p.oversizeReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, oversizeBufferSize) }
+	p.connScratchPool.New = func() any {
+		return &connScratch{buf: make([]byte, readBufferSize)}
+	}
 	return p
+}
+
+// connScratch bundles a connection's read buffer and request scratch so
+// they can be pooled as one unit: Serve checks one out per connection
+// instead of growing the goroutine stack by readBufferSize +
+// unsafe.Sizeof(api.RawRequest{}) (~20 KiB) per conn.
+//
+//nolint:govet // fieldalignment: scratch leads so its pointer-heavy header array is scanned first; the saving stays in one size class
+type connScratch struct {
+	scratch api.RawRequest
+	buf     []byte
 }
 
 // Option configures a Parser.
@@ -177,6 +198,11 @@ const (
 	serveContinue serveResult = iota
 	// serveClose means the connection must be closed and Serve returns.
 	serveClose
+	// serveContinueLeftover means the connection is ready for the next
+	// request AND the caller must adopt the returned leftover bytes as
+	// the prefix of the next parseRequest call (pipelined bytes a
+	// fallback-served request's reader buffered past its body).
+	serveContinueLeftover
 )
 
 // refreshReadDeadline advances the read deadline when the remaining
@@ -208,33 +234,33 @@ func (p *Parser) rearmAfterFallThrough(conn net.Conn, deadline *time.Time, wd *t
 // are rejected with 400 (RFC 9110 §6.6.2) — an ambiguously framed body
 // cannot be safely delimited for keep-alive reuse, so the connection
 // always closes after a 400.
-func (p *Parser) serveFallThroughRequest(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
+func (p *Parser) serveFallThroughRequest(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, []byte, error) {
 	if req == nil {
 		// Oversize headers (>16 KiB): excess holds the buffered prefix.
 		// Hand the bytes to the fallback handler via a prefix conn so the
 		// request is served, not dropped. The fallback owns the
 		// connection's read state afterwards, so the connection closes.
 		if len(excess) == 0 {
-			return serveClose, nil
+			return serveClose, nil, nil
 		}
 		p.handleFallThroughRaw(conn, excess)
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
 	if smugglingDetected(req) {
 		_ = writeBadRequest(conn)
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
-	close, err := p.handleFallThrough(conn, req, excess, rawHead)
+	close, leftover, err := p.handleFallThrough(conn, req, excess, rawHead)
 	if err != nil {
-		return serveClose, err
+		return serveClose, nil, err
 	}
 	if close {
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
 	if err := p.rearmAfterFallThrough(conn, deadline, wd); err != nil {
-		return serveClose, err
+		return serveClose, nil, err
 	}
-	return serveContinue, nil
+	return serveContinueLeftover, leftover, nil
 }
 
 // Serve handles a single connection: parse HTTP/1.1 requests in a
@@ -252,19 +278,17 @@ func (p *Parser) Serve(conn net.Conn) error {
 	// clients. No-op on non-Linux.
 	platform.SetTCPQuickAckConn(conn)
 
-	var readBuf [readBufferSize]byte
-
-	// scratch is the per-connection request struct, reset and refilled by
-	// every parseRequest call. Allocating a fresh RawRequest per request
-	// (the struct embeds a [100]RawHeader array, ~4 KB) was the dominant
-	// allocation on the hit path — 99.3% of bytes allocated under load —
-	// driving ~63 GC cycles/s and stealing CPU from request goroutines as
-	// mark-assist. The header strings alias readBuf, which is already
-	// overwritten by the next request, so reusing the struct keeps the
-	// same lifetime semantics: nothing may retain a request beyond its
-	// iteration, which the fall-through contract already required.
-	var scratch api.RawRequest
-
+	// Each connection checks its read buffer + scratch RawRequest out of
+	// connScratchPool instead of growing the goroutine stack by
+	// ~20 KiB (16 KiB readBuf + ~3.3 KiB RawRequest): at 5k conns that is
+	// ~100 MiB of resident stack the pool avoids. The scratch's lifetime
+	// semantics are unchanged — nothing may retain a request beyond its
+	// iteration, which the fall-through contract already required — and
+	// the buffer is returned to the pool when Serve exits.
+	scratchPtr := p.connScratchPool.Get().(*connScratch)
+	readBuf := (*[readBufferSize]byte)(scratchPtr.buf)
+	scratch := &scratchPtr.scratch
+	defer p.connScratchPool.Put(scratchPtr)
 	// Set the initial read deadline once. The deadline is refreshed
 	// lazily: only when the remaining time drops below the refresh
 	// threshold, avoiding a setsockopt syscall on every request.
@@ -281,18 +305,24 @@ func (p *Parser) Serve(conn net.Conn) error {
 	// reset to zero after each fall-through.
 	var writeDeadline time.Time
 
+	// excess carries pipelined bytes past the previous request's header
+	// terminator into the next parseRequest call, so a hit followed by a
+	// pipelined request loops the fast path instead of falling through.
+	var excess []byte
 	for {
 		if err := p.refreshReadDeadline(conn, &deadline); err != nil {
 			return err
 		}
 
-		req, fallThrough, excess, rawHead, err := p.parseRequest(conn, &readBuf, &scratch)
+		req, fallThrough, next, rawHead, err := p.parseRequest(conn, readBuf, scratch, excess)
 		if err != nil {
 			return err
 		}
+		excess = next
 		p.markActive(conn)
 		if fallThrough {
-			res, err := p.serveFallThroughRequest(conn, req, excess, rawHead, &deadline, &writeDeadline)
+			res, left, err := p.serveFallThroughRequest(conn, req, excess, rawHead, &deadline, &writeDeadline)
+			excess = adoptLeftover(res, left, excess)
 			if res == serveClose || err != nil {
 				return err
 			}
@@ -300,49 +330,75 @@ func (p *Parser) Serve(conn net.Conn) error {
 			continue
 		}
 
-		// Try the fast path.
+		// Try the fast path. On a miss serveFastHit runs the fallback
+		// itself (fastPathMissResult) and returns its outcome, so every
+		// result from it is final for this iteration — the serveFastMiss
+		// call below is only reached when p.fastPath is nil.
 		if p.fastPath != nil {
-			res, err := p.serveFastHit(conn, req, excess, rawHead, &deadline, &writeDeadline)
-			switch {
-			case err != nil:
+			res, left, err := p.serveFastHit(conn, req, excess, rawHead, &deadline, &writeDeadline)
+			excess = adoptLeftover(res, left, excess)
+			if err != nil {
 				return err
-			case res == serveClose:
-				return nil
-			case res == serveContinue:
-				p.markIdle(conn)
-				continue
 			}
+			if res == serveClose {
+				return nil
+			}
+			// serveContinue (a hit was served) or serveContinueLeftover
+			// (a fallback ran and left pipelined bytes): `excess` holds
+			// the next request's prefix either way — the parser's excess
+			// on a hit, the fallback reader's leftover on a miss.
+			p.markIdle(conn)
+			continue
 		}
 
-		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
-		if res, err := p.serveFastMiss(conn, req, excess, rawHead, &deadline, &writeDeadline); res == serveClose || err != nil {
+		// Miss path (only when no fast path is wired): call the fallback
+		// handler with a fasthttp.RequestCtx.
+		res, left, err := p.serveFastMiss(conn, req, excess, rawHead, &deadline, &writeDeadline)
+		excess = adoptLeftover(res, left, excess)
+		if res == serveClose || err != nil {
 			return err
 		}
 		p.markIdle(conn)
 	}
 }
 
+// adoptLeftover picks the next request's prefix after one loop iteration.
+// The caller passes the parser's current excess (valid on a fast-path hit)
+// and the fallback reader's leftover (valid after a fallback-served
+// request): a fallback result (serveContinueLeftover) means the parser's
+// excess was consumed as the request body, so the leftover replaces it;
+// anything else keeps the parser excess on a hit and clears it otherwise.
+func adoptLeftover(res serveResult, left, parserExcess []byte) []byte {
+	if res == serveContinueLeftover {
+		return left
+	}
+	if res == serveContinue {
+		return parserExcess
+	}
+	return nil
+}
+
 // serveFastMiss runs the blocking fallback for a request the fast path
 // declined, then re-arms the parser's deadline ownership for the next
 // keep-alive request. Returns serveClose when the connection ends.
-func (p *Parser) serveFastMiss(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
-	close, ftErr := p.handleFallThrough(conn, req, excess, rawHead)
+func (p *Parser) serveFastMiss(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, []byte, error) {
+	close, leftover, ftErr := p.handleFallThrough(conn, req, excess, rawHead)
 	if ftErr != nil {
-		return serveClose, ftErr
+		return serveClose, nil, ftErr
 	}
 	if close {
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
 	// Re-arm the read deadline for the next keep-alive request.
 	*deadline = p.nowFunc().Add(p.idleRead)
 	if err := conn.SetReadDeadline(*deadline); err != nil {
-		return serveClose, err
+		return serveClose, nil, err
 	}
 	// handleFallThrough cleared the OS write deadline so the fallback
 	// handler could manage its own timeouts; reset the tracker so the
 	// next hit re-arms it.
 	*wd = time.Time{}
-	return serveContinue, nil
+	return serveContinueLeftover, leftover, nil
 }
 
 // serveFastHit attempts the fast path for a parsed request. A hit serves
@@ -350,7 +406,7 @@ func (p *Parser) serveFastMiss(conn net.Conn, req *api.RawRequest, excess []byte
 // bytes past the header block — those must be consumed by the fallback
 // handler with proper framing, so the result falls through. When the
 // fast path does not hit, the caller falls through to the miss path.
-func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
+func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, []byte, error) {
 	now := p.nowFunc()
 	resp, hit := p.fastPath.TryHit(req, now)
 	if !hit || resp == nil {
@@ -360,12 +416,13 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	}
 	if err := p.serveHit(conn, resp, now, wd); err != nil {
 		p.fastPath.Release(resp)
-		return serveClose, err
+		return serveClose, nil, err
 	}
 	if p.metricsHook != nil {
 		dur := p.nowFunc().Sub(now)
 		p.metricsHook(resp.Pool, resp.TrafficClass, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
+		req.Source = resp.Source
 	}
 	closeConn := resp.CloseConn
 	p.fastPath.Release(resp)
@@ -373,34 +430,45 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 		// The request asked for Connection: close (RFC 9112 §9.6) and
 		// the serialized response ended with "Connection: close" — the
 		// connection must not be reused after this response.
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
 	if len(excess) == 0 {
-		return serveContinue, nil
+		return serveContinue, nil, nil
 	}
-	// The client pipelined bytes past this request's header block (a
-	// body or the start of the next request). They are still unread on
-	// the socket. Re-enter the fallback handler with the buffered bytes
-	// so it consumes them with proper framing instead of the next
-	// parseRequest iteration discarding them.
-	return p.serveFallThroughRequest(conn, req, excess, rawHead, deadline, wd)
+	// The client pipelined bytes past this request's header block. If
+	// those bytes are the start of another plain request (no body
+	// framing on this one — a CL/TE header would have set
+	// DisqualifyFastPath and we would not be here), the Serve loop
+	// re-parses them from the buffer on the next iteration and tries
+	// the fast path again — no slow-path fall-through for pipelined
+	// hits. Only fall through when the excess cannot be the start of a
+	// plain request (the previous request carried a body, which the
+	// scan flags disqualify, so any excess is at least ambiguous → let
+	// the fallback frame it). serveFastHit is only reached for
+	// qualified GET/HEAD, so a non-empty excess here is always a
+	// pipelined next request head: hand it back up via serveContinue
+	// and let the loop re-parse it.
+	return serveContinue, nil, nil
 }
 
 // fastPathMissResult runs the fallback handler for a request the fast
 // path declined (miss, conditional, range). It converts the fall-through
 // outcome into a serveResult.
-func (p *Parser) fastPathMissResult(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
-	close, err := p.handleFallThrough(conn, req, excess, rawHead)
+func (p *Parser) fastPathMissResult(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte, deadline *time.Time, wd *time.Time) (serveResult, []byte, error) {
+	close, leftover, err := p.handleFallThrough(conn, req, excess, rawHead)
 	if err != nil {
-		return serveClose, err
+		return serveClose, nil, err
 	}
 	if close {
-		return serveClose, nil
+		return serveClose, nil, nil
 	}
 	if err := p.rearmAfterFallThrough(conn, deadline, wd); err != nil {
-		return serveClose, err
+		return serveClose, nil, err
 	}
-	return serveContinue, nil
+	// Always report serveContinueLeftover on the miss path (even with an
+	// empty leftover) so the Serve loop knows the fallback ran and adopts
+	// `left` as the next prefix, instead of reusing the hit-path excess.
+	return serveContinueLeftover, leftover, nil
 }
 
 // badRequestResponse is the pre-serialized 400 response written when
@@ -419,18 +487,30 @@ func writeBadRequest(conn net.Conn) error {
 // parseRequest reads and parses a single HTTP/1.1 request from conn.
 // scratch is the caller's reusable RawRequest; the returned request
 // aliases it and is valid only until the next parseRequest call on the
-// same connection (the header strings alias readBuf). The returned
-// rawHead is the exact wire bytes of this request's head (and any buffered
-// excess): fall-through callers replay it as-is instead of re-serializing
-// the parsed fields, so a fall-through costs no head allocation. It
-// aliases readBuf and shares the same valid-until-next-parse lifetime;
-// only fall-through callers may use it, and they do so before the next
-// parse.
-func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, []byte, error) {
+// same connection (the header strings alias readBuf).
+// prefix carries pipelined bytes left in readBuf by the previous request
+// (the part past its header terminator). Empty for a fresh connection or
+// after a request that consumed everything buffered.
+func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scratch *api.RawRequest, prefix []byte) (*api.RawRequest, bool, []byte, []byte, error) {
 	buf := readBuf[:0]
+	if len(prefix) > 0 {
+		// Pipelined bytes from the previous request are still buffered:
+		// copy them to the front (they are a suffix of readBuf, so the
+		// copy may overlap — copy handles that) and skip the first read.
+		n := copy(buf[:cap(buf)], prefix)
+		buf = buf[:n]
+	}
 
 	headerEnd := -1
 	for {
+		if len(buf) > 0 {
+			// Buffered (pipelined) bytes may already contain the next
+			// request's terminator — scan before reading more.
+			if idx := findHeaderEnd(buf); idx >= 0 {
+				headerEnd = idx
+				break
+			}
+		}
 		n, err := conn.Read(buf[len(buf):cap(buf)])
 		if n > 0 {
 			buf = buf[:len(buf)+n]
@@ -487,6 +567,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.OwnerGateReject = false
 	req.OwnerShed = false
 	req.OwnerResolver = nil
+	req.Source = ""
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -770,12 +851,19 @@ func releaseReader(pool *sync.Pool, br *bufio.Reader) {
 // and the pooled *bufio.Reader are the only per-request allocations —
 // the hit path is untouched.
 //
-// Returns (close, err). When close is true the caller should return
-// from the keep-alive loop — the client requested Connection: close
-// or the response indicates the connection should be closed.
-func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte) (bool, error) {
+// Returns (close, leftover, err). When close is true the caller should
+// return from the keep-alive loop — the client requested Connection: close
+// or the response indicates the connection should be closed. leftover is
+// any still-buffered pipelined bytes the fallback's reader consumed past
+// the end of this request's body (only possible when the request carried
+// no body framing: a CL/TE request has its exact body length consumed by
+// fasthttp, so nothing past it can belong to this request). The caller
+// feeds leftover back as the prefix of the next parseRequest call, so
+// pipelined requests after a fallback-served request stay on the fast
+// path instead of being silently dropped by the reader reset.
+func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte, rawHead []byte) (bool, []byte, error) {
 	if req == nil {
-		return false, errors.New("h1parser: nil request on fall-through")
+		return false, nil, errors.New("h1parser: nil request on fall-through")
 	}
 
 	// Replay the exact wire bytes of the request head (plus any buffered
@@ -808,27 +896,37 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// The reader is pooled — see fallReaderPool — so this is a checkout,
 	// not a per-request allocation.
 	br := acquireReader(&p.fallReaderPool, rc)
-	defer releaseReader(&p.fallReaderPool, br)
 	if err := ctx.Request.Read(br); err != nil {
 		// Malformed input beyond what the fast parser rejected — the
 		// connection state is now indeterminate; close it without
 		// surfacing a read error (Serve treats all read failures as
 		// connection termination, not listener failure).
-		return true, nil //nolint:nilerr // close-connection outcome, not an error to propagate
+		releaseReader(&p.fallReaderPool, br)
+		return true, nil, nil //nolint:nilerr // close-connection outcome, not an error to propagate
 	}
 	if ctx.Request.MayContinue() {
 		// Mirror fasthttp's serve loop (server.go:2566): send 100 Continue
 		// before reading the body. maxBodySize=0 means unlimited — the
 		// route's body limits are enforced downstream by the cache layer.
 		if _, err := conn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n")); err != nil {
-			return true, err
+			releaseReader(&p.fallReaderPool, br)
+			return true, nil, err
 		}
 		if err := ctx.Request.ContinueReadBody(br, 0, true); err != nil {
 			// Body framing failed mid-request: the connection is
 			// indeterminate, so close — not an error to propagate.
-			return true, nil //nolint:nilerr // close-connection outcome, not an error to propagate
+			releaseReader(&p.fallReaderPool, br)
+			return true, nil, nil //nolint:nilerr // close-connection outcome, not an error to propagate
 		}
 	}
+
+	// Capture any pipelined bytes the fallback's reader buffered past this
+	// request's body before the reader is reset. Only a request without
+	// CL/TE framing can leave bytes: fasthttp consumed exactly the framed
+	// body, so anything buffered beyond it is the next pipelined request.
+	leftover := make([]byte, br.Buffered())
+	_, _ = br.Read(leftover)
+	releaseReader(&p.fallReaderPool, br)
 
 	// Transfer the fast path's peer-branch hints (if any) to the fallback
 	// handler: handleCacheMiss reads them to skip duplicate owner lookups
@@ -838,7 +936,8 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 
 	p.fallback(&ctx)
 
-	return p.writeFallThroughResponse(conn, &ctx, clientClose)
+	close, err := p.writeFallThroughResponse(conn, &ctx, clientClose)
+	return close, leftover, err
 }
 
 // writeFallThroughResponse writes the fallback handler's response and
@@ -895,6 +994,9 @@ func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	}
 	if req.OwnerResolver != nil {
 		ctx.SetUserValue(api.OwnerResolverContextKey, req.OwnerResolver)
+	}
+	if req.Source != "" {
+		ctx.SetUserValue(header.XBouineSource, req.Source)
 	}
 }
 

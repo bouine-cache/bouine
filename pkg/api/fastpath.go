@@ -145,8 +145,19 @@ type RawRequest struct {
 	// crosses into the next keep-alive request. Nil unless the fast path
 	// fetched a resolver-shaped answer.
 	OwnerResolver *Object
-=======
->>>>>>> be4690c0 (chore(aggregate): gofmt conflict resolutions, restore hotEntry nolint placement)
+	// MemoRoute is the server layer's per-connection route-resolution memo
+	// (RouteMemo). The h1parser's per-request soft reset deliberately does
+	// NOT clear it: the scratch RawRequest is per-connection, so the memo
+	// intentionally survives across the connection's keep-alive requests.
+	// Nil on hand-built RawRequests.
+	MemoRoute RouteMemo
+	// Source is the served response's source (hot/warm/peer), set by the
+	// fast path on a hit. The h1parser transfers it to the fallback
+	// RequestCtx under header.XBouineSource so the fallback's metrics
+	// middleware reports the same source label; never emitted on the
+	// wire. Reset to "" by the parser's per-request soft reset;
+	// zero value = unset.
+	Source string
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

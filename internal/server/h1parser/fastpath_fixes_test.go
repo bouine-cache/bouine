@@ -71,7 +71,7 @@ func TestFallThrough_BodyAcrossReads(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	_, ftErr := parser.handleFallThrough(serverConn, req, excess, nil)
+	_, _, ftErr := parser.handleFallThrough(serverConn, req, excess, nil)
 	require.NoError(t, ftErr)
 	_ = serverConn.Close()
 	<-done
@@ -101,7 +101,9 @@ func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 
 	// Send both requests in a single write — the fast path serves the
 	// first (hit), and the second request's bytes are already buffered
-	// as excess.
+	// as excess. The second request is ALSO served by the fast path now:
+	// pipelined hits loop the fast path instead of falling through to
+	// the slow handler.
 	pipelined := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" +
 		"GET /next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
 
@@ -117,13 +119,13 @@ func TestServe_PipelinedBytesAfterHit(t *testing.T) {
 	resp1 := &fasthttp.Response{}
 	require.NoError(t, resp1.Read(reader))
 	assert.Equal(t, 200, resp1.StatusCode())
-	// The second (miss) response must also arrive — its pipelined bytes
-	// were buffered after the first hit.
+	// The second (pipelined) response must also arrive — served from the
+	// fast path out of the buffered excess bytes.
 	resp2 := &fasthttp.Response{}
 	require.NoError(t, resp2.Read(reader))
 	assert.Equal(t, 200, resp2.StatusCode())
-	assert.Equal(t, "miss", string(resp2.Body()))
-	require.Equal(t, 1, handlerCalls, "the pipelined miss must reach the fallback handler")
+	assert.Equal(t, "hello", string(resp2.Body()))
+	require.Equal(t, 0, handlerCalls, "a pipelined plain GET must stay on the fast path")
 
 	_ = client.Close()
 	select {
@@ -253,7 +255,7 @@ func TestFallThrough_RawHeadReplay(t *testing.T) {
 	}
 
 	conn := &mockConn{r: bytes.NewReader(nil), w: io.Discard}
-	_, err := p.handleFallThrough(conn, req, nil, raw)
+	_, _, err := p.handleFallThrough(conn, req, nil, raw)
 	require.NoError(t, err)
 	// The odd header value arrives with its exact spacing preserved when
 	// the raw head is replayed (rebuildRequestHead would normalize the

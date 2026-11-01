@@ -216,6 +216,10 @@ const (
 	// Upgrade — RFC 9110 §7.8. Request to upgrade to a different
 	// protocol on the same connection.
 	Upgrade = "Upgrade"
+
+	// ProxyConnection — non-standard but widely sent hop-by-hop header
+	// (RFC 9110 §7.6.1 spirit); never forwarded to the origin.
+	ProxyConnection = "Proxy-Connection"
 )
 
 // Bouine-specific custom headers. These carry internal metadata between

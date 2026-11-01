@@ -88,6 +88,13 @@ type Parser struct {
 	// does not pay 64 KiB per entry.
 	oversizeReaderPool sync.Pool
 
+	// connScratchPool hands each connection's Serve loop its read buffer
+	// + scratch RawRequest from a pool instead of growing the goroutine
+	// stack by ~20 KiB per connection (~100 MiB RSS at 5k conns). Checked
+	// out at Serve entry, returned on exit; the buffers are never shared
+	// across concurrent connections.
+	connScratchPool sync.Pool
+
 	scheme    string
 	idleRead  time.Duration
 	writeTime time.Duration
@@ -108,7 +115,21 @@ func New(fastPath api.FastPathHandler, fallback fasthttp.RequestHandler, opts ..
 	}
 	p.fallReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, readBufferSize) }
 	p.oversizeReaderPool.New = func() any { return bufio.NewReaderSize(eofReader{}, oversizeBufferSize) }
+	p.connScratchPool.New = func() any {
+		return &connScratch{buf: make([]byte, readBufferSize)}
+	}
 	return p
+}
+
+// connScratch bundles a connection's read buffer and request scratch so
+// they can be pooled as one unit: Serve checks one out per connection
+// instead of growing the goroutine stack by readBufferSize +
+// unsafe.Sizeof(api.RawRequest{}) (~20 KiB) per conn.
+//
+//nolint:govet // fieldalignment: scratch leads so its pointer-heavy header array is scanned first; the saving stays in one size class
+type connScratch struct {
+	scratch api.RawRequest
+	buf     []byte
 }
 
 // Option configures a Parser.
@@ -252,19 +273,17 @@ func (p *Parser) Serve(conn net.Conn) error {
 	// clients. No-op on non-Linux.
 	platform.SetTCPQuickAckConn(conn)
 
-	var readBuf [readBufferSize]byte
-
-	// scratch is the per-connection request struct, reset and refilled by
-	// every parseRequest call. Allocating a fresh RawRequest per request
-	// (the struct embeds a [100]RawHeader array, ~4 KB) was the dominant
-	// allocation on the hit path — 99.3% of bytes allocated under load —
-	// driving ~63 GC cycles/s and stealing CPU from request goroutines as
-	// mark-assist. The header strings alias readBuf, which is already
-	// overwritten by the next request, so reusing the struct keeps the
-	// same lifetime semantics: nothing may retain a request beyond its
-	// iteration, which the fall-through contract already required.
-	var scratch api.RawRequest
-
+	// Each connection checks its read buffer + scratch RawRequest out of
+	// connScratchPool instead of growing the goroutine stack by
+	// ~20 KiB (16 KiB readBuf + ~3.3 KiB RawRequest): at 5k conns that is
+	// ~100 MiB of resident stack the pool avoids. The scratch's lifetime
+	// semantics are unchanged — nothing may retain a request beyond its
+	// iteration, which the fall-through contract already required — and
+	// the buffer is returned to the pool when Serve exits.
+	scratchPtr := p.connScratchPool.Get().(*connScratch)
+	readBuf := (*[readBufferSize]byte)(scratchPtr.buf)
+	scratch := &scratchPtr.scratch
+	defer p.connScratchPool.Put(scratchPtr)
 	// Set the initial read deadline once. The deadline is refreshed
 	// lazily: only when the remaining time drops below the refresh
 	// threshold, avoiding a setsockopt syscall on every request.
@@ -286,7 +305,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			return err
 		}
 
-		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf, &scratch)
+		req, fallThrough, excess, err := p.parseRequest(conn, readBuf, scratch)
 		if err != nil {
 			return err
 		}

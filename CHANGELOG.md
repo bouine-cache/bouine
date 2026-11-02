@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-02
+
 ### Changed
 
 - Cut per-request and per-connection syscall counts on the Linux data
@@ -3884,7 +3886,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.4
 [0.6.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.3
 [0.6.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.2
 [0.6.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.1

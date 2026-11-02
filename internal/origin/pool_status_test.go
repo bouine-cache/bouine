@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,7 +44,7 @@ func TestTargetStatusLastChangeTransitions(t *testing.T) {
 	require.Equal(t, int64(0), st.PassiveErrors, "restore clears the passive streak")
 
 	for range 3 {
-		target.recordProbeError(3, logger, "api")
+		target.recordProbeError(3, 10*time.Second, logger, "api")
 	}
 	st = p.Targets()[0]
 	require.False(t, st.Healthy, "probe ejection at threshold")

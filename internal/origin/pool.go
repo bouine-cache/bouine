@@ -82,9 +82,17 @@ type Target struct {
 	// successWithin to gate 5xx passive counting (issue #839). Zero — a
 	// target that has never completed a successful fetch — never gates.
 	lastSuccessUnix atomic.Int64
-	probeErrors     atomic.Int64
-	successes       atomic.Int64
-	healthy         atomic.Bool
+	// lastProbeSuccessUnix is the Unix-nanosecond timestamp of the most
+	// recent successful active probe, written by recordProbeSuccess. It
+	// gates probe failures the way lastSuccessUnix gates passive 5xx
+	// (#839, #914): a probe against a multi-endpoint target (a Kubernetes
+	// Service VIP, where each probe connection lands on a random ready
+	// pod) only proves that one endpoint failed. Zero — never probed —
+	// never gates, so cold targets eject by streak alone.
+	lastProbeSuccessUnix atomic.Int64
+	probeErrors          atomic.Int64
+	successes            atomic.Int64
+	healthy              atomic.Bool
 	// lastChange is the Unix-nanosecond timestamp of the most recent
 	// health-state transition (ejection or restore). Zero means no
 	// transition was recorded since boot; /v1/status renders it as an
@@ -160,11 +168,20 @@ func (t *Target) notePassiveSuccess() {
 // non-5xx response within d of now. Zero last-success — a target that
 // has never completed a successful fetch — never gates.
 func (t *Target) successWithin(d time.Duration) bool {
-	last := t.lastSuccessUnix.Load()
-	if last == 0 {
+	return within(t.lastSuccessUnix.Load(), d)
+}
+
+// probeSuccessWithin reports whether an active probe succeeded within d
+// of now. Zero — never probed successfully — never gates.
+func (t *Target) probeSuccessWithin(d time.Duration) bool {
+	return within(t.lastProbeSuccessUnix.Load(), d)
+}
+
+func within(lastUnixNano int64, d time.Duration) bool {
+	if lastUnixNano == 0 {
 		return false
 	}
-	return time.Since(time.Unix(0, last)) < d
+	return time.Since(time.Unix(0, lastUnixNano)) < d
 }
 
 // passiveEjectAt performs the threshold check and ejection CAS shared by
@@ -192,11 +209,23 @@ func (t *Target) passiveEjectAt(cnt int64, threshold int, logger observability.L
 // target via CompareAndSwap if the threshold is reached. Called from the
 // active health checker. Counter increments are lock-free; the CAS on
 // healthy ensures the log and flag always agree.
-func (t *Target) recordProbeError(threshold int, logger observability.Logger, poolName string) {
-	cnt := t.probeErrors.Add(1)
+//
+// window gates the streak on recent probe successes, mirroring the
+// passive 5xx gate (#839): a probe failure is excused while any probe
+// succeeded within window, because against a multi-endpoint target
+// (Service VIP) a single failed probe only proves one endpoint is sick.
+// Unlike the passive connection-error path, probe transport errors ARE
+// excused — each probe is a fresh connection that kube-proxy may route
+// to the sick pod. Zero window disables the gate. The metric counts
+// every failure regardless; only the streak is gated.
+func (t *Target) recordProbeError(threshold int, window time.Duration, logger observability.Logger, poolName string) {
 	if t.metrics != nil {
 		t.metrics.incProbeError(poolName, t.addr)
 	}
+	if window > 0 && t.probeSuccessWithin(window) {
+		return
+	}
+	cnt := t.probeErrors.Add(1)
 	if cnt >= int64(threshold) {
 		if t.healthy.CompareAndSwap(true, false) {
 			if t.metrics != nil {
@@ -217,6 +246,7 @@ func (t *Target) recordProbeError(threshold int, logger observability.Logger, po
 // independent.
 func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, poolName string) {
 	t.probeErrors.Store(0)
+	t.lastProbeSuccessUnix.Store(time.Now().UnixNano())
 	if t.healthy.Load() {
 		return
 	}

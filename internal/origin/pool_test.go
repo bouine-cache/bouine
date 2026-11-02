@@ -115,8 +115,11 @@ func TestPool_AllDown(t *testing.T) {
 
 	serveHandler(t, h, "GET", "/", "")
 
+	// The only target is ejected after the first 5xx, but pick() falls
+	// back to it (#914) instead of an instant 502, so the second request
+	// gets the origin's real answer.
 	code, _, _ := serveHandler(t, h, "GET", "/", "")
-	require.Equal(t, fasthttp.StatusBadGateway, code)
+	require.Equal(t, fasthttp.StatusInternalServerError, code)
 }
 
 func TestPool_MarkHealthy(t *testing.T) {
@@ -347,7 +350,7 @@ func TestNewTarget_ParseError(t *testing.T) {
 	require.Contains(t, err.Error(), "parse target")
 }
 
-func TestDoSingleFetch_NoHealthyTarget(t *testing.T) {
+func TestDoSingleFetch_FallsBackToEjectedTarget(t *testing.T) {
 	t.Parallel()
 	p, err := NewPool(PoolConfig{
 		Name:    "p",
@@ -355,7 +358,9 @@ func TestDoSingleFetch_NoHealthyTarget(t *testing.T) {
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	// Eject the only target so pick() returns nil.
+	// Eject the only target: pick() must fall back to it instead of
+	// returning nil, so the fetch fails on the dial (connection refused
+	// on 127.0.0.1:1), not with "no healthy upstream" (#914).
 	for _, tgt := range p.targets {
 		tgt.healthy.Store(false)
 	}
@@ -368,7 +373,7 @@ func TestDoSingleFetch_NoHealthyTarget(t *testing.T) {
 	req.SetRequestURI("/x")
 	err = fc.Do(context.Background(), req, resp)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no healthy upstream")
+	require.NotContains(t, err.Error(), "no healthy upstream")
 }
 
 func TestNewTarget_EmptySchemeDefaultsToHTTP(t *testing.T) {

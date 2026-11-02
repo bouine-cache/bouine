@@ -30,6 +30,16 @@ the curated, human-readable summary.
   connection is idle for a full `health.active.interval` between probes,
   and origins that close idle keep-alives earlier turned that reuse into
   a connection reset on the next probe (#912).
+- Active probe failures are now excused while any probe succeeded within
+  2x `health.active.interval`, mirroring the passive 5xx success-window
+  gate (#839): against a multi-endpoint target (Kubernetes Service VIP,
+  one random pod per probe connection) a minority of sick pods no longer
+  ejects the whole target after `unhealthy_threshold` (#914).
+- When every pool target is ejected, the pool now falls back to
+  round-robin over all targets instead of an instant `502 no healthy
+  upstream`: a truly dead origin still fails the fetch and records
+  passive errors, while a Service VIP keeps routing to its ready pods
+  (#914).
 
 ## [0.6.4] - 2026-11-02
 

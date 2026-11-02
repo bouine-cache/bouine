@@ -3,7 +3,7 @@ module github.com/bouine-cache/bouine
 go 1.27.3
 
 require (
-	github.com/a-h/templ v0.3.1070
+	github.com/a-h/templ v0.3.1100
 	github.com/bouine-cache/xxhash/v3 v3.0.1
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0

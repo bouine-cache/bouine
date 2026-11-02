@@ -464,6 +464,9 @@ type Handler struct {
 	// in-flight sharing. False (default) keeps RFC 9111 semantics — the
 	// cache-tests other-cookie optimal case.
 	bypassOnCookie bool
+	// disabled holds the boot-resolved routes.*.cache.enabled: false
+	// (ADR-0074); see HandlerConfig.Disabled.
+	disabled bool
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
@@ -791,6 +794,14 @@ type HandlerConfig struct {
 	// request by collapseDenied (ADR-0054) regardless of this list:
 	// a listed-cookie request can never receive another user's
 	// in-flight body, and an unlisted-cookie request cannot either.
+	// Disabled resolves routes.*.cache.enabled: false (ADR-0074): the
+	// per-request bypass gate (requestBypass → serveCacheBypass) is
+	// held permanently open — every safe-method request takes the
+	// BYPASS path, decided once at boot. No lookup, no store write, no
+	// peer RPC, no in-flight sharing; unsafe methods keep the RFC 9111
+	// §4.4 invalidating dispatch. The builder registers no fast path
+	// and skips the refresh/cluster/purge wiring for such routes.
+	Disabled bool
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
@@ -1074,7 +1085,7 @@ func (h *Handler) applyResponseRewrites(dst *fasthttp.ResponseHeader) {
 
 // NewHandler creates a caching handler.
 //
-//nolint:funlen,gocyclo // 81 lines: initialization is inherently sequential; the rewrite-directive blocks add four flat branches
+//nolint:funlen,gocyclo // 82 lines: initialization is inherently sequential; the rewrite-directive blocks add four flat branches
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	fp := fillPolicy{
@@ -1114,6 +1125,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		allowSetCookie:            cfg.AllowSetCookie,
 		syncCDC:                   cfg.DownstreamFreshness == downstreamSync,
 		bypassOnCookie:            cfg.BypassOnCookie,
+		disabled:                  cfg.Disabled,
 		uaBypass:                  compileUABypass(cfg.BypassOnUserAgent),
 		bypassCookieNames:         newCookieNameScanner(cfg.BypassOnCookieNames),
 		maxObjectSize:             cfg.MaxObjectSize,
@@ -1707,12 +1719,31 @@ func (h *Handler) serveCacheBypass(ctx *fasthttp.RequestCtx) {
 	h.handleBypass(ctx)
 }
 
+// serveDisabledRoute serves a cache-disabled route (ADR-0074): the
+// per-request bypass path with the gate permanently open. Dispatch
+// order mirrors ServeRequest exactly — unsafe methods still invalidate
+// (RFC 9111 §4.4), safe methods get the request rewrites first, then
+// serveCacheBypass (SSE branch, BYPASS attribution, zero cacheKey).
+func (h *Handler) serveDisabledRoute(ctx *fasthttp.RequestCtx) {
+	if isInvalidatingBytes(ctx.Method()) {
+		h.serveInvalidating(ctx)
+		return
+	}
+	h.rewriteRequestCtx(ctx)
+	h.serveCacheBypass(ctx)
+}
+
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
 // cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
 // and all others to the cache lookup pipeline.
 //
-//nolint:gocyclo // 20: the dispatch switch is the RFC 9111 state machine's front door; the header-rewrite hook adds one branch by design
+//nolint:gocyclo,funlen // dispatch front door; the ADR-0074 disabled branch pushes it over the budget
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
+	if h.disabled {
+		h.serveDisabledRoute(ctx)
+		return
+	}
+
 	if isInvalidatingBytes(ctx.Method()) {
 		h.serveInvalidating(ctx)
 		return
@@ -4112,6 +4143,11 @@ func (h *Handler) purgeAndBroadcast(ctx *fasthttp.RequestCtx, key api.Key) {
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 7234 §3; dropped by RFC 9111, kept by design).
 func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
+	// A cache-disabled route (ADR-0074) never stores, not even the
+	// RFC 7234 §3 POST-response exception that rides the invalidating path.
+	if h.disabled {
+		return
+	}
 	// A 304 is never storable (RFC 9110 §15.4.5) — see IsCacheable's
 	// guard; it carries no body and satisfies no subsequent request.
 	if resp.StatusCode() == fasthttp.StatusNotModified {

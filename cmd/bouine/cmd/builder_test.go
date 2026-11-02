@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2769,4 +2770,194 @@ func TestBuildKeyPolicy_CookieValuesWired(t *testing.T) {
 	// A key block with only cookie_values must construct a policy even
 	// when every query/header/host field is unset (hasKeyPolicy gate).
 	require.NotNil(t, buildKeyPolicy(config.RouteKey{CookieValues: []string{"locale"}}))
+}
+
+// --- cache.enabled: false on pool routes (ADR-0074) ---
+
+// testDisabledRouteEngine builds engine+runState around one pool (target) and the given routes.
+func testDisabledRouteEngine(t *testing.T, target string, routes []config.Route) (*runState, *server.Router) {
+	t.Helper()
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{{Name: "app", Targets: []string{target}}},
+			Routes:        routes,
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	rs.router = router
+	return rs, router
+}
+
+// A disabled pool route (ADR-0074) serves BYPASS from the origin, stores
+// nothing, and joins neither rs.handlers nor rs.fastPathHandlers; the
+// enabled sibling is unchanged.
+func TestBuildRouter_DisabledPoolRoute(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int32
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60, public")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	off := false
+	rs, router := testDisabledRouteEngine(t, originSrv.Addr, []config.Route{
+		{
+			Name:  "per-user-api",
+			Match: config.RouteMatch{Host: "pay.example.com"},
+			Pool:  "app",
+			Cache: config.RouteCache{Enabled: &off},
+		},
+		{
+			Name:  "api",
+			Match: config.RouteMatch{Host: "api.example.com"},
+			Pool:  "app",
+			Cache: config.RouteCache{TTLDefault: 60 * time.Second},
+		},
+	})
+	require.Len(t, rs.handlers, 1)
+	require.Len(t, rs.fastPathHandlers, 1)
+
+	// The disabled route: BYPASS, always from the origin, never stored.
+	for range 3 {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.SetMethod("GET")
+		ctx.Request.SetRequestURI("/user-data")
+		ctx.Request.Header.SetHostBytes([]byte("pay.example.com"))
+		router.ServeRequest(ctx)
+		require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+		require.Equal(t, "BYPASS", string(ctx.Response.Header.Peek(header.XCache)))
+		require.Equal(t, "origin-body", string(ctx.Response.Body()))
+	}
+	require.Equal(t, int32(3), originCalls.Load())
+	require.Zero(t, rs.store.Stats().HotEntries, "the cacheable response is never stored")
+
+	// The enabled sibling keeps today's behavior: MISS from origin.
+	api := &fasthttp.RequestCtx{}
+	api.Request.Header.SetMethod("GET")
+	api.Request.SetRequestURI("/v1/x")
+	api.Request.Header.SetHostBytes([]byte("api.example.com"))
+	router.ServeRequest(api)
+	require.Equal(t, fasthttp.StatusOK, api.Response.StatusCode())
+	require.Equal(t, "MISS", string(api.Response.Header.Peek(header.XCache)))
+}
+
+// The routed H1 fast path declines a disabled route (nil FastPathHandler).
+func TestBuildRouter_DisabledPoolRoute_NoFastPath(t *testing.T) {
+	t.Parallel()
+	off := false
+	rs, _ := testDisabledRouteEngine(t, "127.0.0.1:1", []config.Route{
+		{
+			Name:  "off",
+			Match: config.RouteMatch{Host: "off.example.com"},
+			Pool:  "app",
+			Cache: config.RouteCache{Enabled: &off},
+		},
+		{
+			Name:  "on",
+			Match: config.RouteMatch{Host: "on.example.com"},
+			Pool:  "app",
+			Cache: config.RouteCache{TTLDefault: 60 * time.Second},
+		},
+	})
+	require.Len(t, rs.fastPathHandlers, 1)
+	rfp := server.NewRoutedFastPath(rs.router, rs.fastPathHandlers[0])
+
+	resp, ok := rfp.TryHit(rawReq("GET", "/x", "off.example.com"), time.Now())
+	require.False(t, ok, "a disabled route must never serve from the fast path")
+	assert.Nil(t, resp)
+
+	// Enabled route: reached through its registered handler (miss — store is empty).
+	_, ok = rfp.TryHit(rawReq("GET", "/x", "on.example.com"), time.Now())
+	assert.False(t, ok)
+}
+
+// rawReq builds the api.RawRequest shape TryHit consumes (mirrors internal/server's helper).
+func rawReq(method, path, host string) *api.RawRequest {
+	return &api.RawRequest{Method: method, Path: path, Host: host, Scheme: "http"}
+}
+
+// Policies still apply on a disabled route through the full router chain.
+func TestBuildRouter_DisabledPoolRoute_Policies(t *testing.T) {
+	t.Parallel()
+	var gotURI, gotXCustom, gotXRemoved, gotXFF string
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		gotURI = string(ctx.RequestURI())
+		gotXCustom = string(ctx.Request.Header.Peek("X-Custom"))
+		gotXRemoved = string(ctx.Request.Header.Peek("X-To-Remove"))
+		gotXFF = string(ctx.Request.Header.Peek(header.XForwardedFor))
+		ctx.Response.Header.Set("X-Origin-Strip", "gone")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write([]byte("origin-body"))
+	})
+	defer originSrv.Close()
+
+	off := false
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{{Name: "app", Targets: []string{originSrv.Addr}}},
+			Routes: []config.Route{{
+				Name:  "off",
+				Match: config.RouteMatch{Host: "off.example.com"},
+				Pool:  "app",
+				Request: config.RouteRequest{
+					StripPrefix:  "/api",
+					HeaderSet:    map[string]string{"X-Custom": "set-by-route"},
+					HeaderRemove: []string{"X-To-Remove"},
+					Forwarded:    config.ForwardedConfig{ClientIP: true},
+				},
+				Response: config.RouteResponse{
+					HeaderSet:    map[string]string{"X-Client": "set-by-route"},
+					HeaderRemove: []string{"X-Origin-Strip"},
+				},
+				Cache: config.RouteCache{Enabled: &off},
+			}},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/api/items?q=1")
+	ctx.Request.Header.SetHostBytes([]byte("off.example.com"))
+	ctx.Request.Header.Set("X-To-Remove", "must-not-reach-origin")
+	ctx.Request.Header.Set("X-Forwarded-For", "203.0.113.9")
+	router.ServeRequest(ctx)
+
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, "BYPASS", string(ctx.Response.Header.Peek(header.XCache)))
+	assert.Equal(t, "/items?q=1", gotURI)
+	assert.Equal(t, "set-by-route", gotXCustom)
+	assert.Empty(t, gotXRemoved)
+	assert.Contains(t, gotXFF, "203.0.113.9")
+	assert.Equal(t, "set-by-route", string(ctx.Response.Header.Peek("X-Client")))
+	assert.Empty(t, string(ctx.Response.Header.Peek("X-Origin-Strip")))
 }

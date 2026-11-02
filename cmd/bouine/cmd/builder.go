@@ -381,6 +381,9 @@ func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
 // transport) from the matching upstream pool config, then builds a
 // cache.Handler that owns the RFC 9111 state machine for that route.
 //
+// A pool route with cache.enabled: false (ADR-0074) is wired by
+// buildDisabledPoolRoute instead.
+//
 // Cluster extensions are wired here rather than in cache.Handler so that the
 // handler itself stays cluster-agnostic:
 //
@@ -400,6 +403,10 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		p := rs.pools[rc.Pool]
 		if p == nil {
+			continue
+		}
+		if rc.Cache.Disabled() {
+			e.buildDisabledPoolRoute(router, rs, rc, p)
 			continue
 		}
 		cfg := cache.HandlerConfig{
@@ -488,6 +495,41 @@ func (e *engine) addRoute(router *server.Router, rc config.Route, handler fastht
 	}
 }
 
+// buildDisabledPoolRoute wires a pool route with cache.enabled: false
+// (ADR-0074) as a pure reverse proxy: a cache.Handler with the bypass
+// gate permanently open (cache.HandlerConfig.Disabled). It keeps only
+// what the BYPASS path exercises — policies, forwarded, fetch knobs,
+// fetch-shed counter, attribution — no key policy or TTL knobs (dead
+// config, rejected at load), no refresh/cluster/purge wiring, no fast
+// path, and it is not appended to rs.handlers. Store stays wired for
+// the RFC 9111 §4.4 invalidating dispatch on unsafe methods only.
+func (e *engine) buildDisabledPoolRoute(router *server.Router, rs *runState, rc config.Route, p *origin.Pool) {
+	cfg := cache.HandlerConfig{
+		Upstream:                p.FastHandler(0),
+		FastClient:              p.FastClient(),
+		StripPrefix:             rc.Request.StripPrefix,
+		PathRewrite:             buildPathRewrite(rc),
+		RequestHeaderSet:        rc.Request.HeaderSet,
+		RequestHeaderRemove:     rc.Request.HeaderRemove,
+		Forwarded:               buildForwardedPolicy(rc),
+		ResponseHeaderSet:       rc.Response.HeaderSet,
+		ResponseHeaderRemove:    rc.Response.HeaderRemove,
+		Store:                   rs.store,
+		Logger:                  e.logger,
+		MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
+		MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
+		FetchTimeout:            resolveRouteFetchTimeout(rc, p),
+		FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
+		MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+		FetchShed:               rs.dpMetrics.FetchShedTotal,
+		RouteName:               rc.Name,
+		PoolName:                rc.Pool,
+		Disabled:                true,
+	}
+	disabled := cache.NewHandler(cfg)
+	e.addRoute(router, rc, disabled.ServeRequest, nil)
+}
+
 // routeFPBuilder produces the per-route H1 fast-path constructor: each
 // cache-enabled route registers the FastPathHandler built from its own
 // Handler, so hits carry the route's pool attribution and run under the
@@ -555,6 +597,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// is cache-enabled; nil (no fast path) otherwise.
 	var cacheFP *cache.FastPathHandler
 
+	// nil means cache OFF on static routes (pool routes: ON) — read Enabled directly.
 	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
 	if !cacheEnabled {
 		if rc.Request.StripPrefix != "" {

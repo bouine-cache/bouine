@@ -23,6 +23,14 @@ the curated, human-readable summary.
   `route_defaults` merges for `bypass_on_user_agent` / `key.cookie_values`
   skip disabled routes.
 
+### Fixed
+
+- Active health probes no longer reuse pooled keep-alive connections:
+  each probe now sends `Connection: close` and dials fresh. A probe
+  connection is idle for a full `health.active.interval` between probes,
+  and origins that close idle keep-alives earlier turned that reuse into
+  a connection reset on the next probe (#912).
+
 ## [0.6.4] - 2026-11-02
 
 ### Changed

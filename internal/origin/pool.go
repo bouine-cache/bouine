@@ -600,7 +600,12 @@ func newTarget(addr string) (*Target, error) {
 }
 
 // pick selects the next healthy target via atomic round-robin.
-// Returns nil if all targets are unhealthy.
+// Returns nil only when the pool has no targets at all. When every
+// target is ejected it falls back to plain round-robin over all of
+// them: ejection is a hint, not a fact — against a Service VIP the
+// sick pods are already out of Endpoints, so sending traffic to the
+// ejected target is strictly better than an instant 502, and a truly
+// dead origin still fails the fetch and records passive errors.
 func (p *Pool) pick() *Target {
 	p.mu.RLock()
 	n := uint64(len(p.targets))
@@ -617,7 +622,11 @@ func (p *Pool) pick() *Target {
 			return t
 		}
 	}
-	return nil
+	t := p.targets[start%n]
+	p.logger.Debug("all targets ejected, falling back to unhealthy target",
+		"pool", p.Name,
+		"target", t.addr)
+	return t
 }
 
 // FastHandler returns a fasthttp.RequestHandler that reverse-proxies

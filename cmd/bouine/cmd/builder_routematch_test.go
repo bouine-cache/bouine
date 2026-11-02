@@ -67,8 +67,9 @@ func serveHTTP(t *testing.T, rs *runState, host, path string) *fasthttp.RequestC
 
 // TestBuildRouter_WiresExtendedPredicates proves the builder lowers
 // wildcard-host and regex-path routes onto the router (issue #772) and
-// they resolve end-to-end on the slow path, with first-match precedence
-// over a later catch-all.
+// they resolve end-to-end, with first-match precedence over a later
+// catch-all. The staging route (cache.enabled: false, ADR-0074) serves
+// as a BYPASS proxy and joins neither rs.handlers nor the fast path.
 func TestBuildRouter_WiresExtendedPredicates(t *testing.T) {
 	t.Parallel()
 	rs := buildTestRouter(t, newTestLogger(),
@@ -90,11 +91,12 @@ func TestBuildRouter_WiresExtendedPredicates(t *testing.T) {
 		},
 		config.Route{Name: "root", Pool: "app"},
 	)
-	require.Len(t, rs.handlers, 3)
+	require.Len(t, rs.handlers, 2) // the disabled route registers no cache handler (ADR-0074)
 
 	ctx := serveHTTP(t, rs, "pr-42.staging.example.com", "/anything")
 	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	assert.Equal(t, "staging", ctx.UserValue(header.XBouineRoute))
+	assert.Equal(t, "BYPASS", string(ctx.Response.Header.Peek(header.XCache)))
 
 	ctx = serveHTTP(t, rs, "www.example.com", "/fr-fr/l/campaign-summer")
 	assert.Equal(t, "campaign", ctx.UserValue(header.XBouineRoute))

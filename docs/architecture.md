@@ -628,6 +628,13 @@ replaces the window stamped onto stored objects for content responses
 (it is an operator bound). `downstream_freshness: sync` advertises the
 bounded window downstream automatically.
 
+`cache.enabled: false` (ADR-0074) makes a route a pure reverse proxy: every
+safe-method request takes the BYPASS path decided once at boot — no store
+lookup, no store write, no peer RPC, no in-flight sharing — with
+`X-Cache: BYPASS` and the route's policies still applied. Honored by pool
+and static routes alike; validation rejects storage-side cache knobs as
+dead config on a disabled route.
+
 Route matching (`RouteMatch`) is first-match-wins in **declaration
 order** — the same precedence rule the traffic-class classifier uses.
 `match.host` is an exact host or a single leading `*.` wildcard

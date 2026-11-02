@@ -99,3 +99,4 @@ field to `Superseded by ADR-NNNN`.
 | 0068   | Remove the H1 epoll reactor (supersedes ADR-0041) | Accepted |
 | 0069   | The H1 fast path (and its peer branch) is the default path; the experimental flags are retired | Accepted |
 | 0072   | Per-route stale-while-revalidate override (`swr_override`) | Accepted |
+| 0074   | `cache.enabled: false` honored on pool routes — bypass semantics decided at boot | Accepted |

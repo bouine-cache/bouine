@@ -658,7 +658,14 @@ type RouteCache struct {
 	// stored object so subsequent cache HITs do not replay session
 	// state intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie,omitempty" json:"allow_set_cookie,omitempty"`
-	Enabled        *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Enabled turns this route's cache off entirely (ADR-0074): every
+	// safe-method request takes the BYPASS path decided once at boot (no
+	// store lookup/write, no peer RPC, no in-flight sharing), with
+	// X-Cache: BYPASS and the route's policies still applied. nil
+	// (default) and true keep today's behavior on every route kind.
+	// Validation rejects storage-side cache knobs as dead config on a
+	// disabled route; there is no route_defaults form.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// BypassOnCookie, when true, routes any request carrying a
 	// non-empty Cookie header entirely around the cache: no lookup,
 	// no storage, no in-flight sharing (the Varnish `return (pass)`
@@ -938,6 +945,12 @@ type RouteCache struct {
 	// health checks configured — without a health signal the reaper
 	// keeps its normal schedule.
 	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
+}
+
+// Disabled reports whether the route's cache is explicitly off: only
+// enabled: false disables it — nil and true keep the cache.
+func (rc RouteCache) Disabled() bool {
+	return rc.Enabled != nil && !*rc.Enabled
 }
 
 // RouteKey configures cache key construction for a route.

@@ -10,6 +10,19 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- `cache.enabled: false` is now honored on proxied (pool) routes
+  (ADR-0074): the route becomes a pure reverse proxy — every safe-method
+  request takes the BYPASS path decided once at boot (no store lookup,
+  no store write, no peer RPC, no in-flight sharing), with
+  `X-Cache: BYPASS`, the route's policies still applied, and origin
+  freshness headers forwarded untouched. Defaults unchanged: `enabled`
+  unset or `true` keeps today's behavior on both route kinds. Storage-side
+  cache knobs are now rejected as dead config on a disabled route, and the
+  `route_defaults` merges for `bypass_on_user_agent` / `key.cookie_values`
+  skip disabled routes.
+
 ## [0.6.4] - 2026-11-02
 
 ### Changed

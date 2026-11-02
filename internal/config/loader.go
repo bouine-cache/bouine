@@ -875,7 +875,10 @@ func applyForwardedDefault(f *ForwardedConfig, d ForwardedConfig) {
 //     opts out — the route keeps normal cache semantics.
 //
 // Static routes (no pool) inherit nothing: the knob is wired on pool
-// routes only. Skipped when the default list is invalid
+// routes only. Cache-disabled pool routes (enabled: false, ADR-0074)
+// inherit nothing either: the knob is dead config there and
+// validateDisabledRouteCache rejects it, so an inherited default must
+// not land. Skipped when the default list is invalid
 // (validateBypassOnUserAgent already reported it at route_defaults'
 // own path), so the route_defaults error stands alone.
 func (c *Config) mergeBypassOnUserAgentDefaults() {
@@ -887,7 +890,7 @@ func (c *Config) mergeBypassOnUserAgentDefaults() {
 		return
 	}
 	for i := range c.Routes {
-		if r := &c.Routes[i]; r.Pool != "" && r.Cache.BypassOnUserAgent == nil {
+		if r := &c.Routes[i]; r.Pool != "" && r.Cache.BypassOnUserAgent == nil && !r.Cache.Disabled() {
 			r.Cache.BypassOnUserAgent = d
 		}
 	}
@@ -916,14 +919,14 @@ func bypassOnUserAgentValid(patterns []string) bool {
 //     the route keeps unkeyed semantics.
 //
 // Like downstream_freshness (unlike bypass_on_user_agent), every route
-// inherits: the knob is consumed by every cache handler (pool or
-// static) and validateRouteCache accepts the field on every route
-// kind. Idempotent and skipped when the default list is invalid
-// (validateRouteDefaults already reported it at route_defaults' own
-// path), so the route_defaults error stands alone. Conflicts that only
-// exist post-merge (a route's cookie_presence overlapping the
-// default's names, a route's bypass knobs) are reported at the route's
-// path by per-route validation.
+// inherits — except cache-disabled routes (enabled: false, ADR-0074),
+// where the whole key block is dead config that
+// validateDisabledRouteCache rejects; those inherit nothing so a
+// defaults-bearing deployment can flip a single route. Idempotent and
+// skipped when the default list is invalid (validateRouteDefaults
+// already reported it at route_defaults' own path), so the
+// route_defaults error stands alone. Conflicts that only exist
+// post-merge are reported at the route's path by per-route validation.
 func (c *Config) mergeCookieValuesDefaults() {
 	d := c.RouteDefaults.Cache.Key.CookieValues
 	if len(d) == 0 {
@@ -934,7 +937,7 @@ func (c *Config) mergeCookieValuesDefaults() {
 		return
 	}
 	for i := range c.Routes {
-		if r := &c.Routes[i]; r.Cache.Key.CookieValues == nil {
+		if r := &c.Routes[i]; r.Cache.Key.CookieValues == nil && !r.Cache.Disabled() {
 			r.Cache.Key.CookieValues = d
 		}
 	}
@@ -1210,6 +1213,10 @@ func validateNonNegativeDurations(ec *errCollector, path string, rc *RouteCache)
 }
 
 func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
+	if rc.Disabled() {
+		validateDisabledRouteCache(ec, path, rc)
+		return
+	}
 	validateNonNegativeDurations(ec, path, rc)
 	validateStatusTTL(ec, path+".negative_ttl", &rc.NegativeTTL)
 	validateStatusTTL(ec, path+".negative_ttl", &rc.NegativeTTL)
@@ -1248,6 +1255,100 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateCookieNames(ec, path, *rc)
 	validateCookieKeyingConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
+}
+
+// validateDisabledRouteCache validates a route with enabled: false
+// (ADR-0074). Storage-side knobs are dead config and rejected at load,
+// per the validateCookieKeyingConflicts precedent — including
+// refresh_before_expiry, so a disabled route never needs ttl_default.
+// Fetch-side knobs stay live on the BYPASS path and keep their range
+// checks; jitter_percent, allow_set_cookie, stayin_alive,
+// downstream_freshness and max_object_size are accepted-but-inert
+// (freshness may be inherited from route_defaults, which merges into
+// every route).
+//
+//nolint:gocyclo // 23: flat checklist of independent rejections plus the fetch-knob range checks
+func validateDisabledRouteCache(ec *errCollector, path string, rc *RouteCache) {
+	dead := func(field, why string) {
+		ec.addf(path+"."+field, "%s", "is dead config on a route with cache.enabled: false — "+why+
+			"; remove it or set cache.enabled: true")
+	}
+	if rc.BypassOnCookie != nil && *rc.BypassOnCookie {
+		dead("bypass_on_cookie", "every request already bypasses: the gate is permanently open (ADR-0074)")
+	}
+	if len(rc.BypassOnCookieNames) > 0 {
+		dead("bypass_on_cookie_names", "every request already bypasses: the gate is permanently open (ADR-0074)")
+	}
+	if len(rc.BypassOnUserAgent) > 0 {
+		dead("bypass_on_user_agent", "every request already bypasses: the gate is permanently open (ADR-0074)")
+	}
+	if routeKeyConfigured(rc.Key) {
+		dead("key", "no lookup is ever performed, so the key policy never runs")
+	}
+	if rc.TTLDefault != 0 {
+		dead("ttl_default", "nothing is stored, so there is no fallback lifetime to set")
+	}
+	if rc.TTLOverride != 0 {
+		dead("ttl_override", "nothing is stored, so there is no storage lifetime to override")
+	}
+	if rc.StaleWhileRevalidate != 0 {
+		dead("stale_while_revalidate", "nothing is stored, so there is no stale window to default")
+	}
+	if rc.SWROverride != 0 {
+		dead("swr_override", "nothing is stored, so there is no stale window to bound")
+	}
+	if rc.StaleIfError != 0 {
+		dead("stale_if_error", "nothing is stored, so there is no stale-on-error window to default")
+	}
+	if !rc.NegativeTTL.IsZero() {
+		dead("negative_ttl", "error responses are proxied, never stored")
+	}
+	if rc.MaxVariants != 0 {
+		dead("max_variants", "no variants are ever stored, so there is nothing to cap")
+	}
+	if rc.RefreshBeforeExpiry {
+		dead("refresh_before_expiry", "there is no stored object to refresh")
+	}
+	// Fetch-side knobs stay live on the BYPASS path — keep the range checks.
+	if rc.MaxResponseBytes < 0 {
+		ec.addf(path+".max_response_bytes", "must be >= 0, got %s", rc.MaxResponseBytes)
+	}
+	if rc.MaxStreamingBufferBytes < 0 {
+		ec.addf(path+".max_streaming_buffer_bytes", "must be >= 0, got %s", rc.MaxStreamingBufferBytes)
+	}
+	if rc.MaxFetchConcurrency < 0 {
+		ec.addf(path+".max_fetch_concurrency", "must be >= 0, got %d", rc.MaxFetchConcurrency)
+	}
+	if rc.FetchTimeout < 0 {
+		ec.addf(path+".fetch_timeout", "must be >= 0, got %v", rc.FetchTimeout)
+	}
+	if rc.FetchTimeout >= maxFetchTimeout {
+		ec.addf(path+".fetch_timeout", "must be < %v (data plane safety-net WriteTimeout), got %v", maxFetchTimeout, rc.FetchTimeout)
+	}
+	if rc.FetchWaitTimeout < 0 {
+		ec.addf(path+".fetch_wait_timeout", "must be >= 0, got %v", rc.FetchWaitTimeout)
+	}
+	if rc.FetchWaitTimeout > maxFetchWaitTimeout {
+		ec.addf(path+".fetch_wait_timeout", "must be <= %v, got %v", maxFetchWaitTimeout, rc.FetchWaitTimeout)
+	}
+	// Form checks on the accepted-but-inert knobs so a typo still fails at load.
+	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
+		ec.addf(path+".jitter_percent", "must be 0–50, got %d", rc.JitterPercent)
+	}
+	validateDownstreamFreshness(ec, path, rc.DownstreamFreshness)
+}
+
+// routeKeyConfigured reports whether any cache.key field is set —
+// the merge- and validation-side gate for "does this route have a
+// key policy at all". A disabled route with any key field set is dead
+// config (validateDisabledRouteCache rejects it); the route_defaults
+// cookie_values merge uses it to skip disabled routes.
+func routeKeyConfigured(rk RouteKey) bool {
+	return len(rk.StripQueryParams) > 0 || len(rk.KeepQueryParams) > 0 ||
+		len(rk.StripQueryPrefix) > 0 || rk.StripEmptyParams || rk.DedupQueryParams ||
+		len(rk.IncludeHeaders) > 0 || len(rk.ExcludeHeaders) > 0 ||
+		(rk.IncludeHost != nil && !*rk.IncludeHost) || rk.VerbatimEncoding ||
+		len(rk.CookiePresence) > 0 || len(rk.CookieValues) > 0
 }
 
 // validateDownstreamFreshness checks the downstream_freshness enum

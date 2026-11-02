@@ -191,6 +191,23 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- **Hedged origin fetches no longer read the caller's request from the
+  losing attempt's goroutine.** `doHedgedResponse` returns on the
+  first attempt's result while the losing goroutine may still be
+  inside its attempt closure, which cloned the caller's template
+  request there (`Request.CopyTo`) — so a not-yet-scheduled loser
+  could read the request after `Do` returned and the caller released
+  it, and `fasthttp.ReleaseRequest` recycles the object into the
+  fasthttp pool: the loser's read raced the next owner's writes. The
+  race detector caught it on the ubuntu CI runner (four origin tests
+  failed across pool reuse); timing-dependent, it passed on arm64 and
+  on re-run. Present since the hedged fetch landed in September
+  (0.5.x). Attempts now work from a caller-goroutine snapshot of the
+  request — deliberately never returned to the fasthttp pool, because
+  an object a loser may still read must not be reused — so no attempt
+  goroutine touches caller-owned objects; regression-pinned by
+  `TestDoHedgedFetch_WinnerReturnsBeforeLoser`.
+
 - `concurrent map iteration and map write` process fatal (since v0.6.0,
   issue #880): in cluster mode, `reconcileStaleIncarnation` iterated the
   live `variantSets` map with `variantMu` released around the store

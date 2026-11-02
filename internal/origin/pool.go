@@ -902,30 +902,46 @@ func (c *PoolFastClient) doSingleFetch(attemptCtx context.Context, req *fasthttp
 
 // doHedgedFetch clones the caller's request per attempt, runs both
 // attempts through doSingleFetch, and copies the winner's response into
-// the caller's resp. The caller's pooled req and resp are never handed
-// to a goroutine: each attempt owns its own request/response clones,
-// and the winner's bytes are copied out before the attempt's objects
-// return to fasthttp's pool. The caller's resp is only written inside
-// the winning attempt — doHedged returns only after both attempts
-// delivered their results, but the loser never touches the caller's
-// resp, so no cross-goroutine access to it exists. ctx may be nil (the
-// unhedged DoDeadline path passes nil — there is no context); hedging
-// then runs without cancellation, bounded by the per-attempt deadline.
+// the caller's resp. doHedgedResponse returns on the first attempt's
+// result — the losing attempt's goroutine may still be in flight (its
+// result is buffered, its transport reaped by the cancel or the kernel
+// deadline), so the attempts work from a caller-goroutine snapshot of
+// req (below) and never touch caller-owned objects; the caller's resp
+// is only ever written here, after the winner is reaped. ctx may be nil
+// (the unhedged DoDeadline path passes nil — there is no context);
+// hedging then runs without cancellation, bounded by the per-attempt
+// deadline.
 func (c *PoolFastClient) doHedgedFetch(
 	ctx context.Context,
 	req *fasthttp.Request,
 	resp *fasthttp.Response,
 	fire func(attemptCtx context.Context, r *fasthttp.Request, dst *fasthttp.Response) error,
 ) error {
+	// Snapshot the caller's request once, on the caller's goroutine,
+	// before any attempt is spawned. An attempt goroutine must never
+	// read req: the loser may still be inside its closure when
+	// doHedgedResponse returns and the caller regains req, and the
+	// caller's fasthttp.ReleaseRequest recycles it into the fasthttp
+	// pool — the loser's template read would race the next owner's
+	// writes (the race detector caught exactly that on the ubuntu CI
+	// runner: a read in Request.CopyTo from the attempt closure against
+	// a released-then-reacquired request). The snapshot is deliberately
+	// never returned to the fasthttp pool: an object a loser goroutine
+	// may still read must not be reused — unreleased, it is
+	// garbage-collected instead. The hedged path is the slow-origin
+	// path, not the zero-alloc hit path, so the pool slack is fine.
+	snap := fasthttp.AcquireRequest()
+	req.CopyTo(snap)
+
 	// The winner's bytes are staged per attempt and moved to the
-	// caller's resp only after doHedged returns (both attempts have
-	// delivered their results). The staged copy is the single-writer,
-	// single-reader handoff: the attempt goroutine owns it until the
-	// channel send, the caller owns it after doHedged returns.
+	// caller's resp only after doHedgedResponse returns. The staged
+	// copy is the single-writer, single-reader handoff: the attempt
+	// goroutine owns it until the channel send, the caller owns it
+	// after. The loser never touches the caller's resp.
 	attempt := func(attemptCtx context.Context) (*fasthttp.Response, error) {
 		r := fasthttp.AcquireRequest()
 		defer fasthttp.ReleaseRequest(r)
-		req.CopyTo(r)
+		snap.CopyTo(r)
 		dst := fasthttp.AcquireResponse()
 		err := fire(attemptCtx, r, dst)
 		if err != nil {

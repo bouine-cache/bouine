@@ -63,8 +63,12 @@ func hedgingAllowed(req *fasthttp.Request, streamClient *fasthttp.Client) bool {
 //     through to whichever result arrives; the loser is reaped by the
 //     buffered channel either way.
 //
-// fire must be safe to call twice for the same logical request: it
-// clones the request itself (the caller's req is owned by the primary).
+// fire must be safe to call twice for the same logical request, and
+// must not read caller-owned objects from the attempt goroutine:
+// doHedgedResponse returns on the first attempt's result while the
+// losing goroutine may still be inside fire, so the caller may have
+// regained — and released — its request by then (PoolFastClient's
+// attempt works from a caller-goroutine snapshot; see doHedgedFetch).
 // The channel is buffered with capacity 2 so the losing goroutine
 // always delivers its result and exits — no goroutine leak, no
 // use-after-release of pooled fasthttp objects.

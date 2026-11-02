@@ -287,6 +287,58 @@ func TestDoSingleFetch_HedgedScratchSafe(t *testing.T) {
 	}
 }
 
+func TestDoHedgedFetch_WinnerReturnsBeforeLoser(t *testing.T) {
+	t.Parallel()
+	// Pins the doHedgedResponse contract doHedgedFetch must honor: Do
+	// returns on the FIRST attempt's result while the loser is still
+	// in flight, and the caller may then mutate and release req (the
+	// fasthttp pool recycles it) before the loser drains. The attempts
+	// work from a caller-goroutine snapshot of req, so the losing
+	// goroutine never reads the recycled object — the data race the
+	// detector caught on the ubuntu CI runner (a CopyTo read in the
+	// attempt closure against the next pool owner's writes).
+	stall := make(chan struct{})
+	var arrivals atomic.Int32
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		if arrivals.Add(1) == 1 {
+			// Whichever attempt arrives first stalls until the winner
+			// has returned and the caller has recycled req.
+			<-stall
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		_, _ = ctx.Write([]byte("hedged"))
+	})
+	defer srv.Close()
+
+	pool, err := NewPool(PoolConfig{
+		Name:         "p",
+		Targets:      []string{srv.Addr},
+		HedgeTimeout: 1 * time.Millisecond,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	fc := pool.FastClient()
+
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.Header.SetMethod("GET")
+	req.SetRequestURI("/hedged")
+	req.Header.SetHost("client.example")
+
+	require.NoError(t, fc.Do(context.Background(), req, resp))
+	require.Equal(t, 200, resp.StatusCode())
+	require.Equal(t, "hedged", string(resp.Body()))
+
+	// Recycle the caller's request the way the miss path does (mutate +
+	// release → the pool hands it to the next acquirer), then let the
+	// stalled loser drain: its late reads must touch only its own
+	// snapshot-backed objects.
+	req.SetRequestURIBytes([]byte("/recycled/by/next/owner"))
+	fasthttp.ReleaseRequest(req)
+	fasthttp.ReleaseResponse(resp)
+	close(stall)
+}
+
 func TestNewTarget_ParseError(t *testing.T) {
 	t.Parallel()
 	// A control character in the host makes url.Parse fail.

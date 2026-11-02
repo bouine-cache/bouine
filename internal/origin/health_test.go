@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,4 +68,64 @@ func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
 	_ = hc.Run(ctx)
 
 	require.Len(t, p.Healthy(), 0)
+}
+
+type countingListener struct {
+	net.Listener
+	accepts *atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepts.Add(1)
+	}
+	return c, err
+}
+
+// TestActiveHealth_ProbeDoesNotReuseIdleConn pins issue #912: a probe
+// connection sits idle for a full interval between probes, and origins
+// that close idle keep-alives earlier turn that reuse into a RST. Every
+// probe must dial a fresh connection and send Connection: close.
+func TestActiveHealth_ProbeDoesNotReuseIdleConn(t *testing.T) {
+	t.Parallel()
+
+	var accepts atomic.Int64
+	var sawConnClose atomic.Bool
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	counting := &countingListener{Listener: ln, accepts: &accepts}
+
+	srv := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {
+			sawConnClose.Store(ctx.Request.Header.ConnectionClose())
+			ctx.SetStatusCode(200)
+		},
+		IdleTimeout: 50 * time.Millisecond,
+	}
+	go func() { _ = srv.Serve(counting) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownWithContext(ctx)
+		_ = ln.Close()
+	}()
+
+	p := pool(t, counting.Addr().String())
+	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
+		Path:               "/",
+		Interval:           time.Hour,
+		Timeout:            1 * time.Second,
+		UnhealthyThreshold: 3,
+		ExpectedCodes:      []int{200},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	hc.probeAll(context.Background())
+	hc.probeAll(context.Background())
+
+	require.True(t, sawConnClose.Load(), "probe request must carry Connection: close")
+	require.Equal(t, int64(2), accepts.Load(), "each probe must dial a fresh connection")
+	require.Len(t, p.Healthy(), 1)
 }

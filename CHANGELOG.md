@@ -53,6 +53,18 @@ the curated, human-readable summary.
   is pooled. Cacheable-miss gate benchmark: 18→17 allocs/op, −24%
   B/op; `Handler_CacheMiss_Cacheable` budget tightened accordingly.
 
+- Origin-fetch write path is cheaper and RFC-correct: the four
+  miss/revalidate header-copy loops funnel through
+  `copyOutboundHeaders`, which skips hop-by-hop headers (RFC 9110
+  §7.6.1 — Connection, Keep-Alive, Transfer-Encoding, TE, Trailer,
+  Upgrade, Proxy-Connection were previously forwarded to origin);
+  `PoolFastClient`'s single mutex-guarded URI scratch becomes a
+  `sync.Pool` of per-attempt buffers so hedged attempts no longer
+  contend on one buffer; origin clients get a 16 KiB write buffer (the
+  4 KiB default forced a mid-request flush on Cookie-heavy requests)
+  and dialed origin connections get TCP_NODELAY. Targets the ~26% CPU
+  `doFastFetch` write path measured at 5k rps.
+
 - Origin-bound requests no longer build the absolute URI with a
   per-fetch `scheme + "://" + host + string(uri)` concat (1 alloc,
   ~48 B, ~38 ns per fetch, measured). Each pool target precomputes its

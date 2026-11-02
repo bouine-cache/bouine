@@ -129,3 +129,47 @@ func TestActiveHealth_ProbeDoesNotReuseIdleConn(t *testing.T) {
 	require.Equal(t, int64(2), accepts.Load(), "each probe must dial a fresh connection")
 	require.Len(t, p.Healthy(), 1)
 }
+
+// TestActiveHealth_ProbeFailuresExcusedByRecentSuccess pins issue #914:
+// against a multi-endpoint target (Service VIP, one random pod per probe
+// connection), a probe failure is excused while any probe succeeded
+// within the window — a minority of sick pods must not eject the target.
+func TestActiveHealth_ProbeFailuresExcusedByRecentSuccess(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := pool(t, "127.0.0.1:1")
+	target := p.targets[0]
+	const window = 10 * time.Second
+
+	t.Run("never probed successfully ejects by streak alone", func(t *testing.T) {
+		t.Parallel()
+		for range 3 {
+			target.recordProbeError(3, window, logger, "test")
+		}
+		require.False(t, target.healthy.Load(), "zero last-probe-success never gates")
+	})
+
+	t.Run("recent success excuses the failure streak", func(t *testing.T) {
+		t.Parallel()
+		target2 := pool(t, "127.0.0.1:1").targets[0]
+		target2.recordProbeSuccess(2, logger, "test")
+		for range 10 {
+			target2.recordProbeError(3, window, logger, "test")
+		}
+		require.True(t, target2.healthy.Load(),
+			"successes within the window excuse every probe failure")
+		require.Zero(t, target2.probeErrors.Load(), "excused failures never reach the streak")
+	})
+
+	t.Run("stale success no longer excuses", func(t *testing.T) {
+		t.Parallel()
+		target3 := pool(t, "127.0.0.1:1").targets[0]
+		target3.recordProbeSuccess(2, logger, "test")
+		target3.lastProbeSuccessUnix.Store(time.Now().Add(-window - time.Second).UnixNano())
+		for range 3 {
+			target3.recordProbeError(3, window, logger, "test")
+		}
+		require.False(t, target3.healthy.Load(),
+			"once probe successes stop for the window, threshold-many failures eject")
+	})
+}

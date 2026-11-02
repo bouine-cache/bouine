@@ -21,6 +21,13 @@ type ActiveHealthChecker struct {
 	pool   *Pool
 	client *fasthttp.Client
 	cfg    ActiveHealthConfig
+	// successWindow gates probe failures on recent probe successes
+	// (#914): 2x the interval, because successWithin is a strict <, so a
+	// window of exactly one interval would stop excusing at the next
+	// probe boundary. One full cycle of grace: with a minority of sick
+	// pods behind a Service VIP, successes keep landing inside the
+	// window and failures never reach the ejection streak.
+	successWindow time.Duration
 }
 
 // ActiveHealthConfig controls the probe behavior.
@@ -60,9 +67,10 @@ func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger observabi
 	}
 
 	return &ActiveHealthChecker{
-		pool:   pool,
-		cfg:    cfg,
-		logger: logger,
+		pool:          pool,
+		cfg:           cfg,
+		logger:        logger,
+		successWindow: 2 * cfg.Interval,
 		client: &fasthttp.Client{
 			MaxConnsPerHost: 2,
 			ReadTimeout:     cfg.Timeout,
@@ -156,5 +164,5 @@ func (hc *ActiveHealthChecker) recordSuccess(t *Target) {
 
 func (hc *ActiveHealthChecker) recordFailure(t *Target) {
 	t.successes.Store(0)
-	t.recordProbeError(hc.cfg.UnhealthyThreshold, hc.logger, hc.pool.Name)
+	t.recordProbeError(hc.cfg.UnhealthyThreshold, hc.successWindow, hc.logger, hc.pool.Name)
 }

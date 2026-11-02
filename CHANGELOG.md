@@ -87,8 +87,6 @@ the curated, human-readable summary.
   own URI buffer. Wire bytes are unchanged (fasthttp re-emits origin-form
   on write; verified against a recording origin in tests).
 
-### Changed
-
 - Cluster peer-fetch RPCs no longer emit a per-request info log line:
   `peer fetch hit`/`peer fetch miss` (fetcher side) and `served peer
   fetch hit`/`miss`/`variant mismatch`/`resolver metadata` (serving
@@ -99,7 +97,86 @@ the curated, human-readable summary.
   and variant-mismatch server-side counters, and the RPC duration
   histogram all remain.
 
+- The conn-state hook is lock-free on the per-request path (#884).
+  The h1parser calls `markActive`/`markIdle` around every request, and
+  the hook they invoke (`connTracker.stateChanged`) took a
+  process-wide mutex + map lookup twice per request on every
+  connection. The active flag now lives in per-connection state
+  behind a `sync.Map` (two atomic stores per request); the mutex only
+  guards drain-time state, and shutdown-drain semantics are unchanged
+  (regression-pinned, race-tested — including the drain race the
+  rewrite exposed, where a connection transitioning to in-flight
+  between drain's active read and its close could be killed
+  mid-response; `stateChanged` now re-checks the active bit after
+  storing idle, and drain re-checks `draining` after reading active).
+  Measured on the `markActive`+`markIdle` pair: 29 → 18 ns
+  single-threaded, 251 → 2.5 ns at 10-way parallelism.
+
+- Pipelined requests serve on the fast path (#886). Bytes pipelined
+  past a hit's header block used to force a full slow-path
+  fall-through (`serveFallThroughRequest` rebuilt the head and
+  re-parsed via fasthttp). The Serve loop now carries the excess bytes
+  into the next `parseRequest` as a buffer prefix, so a pipelined
+  plain GET loops the fast path (parse + TryHit + writev) like any
+  other hit. Requests with bodies or smuggling flags still fall
+  through unchanged; the fallback path returns the bytes its reader
+  buffered past the framed body as its own leftover, and a miss
+  adopts that leftover instead of the parser's excess — the two
+  leftover contracts the rewrite initially conflated (a framed body
+  re-parsed as a request line corrupted the pipelined successor)
+  were caught by the cache-tests conformance suite and closed in the
+  same release. Measured on 8 pipelined GETs in one write: 29.7 →
+  25.8 us per batch, 16.5 → 2.7 KB, 104 → 32 allocs (−13% ns,
+  −84% bytes, −69% allocs).
+
+- Access-log attributes and the URL ring sample before they allocate
+  (#894). The fall-through middleware built the 20-element access-log
+  attrs slice (string conversions for method/host/path/remote) on
+  every request before the 1:100 `shouldLogAccess` check, so 99% of
+  200s paid the allocation and were then dropped;
+  `recordFastHTTPRings` likewise converted the path to a string
+  before the URL ring's own 1-in-N sampler. Both now sample first:
+  the attrs slice is built only when the log entry will be emitted,
+  and a new `URLRing.RecordURLBytes` applies the sampler over the raw
+  bytes, converting only on the calls that record. Non-200s still
+  always log. Measured at 1:100 sampling: ~737 → ~499 ns/op,
+  464 B/op + 12 allocs → 0 B/op + 0 allocs.
+
+- The contended fetch-slot wait timer is pooled (#896).
+  `acquireFetchSlot` allocated a `time.NewTimer` per contended miss
+  (fetch semaphore full) — 377 B / 7 allocs per contended wait,
+  dominated by the timer + channel machinery. The wait timer now
+  comes from a `Handler`-scoped `sync.Pool`, stopped and drained
+  before `Reset` and before returning to the pool; the happy path
+  (non-blocking send) is unchanged and still zero-alloc. Measured on
+  a saturated 1-slot `fetchSem`: 377 B / 7 allocs → 131 B / 4 allocs
+  per contended wait.
+
 ### Added
+
+- **`cache.key.cookie_values` per-route list (issue #870, ADR-0072)**:
+  the listed cookies' VALUES join the Vary variant key through a
+  second synthetic Vary field (`x-bouine-cookie-values`) — the
+  Cloudflare cache-rule `cookie.include` equivalent (`cookie_presence`
+  is `check_presence`). Same URL + same listed values ⇒ one variant
+  cluster-wide; any listed-value difference ⇒ its own variant; unlisted
+  cookies never fragment. Canonicalization is pinned for cluster
+  agreement: RFC 6265 §5.2 OWS trimming, last-occurrence-wins
+  duplicates (§5.4), all Cookie lines via the §4.2 joined value,
+  absent/empty ⇒ one empty-value variant. Capped at 4 names (values
+  are unbounded — `max_variants` refuses over-cap stores, never a
+  wrong variant); rejected combined with `bypass_on_cookie*`,
+  overlapping `cookie_presence` names, or
+  `include_headers: [cookie]`. Cookie values are PII (threat-model
+  T53): they exist only inside the transient variant-key hash input —
+  never stored, logged, or in metrics. A
+  `route_defaults.cache.key.cookie_values` default merges per the
+  list-knob precedent (inherit wholesale, replace per route, `[]`
+  opts out). In-flight sharing stays refused for every cookied
+  request (ADR-0054 unchanged). Bench gates:
+  `VaryKey_CookieValues{,Fast,Raw}` at the presence-tier ceilings
+  (1/2/4 allocs) and `VaryKey_NoCookieKeyingZeroCost` proving
+  non-keyed routes pay nothing.
 
 - `swr_override` per-route cache knob (ADR-0072): when set, it replaces
   the stale-while-revalidate window stamped onto stored objects
@@ -130,29 +207,6 @@ the curated, human-readable summary.
 
 ### Added
 
-- **`cache.key.cookie_values` per-route list (issue #870, ADR-0072)**:
-  the listed cookies' VALUES join the Vary variant key through a
-  second synthetic Vary field (`x-bouine-cookie-values`) — the
-  Cloudflare cache-rule `cookie.include` equivalent (`cookie_presence`
-  is `check_presence`). Same URL + same listed values ⇒ one variant
-  cluster-wide; any listed-value difference ⇒ its own variant; unlisted
-  cookies never fragment. Canonicalization is pinned for cluster
-  agreement: RFC 6265 §5.2 OWS trimming, last-occurrence-wins
-  duplicates (§5.4), all Cookie lines via the §4.2 joined value,
-  absent/empty ⇒ one empty-value variant. Capped at 4 names (values
-  are unbounded — `max_variants` refuses over-cap stores, never a
-  wrong variant); rejected combined with `bypass_on_cookie*`,
-  overlapping `cookie_presence` names, or
-  `include_headers: [cookie]`. Cookie values are PII (threat-model
-  T53): they exist only inside the transient variant-key hash input —
-  never stored, logged, or in metrics. A
-  `route_defaults.cache.key.cookie_values` default merges per the
-  list-knob precedent (inherit wholesale, replace per route, `[]`
-  opts out). In-flight sharing stays refused for every cookied
-  request (ADR-0054 unchanged). Bench gates:
-  `VaryKey_CookieValues{,Fast,Raw}` at the presence-tier ceilings
-  (1/2/4 allocs) and `VaryKey_NoCookieKeyingZeroCost` proving
-  non-keyed routes pay nothing.
 - `bouine_conn_rejections_total`: an exact counter of data-plane
   connections refused at accept because `listen.max_connections` was
   reached. The refusal used to be observable only through one warn

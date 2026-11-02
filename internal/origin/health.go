@@ -121,12 +121,9 @@ func (hc *ActiveHealthChecker) probeOne(_ context.Context, t *Target) { //nolint
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(hc.cfg.Method)
 	req.SetRequestURI(url)
-	// A probe connection is idle for a full interval between probes, and
-	// origins commonly close idle keep-alive connections earlier (the
-	// pcap in issue #912 shows a FIN at ~2s against a 5s interval), so
-	// pooling it only earns a RST on the next probe. fasthttp's idempotent
-	// retry absorbs that for GET, but not for a non-idempotent probe
-	// method — dial fresh and close after every probe instead.
+	// Probes are a full interval apart and origins often close idle
+	// keep-alives sooner (issue #912), so a pooled conn just earns a RST
+	// on the next probe — dial fresh and close after each one.
 	req.Header.SetConnectionClose()
 
 	resp := fasthttp.AcquireResponse()

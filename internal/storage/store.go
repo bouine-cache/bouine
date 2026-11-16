@@ -43,6 +43,13 @@ type Store interface {
 	// reports the boolean; the explain plane asks for the
 	// descriptors (issue #814).
 	MatchingBans(obj *api.Object) []BanDescriptor
+	// KeysBySurrogate returns all keys (any tier) whose stored object
+	// carries the given surrogate key, at most maxKeys entries. Admin
+	// path only: side-effect-free (no hit accounting, no promotion),
+	// never called on the data-plane hit path. Capped so one tag
+	// cannot make an admin call allocate an unbounded slice; callers
+	// treat a full (== maxKeys) result as "possibly more matches".
+	KeysBySurrogate(ctx context.Context, surrogateKey string, maxKeys int) []api.Key
 }
 
 // BanDescriptor describes one active lazy ban, as returned by

@@ -98,6 +98,14 @@ func originRouteHandler(ctx *fasthttp.RequestCtx, ctrl *originControl) {
 		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
 		ctx.Response.Header.Set("ETag", `"hit-v1"`)
 		fmt.Fprintf(ctx, "hit at %s", time.Now().Format(time.RFC3339Nano))
+	case "/tagged":
+		// Tagged route for surrogate-key tests: SWR window so a soft
+		// purge keeps the object servable while it revalidates, plus a
+		// stable surrogate tag from the query so each test gets its own
+		// tag space.
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600, stale-while-revalidate=3600")
+		ctx.Response.Header.Set("Surrogate-Key", "tag-"+string(ctx.QueryArgs().Peek("t")))
+		fmt.Fprintf(ctx, "tagged t=%s at %s", ctx.QueryArgs().Peek("t"), time.Now().Format(time.RFC3339Nano))
 	case "/miss":
 		ctx.Response.Header.Set("Cache-Control", "no-store")
 		fmt.Fprintf(ctx, "miss at %s", time.Now().Format(time.RFC3339Nano))

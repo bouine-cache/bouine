@@ -59,6 +59,20 @@ type HotStore struct {
 	// path. Set via HotConfig.OnEvict. See HotConfig.OnEvict for the
 	// constraint.
 	onEvict func(key api.Key)
+	// onEntryRemoved is called when ANY entry (backed or not) leaves
+	// the shard, whatever the reason (SIEVE, reaper, ban, Delete,
+	// Put-overwrite). It receives the evicted object so admin-path
+	// reverse indexes (e.g. a surrogate→keys map) can drop the key.
+	// Called under the shard write lock like onEvict: must only
+	// enqueue, never block or call back into HotStore.
+	onEntryRemoved func(key api.Key, obj *api.Object)
+	// surrIdx is the surrogate→keys reverse index consulted by the
+	// admin-path KeysBySurrogate. Maintained inline on Put/removal via
+	// the same shard-lock critical sections (no extra locking on the
+	// hit path beyond a single RWMutex per operation, which is
+	// admin-path only for reads). nil disables indexing; lookups then
+	// always scan.
+	surrIdx *surrogateIndex
 	// onEvictDemoted is called when a backed entry is SIEVE-evicted.
 	// Set via HotConfig.OnEvictDemoted. The TieredStore uses it to
 	// Unprotect (not Delete) the warm copy — demoting it to
@@ -337,6 +351,16 @@ type HotConfig struct {
 	// to a warmUnprotectQueue drained outside the hot lock to avoid a
 	// lock-ordering cycle with warm.idxMu).
 	OnEvictDemoted func(key api.Key)
+	// OnEntryRemoved is called when ANY entry leaves the shard whatever
+	// the reason (SIEVE, reaper, ban, Delete, Put-overwrite), with the
+	// evicted object so admin-path reverse indexes (e.g. a surrogate
+	// key → keys map) can drop the key. Unlike OnEvict it fires for
+	// non-backed entries and for SIEVE evictions too.
+	//
+	// CONSTRAINT: Same as OnEvict — invoked under the shard write lock,
+	// must only enqueue, never block, do I/O, or call back into
+	// HotStore.
+	OnEntryRemoved func(key api.Key, obj *api.Object)
 	// MayReap gates the TTL reaper for expired entries whose object
 	// requested grace retention (KeepGrace, set by stayin_alive routes
 	// at fill time). Returning false holds the entry for the next
@@ -420,6 +444,21 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
 		onEvictDemoted: cfg.OnEvictDemoted,
+		surrIdx:        newSurrogateIndex(),
+	}
+	// The built-in reverse index is maintained inline via onEntryRemoved;
+	// compose with any caller-supplied callback.
+	removeFromIdx := func(key api.Key, obj *api.Object) {
+		h.surrIdx.remove(key, obj)
+	}
+	if cfg.OnEntryRemoved != nil {
+		caller := cfg.OnEntryRemoved
+		h.onEntryRemoved = func(key api.Key, obj *api.Object) {
+			removeFromIdx(key, obj)
+			caller(key, obj)
+		}
+	} else {
+		h.onEntryRemoved = removeFromIdx
 	}
 	h.bans.ttl = banTTL
 	if cfg.Slab {
@@ -550,6 +589,13 @@ func (h *HotStore) detachBody(obj *api.Object) *api.Object {
 func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry, slabFrees *[][]byte, reason evictReason) {
 	if h.slab != nil && entry.obj != nil {
 		*slabFrees = append(*slabFrees, entry.obj.Body)
+	}
+	// Reverse-index maintenance fires for every removal, whatever the
+	// reason and whether or not the entry had a warm backup. It runs
+	// before the hasBackup early-return so the index can never keep a
+	// dead key.
+	if h.onEntryRemoved != nil {
+		h.onEntryRemoved(key, entry.obj)
 	}
 	if !entry.hasBackup {
 		return
@@ -697,6 +743,11 @@ func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
 		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.entry)
+		// An overwrite replaces the surrogate tags: drop the old
+		// object's index entries before the new ones are added below.
+		if h.surrIdx != nil && old.obj != nil {
+			h.surrIdx.remove(key, old.obj)
+		}
 		if old.hasBackup {
 			s.backedCount--
 		}
@@ -716,6 +767,9 @@ func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
 	e.entry = se
 	s.entries[key] = e
 	s.bytes += size
+	if h.surrIdx != nil {
+		h.surrIdx.add(stored, key)
+	}
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
 	h.flushSlabFrees(slabFrees)
@@ -1280,6 +1334,141 @@ func (h *HotStore) Keys() []api.Key {
 		s.mu.RUnlock()
 	}
 	return keys
+}
+
+// maxSurrogateIndexEntries caps the in-memory surrogate→keys reverse
+// index. When a tag accumulates more than this many keys, the index
+// stops tracking it and KeysBySurrogate falls back to a full shard
+// scan for that tag (admin path only, so the cost stays off the hit
+// path). 64k keys per tag is far above realistic product/category tag
+// cardinality and bounds the index at a few MB worst case.
+const maxSurrogateIndexEntries = 64 << 10
+
+// surrogateIndex is the hot tier's reverse index from surrogate key to
+// the set of cache keys carrying it. Maintained on Put/Delete/evict via
+// HotConfig.OnEntryRemoved; consulted only by the admin-path
+// KeysBySurrogate, never on the data-plane hit path (zero per-hit cost).
+// A tag whose set exceeds maxSurrogateIndexEntries is dropped from the
+// map (tombstoned) and served by scan until it drains below the cap.
+type surrogateIndex struct {
+	keys map[string]map[api.Key]struct{}
+	mu   sync.RWMutex
+}
+
+func newSurrogateIndex() *surrogateIndex {
+	return &surrogateIndex{keys: make(map[string]map[api.Key]struct{})}
+}
+
+func (si *surrogateIndex) add(obj *api.Object, key api.Key) {
+	if obj == nil || len(obj.SurrogateKeys) == 0 {
+		return
+	}
+	si.mu.Lock()
+	defer si.mu.Unlock()
+	for _, sk := range obj.SurrogateKeys {
+		set, ok := si.keys[sk]
+		if !ok {
+			set = make(map[api.Key]struct{})
+			si.keys[sk] = set
+		}
+		if len(set) >= maxSurrogateIndexEntries {
+			continue
+		}
+		set[key] = struct{}{}
+	}
+}
+
+func (si *surrogateIndex) remove(key api.Key, obj *api.Object) {
+	if obj == nil || len(obj.SurrogateKeys) == 0 {
+		return
+	}
+	si.mu.Lock()
+	defer si.mu.Unlock()
+	for _, sk := range obj.SurrogateKeys {
+		set, ok := si.keys[sk]
+		if !ok {
+			continue
+		}
+		delete(set, key)
+		if len(set) == 0 {
+			delete(si.keys, sk)
+		}
+	}
+}
+
+// lookup returns up to maxKeys indexed keys for sk, or nil when the tag
+// is not tracked (absent or over cap) — callers then fall back to a
+// scan. A non-nil result with len == maxKeys means "possibly more".
+func (si *surrogateIndex) lookup(sk string, maxKeys int) []api.Key {
+	si.mu.RLock()
+	set, ok := si.keys[sk]
+	si.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	out := make([]api.Key, 0, min(len(set), maxKeys))
+	for k := range set {
+		if len(out) >= maxKeys {
+			break
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// KeysBySurrogate returns up to maxKeys hot-tier keys whose stored
+// object carries the given surrogate key. Admin-path only,
+// side-effect-free: no hit accounting, SIEVE visit, or promotion
+// (unlike Get), and ctx cancellation aborts the fallback scan between
+// shards. When the reverse index tracks the tag this is an O(matches)
+// map read; otherwise it falls back to a shard-parallel scan under each
+// shard's read lock (bounded like Ban's eager scan). A non-nil result
+// with len == maxKeys means the match set may be larger. Obj.
+// SurrogateKeys is immutable after Put (CloneForStorage copies the
+// slice), so reads are race-free.
+func (h *HotStore) KeysBySurrogate(ctx context.Context, surrogateKey string, maxKeys int) []api.Key {
+	if maxKeys <= 0 {
+		return nil
+	}
+	if h.surrIdx != nil {
+		if keys := h.surrIdx.lookup(surrogateKey, maxKeys); keys != nil {
+			return keys
+		}
+	}
+	var mu sync.Mutex
+	var out []api.Key
+	var g errgroup.Group
+	g.SetLimit(min(len(h.shards), runtime.NumCPU()))
+	for i := range h.shards {
+		g.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var local []api.Key
+			s := &h.shards[i]
+			s.mu.RLock()
+			for k, e := range s.entries {
+				if len(out)+len(local) >= maxKeys {
+					break
+				}
+				if e.obj != nil && slices.Contains(e.obj.SurrogateKeys, surrogateKey) {
+					local = append(local, k)
+				}
+			}
+			s.mu.RUnlock()
+			if len(local) > 0 {
+				mu.Lock()
+				out = append(out, local...)
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if len(out) > maxKeys {
+		out = out[:maxKeys]
+	}
+	return out
 }
 
 // HotOnlyKeys returns up to limit hot-tier keys that are not backed by

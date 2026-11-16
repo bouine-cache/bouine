@@ -1357,3 +1357,81 @@ func TestMatchesActiveBan_ConcurrentReadsAndBan(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 }
+
+func TestHotStore_KeysBySurrogate(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer s.Close(context.Background())
+
+	k1 := testkey.Hash([]byte("a"))
+	k2 := testkey.Hash([]byte("b"))
+	k3 := testkey.Hash([]byte("c"))
+
+	o1 := obj(k1, 10)
+	o1.SurrogateKeys = []string{"tag-a", "shared"}
+	o2 := obj(k2, 10)
+	o2.SurrogateKeys = []string{"shared"}
+	o3 := obj(k3, 10) // no surrogate keys
+	for _, o := range []*api.Object{o1, o2, o3} {
+		require.NoError(t, s.Put(context.Background(), o.Key, o))
+	}
+
+	got := s.KeysBySurrogate(context.Background(), "shared", 1000)
+	require.ElementsMatch(t, []api.Key{k1, k2}, got)
+
+	got = s.KeysBySurrogate(context.Background(), "tag-a", 1000)
+	require.Equal(t, []api.Key{k1}, got)
+
+	require.Empty(t, s.KeysBySurrogate(context.Background(), "absent", 1000))
+
+	// Cap: maxKeys=1 truncates the match set instead of scanning all.
+	capped := s.KeysBySurrogate(context.Background(), "shared", 1)
+	require.Len(t, capped, 1)
+}
+
+func TestHotStore_KeysBySurrogate_NoSideEffects(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer s.Close(context.Background())
+
+	k := testkey.Hash([]byte("sfx"))
+	o := obj(k, 10)
+	o.SurrogateKeys = []string{"tag"}
+	require.NoError(t, s.Put(context.Background(), k, o))
+
+	_ = s.KeysBySurrogate(context.Background(), "tag", 1000)
+	// A scan must not count as a hit: windowHits stays 0.
+	require.Zero(t, s.WindowHits(k))
+}
+
+func TestHotStore_SurrogateIndex_Removal(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer s.Close(context.Background())
+
+	k1 := testkey.Hash([]byte("idx-a"))
+	k2 := testkey.Hash([]byte("idx-b"))
+	o1 := obj(k1, 10)
+	o1.SurrogateKeys = []string{"idx-tag"}
+	o2 := obj(k2, 10)
+	o2.SurrogateKeys = []string{"idx-tag"}
+	require.NoError(t, s.Put(context.Background(), k1, o1))
+	require.NoError(t, s.Put(context.Background(), k2, o2))
+
+	require.ElementsMatch(t, []api.Key{k1, k2},
+		s.KeysBySurrogate(context.Background(), "idx-tag", 100))
+
+	// Delete one: the index must drop it (falls back to scan only for
+	// untracked tags, so the deleted key must not reappear).
+	require.NoError(t, s.Delete(context.Background(), k1))
+	got := s.KeysBySurrogate(context.Background(), "idx-tag", 100)
+	require.ElementsMatch(t, []api.Key{k2}, got)
+
+	// Overwrite with an object carrying a different tag: old tag entry
+	// must be gone.
+	o2b := obj(k2, 10)
+	o2b.SurrogateKeys = []string{"idx-other"}
+	require.NoError(t, s.Put(context.Background(), k2, o2b))
+	require.Empty(t, s.KeysBySurrogate(context.Background(), "idx-tag", 100))
+	require.ElementsMatch(t, []api.Key{k2}, s.KeysBySurrogate(context.Background(), "idx-other", 100))
+}

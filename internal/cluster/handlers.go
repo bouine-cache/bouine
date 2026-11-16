@@ -59,6 +59,58 @@ func NewPeerRefreshHandler(fn func(api.RefreshEvent) error) fasthttp.RequestHand
 	return newPeerInvalidationHandler(DecodeRefreshHTTP, fn, "refreshed")
 }
 
+// maxPeerSurrogateKeyLen caps the surrogate key in a peer refresh
+// frame. The admin plane already enforces 256 bytes
+// (admin.maxSurrogateKeyLen); this is the peer-side guard against a
+// corrupted or hostile frame asking every node to scan its stores for
+// an unbounded string.
+const maxPeerSurrogateKeyLen = 256
+
+// validPeerSurrogateKey applies the same token rules as the admin
+// plane: exact opaque token, no whitespace, commas, or control bytes.
+func validPeerSurrogateKey(sk string) bool {
+	if sk == "" || len(sk) > maxPeerSurrogateKeyLen {
+		return false
+	}
+	for i := 0; i < len(sk); i++ {
+		c := sk[i]
+		if c <= ' ' || c == ',' || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// NewPeerRefreshSurrogateHandler returns a fasthttp.RequestHandler that
+// decodes binary RefreshSurrogateEvent frames and delegates to fn.
+// Mounted at POST /v1/peer/refresh/surrogate; the receiving node
+// resolves the tag locally, so the fan-out stays one frame per peer.
+// The tag is re-validated here (400 on garbage) because the frame may
+// come from gossip replay or a misbehaving peer, not just the admin API.
+func NewPeerRefreshSurrogateHandler(fn func(api.RefreshSurrogateEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > maxPeerInvalidationBody {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		evt, err := DecodeRefreshSurrogateHTTP(body)
+		if err != nil {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		if !validPeerSurrogateKey(evt.SurrogateKey) {
+			ctx.Error("bad request: invalid surrogate_key", fasthttp.StatusBadRequest)
+			return
+		}
+		if err := fn(evt); err != nil {
+			writePeerError(ctx, err)
+			return
+		}
+		writePeerOK(ctx, "refreshed")
+	}
+}
+
 // NewPeerHotSetHandler returns a fasthttp.RequestHandler that decodes
 // HotSetEvent JSON frames and delegates to fn. Mounted at POST
 // /v1/peer/config/hot: the receiving node applies the runtime knob

@@ -176,6 +176,25 @@ func (c *Client) Refresh(ctx context.Context, url string) (*RefreshResult, error
 	return &out, nil
 }
 
+// RefreshSurrogateResult is the response from a surrogate-key refresh.
+type RefreshSurrogateResult struct {
+	Status string `json:"status"`
+	// Count is how many locally stored keys were soft-purged.
+	Count int `json:"count"`
+}
+
+// RefreshSurrogate soft-purges every cached object carrying the given
+// surrogate key (grouped invalidation by tag, e.g. Surrogate-Key /
+// Cache-Tag).
+func (c *Client) RefreshSurrogate(ctx context.Context, surrogateKey string) (*RefreshSurrogateResult, error) {
+	body := map[string]string{"surrogate_key": surrogateKey}
+	var out RefreshSurrogateResult
+	if err := c.post(ctx, "/v1/refresh", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	return c.exchange(ctx, "GET", path, nil, out)
 }

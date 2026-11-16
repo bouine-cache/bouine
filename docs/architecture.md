@@ -527,7 +527,7 @@ runs on the resolved value (config contract:
 |----------|-------------|
 | `POST /v1/purge` | Exact URL purge |
 | `POST /v1/ban` | Predicate ban (regex on host/path/header) |
-| `POST /v1/refresh` | Soft purge: mark stale, revalidate on next request |
+| `POST /v1/refresh` | Soft purge by URL or surrogate key: mark stale, revalidate on next request |
 | `GET /v1/config` | Current effective config |
 | `GET /v1/cluster/peers` | Gossip view |
 | `GET /v1/stats` | JSON snapshot of counters |
@@ -543,7 +543,12 @@ All write endpoints require a bearer token or mTLS.
 - **Ban** — predicate persisted in-memory; objects matched lazily on lookup.
   Compacted when the oldest still-live object is younger than the predicate.
 - **Refresh** — sets `Age = max-age - 1` so the next request triggers a
-  conditional revalidation.
+  conditional revalidation. Accepts `{"url": ...}` or
+  `{"surrogate_key": ...}` (exactly one); the surrogate form resolves the
+  tag via a side-effect-free store scan (`Store.KeysBySurrogate`), soft
+  purges every matching key locally, and fans out one
+  `RefreshSurrogateEvent` (new gossip msgType + `/v1/peer/refresh/surrogate`)
+  so each peer refreshes only what it holds.
 
 ---
 

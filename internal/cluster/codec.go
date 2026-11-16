@@ -19,11 +19,12 @@ const (
 )
 
 const (
-	msgTypePurge        byte = 1
-	msgTypeBan          byte = 2
-	msgTypeRefresh      byte = 3
-	msgTypePurgeBatch   byte = 4
-	msgTypeRefreshBatch byte = 5
+	msgTypePurge            byte = 1
+	msgTypeBan              byte = 2
+	msgTypeRefresh          byte = 3
+	msgTypePurgeBatch       byte = 4
+	msgTypeRefreshBatch     byte = 5
+	msgTypeRefreshSurrogate byte = 6
 )
 
 var (
@@ -377,6 +378,85 @@ func DecodeRefreshHTTP(buf []byte) (api.RefreshEvent, error) {
 	err := decodeFrame(buf, 0, func(buf []byte, off int) error {
 		var err error
 		evt, err = decodeRefreshPayload(buf, off)
+		return err
+	})
+	return evt, err
+}
+
+func refreshSurrogatePayloadLen(evt api.RefreshSurrogateEvent) int {
+	return 2 + len(evt.SurrogateKey) + 2 + len(evt.Issuer) + 8 + 8
+}
+
+func putRefreshSurrogatePayload(buf []byte, off int, evt api.RefreshSurrogateEvent) (int, error) {
+	var err error
+	off, err = putString(buf, off, evt.SurrogateKey)
+	if err != nil {
+		return off, err
+	}
+	off, err = putString(buf, off, evt.Issuer)
+	if err != nil {
+		return off, err
+	}
+	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast
+	off += 8
+	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
+	return off + 8, nil
+}
+
+func decodeRefreshSurrogatePayload(buf []byte, off int) (api.RefreshSurrogateEvent, error) {
+	var evt api.RefreshSurrogateEvent
+	var err error
+	evt.SurrogateKey, off, err = readString(buf, off)
+	if err != nil {
+		return evt, err
+	}
+	evt.Issuer, off, err = readString(buf, off)
+	if err != nil {
+		return evt, err
+	}
+	if off+16 > len(buf) {
+		return evt, errShortFrame
+	}
+	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
+	return evt, nil
+}
+
+// EncodeRefreshSurrogateGossip serializes a RefreshSurrogateEvent as a
+// gossip frame. It uses its own msgType so older nodes drop the frame
+// at the dispatch default instead of mis-decoding it.
+func EncodeRefreshSurrogateGossip(evt api.RefreshSurrogateEvent) ([]byte, error) {
+	return encodeFrame(frameLen(true, refreshSurrogatePayloadLen(evt)), msgTypeRefreshSurrogate,
+		func(buf []byte, off int) (int, error) { return putRefreshSurrogatePayload(buf, off, evt) })
+}
+
+// EncodeRefreshSurrogateHTTP serializes a RefreshSurrogateEvent for the
+// HTTP peer-refresh-surrogate endpoint.
+func EncodeRefreshSurrogateHTTP(evt api.RefreshSurrogateEvent) ([]byte, error) {
+	return encodeFrame(frameLen(false, refreshSurrogatePayloadLen(evt)), 0,
+		func(buf []byte, off int) (int, error) { return putRefreshSurrogatePayload(buf, off, evt) })
+}
+
+// DecodeRefreshSurrogateGossip decodes a RefreshSurrogateEvent from a
+// gossip frame.
+func DecodeRefreshSurrogateGossip(buf []byte) (api.RefreshSurrogateEvent, error) {
+	var evt api.RefreshSurrogateEvent
+	err := decodeFrame(buf, msgTypeRefreshSurrogate, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeRefreshSurrogatePayload(buf, off)
+		return err
+	})
+	return evt, err
+}
+
+// DecodeRefreshSurrogateHTTP decodes a RefreshSurrogateEvent from an
+// HTTP peer body.
+func DecodeRefreshSurrogateHTTP(buf []byte) (api.RefreshSurrogateEvent, error) {
+	var evt api.RefreshSurrogateEvent
+	err := decodeFrame(buf, 0, func(buf []byte, off int) error {
+		var err error
+		evt, err = decodeRefreshSurrogatePayload(buf, off)
 		return err
 	})
 	return evt, err

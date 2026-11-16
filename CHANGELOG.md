@@ -21,6 +21,15 @@ the curated, human-readable summary.
 
 ### Added
 
+- `POST /v1/refresh` now also accepts `{"surrogate_key": "..."}` to
+  soft-purge every cached object carrying a surrogate tag
+  (Surrogate-Key / Cache-Tag / X-Cache-Tags), returning
+  `{"status":"refreshed","count":N}`. In a cluster the tag fans out as a
+  single event per peer (`/v1/peer/refresh/surrogate`, new gossip frame
+  kind) and each peer refreshes only what it holds; Cloudflare
+  propagation issues a PurgeByTags when `propagate.refresh` is on. The
+  URL form is unchanged. `bouine refresh --surrogate-key <tag>` and
+  `Client.RefreshSurrogate` are the CLI/SDK entry points.
 - `cache.enabled: false` is now honored on proxied (pool) routes
   (ADR-0074): the route becomes a pure reverse proxy — every safe-method
   request takes the BYPASS path decided once at boot (no store lookup,

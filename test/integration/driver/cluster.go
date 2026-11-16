@@ -936,6 +936,38 @@ func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) 
 	}
 }
 
+// AdminPost is adminPost without the fatal-on-error check; it returns the
+// status code and body so tests can assert on them.
+func (s *ClusterStack) AdminPost(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	return s.adminPostWithCode(t, n, path, body)
+}
+
+// AdminPostWithCode is the non-fatal admin POST variant used by validation
+// tests.
+func (s *ClusterStack) AdminPostWithCode(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	return s.adminPostWithCode(t, n, path, body)
+}
+
+func (s *ClusterStack) adminPostWithCode(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	url := s.Nodes[n].AdminAddr + path
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("POST")
+	req.SetBody(body)
+	req.Header.SetContentType("application/json")
+	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return resp.StatusCode(), append([]byte(nil), resp.Body()...)
+}
+
 // Peers returns the cluster peers from node n's admin API.
 func (s *ClusterStack) Peers(t *testing.T, n int) []map[string]any {
 	t.Helper()

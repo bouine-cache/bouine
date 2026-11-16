@@ -313,6 +313,45 @@ func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
 	b.flushRefreshBatch([]api.RefreshEvent{evt})
 }
 
+// BroadcastRefreshSurrogate sends one surrogate-key refresh event to
+// all live peers. Unlike BroadcastRefresh it is never batched: the
+// event is a single small frame (the tag, not the resolved keys), so
+// coalescing would save nothing, and each peer resolves the tag against
+// its own store at apply time. Strong mode posts to each peer's
+// /v1/peer/refresh/surrogate and also enqueues via gossip; eventual
+// mode gossips only. Fan-out is detached from the caller's context so
+// the event survives request cancellation, same as the other
+// invalidations.
+//
+//nolint:contextcheck // fan-out deliberately detached from the caller's request context, same as flushBatch
+func (b *Broadcaster) BroadcastRefreshSurrogate(ctx context.Context, surrogateKey string) {
+	fanoutCtx := context.WithoutCancel(ctx)
+
+	evt := api.RefreshSurrogateEvent{
+		SurrogateKey: surrogateKey,
+		Issuer:       b.cluster.cfg.NodeName,
+		IssuedAt:     time.Now(),
+		Seq:          b.seq.Add(1),
+	}
+
+	if body, err := EncodeRefreshSurrogateHTTP(evt); err != nil {
+		b.logger.Warn("refresh_surrogate encode failed", "error", err)
+		b.metrics.IncBroadcastFailure("refresh_surrogate", "marshal")
+	} else {
+		b.broadcastEvent(fanoutCtx, "refresh_surrogate", "/v1/peer/refresh/surrogate", body)
+	}
+	if gbody, err := EncodeRefreshSurrogateGossip(evt); err == nil {
+		b.cluster.QueueBroadcast(gbody)
+	} else {
+		b.logger.Warn("refresh_surrogate gossip encode failed", "error", err)
+	}
+	b.logger.Info("gossiped refresh_surrogate to peers",
+		"surrogate_key", surrogateKey,
+		"issuer", evt.Issuer,
+		"peers", countPeers(b.cluster.Members()),
+	)
+}
+
 // BroadcastHotSet propagates a hot-config point mutation
 // (bouine config set) to every live peer and returns the number that
 // acknowledged it. Strong mode only: runtime knobs ride no gossip, so

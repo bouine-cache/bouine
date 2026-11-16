@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -224,7 +225,10 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		StaleIfError:         o.StaleIfError,
 		ETag:                 o.ETag,
 		LastModified:         o.LastModified,
-		SurrogateKeys:        o.SurrogateKeys,
+		// Deep-copied so a caller mutating the returned slice (e.g. the
+		// surrogate reverse index builder) can never alias the stored
+		// object's slice, and vice versa.
+		SurrogateKeys: slices.Clone(o.SurrogateKeys),
 		// Atomic load: the stored object's Hits is incremented with
 		// atomic.AddUint64 by HotStore.Get while this clone may run on
 		// another goroutine (revalidation, warm encode) holding the same

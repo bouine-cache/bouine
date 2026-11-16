@@ -103,6 +103,28 @@ type RefreshEvent struct {
 	Key Key `json:"key"`
 }
 
+// RefreshSurrogateEvent is broadcast when a surrogate key is refreshed
+// (soft-purged by tag). Unlike RefreshEvent it carries no concrete key:
+// each peer resolves the surrogate key against its own store
+// (KeysBySurrogate) and soft-purges only what it holds, so one event
+// covers the whole fleet without an N-key fan-out. It rides a
+// dedicated gossip msgType and peer route so old nodes that do not know
+// the frame kind drop it at the dispatch default instead of failing
+// the decode.
+//
+// Unstable.
+type RefreshSurrogateEvent struct {
+	// IssuedAt is the wall-clock time of the refresh.
+	IssuedAt time.Time `json:"issued_at"`
+	// SurrogateKey is the exact opaque tag to soft-purge; never a
+	// pattern (same rule as BanExpr.SurrogateKey).
+	SurrogateKey string `json:"surrogate_key"`
+	// Issuer is the node name that originated the refresh.
+	Issuer string `json:"issuer"`
+	// Seq is the monotonic sequence number from the issuer.
+	Seq uint64 `json:"seq"`
+}
+
 // HotSetEvent is broadcast when a hot-config knob is set at runtime
 // (bouine config set): peers apply the same point mutation so the
 // fleet's runtime overrides stay identical. Unlike invalidation

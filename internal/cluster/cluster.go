@@ -100,6 +100,9 @@ type Invalidator struct {
 	PurgeFn   func(ctx context.Context, evt api.PurgeEvent) error
 	BanFn     func(ctx context.Context, evt api.BanEvent) error
 	RefreshFn func(ctx context.Context, evt api.RefreshEvent) error
+	// RefreshSurrogateFn applies a surrogate-key refresh received via
+	// gossip. nil disables the msgType; older peers never send it.
+	RefreshSurrogateFn func(ctx context.Context, evt api.RefreshSurrogateEvent) error
 }
 
 // Member holds runtime state about a peer node in the cluster.
@@ -158,14 +161,26 @@ type Cluster struct {
 	onPeerUnretired atomic.Pointer[func(addr string)]
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
-	gossipQueue   []gossipBroadcast
-	cfg           Config
-	mu            sync.RWMutex
+	gossipQueue []gossipBroadcast
+	// applyCh hands surrogate-refresh gossip events from memberlist's
+	// packet-handler goroutine to the applyLoop worker, so a full-store
+	// tag resolution never runs on the gossip receive path. Bounded;
+	// overflow drops (see New).
+	applyCh chan api.RefreshSurrogateEvent
+	applyWg *sync.WaitGroup
+	cfg     Config
+	mu      sync.RWMutex
+	// gossipMu guards gossipQueue.
 	gossipMu      sync.Mutex
 	closeOnce     sync.Once
 	reconcileLive atomic.Bool
 	reconcileWg   sync.WaitGroup
 }
+
+// gossipSurrogateApplyQueue bounds the pending surrogate-refresh gossip
+// applies. Each pending event costs one small struct; 64 slots absorb
+// a refresh storm while bounding memory.
+const gossipSurrogateApplyQueue = 64
 
 // New creates a Cluster and starts the gossip listener. Call Join
 // afterwards to connect to existing peers.
@@ -191,14 +206,17 @@ func New(cfg Config) (*Cluster, error) {
 	}
 
 	c := &Cluster{
-		cfg:    cfg,
-		peers:  make(map[string]*Member),
-		local:  cfg.PeerInfo,
-		logger: cfg.Logger,
-		ring:   newRing(cfg.VirtualNodes),
-		seqs:   newSeqTracker(),
-		done:   make(chan struct{}),
+		cfg:     cfg,
+		peers:   make(map[string]*Member),
+		local:   cfg.PeerInfo,
+		logger:  cfg.Logger,
+		ring:    newRing(cfg.VirtualNodes),
+		seqs:    newSeqTracker(),
+		done:    make(chan struct{}),
+		applyCh: make(chan api.RefreshSurrogateEvent, gossipSurrogateApplyQueue),
+		applyWg: &sync.WaitGroup{},
 	}
+	c.startApplyLoop()
 
 	mlCfg := memberlist.DefaultLANConfig()
 	mlCfg.Name = cfg.NodeName
@@ -341,6 +359,9 @@ func (c *Cluster) Digest() api.RingDigest {
 func (c *Cluster) Leave(ctx context.Context) error {
 	c.closeOnce.Do(func() { close(c.done) })
 	c.reconcileWg.Wait()
+	if c.applyWg != nil {
+		c.applyWg.Wait()
+	}
 	c.adapter.markClosing()
 	if err := c.ml.Leave(0); err != nil {
 		c.logger.Warn("cluster leave error", "error", err)
@@ -414,6 +435,8 @@ func (c *Cluster) handleBinaryGossip(msg []byte) {
 		c.handleGossipRefresh(msg)
 	case msgTypeRefreshBatch:
 		c.handleGossipRefreshBatch(msg)
+	case msgTypeRefreshSurrogate:
+		c.handleGossipRefreshSurrogate(msg)
 	default:
 		c.logger.Debug("cluster: unrecognized binary gossip msgType", "msgType", GossipMsgType(msg), "len", len(msg))
 	}
@@ -533,6 +556,83 @@ func (c *Cluster) handleGossipRefresh(msg []byte) {
 		"issuer", evt.Issuer,
 		"seq", evt.Seq,
 	)
+}
+
+// handleGossipRefreshSurrogate applies a single surrogate-key refresh
+// gossip frame. Same dedup and timeout contract as handleGossipRefresh;
+// the receiver resolves the tag against its own store.
+func (c *Cluster) handleGossipRefreshSurrogate(msg []byte) {
+	if c.inv.Load() == nil || c.inv.Load().RefreshSurrogateFn == nil {
+		return
+	}
+	evt, err := DecodeRefreshSurrogateGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip refresh-surrogate decode failed", "error", err)
+		return
+	}
+	if !validPeerSurrogateKey(evt.SurrogateKey) {
+		c.logger.Warn("cluster: gossip refresh-surrogate with invalid surrogate_key dropped",
+			"issuer", evt.Issuer, "seq", evt.Seq)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	// Hand the event to the apply worker: resolving the tag scans the
+	// whole store and must not run on memberlist's packet-handler
+	// goroutine, or one refresh stalls all gossip reception. Overflow
+	// drops the event — strong mode also delivers over HTTP, and
+	// eventual mode re-delivers on the next push/pull.
+	select {
+	case c.applyCh <- evt:
+	default:
+		c.logger.Warn("cluster: gossip refresh-surrogate apply queue full, dropping",
+			"surrogate_key", evt.SurrogateKey, "issuer", evt.Issuer, "seq", evt.Seq)
+	}
+}
+
+// startApplyLoop runs gossip-driven surrogate-refresh applies off
+// memberlist's packet-handler goroutine: resolving a tag scans the
+// whole store and must never block gossip reception (a scan in the
+// packet handler would stall all gossip for the node). The queue is
+// bounded; overflow drops the event — the issuer's HTTP fan-out in
+// strong mode is the primary delivery, gossip is redundant there, and
+// in eventual mode the next push/pull re-delivers.
+func (c *Cluster) startApplyLoop() {
+	c.applyWg.Add(1)
+	go c.applyLoop(c.applyCh, c.applyWg)
+}
+
+// applyLoop drains surrogate-refresh gossip events off the packet
+// handler and applies them with the GossipApplyTimeout budget. Exits
+// when the cluster is done; pending events are abandoned (the IDs are
+// already in the seq tracker, so a redelivery after restart is a no-op
+// for peers that saw them).
+func (c *Cluster) applyLoop(ch chan api.RefreshSurrogateEvent, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		select {
+		case <-c.done:
+			return
+		case evt := <-ch:
+			inv := c.inv.Load()
+			if inv == nil || inv.RefreshSurrogateFn == nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+			if err := inv.RefreshSurrogateFn(ctx, evt); err != nil {
+				c.logger.Warn("cluster: gossip refresh-surrogate apply failed", "error", err)
+			} else {
+				c.metrics.Load().IncGossipInvalidation("refresh_surrogate")
+				c.logger.Info("received surrogate refresh from peer",
+					"surrogate_key", evt.SurrogateKey,
+					"issuer", evt.Issuer,
+					"seq", evt.Seq,
+				)
+			}
+			cancel()
+		}
+	}
 }
 
 // handleGossipRefreshBatch applies a batched refresh gossip frame,

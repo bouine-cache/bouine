@@ -335,7 +335,7 @@ func TestRefresh_EmptyURL(t *testing.T) {
 	})
 	code, body := postWithToken(t, s, "/v1/refresh", `{}`)
 	require.Equal(t, fasthttp.StatusBadRequest, code)
-	require.True(t, bytes.Contains(body, []byte("url field is required")))
+	require.True(t, bytes.Contains(body, []byte("url or surrogate_key field is required")))
 }
 
 func TestRefresh_UnknownField(t *testing.T) {
@@ -621,4 +621,93 @@ func TestPurgeBatch_BatchFnCoalesced(t *testing.T) {
 	require.Equal(t, 0, singleCalls, "per-URL PurgeFn must not be used when PurgeBatchFn is set")
 	require.Equal(t, []string{"https://a.com/", "https://b.com/", "https://c.com/"}, batchURLs)
 	require.True(t, bytes.Contains(respBody, []byte(`"count":3`)))
+}
+
+func newRefreshSurrogateServer(fn func(string) (int, error)) *Server {
+	return New(Config{
+		Token:              "secret",
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn:          func(_ api.Key) error { return nil },
+		RefreshSurrogateFn: fn,
+	})
+}
+
+func TestRefresh_SurrogateKey(t *testing.T) {
+	t.Parallel()
+	var gotSK string
+	s := newRefreshSurrogateServer(func(sk string) (int, error) {
+		gotSK = sk
+		return 3, nil
+	})
+	code, body := postWithToken(t, s, "/v1/refresh", `{"surrogate_key":"product-42"}`)
+	require.Equal(t, fasthttp.StatusOK, code)
+	require.Equal(t, "product-42", gotSK)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(body, &resp))
+	require.Equal(t, "refreshed", resp["status"])
+	require.Equal(t, float64(3), resp["count"])
+}
+
+func TestRefresh_SurrogateKey_Validation(t *testing.T) {
+	t.Parallel()
+	called := false
+	s := newRefreshSurrogateServer(func(string) (int, error) { called = true; return 0, nil })
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"both fields", `{"url":"https://example.com/","surrogate_key":"x"}`},
+		{"empty key", `{"surrogate_key":""}`},
+		{"whitespace", `{"surrogate_key":"a b"}`},
+		{"comma", `{"surrogate_key":"a,b"}`},
+		{"control char", `{"surrogate_key":"a\tb"}`},
+		{"too long", `{"surrogate_key":"` + string(make([]byte, 0)) + repeatStr(257) + `"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			code, _ := postWithToken(t, s, "/v1/refresh", tc.body)
+			require.Equal(t, fasthttp.StatusBadRequest, code)
+			require.False(t, called)
+		})
+	}
+}
+
+func repeatStr(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 'x'
+	}
+	return string(b)
+}
+
+func TestRefresh_SurrogateKey_NotWired(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:     "secret",
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn: func(_ api.Key) error { return nil },
+	})
+	code, _ := postWithToken(t, s, "/v1/refresh", `{"surrogate_key":"x"}`)
+	require.Equal(t, fasthttp.StatusNotFound, code)
+}
+
+func TestRefresh_SurrogateKey_Error(t *testing.T) {
+	t.Parallel()
+	s := newRefreshSurrogateServer(func(string) (int, error) { return 0, errors.New("store down") })
+	code, body := postWithToken(t, s, "/v1/refresh", `{"surrogate_key":"x"}`)
+	require.Equal(t, fasthttp.StatusInternalServerError, code)
+	require.Contains(t, string(body), "store down")
+}
+
+func TestValidSurrogateKey(t *testing.T) {
+	t.Parallel()
+	require.True(t, validSurrogateKey("product-42"))
+	require.True(t, validSurrogateKey(repeatStr(256)))
+	require.False(t, validSurrogateKey(""))
+	require.False(t, validSurrogateKey(repeatStr(257)))
+	require.False(t, validSurrogateKey("a b"))
+	require.False(t, validSurrogateKey("a,b"))
+	require.False(t, validSurrogateKey("a\x00b"))
+	require.False(t, validSurrogateKey("a\x7fb"))
 }

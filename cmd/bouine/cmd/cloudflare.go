@@ -495,6 +495,33 @@ func (p *cfPropagator) PropagateForRefresh(ctx context.Context, url string) {
 	})
 }
 
+// PropagateForRefreshSurrogate forwards a surrogate-key refresh to
+// Cloudflare as a PurgeByTags call, gated by the same propagate.refresh
+// toggle as URL refreshes. The tag maps through MapSurrogateKey so the
+// skip/metrics accounting matches ban propagation.
+func (p *cfPropagator) PropagateForRefreshSurrogate(ctx context.Context, surrogateKey string) {
+	if p.inv == nil || !p.cfg.Propagate.Refresh {
+		return
+	}
+	result := bouinecf.MapSurrogateKey(surrogateKey)
+	if result.Skipped {
+		p.metrics.CFPurgeSkipped.WithLabelValues(bouinecf.SkipCategory(result.SkipReason)).Inc()
+		p.logger.Warn("cloudflare propagation skipped",
+			"op", "refresh_surrogate",
+			"reason", result.SkipReason)
+		return
+	}
+	if p.batcher != nil {
+		for _, tag := range result.Tags {
+			p.batcher.Add(ctx, bouinecf.KindTags, tag)
+		}
+		return
+	}
+	p.dispatch(ctx, "refresh_surrogate", bouinecf.KindTags, result.Tags, func(ctx context.Context) error {
+		return p.inv.PurgeTags(ctx, result.Tags)
+	})
+}
+
 // Close waits for in-flight async propagations to finish or ctx to expire.
 // In batched mode, also flushes pending items and stops the batcher.
 // Must be called during shutdown to prevent goroutine leaks.

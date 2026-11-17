@@ -10,6 +10,15 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+
+- Go toolchain bumped from 1.27.3 to 1.27.4 (`go.mod`, `GO_VERSION` in
+  ci/nightly/release workflows, `GO_VERSION_STAMP` in the prek hook
+  config). 1.27.4 fixes GO-2026-6859 (CVE-2026-97054), an HTTP/1 server
+  crash from an unsynchronized `Connection: close` set by
+  `MaxBytesReader` racing a handler-set header; `govulncheck` now
+  reports zero findings.
+
 ### Added
 
 - `cache.enabled: false` is now honored on proxied (pool) routes

@@ -79,6 +79,11 @@ routes:
       # reaper collects expired entries on the normal schedule and a
       # load-time warning is emitted.
       stayin_alive: true
+      # The CMS origin does not compress; bouine compresses HTML fills
+      # at the edge (ADR-0075). Hits are served verbatim from the store.
+      compression:
+        enabled: true
+        content_types: [text/html, text/*, application/json, application/javascript, image/svg+xml]
 
   # Cart and checkout — never cache. These routes carry Set-Cookie
   # and Authorization headers; bouine respects Cache-Control: private

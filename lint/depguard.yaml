@@ -78,6 +78,9 @@ rules:
       - github.com/bouine-cache/bouine/pkg/api
       - github.com/bouine-cache/bouine/pkg/header
       - github.com/cespare/xxhash/v2
+      - github.com/klauspost/compress/gzip
+      - github.com/klauspost/compress/zstd
+      - github.com/molecule-man/go-brrr
       - golang.org/x/sync
 
   # L4 may only depend on L7 and internal/config.

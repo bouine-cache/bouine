@@ -28,8 +28,14 @@ the curated, human-readable summary.
   single event per peer (`/v1/peer/refresh/surrogate`, new gossip frame
   kind) and each peer refreshes only what it holds; Cloudflare
   propagation issues a PurgeByTags when `propagate.refresh` is on. The
-  URL form is unchanged. `bouine refresh --surrogate-key <tag>` and
-  `Client.RefreshSurrogate` are the CLI/SDK entry points.
+  URL form is unchanged. `count` is the number of locally stored keys
+  actually soft-purged (keys evicted between resolution and purge are
+  not counted); it is a lower bound when the per-call cap binds.
+  `bouine refresh --surrogate-key <tag>` and
+  `Client.RefreshSurrogate` are the CLI/SDK entry points. The hot-tier
+  surrogate reverse index tombstones any tag exceeding 64k keys and
+  serves it by scan instead, so a runaway tag cannot make refreshes
+  silently partial.
 - `cache.enabled: false` is now honored on proxied (pool) routes
   (ADR-0074): the route becomes a pure reverse proxy — every safe-method
   request takes the BYPASS path decided once at boot (no store lookup,

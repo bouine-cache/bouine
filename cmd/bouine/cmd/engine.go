@@ -391,7 +391,8 @@ func (rs *runState) wireGossipInvalidator() {
 			return err
 		},
 		RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
-			return rs.softPurgeKey(ctx, evt.Key)
+			_, err := rs.softPurgeKey(ctx, evt.Key)
+			return err
 		},
 		RefreshSurrogateFn: func(ctx context.Context, evt api.RefreshSurrogateEvent) error {
 			_, err := rs.softPurgeSurrogate(ctx, evt.SurrogateKey)
@@ -796,14 +797,18 @@ func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
 // handlers, triggering background revalidation via stale-while-revalidate
 // instead of hard-deleting it. This is the correct "refresh" / "soft
 // purge" semantic: the object stays servable while a conditional fetch
-// refreshes it in the background.
-func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
+// refreshes it in the background. It reports whether any handler still
+// held the key (SoftPurge's owned flag).
+func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) (bool, error) {
+	owned := false
 	for _, h := range rs.handlers {
-		if _, err := h.SoftPurge(ctx, key); err != nil {
-			return err
+		o, err := h.SoftPurge(ctx, key)
+		if err != nil {
+			return owned, err
 		}
+		owned = owned || o
 	}
-	return nil
+	return owned, nil
 }
 
 // maxSurrogateRefreshKeys caps how many keys one surrogate refresh
@@ -822,10 +827,13 @@ func (rs *runState) softPurgeSurrogate(ctx context.Context, surrogateKey string)
 	keys := rs.store.KeysBySurrogate(ctx, surrogateKey, maxSurrogateRefreshKeys)
 	refreshed := 0
 	for _, key := range keys {
-		if err := rs.softPurgeKey(ctx, key); err != nil {
+		owned, err := rs.softPurgeKey(ctx, key)
+		if err != nil {
 			return refreshed, err
 		}
-		refreshed++
+		if owned {
+			refreshed++
+		}
 	}
 	return refreshed, nil
 }
@@ -881,7 +889,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
 			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
-			if err := rs.softPurgeKey(dCtx, key); err != nil {
+			if _, err := rs.softPurgeKey(dCtx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -962,7 +970,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return n, nil
 		},
 		RefreshFn: func(key api.Key) error {
-			if err := rs.softPurgeKey(ctx, key); err != nil {
+			if _, err := rs.softPurgeKey(ctx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -1050,7 +1058,8 @@ func (e *engine) peerRefreshApply(rs *runState, ctx context.Context) fasthttp.Re
 		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
 			return nil
 		}
-		return rs.softPurgeKey(ctx, evt.Key)
+		_, err := rs.softPurgeKey(ctx, evt.Key)
+		return err
 	})
 }
 
@@ -1072,7 +1081,8 @@ func (e *engine) peerRefreshBatchApply(rs *runState, ctx context.Context) fastht
 		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
 			return nil
 		}
-		return rs.softPurgeKey(ctx, evt.Key)
+		_, err := rs.softPurgeKey(ctx, evt.Key)
+		return err
 	})
 }
 

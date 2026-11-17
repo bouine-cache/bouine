@@ -34,6 +34,8 @@ aren't `slog`-compatible, HTTP servers other than
 | `github.com/sean-/seed`                         | MIT        | (transitive)             | memberlist RNG seed. |
 | `github.com/valyala/fasthttp`                   | MIT        | `internal/transport`, all layers | HTTP/1.1 server/client (ADR-0034). Pre-approved in `AGENTS.md §5`. Sole HTTP stack; replaces `net/http`. |
 | `github.com/andybalholm/brotli`                 | MIT        | (transitive)             | fasthttp dependency. |
+| `github.com/klauspost/compress`                | MIT + BSD-3 + Apache-2.0 | `internal/cache`  | gzip/zstd encoders for fill-path edge compression (ADR-0075). Pre-approved in `AGENTS.md §5`. |
+| `github.com/molecule-man/go-brrr`              | MIT        | `internal/cache`         | Streaming brotli encoder for the br bucket (ADR-0075); previously transitive via fasthttp. |
 | `github.com/quic-go/quic-go`                    | MIT        | `internal/listener`      | HTTP/3 listener (ADR-0002). |
 | `github.com/prometheus/client_golang`           | Apache-2.0 | `internal/observability` | Prometheus metrics + handler. Pre-approved in `AGENTS.md §5`. |
 | `github.com/prometheus/client_model`            | Apache-2.0 | (transitive)             | client_golang dependency. |

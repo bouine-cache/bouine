@@ -137,6 +137,11 @@ type ClusterOptions struct {
 	// ADR-0068 pins at storage level and legacy-blob tests can inject
 	// pre-upgrade warm blobs into a killed node.
 	WarmTier bool
+	// CompressionRoute adds a /compressed/ route on every node with
+	// cache.compression enabled (fill-path edge compression,
+	// docs/plans/edge-compression.md): identity-encoded HTML fills under
+	// this prefix are stored compressed in the negotiated AE bucket.
+	CompressionRoute bool
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -226,6 +231,9 @@ type nodeConfigParams struct {
 	// cookieValuesRoute renders the /ssr-values/ cookie-values-keyed
 	// route (issue #870) when true.
 	cookieValuesRoute bool
+	// compressionRoute renders the /compressed/ edge-compression route
+	// when true.
+	compressionRoute bool
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -255,6 +263,22 @@ func buildNodeConfig(p nodeConfigParams) string {
       ttl_default: 60s
       key:
         cookie_values: [locale]
+`
+	}
+	compressionLine := ""
+	if p.compressionRoute {
+		compressionLine = `  - match:
+      path_prefix: /compressed/
+    pool: origin
+    cache:
+      ttl_default: 60s
+      compression:
+        enabled: true
+        content_types: [text/html, text/*]
+    request:
+      path_rewrite:
+        match: ^/compressed/(.*)$
+        replace: /$1
 `
 	}
 	fmt.Fprintf(&b, `  admin: "127.0.0.1:%d"
@@ -294,13 +318,13 @@ routes:
         # /public/webhook/echo?x=1 -> /echo?x=1.
         match: ^/public/webhook/(.*)$
         replace: /$1
-%s  - match: {}
+%s%s  - match: {}
     pool: origin
     cache:
       ttl_default: 60s
 %s`,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), warmLine, p.name, p.mode, p.seedList,
-		p.originAddr, p.preserveHost, cookieValuesLine, maxVariantsLine)
+		p.originAddr, p.preserveHost, cookieValuesLine, compressionLine, maxVariantsLine)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -398,6 +422,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			maxVariants:       opts.MaxVariants,
 			warmDir:           s.warmDirFor(name),
 			cookieValuesRoute: opts.CookieValuesRoute,
+			compressionRoute:  opts.CompressionRoute,
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")

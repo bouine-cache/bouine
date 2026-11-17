@@ -283,6 +283,20 @@ and refill path; the hit path never touches it. See ADR-0061.
 - `normalize_identity` — request `identity` from origin, recompress on
   egress (backlog; would break the zero-alloc egress path).
   Forbidden on routes serving secrets (mitigates BREACH-class oracles, T25).
+- `cache.compression` (opt-in, default off, ADR-0075) — **fill-path edge
+  compression**: on a cacheable fill whose origin response is
+  identity-encoded and eligible (allow-listed Content-Type, no
+  client-state headers, no request `Authorization`, not SSE, size within
+  `[min_size, max_size]`, max_size hard-capped at 1 MiB), the body is
+  compressed to the negotiated bucket coding and stored as that bucket's
+  variant. Bodies up to 1 MiB stream through a pooled encoder in 32 KiB
+  chunks with a sync-flush every 128 KiB, so only the compressed copy is
+  buffered for storage. The stored encoding always equals the variant
+  key's bucket, so no key or wire change is needed and hits are served
+  verbatim — the hit path is untouched (one nil check on routes without
+  the block). Bodies over `max_size`, under `min_size`, or that expand
+  under compression are proxied/stored as identity. Like
+  `verbatim_encoding`, the block must be identical across cluster nodes.
 
 ### 3.4 Cookie & authorization policy
 

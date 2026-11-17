@@ -152,6 +152,9 @@ linters:
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/bouine-cache/xxhash/v3
             - github.com/valyala/fasthttp
+            - github.com/klauspost/compress/gzip
+            - github.com/klauspost/compress/zstd
+            - github.com/molecule-man/go-brrr
             - golang.org/x/sync
         origin-L4:
           list-mode: strict

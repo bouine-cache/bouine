@@ -159,6 +159,16 @@ func originRouteHandler(ctx *fasthttp.RequestCtx, ctrl *originControl) {
 		ctx.Response.Header.Set("Vary", "Accept-Encoding")
 		enc := string(ctx.Request.Header.Peek("Accept-Encoding"))
 		fmt.Fprintf(ctx, "vary enc=%s", enc)
+	case "/html":
+		// Compressible HTML page for the edge-compression route
+		// (docs/plans/edge-compression.md): identity-encoded,
+		// cacheable, ~64 KiB.
+		ctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		line := "<div class=\"card\"><h2>Product name</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt.</p></div>\n"
+		for i := 0; i < 700; i++ {
+			ctx.WriteString(line)
+		}
 	case "/vary-drift":
 		// Vary-declaration rotation for drift tests (ADR-0058 e2e): the
 		// Vary list and the body generation both flip with the control,

@@ -1346,6 +1346,83 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateCookieNames(ec, path, *rc)
 	validateCookieKeyingConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
+	validateCompression(ec, path+".compression", rc.Compression)
+}
+
+// maxCompressionSize hard-caps cache.compression.max_size at 1 MiB:
+// one fill must never pin more than that in store-buffer memory, and the
+// streaming tee already bounds concurrent buffers via the global cap.
+const maxCompressionSize = 1 << 20
+
+// validateCompression checks the routes.*.cache.compression block. The
+// zero value (disabled) is always valid; enabled blocks must name at
+// least one known content type, restrict encodings to {br, zstd, gzip},
+// and keep 0 < min_size < max_size <= 1 MiB.
+//
+//nolint:gocyclo // 20: flat checklist of independent rejections, mirrors validateRouteCache's shape
+func validateCompression(ec *errCollector, path string, cc CompressionConfig) {
+	if !cc.Enabled {
+		if cc.MinSize != 0 || cc.MaxSize != 0 || len(cc.Encodings) > 0 || len(cc.ContentTypes) > 0 {
+			ec.addf(path, "fields are dead config when enabled is false — remove them or set enabled: true")
+		}
+		return
+	}
+	validateCompressionContentTypes(ec, path, cc.ContentTypes)
+	validateCompressionEncodings(ec, path, cc.Encodings)
+	minSize, maxSize := cc.MinSize, cc.MaxSize
+	if minSize < 0 {
+		ec.addf(path+".min_size", "must be >= 0, got %s", minSize)
+	}
+	if maxSize < 0 {
+		ec.addf(path+".max_size", "must be >= 0, got %s", maxSize)
+	}
+	if maxSize > maxCompressionSize {
+		ec.addf(path+".max_size", "must be <= %d bytes (1 MiB hard cap), got %s", maxCompressionSize, maxSize)
+	}
+	if minSize > 0 && maxSize > 0 && minSize >= maxSize {
+		ec.addf(path, "min_size (%s) must be < max_size (%s)", minSize, maxSize)
+	}
+}
+
+// validateCompressionContentTypes checks the media-type allow-list:
+// non-empty essences (type/subtype or type/*), case-folded, no
+// duplicates.
+func validateCompressionContentTypes(ec *errCollector, path string, contentTypes []string) {
+	if len(contentTypes) == 0 {
+		ec.addf(path+".content_types", "required when compression is enabled")
+	}
+	seen := make(map[string]bool, len(contentTypes))
+	for _, ct := range contentTypes {
+		essence := strings.ToLower(strings.TrimSpace(ct))
+		if essence == "" {
+			ec.addf(path+".content_types", "empty entry")
+			continue
+		}
+		if seen[essence] {
+			ec.addf(path+".content_types", "duplicate entry %q", ct)
+		}
+		seen[essence] = true
+		if !strings.Contains(essence, "/") {
+			ec.addf(path+".content_types", "%q is not a media type (want type/subtype or type/*)", ct)
+		}
+	}
+}
+
+// validateCompressionEncodings checks the coding allow-list: entries must
+// be one of br/zstd/gzip, case-insensitively, without duplicates.
+func validateCompressionEncodings(ec *errCollector, path string, encodings []string) {
+	seen := make(map[string]bool, len(encodings))
+	for _, e := range encodings {
+		switch strings.ToLower(strings.TrimSpace(e)) {
+		case "br", "zstd", "gzip":
+			if seen[e] {
+				ec.addf(path+".encodings", "duplicate entry %q", e)
+			}
+			seen[e] = true
+		default:
+			ec.addf(path+".encodings", "unknown coding %q (want br, zstd or gzip)", e)
+		}
+	}
 }
 
 // validateDisabledRouteCache validates a route with enabled: false
@@ -1399,6 +1476,9 @@ func validateDisabledRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	}
 	if rc.RefreshBeforeExpiry {
 		dead("refresh_before_expiry", "there is no stored object to refresh")
+	}
+	if rc.Compression.Enabled {
+		dead("compression", "nothing is stored, so there is no fill to compress")
 	}
 	// Fetch-side knobs stay live on the BYPASS path — keep the range checks.
 	if rc.MaxResponseBytes < 0 {

@@ -107,6 +107,14 @@ the curated, human-readable summary.
   surrogate reverse index tombstones any tag exceeding 64k keys and
   serves it by scan instead, so a runaway tag cannot make refreshes
   silently partial.
+- Opt-in per-route fill-path edge compression (`cache.compression`,
+  ADR-0075): on a cacheable miss whose origin response is identity-encoded
+  and eligible, bouine compresses the body (gzip/zstd/br, latency-tuned
+  levels) to the negotiated `Accept-Encoding` bucket and stores that
+  variant. Bodies up to `max_size` (default and hard cap 1 MiB) are
+  compressed in streaming chunks; the cache-hit path is unchanged
+  (allocs/op == 0, existing gate budgets untouched). Never compresses
+  client-state, authorized, SSE, or disallowed content-type responses.
 - `cache.enabled: false` is now honored on proxied (pool) routes
   (ADR-0074): the route becomes a pure reverse proxy — every safe-method
   request takes the BYPASS path decided once at boot (no store lookup,

@@ -959,6 +959,46 @@ type RouteCache struct {
 	// distinguish "unset" from "explicitly false" (issue #934). Not
 	// serialized; set by RouteCache's UnmarshalYAML.
 	stayinAliveSet bool `yaml:"-" json:"-"`
+	// Compression is the per-route edge-compression policy: on a
+	// cacheable fill whose origin response is identity-encoded and
+	// eligible, bouine compresses the body to the negotiated
+	// Accept-Encoding bucket coding before storing it. Disabled by
+	// default (zero value); the cache-hit path is never touched.
+	// See docs/plans/edge-compression.md.
+	Compression CompressionConfig `yaml:"compression,omitempty" json:"compression,omitempty"`
+}
+
+// CompressionConfig is the routes.*.cache.compression block: opt-in
+// fill-path compression of identity-encoded origin responses into the
+// negotiated Accept-Encoding bucket (br | zstd | gzip). The stored
+// variant keeps the existing variant key (the bucket is already in it);
+// hits are served verbatim.
+//
+//nolint:govet // fieldalignment: fields follow the config-file order
+type CompressionConfig struct {
+	// Enabled turns fill-path compression on for this route. Default
+	// false (zero value): passthrough, store as the origin produced.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Encodings restricts which bucket codings may be produced, e.g.
+	// [zstd, gzip] when no brotli encoder is deployed. Empty means
+	// every coding the build supports. Validated against
+	// {br, zstd, gzip}.
+	Encodings []string `yaml:"encodings,omitempty" json:"encodings,omitempty"`
+	// ContentTypes is the media-type allow-list matched against the
+	// essence (type/subtype, parameters stripped) of the origin
+	// Content-Type, case-insensitively; a trailing "/*" is a wildcard.
+	// Required when Enabled is true.
+	ContentTypes []string `yaml:"content_types,omitempty" json:"content_types,omitempty"`
+	// MinSize is the minimum identity body size in bytes worth
+	// compressing; smaller bodies are proxied as-is and never stored
+	// compressed. Default 1024.
+	MinSize ByteSize `yaml:"min_size,omitempty" json:"min_size,omitempty"`
+	// MaxSize caps the identity body size eligible for compression and
+	// storage: larger bodies are still streamed (compressed when
+	// eligible) to the filling client but are never stored. Default
+	// 1 MiB; hard-capped at 1 MiB by validation so one fill cannot pin
+	// unbounded memory.
+	MaxSize ByteSize `yaml:"max_size,omitempty" json:"max_size,omitempty"`
 }
 
 // Disabled reports whether the route's cache is explicitly off: only

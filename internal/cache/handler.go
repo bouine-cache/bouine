@@ -277,6 +277,8 @@ type fetchResult struct {
 // maxRecorderCap bounds the backing array retained by the recorder pool.
 // Recorders that grew past this on a large response are discarded so the
 // pool never pins a transiently oversized buffer across GC cycles.
+//
+//nolint:govet // fieldalignment: fields follow the config-file order
 type Handler struct {
 	refreshMetrics observability.RefreshMetricsForRoute
 	// StreamingFallbackInc is incremented when a cacheable miss falls
@@ -477,6 +479,11 @@ type Handler struct {
 	// Zero value = disabled (single bool read per fetch). Lives in the
 	// value region with the other non-pointer fields (fieldalignment).
 	forwarded ForwardedPolicy
+	// compression is the compiled routes.*.cache.compression policy
+	// (fill-path edge compression, docs/plans/edge-compression.md).
+	// nil = disabled: the fill path pays a single nil check. Never
+	// consulted on the hit path.
+	compression *compressionPolicy
 }
 
 // HandlerConfig configures a cache Handler.
@@ -698,6 +705,12 @@ type HandlerConfig struct {
 	// no explicit freshness (no max-age, no Expires, no Last-Modified).
 	// Zero means fall back to heuristic or treat as uncacheable.
 	DefaultTTL time.Duration
+	// Compression is the routes.*.cache.compression block (fill-path
+	// edge compression; docs/plans/edge-compression.md). The zero value
+	// (Enabled false) disables it; the handler compiles it once at boot
+	// and the fill paths pay a single nil check. Never consulted on the
+	// hit path.
+	Compression CompressionSpec
 	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
 	JitterPercent int
 	// RefreshMargin is the duration before TTL expiry at which the
@@ -1141,6 +1154,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshReactiveFirst:      cfg.RefreshReactiveFirst,
 		routeName:                 cfg.RouteName,
 		poolName:                  cfg.PoolName,
+		compression:               newCompressionPolicy(cfg.Compression),
 		done:                      make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -837,7 +838,7 @@ func effectiveVary(h header.Map, policy *KeyPolicy) string {
 // doesn't support body streaming, the request is HEAD, or the response
 // is not cacheable. The body is already in resp.Body().
 //
-//nolint:gocyclo // 16: Vary-variant storage branches mirror the store path; splitting would hide the ownership rules
+//nolint:gocyclo,funlen // 16 branches / 85 lines: Vary-variant storage branches mirror the store path; splitting would hide the ownership rules
 func (h *Handler) streamMissBuffered(
 	ctx *fasthttp.RequestCtx,
 	sf *streamFetchResult,
@@ -952,6 +953,20 @@ func (h *Handler) streamMissBuffered(
 	// the fetch-queue wait.
 	releaseStreamFetch(sf)
 
+	// Fill-path edge compression on the buffered path
+	// (docs/plans/edge-compression.md): the body is already fully
+	// buffered here, so compression is a one-shot writer pass. The
+	// eligibility gates are the same as the streaming path's header-time
+	// decision. When active, res.Body is replaced by the compressed
+	// bytes, res.Header becomes a detached (mutated) clone of resMap so
+	// the published verdict and the stored object both carry
+	// Content-Encoding, and the client response mirrors it.
+	if cacheable && !isHEAD && h.compression != nil {
+		if h.compressBufferedFill(ctx, ri, resMap, &res) {
+			resMap = res.Header.hdr
+		}
+	}
+
 	if !isHEAD {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
@@ -1014,6 +1029,72 @@ func takeResponseBody(resp *fasthttp.Response) []byte {
 	return resp.SwapBody(nil)
 }
 
+// compressBufferedFill applies fill-path edge compression on the buffered
+// miss path (docs/plans/edge-compression.md). res.Body holds the full
+// identity-encoded origin body; when every gate passes, res.Body is
+// replaced by the compressed bytes, resMap gains Content-Encoding and a
+// corrected Content-Length, and the client response header mirrors both,
+// so the client serve and the store see the same compressed variant under
+// the existing variant key. Returns true when compression was applied.
+//
+// Gates (all checked before any compression work): origin response is
+// identity-encoded; no client-state headers and no request Authorization
+// (BREACH, T25); not SSE; Content-Type on the allow-list; negotiated AE
+// bucket compressible and allowed by the route; raw size within
+// [minSize, maxSize]; compression actually shrinks the body.
+func (h *Handler) compressBufferedFill(
+	ctx *fasthttp.RequestCtx,
+	ri RequestInfo,
+	resMap header.Map,
+	res *fetchResult,
+) bool {
+	p := h.compression
+	if len(resMap.Get(header.ContentEncoding)) > 0 {
+		return false
+	}
+	if carriesClientState(res.Header) || ri.Header.Has(header.Authorization) {
+		return false
+	}
+	ct := resMap.Get(header.ContentType)
+	if header.IsEventStreamContentType([]byte(ct)) {
+		return false
+	}
+	if !p.allowsContentType(ct) {
+		return false
+	}
+	bucket := "identity"
+	if h.policy == nil || !h.policy.verbatimEncoding() {
+		bucket = encodingBucket(ri.Header.Get(header.AcceptEncoding))
+	}
+	if bucket == "identity" || !p.allowsCoding(bucket) {
+		return false
+	}
+	raw := int64(len(res.Body))
+	if raw < p.minSize || (p.maxSize > 0 && raw > p.maxSize) {
+		return false
+	}
+	compressed, ok := compressBytes(bucket, res.Body)
+	if !ok {
+		return false
+	}
+	res.Body = compressed
+	res.bodyOwned = true
+	// Mutate a DETACHED clone of resMap: res.Header already wraps resMap
+	// by value (a Map is two slice headers), so inserting entries into
+	// resMap in place leaves res.Header holding the pre-insert lengths
+	// and its next Get reads out of range. The caller adopts the new map
+	// from res.Header after this returns true.
+	m := resMap.Clone()
+	m.Set(header.ContentEncoding, bucket)
+	var clBuf [16]byte
+	m.Set(header.ContentLength, string(strconv.AppendInt(clBuf[:0], int64(len(compressed)), 10)))
+	res.Header = fromHeaderMap(m)
+	dst := &ctx.Response.Header
+	dst.SetCanonical(header.S2b(header.ContentEncoding), header.S2b(bucket))
+	dst.SetContentLength(len(compressed))
+	return true
+}
+
 // streamMissTee handles the streaming cacheable path: tee origin body
 // to client + buffer for cache storage using SetBodyStreamWriter.
 func (h *Handler) streamMissTee(
@@ -1038,14 +1119,77 @@ func (h *Handler) streamMissTee(
 		}
 	}
 
+	// Fill-path edge compression (docs/plans/edge-compression.md):
+	// decided once at header time — the origin response is
+	// identity-encoded, the route allows compression, the negotiated AE
+	// bucket is a compressible coding, and the Content-Type is on the
+	// allow-list. The size gates (min/max) are enforced against the
+	// running raw total in the tee loop and at settle time. When active,
+	// the client response carries Content-Encoding and no Content-Length
+	// (chunked), and the store buffer receives the compressed bytes.
+	var fc *fillCompressor
+	if h.compression != nil {
+		fc = h.maybeStartFillCompression(&ctx.Response.Header, sf, ri)
+	}
+
 	finalStoreKey := storeKey
 	bodyStream := sf.resp.BodyStream()
 	buf := streamBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-		h.teeStreamToClient(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap, fillTTL)
+		h.teeStreamToClientCompress(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap, fillTTL, fc)
 	})
+}
+
+// maybeStartFillCompression decides, at response-header time on a
+// streaming fill, whether this fill compresses. It mutates dst (the
+// client response header) to carry Content-Encoding and drop
+// Content-Length when it returns non-nil. Returns nil when the route is
+// not configured, the origin already encoded the body, the request or
+// response carries client-state markers, SSE, or the negotiated bucket /
+// Content-Type is ineligible.
+func (h *Handler) maybeStartFillCompression(dst *fasthttp.ResponseHeader, sf *streamFetchResult, ri RequestInfo) *fillCompressor {
+	p := h.compression
+	// Origin already encoded: passthrough stays passthrough.
+	if len(sf.resp.Header.Peek(header.ContentEncoding)) > 0 {
+		return nil
+	}
+	// Client-state / authorized responses are never compressed
+	// (BREACH-class oracle, threat T25).
+	if carriesClientState(fromFastHTTPHeader(&sf.resp.Header)) || ri.Header.Has(header.Authorization) {
+		return nil
+	}
+	// SSE is never compressed (and streams unbuffered on its own path).
+	if header.IsEventStreamContentType(sf.resp.Header.Peek(header.ContentType)) {
+		return nil
+	}
+	ct := string(sf.resp.Header.Peek(header.ContentType))
+	if !p.allowsContentType(ct) {
+		return nil
+	}
+	// Bucket from the request's Accept-Encoding — the same function the
+	// variant key uses, so the stored encoding always matches the bucket
+	// the key claims (ADR-0061 pairing).
+	bucket := "identity"
+	if h.policy == nil || !h.policy.verbatimEncoding() {
+		bucket = encodingBucket(ri.Header.Get(header.AcceptEncoding))
+	}
+	if bucket == "identity" || !p.allowsCoding(bucket) {
+		return nil
+	}
+	out := streamBufPool.Get().(*bytes.Buffer)
+	sc := acquireCompressor(bucket, out)
+	if sc == nil {
+		streamBufPool.Put(out)
+		return nil
+	}
+	dst.SetCanonical(header.S2b(header.ContentEncoding), header.S2b(bucket))
+	// Negative content-length makes fasthttp emit chunked framing; the
+	// body now streams through SetBodyStreamWriter, whose compressed
+	// length is unknown up front.
+	dst.SetContentLength(-1)
+	return &fillCompressor{sc: sc, buf: out}
 }
 
 // teeStreamToClient reads from the origin body stream, writes to both
@@ -1076,6 +1220,26 @@ func (h *Handler) teeStreamToClient(
 	storeKey, primaryKey api.Key,
 	ri RequestInfo, resMap header.Map, fillTTL *time.Duration,
 ) {
+	h.teeStreamToClientCompress(w, bodyStream, buf, sf, inflight, storeKey, primaryKey, ri, resMap, fillTTL, nil)
+}
+
+// teeStreamToClientCompress is teeStreamToClient with an optional fill
+// compressor (fc != nil): each origin chunk is fed through the compressor
+// and the compressed bytes go to both the client writer w and the store
+// buffer buf, replacing the raw tee. fc == nil is the exact passthrough
+// behavior — the loop body is identical except for the write target.
+//
+//nolint:gocyclo,funlen // the compressed-fill branch duplicates the raw tee's cap checks; a shared helper would hide the fc==nil fast path
+func (h *Handler) teeStreamToClientCompress(
+	w *bufio.Writer,
+	bodyStream io.Reader,
+	buf *bytes.Buffer,
+	sf *streamFetchResult,
+	inflight *inflightStream,
+	storeKey, primaryKey api.Key,
+	ri RequestInfo, resMap header.Map, fillTTL *time.Duration,
+	fc *fillCompressor,
+) {
 	var totalBytes int64
 	cacheExceeded := false
 	// bodyComplete reports whether the origin body was read to a clean
@@ -1104,22 +1268,43 @@ func (h *Handler) teeStreamToClient(
 		if n > 0 {
 			totalBytes += int64(n)
 
-			_, wErr := w.Write(chunk[:n])
-			if wErr != nil {
-				// The leader's client hung up mid-body: stop streaming
-				// and buffering. The partial copy must never reach a
-				// sharing surface — the publish below makes it unshareable.
-				break
-			}
-			_ = w.Flush()
-
-			if !cacheExceeded {
-				cacheExceeded = h.shouldStopBuffering(buf, int64(n), totalBytes, bufCap)
+			if fc != nil {
+				// Compressed fill: the origin chunk goes through the
+				// compressor; its output is written to the client and
+				// appended to the store buffer. A client write error
+				// aborts the loop exactly like the raw path.
+				if wErr := fc.writeChunk(w, chunk[:n]); wErr != nil {
+					break
+				}
+				_ = w.Flush()
+				// Size gates are evaluated on the RAW total: min/max
+				// describe the identity body. Once totalBytes passes
+				// maxSize the response keeps streaming compressed to the
+				// client but stops buffering for storage.
+				if !cacheExceeded && h.compression.maxSize > 0 && totalBytes > h.compression.maxSize {
+					cacheExceeded = true
+				}
 				if !cacheExceeded {
-					buf.Write(chunk[:n])
-					if buf.Len() > lastReported {
-						h.streamingBufferBytes.Add(int64(buf.Len() - lastReported))
-						lastReported = buf.Len()
+					cacheExceeded = h.shouldStopBuffering(buf, 0, totalBytes, bufCap)
+				}
+			} else {
+				_, wErr := w.Write(chunk[:n])
+				if wErr != nil {
+					// The leader's client hung up mid-body: stop streaming
+					// and buffering. The partial copy must never reach a
+					// sharing surface — the publish below makes it unshareable.
+					break
+				}
+				_ = w.Flush()
+
+				if !cacheExceeded {
+					cacheExceeded = h.shouldStopBuffering(buf, int64(n), totalBytes, bufCap)
+					if !cacheExceeded {
+						buf.Write(chunk[:n])
+						if buf.Len() > lastReported {
+							h.streamingBufferBytes.Add(int64(buf.Len() - lastReported))
+							lastReported = buf.Len()
+						}
 					}
 				}
 			}
@@ -1128,6 +1313,16 @@ func (h *Handler) teeStreamToClient(
 			bodyComplete = errors.Is(readErr, io.EOF)
 			break
 		}
+	}
+
+	// Finalize the compressor: closes the stream (trailer/checksum),
+	// drains the last compressed bytes to client + store buffer, and
+	// reports the compressed size. Store-vs-skip is decided from the raw
+	// total vs compressed size (expansion guard) plus minSize and a
+	// clean body; when skipped, the client has already received valid
+	// compressed bytes but nothing is stored.
+	if fc != nil {
+		fc.finalizeTeeFill(w, resMap, bodyComplete, cacheExceeded, totalBytes, h.compression.minSize, h.compression.maxSize)
 	}
 
 	// Copy the tee buffer into an exact-size slice. Stealing the buffer's
@@ -1164,6 +1359,19 @@ func (h *Handler) teeStreamToClient(
 	// detached the pooled response's headers — so the early release is
 	// race-free.
 	releaseStreamFetch(sf)
+
+	if fc != nil {
+		// Compressed fill: skipStore means the client got compressed
+		// bytes but the cache must not store them (expansion, under
+		// minSize, incomplete body, or cap). Emulate the cacheExceeded
+		// contract at settle: nothing stored, and followers cannot
+		// share the buffered (compressed) copy because their own
+		// response headers were never rewritten.
+		if fc.skipStore {
+			cacheExceeded = true
+			bodyComplete = false
+		}
+	}
 
 	h.settleTeeFill(inflight, res, storeKey, primaryKey, ri, resMap, fillTTL, bodyComplete, cacheExceeded, totalBytes)
 

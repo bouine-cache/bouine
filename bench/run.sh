@@ -147,6 +147,20 @@ declare -A BUDGETS=(
     # TracingPipeline_Disabled: 0 — the disabled middleware short-circuit
     # allocates nothing.
     [TracingPipeline_Disabled]=0
+    # Fill-path edge compression (docs/plans/edge-compression.md). The
+    # compress benches include the body compression pass, so their budgets
+    # cover the compressed body copy + encoder internals, not just the miss
+    # path. The skip benches must stay at the passthrough miss budget plus
+    # one bucket evaluation: zero compression work. Hit-path gate benches
+    # (Handler_CacheHit_*, FastPath_Hit*, RoutedFastPath_Hit*) are unchanged
+    # and must keep their 0-alloc budgets.
+    # Measured on darwin/arm64 (Apple M5), count=3, min allocs/op:
+    [FillCompress_Gzip1MiB]=42
+    [FillCompress_Zstd1MiB]=40
+    [FillCompress_Br64KiB]=34
+    # Skip paths: identity bucket / already-encoded origin.
+    [FillSkip_Disabled]=25
+    [FillSkip_Encoded]=30
 )
 
 run_bench() {

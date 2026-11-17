@@ -1435,3 +1435,182 @@ func TestHotStore_SurrogateIndex_Removal(t *testing.T) {
 	require.Empty(t, s.KeysBySurrogate(context.Background(), "idx-tag", 100))
 	require.ElementsMatch(t, []api.Key{k2}, s.KeysBySurrogate(context.Background(), "idx-other", 100))
 }
+
+func TestHotStore_KeysBySurrogate_ScanRaceConcurrent(t *testing.T) {
+	t.Parallel()
+	// Many keys spread over many shards, queried with an untracked tag
+	// so every lookup takes the shard-parallel scan path. Run under
+	// -race: the per-shard cap check must not read the shared result
+	// slice without synchronization.
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 16})
+	defer s.Close(context.Background())
+
+	const n = 4096
+	want := make(map[api.Key]struct{}, n)
+	for i := 0; i < n; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 10)
+		o.SurrogateKeys = []string{"scan-tag"}
+		require.NoError(t, s.Put(context.Background(), k, o))
+		want[k] = struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	for r := 0; r < 8; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				got := s.KeysBySurrogate(context.Background(), "scan-tag", 100000)
+				require.Len(t, got, n)
+				for _, k := range got {
+					_, ok := want[k]
+					require.True(t, ok)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestHotStore_KeysBySurrogate_ScanCapRespected(t *testing.T) {
+	t.Parallel()
+	// maxKeys must be honored on the scan path even when multiple
+	// shards contribute concurrently.
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 16})
+	defer s.Close(context.Background())
+
+	for i := 0; i < 512; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 10)
+		o.SurrogateKeys = []string{"cap-tag"}
+		require.NoError(t, s.Put(context.Background(), k, o))
+	}
+
+	for _, maxKeys := range []int{1, 7, 100, 511, 512, 10000} {
+		got := s.KeysBySurrogate(context.Background(), "cap-tag", maxKeys)
+		require.LessOrEqual(t, len(got), maxKeys, "maxKeys=%d", maxKeys)
+		require.Len(t, got, min(512, maxKeys), "maxKeys=%d", maxKeys)
+	}
+}
+
+func TestHotStore_KeysBySurrogate_ScanContextCancel(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 16})
+	defer s.Close(context.Background())
+
+	for i := 0; i < 256; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 10)
+		o.SurrogateKeys = []string{"ctx-tag"}
+		require.NoError(t, s.Put(context.Background(), k, o))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// With a cancelled context the scan aborts between shards; the
+	// result is allowed to be partial but must never panic or exceed
+	// the cap.
+	got := s.KeysBySurrogate(ctx, "ctx-tag", 1000)
+	require.LessOrEqual(t, len(got), 1000)
+}
+
+func TestSurrogateIndex_OverCapTombstones(t *testing.T) {
+	t.Parallel()
+	si := newSurrogateIndex()
+	// Fill past the cap with enough distinct keys. testkey.Key only
+	// fills the first 8 bytes, so hash the counter for full-width keys.
+	for i := 0; i < maxSurrogateIndexEntries+10; i++ {
+		si.add(&api.Object{SurrogateKeys: []string{"hot-tag"}}, testkey.Hash([]byte(fmt.Sprintf("ovf-%d", i))))
+	}
+	// Over cap: the tag must be tombstoned (lookup returns nil) so
+	// KeysBySurrogate falls back to a scan instead of returning the
+	// stale partial set.
+	require.Nil(t, si.lookup("hot-tag", 100))
+
+	// A new tag under the cap is still tracked normally.
+	ck := testkey.Hash([]byte("cold"))
+	si.add(&api.Object{SurrogateKeys: []string{"cold-tag"}}, ck)
+	got := si.lookup("cold-tag", 100)
+	require.Equal(t, []api.Key{ck}, got)
+}
+
+func TestHotStore_KeysBySurrogate_OverCapFallsBackToScan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 4})
+	defer s.Close(context.Background())
+
+	// Drive a tag past maxSurrogateIndexEntries via direct Puts.
+	n := maxSurrogateIndexEntries + 50
+	for i := 0; i < n; i++ {
+		k := testkey.Hash([]byte(fmt.Sprintf("ovf-%d", i)))
+		o := obj(k, 10)
+		o.SurrogateKeys = []string{"overflow-tag"}
+		require.NoError(t, s.Put(context.Background(), k, o))
+	}
+	// The index tombstoned the tag; the scan must still find all keys.
+	got := s.KeysBySurrogate(context.Background(), "overflow-tag", n+100)
+	require.Len(t, got, n)
+}
+
+func TestHotStore_KeysBySurrogate_NoSideEffects_UnderConcurrency(t *testing.T) {
+	t.Parallel()
+	// Side-effect-free guarantee under -race with concurrent scans:
+	// no hit accounting, no SIEVE visit, no promotion.
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 8})
+	defer s.Close(context.Background())
+
+	const n = 128
+	keys := make([]api.Key, n)
+	for i := 0; i < n; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 10)
+		o.SurrogateKeys = []string{"sfx-tag"}
+		require.NoError(t, s.Put(context.Background(), k, o))
+		keys[i] = k
+	}
+
+	var wg sync.WaitGroup
+	for r := 0; r < 8; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				_ = s.KeysBySurrogate(context.Background(), "sfx-tag", n)
+			}
+		}()
+	}
+	wg.Wait()
+	for _, k := range keys {
+		require.Zero(t, s.WindowHits(k), "scan must not count as a hit")
+	}
+}
+
+func TestSurrogateIndex_OverCapStaysTombstoned(t *testing.T) {
+	t.Parallel()
+	si := newSurrogateIndex()
+	n := maxSurrogateIndexEntries + 10
+	keys := make([]api.Key, n)
+	objs := make([]*api.Object, n)
+	for i := 0; i < n; i++ {
+		keys[i] = testkey.Hash([]byte(fmt.Sprintf("sticky-%d", i)))
+		objs[i] = &api.Object{SurrogateKeys: []string{"sticky-tag"}}
+		si.add(objs[i], keys[i])
+	}
+	// Over cap: tombstoned.
+	require.Nil(t, si.lookup("sticky-tag", 100000))
+
+	// Removing some keys must NOT un-tombstone: the remaining set is
+	// still a partial view.
+	for i := 0; i < n-1; i++ {
+		si.remove(keys[i], objs[i])
+		require.Nil(t, si.lookup("sticky-tag", 100000), "must stay scan-served at i=%d", i)
+	}
+	// Once fully drained the tag returns to normal untracked state;
+	// a fresh add recreates a correct index entry.
+	si.remove(keys[n-1], objs[n-1])
+	require.Nil(t, si.lookup("sticky-tag", 100000))
+	k := testkey.Hash([]byte("sticky-new"))
+	si.add(&api.Object{SurrogateKeys: []string{"sticky-tag"}}, k)
+	require.Equal(t, []api.Key{k}, si.lookup("sticky-tag", 100000))
+}

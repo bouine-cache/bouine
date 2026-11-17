@@ -423,6 +423,18 @@ func (c *Cluster) seenFromPeer(issuer string, seq uint64) bool {
 	return c.seqs.seen(issuer, seq)
 }
 
+// peekFromPeer reports whether (issuer, seq) was already recorded
+// without recording it. Used by the surrogate-refresh gossip path,
+// which may drop an event on a full apply queue: recording on receive
+// would dedup that drop forever, silencing the eventual-mode
+// redelivery.
+func (c *Cluster) peekFromPeer(issuer string, seq uint64) bool {
+	if c.seqs == nil {
+		return false
+	}
+	return c.seqs.peek(issuer, seq)
+}
+
 func (c *Cluster) handleBinaryGossip(msg []byte) {
 	switch GossipMsgType(msg) {
 	case msgTypePurge:
@@ -575,14 +587,19 @@ func (c *Cluster) handleGossipRefreshSurrogate(msg []byte) {
 			"issuer", evt.Issuer, "seq", evt.Seq)
 		return
 	}
-	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+	// Peek only: the seq is recorded in the apply loop once the event is
+	// actually taken off the queue. Recording here would dedup a dropped
+	// (queue-full) event forever, so an eventual-mode redelivery on the
+	// next push/pull would be silently swallowed.
+	if c.peekFromPeer(evt.Issuer, evt.Seq) {
 		return
 	}
 	// Hand the event to the apply worker: resolving the tag scans the
 	// whole store and must not run on memberlist's packet-handler
 	// goroutine, or one refresh stalls all gossip reception. Overflow
-	// drops the event — strong mode also delivers over HTTP, and
-	// eventual mode re-delivers on the next push/pull.
+	// drops the event without recording its seq — strong mode also
+	// delivers over HTTP, and eventual mode re-delivers on the next
+	// push/pull.
 	select {
 	case c.applyCh <- evt:
 	default:
@@ -604,10 +621,13 @@ func (c *Cluster) startApplyLoop() {
 }
 
 // applyLoop drains surrogate-refresh gossip events off the packet
-// handler and applies them with the GossipApplyTimeout budget. Exits
-// when the cluster is done; pending events are abandoned (the IDs are
-// already in the seq tracker, so a redelivery after restart is a no-op
-// for peers that saw them).
+// handler and applies them with the GossipApplyTimeout budget. The seq
+// is recorded here, when the event is actually taken off the queue, so
+// a queue-full drop in the packet handler leaves the seq unseen and a
+// redelivery can still be applied. Exits when the cluster is done;
+// pending events are abandoned (their IDs were never recorded, so a
+// redelivery after restart is applied again, which is safe: a refresh
+// is idempotent).
 func (c *Cluster) applyLoop(ch chan api.RefreshSurrogateEvent, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
@@ -617,6 +637,9 @@ func (c *Cluster) applyLoop(ch chan api.RefreshSurrogateEvent, wg *sync.WaitGrou
 		case evt := <-ch:
 			inv := c.inv.Load()
 			if inv == nil || inv.RefreshSurrogateFn == nil {
+				continue
+			}
+			if c.seenFromPeer(evt.Issuer, evt.Seq) {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)

@@ -567,3 +567,71 @@ func BenchmarkHotStore_Ban_SurrogateStorm(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGate_HotStore_KeysBySurrogate_Indexed measures the admin-path
+// reverse-index lookup (no scan). Alloc budget: it allocates the result
+// slice only; the per-tag set is not copied anymore (lookup copies under
+// the read lock, sized to maxKeys).
+func BenchmarkGate_HotStore_KeysBySurrogate_Indexed(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	const n = 1000
+	for i := 0; i < n; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 64)
+		o.SurrogateKeys = []string{"bench-tag"}
+		_ = s.Put(context.Background(), k, o)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = s.KeysBySurrogate(context.Background(), "bench-tag", 100000)
+	}
+}
+
+// BenchmarkGate_HotStore_KeysBySurrogate_Scan measures the fallback
+// shard-parallel scan for an untracked tag. Admin path only, but bounded:
+// it must never allocate on the hit path (it never runs there).
+func BenchmarkGate_HotStore_KeysBySurrogate_Scan(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	const n = 10000
+	for i := 0; i < n; i++ {
+		k := testkey.Key(uint64(i))
+		o := obj(k, 64)
+		o.SurrogateKeys = []string{"other-tag"}
+		_ = s.Put(context.Background(), k, o)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = s.KeysBySurrogate(context.Background(), "absent-tag", 100000)
+	}
+}
+
+// BenchmarkGate_HotStore_Put_SurrogateIndexed pins the Put-path cost with
+// surrogate keys attached: the inline reverse-index add must not push
+// Put over its alloc budget. Alloc budget: 1 (the index set insert may
+// allocate the tag's map entry once; steady state is 0 extra per Put
+// once the set exists, but the first Put per tag allocates — we measure
+// steady state after warmup by pre-creating the tag).
+func BenchmarkGate_HotStore_Put_SurrogateIndexed(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 30, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	hdr := headerMap(header.ContentType, "text/plain")
+	// Warm the tag's index entry so steady-state adds allocate nothing.
+	wk := testkey.Key(0xFFFFFF)
+	_ = s.Put(context.Background(), wk, &api.Object{
+		Key: wk, StatusCode: 200, Header: hdr, Body: make([]byte, 1024), BodySize: 1024,
+		StoredAt: time.Now(), TTL: time.Minute, SurrogateKeys: []string{"put-bench-tag"},
+	})
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := range b.N {
+		k := testkey.Key(uint64(i))
+		_ = s.Put(context.Background(), k, &api.Object{
+			Key: k, StatusCode: 200, Header: hdr, Body: make([]byte, 1024), BodySize: 1024,
+			StoredAt: time.Now(), TTL: time.Minute, SurrogateKeys: []string{"put-bench-tag"},
+		})
+	}
+}

@@ -1352,11 +1352,18 @@ const maxSurrogateIndexEntries = 64 << 10
 // map (tombstoned) and served by scan until it drains below the cap.
 type surrogateIndex struct {
 	keys map[string]map[api.Key]struct{}
-	mu   sync.RWMutex
+	// tombstoned holds tags that hit the cap and must be served by
+	// scan until they drain below it (their entry may be recreated
+	// by remove when the last tracked key leaves).
+	tombstoned map[string]struct{}
+	mu         sync.RWMutex
 }
 
 func newSurrogateIndex() *surrogateIndex {
-	return &surrogateIndex{keys: make(map[string]map[api.Key]struct{})}
+	return &surrogateIndex{
+		keys:       make(map[string]map[api.Key]struct{}),
+		tombstoned: make(map[string]struct{}),
+	}
 }
 
 func (si *surrogateIndex) add(obj *api.Object, key api.Key) {
@@ -1372,6 +1379,13 @@ func (si *surrogateIndex) add(obj *api.Object, key api.Key) {
 			si.keys[sk] = set
 		}
 		if len(set) >= maxSurrogateIndexEntries {
+			// Over cap: tombstone the tag (and remember it) so lookup
+			// returns nil and KeysBySurrogate falls back to a full
+			// scan. Without this the capped partial set would be
+			// returned as authoritative and keys stored while capped
+			// would never be refreshed.
+			delete(si.keys, sk)
+			si.tombstoned[sk] = struct{}{}
 			continue
 		}
 		set[key] = struct{}{}
@@ -1392,6 +1406,9 @@ func (si *surrogateIndex) remove(key api.Key, obj *api.Object) {
 		delete(set, key)
 		if len(set) == 0 {
 			delete(si.keys, sk)
+			// A tombstoned tag whose tracked set drained goes back to
+			// untracked: lookup reports nil and callers scan.
+			delete(si.tombstoned, sk)
 		}
 	}
 }
@@ -1401,11 +1418,14 @@ func (si *surrogateIndex) remove(key api.Key, obj *api.Object) {
 // scan. A non-nil result with len == maxKeys means "possibly more".
 func (si *surrogateIndex) lookup(sk string, maxKeys int) []api.Key {
 	si.mu.RLock()
+	defer si.mu.RUnlock()
 	set, ok := si.keys[sk]
-	si.mu.RUnlock()
-	if !ok {
+	_, dead := si.tombstoned[sk]
+	if !ok || dead {
 		return nil
 	}
+	// Copy under the read lock: remove mutates the set under the write
+	// lock, and reading it after RUnlock would race.
 	out := make([]api.Key, 0, min(len(set), maxKeys))
 	for k := range set {
 		if len(out) >= maxKeys {
@@ -1437,6 +1457,11 @@ func (h *HotStore) KeysBySurrogate(ctx context.Context, surrogateKey string, max
 	}
 	var mu sync.Mutex
 	var out []api.Key
+	// total counts keys collected across all shards. The per-shard loop
+	// reads it while holding only the shard read lock, so an atomic is
+	// required: reading len(out) there races the append under mu (caught
+	// by -race when several shards scan concurrently).
+	var total atomic.Int64
 	var g errgroup.Group
 	g.SetLimit(min(len(h.shards), runtime.NumCPU()))
 	for i := range h.shards {
@@ -1448,7 +1473,7 @@ func (h *HotStore) KeysBySurrogate(ctx context.Context, surrogateKey string, max
 			s := &h.shards[i]
 			s.mu.RLock()
 			for k, e := range s.entries {
-				if len(out)+len(local) >= maxKeys {
+				if int(total.Load())+len(local) >= maxKeys {
 					break
 				}
 				if e.obj != nil && slices.Contains(e.obj.SurrogateKeys, surrogateKey) {
@@ -1460,6 +1485,7 @@ func (h *HotStore) KeysBySurrogate(ctx context.Context, surrogateKey string, max
 				mu.Lock()
 				out = append(out, local...)
 				mu.Unlock()
+				total.Add(int64(len(local)))
 			}
 			return nil
 		})

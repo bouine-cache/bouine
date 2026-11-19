@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,14 @@ type originControl struct {
 	forceErr  atomic.Bool  // when true, all requests return 503
 	varyDrift atomic.Bool  // /vary-drift generation: false = Vary X-A (gen 1), true = Vary X-B (gen 2)
 	requests  atomic.Int64 // total handled requests (cacheable or not)
+
+	// hosts records the Host header each request carried, keyed by path,
+	// in arrival order, so integration tests can assert which Host every
+	// origin-bound fetch presented — the foreground fill and, on
+	// refresh-enabled routes, the background refresh fetch
+	// (preserve_host).
+	hostsMu sync.Mutex
+	hosts   map[string][]string
 }
 
 // Requests reports the total number of requests the origin has handled.
@@ -29,6 +38,25 @@ type originControl struct {
 // Origin.Requests(); a zero value is only safe before the first read
 // because Requests starts at zero at boot.
 func (o *originControl) Requests() int64 { return o.requests.Load() }
+
+// recordHost appends host to the per-path Host record.
+func (o *originControl) recordHost(path, host string) {
+	o.hostsMu.Lock()
+	defer o.hostsMu.Unlock()
+	if o.hosts == nil {
+		o.hosts = make(map[string][]string)
+	}
+	o.hosts[path] = append(o.hosts[path], host)
+}
+
+// HostsFor returns the Host headers the origin received for path, in
+// arrival order (the foreground fill first, then any background refresh
+// fetches). The slice is a copy — safe to read while the origin serves.
+func (o *originControl) HostsFor(path string) []string {
+	o.hostsMu.Lock()
+	defer o.hostsMu.Unlock()
+	return append([]string(nil), o.hosts[path]...)
+}
 
 // fasthttpTestServer is a minimal fasthttp server with the same lifecycle
 // semantics as httptest.Server: call Close when done.
@@ -52,6 +80,7 @@ func startOriginWithControl() (*fasthttpTestServer, *originControl) {
 
 	handler := func(ctx *fasthttp.RequestCtx) {
 		ctrl.requests.Add(1)
+		ctrl.recordHost(string(ctx.Path()), string(ctx.Host()))
 		if ctrl.forceErr.Load() {
 			ctx.SetStatusCode(503)
 			ctx.WriteString("origin forced error")
@@ -248,6 +277,24 @@ func originRouteHandler(ctx *fasthttp.RequestCtx, ctrl *originControl) {
 		// (preserve_host pools). no-store: the Host varies per client,
 		// so the body must never be cached or shared in-flight.
 		ctx.Response.Header.Set("Cache-Control", "no-store")
+		fmt.Fprintf(ctx, "host %s", ctx.Host())
+	case "/host-refresh":
+		// Cacheable host echo for the background-refresh preserve_host
+		// e2e (2026-11-19 production incident): the TTL sits just
+		// above the cache layer's 5s minRefreshTTL so a
+		// refresh_before_expiry route schedules the proactive fetch
+		// within test time (margin 50% → ~3s after the fill), the ETag
+		// answers the conditional fetch with 304 so the refresh keeps
+		// the stored body, and the received Host is echoed so tests can
+		// assert which Host each origin-bound fetch carried — the
+		// originHosts record distinguishes the foreground fill from the
+		// background refresh fetch.
+		ctx.Response.Header.Set("Cache-Control", "max-age=6")
+		ctx.Response.Header.Set("ETag", `"hr-v1"`)
+		if string(ctx.Request.Header.Peek("If-None-Match")) == `"hr-v1"` {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
 		fmt.Fprintf(ctx, "host %s", ctx.Host())
 	default:
 		ctx.Response.Header.Set("Cache-Control", "max-age=5, stale-if-error=60, stale-while-revalidate=60")

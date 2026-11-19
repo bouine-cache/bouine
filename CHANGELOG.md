@@ -49,6 +49,19 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- Background refreshes (`refresh_before_expiry`) now carry the
+  triggering client's Host header and TLS flag. The refresh registry
+  stored only the origin-form URL, so the replayed fetch presented an
+  empty Host and the pool dial's absolute-URI rewrite made fasthttp
+  refill it from the pool target — silently bypassing
+  `connect.preserve_host` on every background refresh, and advertising
+  `x-forwarded-proto: http` for HTTPS clients (2026-11-19 production
+  incident: an origin that derives its behaviour from the request Host
+  header received the internal pool hostname instead and returned 500s
+  to clients; the config change that exposed the bug was reverted
+  pending this fix).
+  Default (non-preserve-host) pools keep sending the pool target,
+  byte-for-byte what the equivalent foreground fetch sends.
 - Active health probes no longer reuse pooled keep-alive connections:
   each probe now sends `Connection: close` and dials fresh. A probe
   connection is idle for a full `health.active.interval` between probes,

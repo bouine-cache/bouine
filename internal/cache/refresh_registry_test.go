@@ -181,6 +181,41 @@ func TestRefreshRegistry_Concurrent(t *testing.T) {
 	assert.Equal(t, 50, r.Len())
 }
 
+// Register must capture the triggering client's host and TLS flag: the
+// background refresh replays them into its origin-bound fetch, because
+// the entry's url is origin-form ("/path?query" — requestInfoFromCtx
+// stores RequestURI) and carries no scheme/host to recover them from.
+// Losing them made every background refresh present the pool target as
+// Host on preserve_host pools (2026-11-19 production incident) and
+// advertise x-forwarded-proto http for https clients.
+func TestRefreshRegistry_CapturesClientHostAndTLS(t *testing.T) {
+	t.Parallel()
+	r := newRefreshRegistry()
+
+	// The production shape requestInfoFromCtx produces for a live
+	// request: origin-form URI, client Host, connection TLS flag.
+	ri := RequestInfo{
+		Method: "GET",
+		URI:    "/p?x=1",
+		Host:   "www.example.com",
+		Path:   "/p",
+		TLS:    true,
+		Header: header.NewMap(0),
+	}
+
+	key := testkey.Key(11)
+	r.Register(key, ri, "", 0, nil)
+
+	entry := r.Lookup(key)
+	require.NotNil(t, entry)
+	assert.Equal(t, "/p?x=1", entry.url,
+		"the entry target stays origin-form, matching what a live request carries")
+	assert.Equal(t, "www.example.com", entry.host,
+		"the client Host must be captured so preserve_host pools stay honoured on the refresh fetch")
+	assert.True(t, entry.tls,
+		"the client TLS flag must be captured so x-forwarded-proto stays truthful on the refresh fetch")
+}
+
 // A presence-keyed route (issue #768) must save the Cookie header in
 // the registry entry: doBackgroundRefresh replays the saved headers
 // into the conditional fetch's RequestInfo, and refreshFrom304

@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-11-20
+
 ### Fixed
 
 - Background refreshes (`refresh_before_expiry`) now carry the triggering
@@ -3968,7 +3970,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.7...HEAD
+[0.6.7]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.7
 [0.6.4]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.4
 [0.6.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.3
 [0.6.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.6.2

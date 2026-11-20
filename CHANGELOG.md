@@ -10,6 +10,20 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- Background refreshes (`refresh_before_expiry`) now carry the triggering
+  client's Host header and TLS flag (da5ad016). The refresh registry stored
+  only the origin-form URL, so the replayed fetch presented an empty Host and
+  the pool dial's absolute-URI rewrite made fasthttp refill it from the pool
+  target, silently bypassing `connect.preserve_host` on every background
+  refresh, and advertising `x-forwarded-proto: http` for HTTPS clients
+  (2026-11-19 production incident: an origin that derives its behaviour from
+  the request Host header received the internal pool hostname instead and
+  returned 500s to clients).
+- fasthttp bumped from v1.78.0 to v1.79.0, pulling the transitive
+  klauspost/compress v1.20.3 → v1.20.4 update (96be62f3).
+
 ### Changed
 
 - Go toolchain bumped from 1.27.3 to 1.27.4 (`go.mod`, `GO_VERSION` in

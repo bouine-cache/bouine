@@ -131,3 +131,15 @@ The per-request "stayin-alive: serving stale" Info logs are sampled
 the `X-Cache: STALE` access-log entries and the `cache_result="STALE"`
 metric carry the full volume, so a quiet log during an outage does not
 mean the serves stopped.
+
+Two caveats worth knowing before relying on grace:
+
+- **Cold start**: pool targets boot `healthy: true`, so a pool whose
+  origin is already down when bouine starts reports healthy until
+  enough fetch failures eject it. Grace engages only after the first
+  ejection — during that window the reaper collects expired entries on
+  the normal schedule.
+- **Soft purge**: an entry with `stale_while_revalidate: 0` and
+  `stale_if_error: 0` is hard-deleted on purge even on a stayin_alive
+  route — there is no stale window to serve from. Set SWR/SIE > 0 on
+  stayin_alive routes if purge-grace is wanted.

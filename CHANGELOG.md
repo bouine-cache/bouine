@@ -38,6 +38,13 @@ the curated, human-readable summary.
   ejection) and `cache-grace-holds-no-ejection` (grace holds with no
   ejected target — missing health signal or elapsed `eject_for` while
   the origin is still down).
+- `stayin_alive` now appears in `examples/ecommerce/config.yaml` on the
+  product pages route, with a comment tying it to the pool's health
+  config prerequisite (#940).
+- The `stayin_alive` godoc and `docs/runbook/54-origin-ejection.md`
+  now document the two caveats: targets boot healthy (cold-start
+  window before the first ejection), and soft purge hard-deletes
+  entries with `swr=0`+`sie=0` even on stayin_alive routes (#938).
 
 ### Changed
 
@@ -46,6 +53,13 @@ the curated, human-readable summary.
   allocations on the serve path, #935). Stale-serve volume remains fully
   observable through `X-Cache: STALE` access logs and the
   `cache_result="STALE"` metric.
+- `Pool.HasHealthyTarget` is now a single atomic load: the pool caches
+  "any healthy target" (`anyHealthy`), recomputed under the pool mutex
+  on every health transition (passive eject, probe eject/restore,
+  MarkHealthy, eject_for reaper) instead of RLock + per-target scan per
+  call. This removes lock-held CPU from the TTL reaper's stayin_alive
+  grace gate, which calls it per held entry per 30 s pass under the
+  shard write lock (#939).
 
 ### Fixed
 

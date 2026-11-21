@@ -60,6 +60,12 @@ the curated, human-readable summary.
   call. This removes lock-held CPU from the TTL reaper's stayin_alive
   grace gate, which calls it per held entry per 30 s pass under the
   shard write lock (#939).
+- Hot-tier SIEVE capacity eviction now prefers evicting non-graced
+  entries over `stayin_alive` (`KeepGrace`) ones in hot-only shards:
+  graced victims are skipped up to `maxEvictSkips` (4) probes per
+  eviction, then plain SIEVE resumes, so bounded resources still win
+  (#947). Skips are counted in `api.Stats.GraceEvictSkips` and exported
+  as `bouine_hot_store_grace_evict_skips_total`. ADR-0051 amended.
 
 ### Fixed
 

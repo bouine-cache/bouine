@@ -305,6 +305,7 @@ type hotStats struct {
 	misses     atomic.Int64
 	evictions  atomic.Int64
 	graceHolds atomic.Int64
+	graceSkips atomic.Int64
 }
 
 // evictReason classifies the caller of notifyEvict so the OnEvict
@@ -718,7 +719,7 @@ func (h *HotStore) putStored(key api.Key, stored *api.Object) error {
 		if s.bytes+size <= perShardMax || s.evict.Len() == 0 {
 			break
 		}
-		evKey, ok := s.evictPreferBacked()
+		evKey, ok := s.evictPreferBacked(&h.stats)
 		if !ok {
 			break
 		}
@@ -877,7 +878,7 @@ func (h *HotStore) sweeper() {
 			var slabFrees [][]byte
 			s.mu.Lock()
 			for s.bytes > perShardMax && s.evict.Len() > 0 {
-				evKey, ok := s.evictPreferBacked()
+				evKey, ok := s.evictPreferBacked(&h.stats)
 				if !ok {
 					break
 				}
@@ -1193,6 +1194,7 @@ func (h *HotStore) Stats() api.Stats {
 		Misses:           h.stats.misses.Load(),
 		Evictions:        h.stats.evictions.Load(),
 		ReaperGraceHolds: h.stats.graceHolds.Load(),
+		GraceEvictSkips:  h.stats.graceSkips.Load(),
 	}
 }
 
@@ -1285,9 +1287,16 @@ const maxSweepProbes = 128
 // SIEVE evictions, re-inserting hot-only entries at the head for a
 // second chance (via Access + MarkVisited).
 // If no backed entries are found, falls back to standard eviction.
-func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
+//
+// When the shard has no backed entries at all (hot-only deployment,
+// issue #947), the fast path additionally prefers non-graced victims:
+// a KeepGrace (stayin_alive) entry is skipped up to maxEvictSkips times
+// so ordinary entries are evicted first under capacity pressure. The
+// skip budget is bounded, so a fully-graced shard under pressure still
+// evicts — bounded resources always win (ADR-0051).
+func (s *shard) evictPreferBacked(st *hotStats) (key api.Key, ok bool) {
 	if s.backedCount == 0 {
-		return s.evict.EvictBounded(maxSweepProbes)
+		return s.evictPreferNonGraced(st)
 	}
 	for range maxEvictSkips {
 		k, ok := s.evict.EvictBounded(maxSweepProbes)
@@ -1299,24 +1308,51 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 				s.backedCount--
 				return k, true
 			}
-			// Hot-only entry: re-insert at the head to give it another
-			// chance. EvictBounded already removed the entry from the
-			// list and returned it to the pool, so we must re-insert via
-			// Access (not Defer, which assumes the entry is still linked
-			// in the list — calling Defer on an unlinked entry corrupts
-			// head/tail and orphans every other entry).
-			//
-			// Access pulls a fresh entry from the pool via Reset, which
-			// clears visited to false. Mark it visited so the re-inserted
-			// entry gets a full second chance (one sweep to clear visited,
-			// a second to evict) — matching the semantic the old Defer
-			// path provided by preserving the visited bit.
-			he.entry, _ = s.evict.Access(k, func(api.Key) *evictor.Entry[api.Key] { return nil })
-			he.entry.MarkVisited()
+			s.reinsertVictim(he)
 		}
 	}
 	// Fall back to standard eviction after skips exhausted.
 	return s.evict.EvictBounded(maxSweepProbes)
+}
+
+// evictPreferNonGraced is the no-backup fast path of evictPreferBacked
+// (hot-only shards): evict the first non-graced victim, skipping
+// KeepGrace (stayin_alive) entries up to maxEvictSkips times so they
+// are evicted last under capacity pressure (issue #947). After the
+// budget exhausts it falls back to plain SIEVE eviction, so a
+// fully-graced shard still evicts.
+func (s *shard) evictPreferNonGraced(st *hotStats) (key api.Key, ok bool) {
+	for range maxEvictSkips {
+		k, ok := s.evict.EvictBounded(maxSweepProbes)
+		if !ok {
+			return k, false
+		}
+		he, exists := s.entries[k]
+		if !exists {
+			continue
+		}
+		if he.obj != nil && he.obj.KeepGrace {
+			st.graceSkips.Add(1)
+			s.reinsertVictim(he)
+			continue
+		}
+		return k, true
+	}
+	// All probed victims were graced: fall back to standard eviction.
+	return s.evict.EvictBounded(maxSweepProbes)
+}
+
+// reinsertVictim puts a SIEVE-probed entry back at the head of the
+// eviction list with visited=true, giving it a full second chance.
+// EvictBounded already unlinked the entry and returned it to the
+// pool, so the re-insert must go through Access (not Defer, which
+// assumes the entry is still linked — Defer on an unlinked entry
+// corrupts head/tail and orphans every other entry). Access pulls a
+// fresh entry from the pool via Reset, which clears visited to false;
+// MarkVisited restores the second-chance semantic.
+func (s *shard) reinsertVictim(he *hotEntry) {
+	he.entry, _ = s.evict.Access(he.obj.Key, func(api.Key) *evictor.Entry[api.Key] { return nil })
+	he.entry.MarkVisited()
 }
 
 // Keys returns all cache keys currently stored in the hot tier.

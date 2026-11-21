@@ -558,6 +558,7 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 		var lastEvictions int64
 		var lastWarmSelfHeals int64
 		var lastGraceHolds int64
+		var lastGraceSkips int64
 		for {
 			select {
 			case <-rCtx.Done():
@@ -576,6 +577,7 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 				// during an origin outage on stayin_alive routes (ADR-0051).
 				// Extracted to keep startBackgroundTasks' complexity flat.
 				updateReaperGraceHoldMetric(rs.dpMetrics, s, &lastGraceHolds)
+				updateGraceEvictSkipMetric(rs.dpMetrics, s, &lastGraceSkips)
 				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
 				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
 				// Warm-tier disk-pressure gauge: disk_bytes reflects total
@@ -656,6 +658,17 @@ func updateReaperGraceHoldMetric(m *observability.DataPlaneMetrics, s api.Stats,
 	if d := s.ReaperGraceHolds - *last; d > 0 {
 		m.HotStoreReaperGraceHolds.Add(float64(d))
 		*last = s.ReaperGraceHolds
+	}
+}
+
+// updateGraceEvictSkipMetric delta-adds the grace-evict-skip counter
+// from a Stats snapshot (issue #947), updating the caller's last-seen
+// value. Extracted next to updateReaperGraceHoldMetric for the same
+// complexity reason.
+func updateGraceEvictSkipMetric(m *observability.DataPlaneMetrics, s api.Stats, last *int64) {
+	if d := s.GraceEvictSkips - *last; d > 0 {
+		m.HotStoreGraceEvictSkips.Add(float64(d))
+		*last = s.GraceEvictSkips
 	}
 }
 

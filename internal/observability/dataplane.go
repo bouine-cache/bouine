@@ -91,6 +91,10 @@ type DataPlaneMetrics struct {
 	// an expired stayin_alive entry because its origin pool had no
 	// healthy target (ADR-0051).
 	HotStoreReaperGraceHolds prometheus.Counter
+	// HotStoreGraceEvictSkips counts SIEVE capacity-eviction passes that
+	// skipped a stayin_alive (KeepGrace) victim in favor of a non-graced
+	// one (issue #947).
+	HotStoreGraceEvictSkips prometheus.Counter
 	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
 	WarmStoreBytes     prometheus.Gauge
 	WarmStoreEntries   prometheus.Gauge
@@ -225,6 +229,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions, m.HotStoreMaxBytes,
 		m.HotStoreReaperGraceHolds,
+		m.HotStoreGraceEvictSkips,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals, m.WarmStoreMaxBytes,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
@@ -277,6 +282,11 @@ func (m *DataPlaneMetrics) initHotStoreMetrics() {
 		Namespace: "bouine",
 		Name:      "hot_store_reaper_grace_holds_total",
 		Help:      "Total number of TTL-reaper passes that withheld an expired stayin_alive (KeepGrace) entry because its origin pool had no healthy target (ADR-0051). A persistently non-zero rate during an outage is the grace retention working; non-zero while all pools report healthy indicates a stale ejection — check the origin pool health state.",
+	})
+	m.HotStoreGraceEvictSkips = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_grace_evict_skips_total",
+		Help:      "Total number of SIEVE capacity-eviction passes that skipped a stayin_alive (KeepGrace) victim in favor of a non-graced entry (issue #947). Non-zero under hot-tier pressure with stayin_alive routes present means the eviction preference is engaged; the skip budget is bounded (maxEvictSkips) so a fully-graced shard still evicts.",
 	})
 	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",

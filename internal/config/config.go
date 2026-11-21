@@ -40,8 +40,9 @@ type Config struct {
 	Metrics MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
 	// RouteDefaults is merged into every route before validation
 	// (see mergeRouteDefaults), so per-route blocks that repeat across
-	// routes can be declared once. Only request.forwarded and
-	// cache.bypass_on_user_agent are mergeable today; other fields are
+	// routes can be declared once. Mergeable today: request.forwarded,
+	// cache.bypass_on_user_agent, cache.downstream_freshness,
+	// cache.key.cookie_values, and cache.stayin_alive; other fields are
 	// rejected at decode so their merge semantics get designed when
 	// they are needed, not inherited by accident. Unstable. Sits with
 	// the slice-typed fields (fieldalignment: the block carries a
@@ -948,8 +949,16 @@ type RouteCache struct {
 	// TTL + SWR + SIE (ADR-0051). Full protection requires the pool
 	// to have passive (health.passive.consecutive_5xx) or active
 	// health checks configured — without a health signal the reaper
-	// keeps its normal schedule.
+	// keeps its normal schedule (a load-time warning is emitted in
+	// that case). Inheritable from route_defaults.cache.stayin_alive
+	// (issue #934): routes that set the field themselves keep their
+	// value (see stayinAliveSet).
 	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
+	// stayinAliveSet records that StayinAlive was explicitly set on
+	// this route (YAML key present), so the route_defaults merge can
+	// distinguish "unset" from "explicitly false" (issue #934). Not
+	// serialized; set by RouteCache's UnmarshalYAML.
+	stayinAliveSet bool `yaml:"-" json:"-"`
 }
 
 // Disabled reports whether the route's cache is explicitly off: only
@@ -1265,11 +1274,12 @@ func ForwardedStandard() ForwardedConfig {
 // declared once. The merge is field-scoped and form-aware (see
 // mergeRouteDefaults in loader.go). Unstable.
 type RouteDefaults struct {
-	// Cache holds cache-side defaults. Only bypass_on_user_agent and
-	// downstream_freshness are mergeable today; other RouteCache fields
-	// are rejected here at decode time (strict mode), same rationale as
-	// Request. Declared before Request (fieldalignment: it carries the
-	// block's only slice).
+	// Cache holds cache-side defaults. Mergeable today:
+	// bypass_on_user_agent, downstream_freshness, key.cookie_values,
+	// and stayin_alive; other RouteCache fields are rejected here at
+	// decode time (strict mode), same rationale as Request. Declared
+	// before Request (fieldalignment: it carries the block's only
+	// slice).
 	Cache RouteDefaultsCache `yaml:"cache,omitempty" json:"cache,omitempty"`
 	// Request holds request-side defaults. Only forwarded is
 	// mergeable; other RouteRequest fields are rejected here at decode
@@ -1323,6 +1333,16 @@ type RouteDefaultsCache struct {
 	// only. Patterns are validated at route_defaults' own path before
 	// the merge (validateRouteDefaults).
 	BypassOnUserAgent []string `yaml:"bypass_on_user_agent,omitempty" json:"bypass_on_user_agent,omitempty"`
+	// StayinAlive is the cache.stayin_alive default (issue #934,
+	// ADR-0011 / ADR-0051). When true, every route that did not set the
+	// field itself inherits emergency stale mode; a route that sets
+	// stayin_alive explicitly (true or false) keeps its own value. The
+	// unset-vs-false distinction is tracked by stayinAliveSet (a private
+	// bit set during YAML decode), so `route_defaults: true` plus a
+	// route-level `stayin_alive: false` is a real opt-out. Static routes
+	// inherit too: the knob is consumed by every cache handler.
+	// Declared after the slice field (fieldalignment).
+	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
 }
 
 // RouteDefaultsKey is the key half of route_defaults.cache — a

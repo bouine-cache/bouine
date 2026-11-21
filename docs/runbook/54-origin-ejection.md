@@ -125,3 +125,9 @@ Once the pool has a healthy target again, the next reaper pass reaps all
 withheld expired entries on the normal schedule — no manual cleanup.
 Capacity (SIEVE hot-tier pressure, warm disk budget) still applies during
 grace: held entries can be demoted to the warm tier, not lost.
+
+The per-request "stayin-alive: serving stale" Info logs are sampled
+(first event per route, then 1-in-1024, `internal/cache/staysample.go`):
+the `X-Cache: STALE` access-log entries and the `cache_result="STALE"`
+metric carry the full volume, so a quiet log during an outage does not
+mean the serves stopped.

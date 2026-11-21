@@ -63,6 +63,13 @@ type Pool struct {
 	// Atomic (hot-config knob pool:<name>.health.passive.consecutive_5xx):
 	// read per fetch on the data plane, so it swaps without locks.
 	consecutive5xx atomic.Int64
+	// anyHealthy caches "at least one target is currently healthy" so
+	// HasHealthyTarget is a single atomic load instead of an RLock +
+	// per-target scan (the TTL reaper's MayReap gate calls it per held
+	// entry per pass under the shard write lock, issue #939).
+	// Maintained by setTargetHealthy on every transition; recomputed
+	// from scratch on target add (NewPool builds all-healthy).
+	anyHealthy atomic.Bool
 }
 
 // Target is a single upstream endpoint.
@@ -70,6 +77,11 @@ type Target struct {
 	url     *url.URL
 	metrics *Metrics
 	addr    string
+	// pool is the owning pool, set at NewPool; lets the Target-level
+	// health transitions refresh the pool's cached anyHealthy flag
+	// (issue #939) without changing their signatures for the
+	// health-checker call sites.
+	pool *Pool
 	// originPrefix is scheme://host precomputed once at construction; the
 	// fetch paths append the request URI to it without re-deriving the
 	// scheme+host or allocating a concat per fetch.
@@ -190,19 +202,32 @@ func (t *Target) passiveEjectAt(cnt int64, threshold int, logger observability.L
 	if cnt < int64(threshold) {
 		return
 	}
-	if t.healthy.CompareAndSwap(true, false) {
-		now := time.Now().UnixNano()
-		t.ejectedAt.Store(now)
-		t.lastChange.Store(now)
-		if t.metrics != nil {
-			t.metrics.incEjection(poolName, t.addr, "passive")
+	if t.pool != nil {
+		if t.pool.setTargetHealthy(t, false) {
+			t.afterEject(poolName, source, cnt, logger)
 		}
-		logger.Warn("target ejected (passive)",
-			"pool", poolName,
-			"target", t.addr,
-			"source", source,
-			"consecutive_errors", cnt)
+		return
 	}
+	if t.healthy.CompareAndSwap(true, false) {
+		t.afterEject(poolName, source, cnt, logger)
+	}
+}
+
+// afterEject records the ejection side effects after the healthy flag
+// has flipped to false (shared by the nil-pool legacy path and the
+// pool-backed path, issue #939).
+func (t *Target) afterEject(poolName, source string, cnt int64, logger observability.Logger) {
+	now := time.Now().UnixNano()
+	t.ejectedAt.Store(now)
+	t.lastChange.Store(now)
+	if t.metrics != nil {
+		t.metrics.incEjection(poolName, t.addr, "passive")
+	}
+	logger.Warn("target ejected (passive)",
+		"pool", poolName,
+		"target", t.addr,
+		"source", source,
+		"consecutive_errors", cnt)
 }
 
 // recordProbeError increments the probe error counter and ejects the
@@ -227,7 +252,13 @@ func (t *Target) recordProbeError(threshold int, window time.Duration, logger ob
 	}
 	cnt := t.probeErrors.Add(1)
 	if cnt >= int64(threshold) {
-		if t.healthy.CompareAndSwap(true, false) {
+		flipped := false
+		if t.pool != nil {
+			flipped = t.pool.setTargetHealthy(t, false)
+		} else {
+			flipped = t.healthy.CompareAndSwap(true, false)
+		}
+		if flipped {
 			if t.metrics != nil {
 				t.metrics.incEjection(poolName, t.addr, "active")
 			}
@@ -252,7 +283,13 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 	}
 	cnt := t.successes.Add(1)
 	if cnt >= int64(threshold) {
-		if t.healthy.CompareAndSwap(false, true) {
+		flipped := false
+		if t.pool != nil {
+			flipped = t.pool.setTargetHealthy(t, true)
+		} else {
+			flipped = t.healthy.CompareAndSwap(false, true)
+		}
+		if flipped {
 			t.successes.Store(0)
 			t.lastChange.Store(time.Now().UnixNano())
 			if t.metrics != nil {
@@ -546,10 +583,41 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 			return nil, fmt.Errorf("origin: pool %q: %w", cfg.Name, err)
 		}
 		t.metrics = cfg.Metrics
+		t.pool = p
 		p.targets = append(p.targets, t)
 	}
+	// All targets boot healthy (newTarget stores true), so the cached
+	// anyHealthy starts true (issue #939).
+	p.anyHealthy.Store(len(p.targets) > 0)
 
 	return p, nil
+}
+
+// setTargetHealthy flips t.healthy to healthy (the CAS makes
+// concurrent transition sites agree on the log/flag pair, as before)
+// and recomputes the pool-level anyHealthy cache under p.mu so the
+// recompute never races another recompute (issue #939).
+func (p *Pool) setTargetHealthy(t *Target, healthy bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if t.healthy.CompareAndSwap(!healthy, healthy) {
+		p.recomputeAnyHealthyLocked()
+		return true
+	}
+	return false
+}
+
+// recomputeAnyHealthyLocked is recomputeAnyHealthy for callers already
+// holding p.mu.
+func (p *Pool) recomputeAnyHealthyLocked() {
+	any := false
+	for _, t := range p.targets {
+		if t.healthy.Load() {
+			any = true
+			break
+		}
+	}
+	p.anyHealthy.Store(any)
 }
 
 // SetConsecutive5xx swaps the passive-ejection threshold at runtime
@@ -1004,17 +1072,11 @@ func (c *PoolFastClient) doHedgedFetch(
 // healthy — i.e. whether a miss could be refilled from this pool. It is
 // the health signal the stayin_alive grace gate keys on (ADR-0051):
 // while false, expired KeepGrace entries are withheld from the TTL
-// reaper. Zero-alloc (atomic loads only), safe from any goroutine.
+// reaper. Single atomic load — anyHealthy is maintained on every health
+// transition (issue #939) — so it is safe to call per held entry from
+// inside the reaper's shard lock.
 func (p *Pool) HasHealthyTarget() bool {
-	p.mu.RLock()
-	targets := p.targets
-	p.mu.RUnlock()
-	for _, t := range targets {
-		if t.healthy.Load() {
-			return true
-		}
-	}
-	return false
+	return p.anyHealthy.Load()
 }
 
 // Healthy returns the list of currently healthy target addresses.
@@ -1072,14 +1134,15 @@ func (p *Pool) Targets() []TargetStatus {
 // intervention. Uses CompareAndSwap so the log and the flag always
 // agree.
 func (p *Pool) MarkHealthy(addr string) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, t := range p.targets {
 		if t.addr == addr {
 			t.passiveErrors.Store(0)
 			t.probeErrors.Store(0)
 			t.successes.Store(0)
 			if t.healthy.CompareAndSwap(false, true) {
+				p.recomputeAnyHealthyLocked()
 				t.lastChange.Store(time.Now().UnixNano())
 				p.logger.Info("target restored (manual)",
 					"pool", p.Name,
@@ -1171,7 +1234,7 @@ func (r *EjectReaper) reap() {
 		}
 		t.passiveErrors.Store(0)
 		t.successes.Store(0)
-		if t.healthy.CompareAndSwap(false, true) {
+		if p.setTargetHealthy(t, true) {
 			t.ejectedAt.Store(0)
 			if t.metrics != nil {
 				t.metrics.incRestore(p.Name, t.addr, "eject_for")

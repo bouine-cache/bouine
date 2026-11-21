@@ -71,6 +71,14 @@ routes:
       # window regardless of that directive (ADR-0072).
       swr_override: 30s
       stale_if_error: 5m
+      # Emergency stale mode: if the storefront pool is down (all
+      # targets ejected), keep serving the last cached copy of product
+      # pages indefinitely instead of erroring (ADR-0051). Only works
+      # because the pool above has health signals configured
+      # (passive consecutive_5xx + active probe); without them the
+      # reaper collects expired entries on the normal schedule and a
+      # load-time warning is emitted.
+      stayin_alive: true
 
   # Cart and checkout — never cache. These routes carry Set-Cookie
   # and Authorization headers; bouine respects Cache-Control: private

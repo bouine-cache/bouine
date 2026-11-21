@@ -83,3 +83,13 @@ Key properties:
 - Config must be identical across cluster nodes serving a route (same rule
   as `verbatim_encoding`); mixed-version nodes treat the object as opaque
   bytes plus a `Content-Encoding` header.
+- **Vary synthesis**: a cacheable fill on a compression-enabled route is
+  stamped with `Vary: Accept-Encoding` (stored map and client response)
+  before the variant key is computed, even when the origin sends no Vary.
+  Without it the compressed variant would sit under the primary key and be
+  served to identity-bucket clients; with it each AE bucket resolves to its
+  own variant (RFC 9111 §4.1; nginx `gzip_vary on` parity). Cost: up to one
+  variant per bucket in the client mix (typically br + identity = 2),
+  bounded by the existing `max_variants` cap. `compression.enabled` +
+  `key.verbatim_encoding: true` is rejected by validation: verbatim keys
+  the raw AE spelling and would re-fragment the variant space.

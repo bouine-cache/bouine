@@ -297,6 +297,11 @@ and refill path; the hit path never touches it. See ADR-0061.
   the block). Bodies over `max_size`, under `min_size`, or that expand
   under compression are proxied/stored as identity. Like
   `verbatim_encoding`, the block must be identical across cluster nodes.
+  Cacheable fills on a compression-enabled route are stamped
+  `Vary: Accept-Encoding` before the variant key is computed (even when the
+  origin sends no Vary), so each AE bucket resolves to its own variant and
+  identity-bucket clients never receive encoded bytes; the combination with
+  `verbatim_encoding: true` is rejected by validation.
 
 ### 3.4 Cookie & authorization policy
 

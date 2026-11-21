@@ -259,15 +259,27 @@ func TestFillCompression_BufferedMissStoresCompressed(t *testing.T) {
 	require.Equal(t, body, string(decompressGzip(t, hit.Response.Body())))
 	require.Equal(t, strconv.Itoa(len(hit.Response.Body())), string(hit.Response.Header.Peek(header.ContentLength)))
 
-	// Identity-only client: the origin has no Vary, so the primary key
-	// holds the compressed variant and the identity request hits it
-	// verbatim (same as an origin that pre-compresses: one variant).
-	// The identity client therefore also receives gzip bytes here.
+	// Identity-only client: compression stamps Vary: Accept-Encoding
+	// (ADR-0075), so the AE bucket is in the variant key and the identity
+	// request resolves to its OWN variant — a fresh MISS that fetches and
+	// stores the identity bytes, never the compressed ones (RFC 9110
+	// §12.5.3: a client that did not accept gzip must not receive gzip).
 	id := testCtx("GET", "http://example.com/page")
 	h.ServeRequest(id)
-	require.Equal(t, "HIT", respHeader(id, header.XCache))
-	require.Equal(t, "gzip", string(id.Response.Header.Peek(header.ContentEncoding)))
-	require.Equal(t, body, string(decompressGzip(t, id.Response.Body())))
+	require.Equal(t, "MISS", respHeader(id, header.XCache))
+	require.Equal(t, "", respHeader(id, header.ContentEncoding),
+		"identity-bucket fill must not carry Content-Encoding")
+	require.Equal(t, "Accept-Encoding", respHeader(id, header.Vary),
+		"compression-enabled fills advertise Vary: Accept-Encoding")
+	require.Equal(t, body, respBody(id))
+
+	// Second identity request now HITs the identity variant, still
+	// without Content-Encoding.
+	id2 := testCtx("GET", "http://example.com/page")
+	h.ServeRequest(id2)
+	require.Equal(t, "HIT", respHeader(id2, header.XCache))
+	require.Equal(t, "", respHeader(id2, header.ContentEncoding))
+	require.Equal(t, body, respBody(id2))
 }
 
 func TestFillCompression_SkipsWhenOriginAlreadyEncoded(t *testing.T) {
@@ -531,4 +543,30 @@ func TestTeeStreamCompress_OverMaxSizeNotStored(t *testing.T) {
 	require.Nil(t, obj, "nothing may be stored for an over-max_size compressed fill")
 	require.Equal(t, body, decompressGzip(t, client.Bytes()),
 		"the filling client still receives valid compressed bytes")
+}
+
+// TestStampAEDependentVary pins the Vary synthesis: idempotent against an
+// origin that already sent Vary: Accept-Encoding, and merging with an
+// existing list (e.g. User-Agent).
+func TestStampAEDependentVary(t *testing.T) {
+	t.Parallel()
+
+	m := headerMap()
+	dst := &fasthttp.ResponseHeader{}
+	stampAEDependentVary(&m, dst)
+	assert.Equal(t, "Accept-Encoding", m.Get(header.Vary))
+	assert.Equal(t, "Accept-Encoding", string(dst.Peek(header.Vary)))
+
+	// Existing Vary list: append, don't clobber.
+	m2 := headerMap(header.Vary, "User-Agent")
+	dst2 := &fasthttp.ResponseHeader{}
+	stampAEDependentVary(&m2, dst2)
+	assert.Equal(t, "User-Agent, Accept-Encoding", m2.Get(header.Vary))
+
+	// Already present (any case): no duplicate.
+	m3 := headerMap(header.Vary, "user-agent, accept-ENCODING")
+	dst3 := &fasthttp.ResponseHeader{}
+	dst3.SetCanonical(header.S2b(header.Vary), header.S2b("user-agent, accept-ENCODING"))
+	stampAEDependentVary(&m3, dst3)
+	assert.Equal(t, "user-agent, accept-ENCODING", m3.Get(header.Vary))
 }

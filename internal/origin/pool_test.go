@@ -47,10 +47,9 @@ func serveHandler(t *testing.T, h fasthttp.RequestHandler, method, path string, 
 	h(ctx)
 	host := string(ctx.Response.Header.Peek("X-Echo-Host"))
 	if host == "" {
-		//nolint:staticcheck // deprecated but functional
-		ctx.Response.Header.VisitAll(func(k, v []byte) {
+		for k, v := range ctx.Response.Header.All() {
 			t.Logf("resp header: %s=%s", k, v)
-		})
+		}
 	}
 	return ctx.Response.StatusCode(), string(ctx.Response.Body()), host
 }

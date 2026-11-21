@@ -34,6 +34,18 @@ var (
 	errStringTooLong  = errors.New("cluster: string length exceeds 64 KiB")
 )
 
+// putTime writes a timestamp as 8-byte little-endian Unix nanoseconds.
+// The wire format is fixed; gosec G115's int64->uint64 cast is inherent to
+// LE-encoding a signed value, so the conversion lives in exactly one place.
+func putTime(buf []byte, off int, t time.Time) {
+	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(t))) //nolint:gosec // wire format: int64 cast for LE encoding
+}
+
+// getTime reads a timestamp written by putTime.
+func getTime(buf []byte, off int) time.Time {
+	return decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64->int64 round-trip
+}
+
 func encodeTime(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
@@ -142,7 +154,7 @@ func putPurgePayload(buf []byte, off int, evt api.PurgeEvent) (int, error) {
 	if err != nil {
 		return off, err
 	}
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast for LE encoding
+	putTime(buf, off, evt.IssuedAt)
 	off += 8
 	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
 	return off + 8, nil
@@ -167,7 +179,7 @@ func decodePurgePayload(buf []byte, off int) (api.PurgeEvent, error) {
 	if off+16 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	evt.IssuedAt = getTime(buf, off)
 	off += 8
 	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
 	return evt, nil
@@ -231,13 +243,13 @@ func putBanPayload(buf []byte, off int, evt api.BanEvent) (int, error) {
 	if err != nil {
 		return off, err
 	}
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.Predicate.CreatedAt))) //nolint:gosec // wire format: int64 cast
+	putTime(buf, off, evt.Predicate.CreatedAt)
 	off += 8
 	off, err = putString(buf, off, evt.Issuer)
 	if err != nil {
 		return off, err
 	}
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast
+	putTime(buf, off, evt.IssuedAt)
 	off += 8
 	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
 	return off + 8, nil
@@ -261,7 +273,7 @@ func decodeBanPayload(buf []byte, off int) (api.BanEvent, error) {
 	if off+8 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.Predicate.CreatedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	evt.Predicate.CreatedAt = getTime(buf, off)
 	off += 8
 	evt.Issuer, off, err = readString(buf, off)
 	if err != nil {
@@ -270,7 +282,7 @@ func decodeBanPayload(buf []byte, off int) (api.BanEvent, error) {
 	if off+16 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	evt.IssuedAt = getTime(buf, off)
 	off += 8
 	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
 	return evt, nil
@@ -322,7 +334,7 @@ func putRefreshPayload(buf []byte, off int, evt api.RefreshEvent) (int, error) {
 	if err != nil {
 		return off, err
 	}
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast
+	putTime(buf, off, evt.IssuedAt)
 	off += 8
 	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
 	return off + 8, nil
@@ -343,7 +355,7 @@ func decodeRefreshPayload(buf []byte, off int) (api.RefreshEvent, error) {
 	if off+16 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	evt.IssuedAt = getTime(buf, off)
 	off += 8
 	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
 	return evt, nil
@@ -397,7 +409,7 @@ func putRefreshSurrogatePayload(buf []byte, off int, evt api.RefreshSurrogateEve
 	if err != nil {
 		return off, err
 	}
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast
+	putTime(buf, off, evt.IssuedAt)
 	off += 8
 	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
 	return off + 8, nil
@@ -417,7 +429,7 @@ func decodeRefreshSurrogatePayload(buf []byte, off int) (api.RefreshSurrogateEve
 	if off+16 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	evt.IssuedAt = getTime(buf, off)
 	off += 8
 	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
 	return evt, nil
@@ -496,7 +508,7 @@ func peerInfoPayloadLen(info api.PeerInfo) int {
 }
 
 func putPeerInfoPayload(buf []byte, off int, info api.PeerInfo) int {
-	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(info.JoinedAt))) //nolint:gosec // wire format: uint64→int64 round-trip
+	putTime(buf, off, info.JoinedAt)
 	off += 8
 	for _, s := range peerInfoStrings(info) {
 		// String lengths are validated by EncodePeerInfoMeta; the
@@ -513,7 +525,7 @@ func readPeerInfoPayload(buf []byte, off int) (api.PeerInfo, int, error) {
 	if off+8 > len(buf) {
 		return info, off, errShortFrame
 	}
-	info.JoinedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	info.JoinedAt = getTime(buf, off)
 	off += 8
 	var err error
 	for _, dst := range []*string{&info.Name, &info.Addr, &info.AdminAddr, &info.DataAddr, &info.Version} {

@@ -95,9 +95,10 @@ func extractRawQuery(uri string) string {
 	return ""
 }
 
-// requestInfoFromURL creates a RequestInfo from a method and URL string.
-// Used by tests that construct requests from URL strings.
-func requestInfoFromURL(method, rawURL string) RequestInfo { //nolint:unparam
+// requestInfoFromURL builds a RequestInfo by parsing an absolute URL.
+// The production path constructs RequestInfo directly from the resolved
+// route URL; tests use this helper to build keys from URL strings.
+func requestInfoFromURL(method, rawURL string) RequestInfo {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return RequestInfo{Method: method, URI: rawURL}

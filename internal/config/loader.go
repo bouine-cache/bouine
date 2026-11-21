@@ -189,6 +189,7 @@ func (c *Config) Validate() error {
 	for i := range c.Routes {
 		c.validateRoute(ec, i, seen)
 	}
+	c.validateStayinAliveHealthSignal(ec)
 
 	c.validateCluster(ec)
 
@@ -226,7 +227,48 @@ func (c *Config) Validate() error {
 
 	c.validateTrafficClasses(ec)
 
+	c.Warnings = ec.warningList()
 	return ec.err()
+}
+
+// poolHasHealthSignal reports whether the named pool has at least one
+// ejection-capable health signal configured: passive consecutive_5xx or
+// an active probe. Without one, targets never eject (they boot healthy
+// and stay healthy), so ADR-0051's reaper grace gate can never see an
+// unhealthy pool and stayin_alive retention degrades to TTL+SWR+SIE.
+func (c *Config) poolHasHealthSignal(name string) bool {
+	for i := range c.UpstreamPools {
+		p := &c.UpstreamPools[i]
+		if p.Name != name {
+			continue
+		}
+		return p.Health.Passive.Consecutive5xx > 0 || p.Health.Active.Path != ""
+	}
+	return false
+}
+
+// validateStayinAliveHealthSignal warns (never errors) when a route
+// enables stayin_alive on a pool without any health signal (issue #933):
+// the serving layer still serves stale on error/5xx, but the reaper's
+// grace retention cannot engage, so the "indefinitely" contract is
+// silently capped. Static routes (no pool) and disabled caches skip the
+// check.
+func (c *Config) validateStayinAliveHealthSignal(ec *errCollector) {
+	for i := range c.Routes {
+		r := &c.Routes[i]
+		if r.Pool == "" || r.Static.Root != "" || !r.Cache.StayinAlive || r.Cache.Disabled() {
+			continue
+		}
+		if !c.poolHasHealthSignal(r.Pool) {
+			ec.warnf(fmt.Sprintf("routes[%d].cache.stayin_alive", i),
+				"route %q enables stayin_alive but pool %q has no health signal "+
+					"(health.passive.consecutive_5xx or health.active.path): the TTL reaper "+
+					"will still collect expired entries during an outage, capping stale serving "+
+					"at TTL+SWR+SIE instead of indefinitely (ADR-0051); configure passive "+
+					"consecutive_5xx (plus eject_for for auto-restore) or an active health check",
+				r.Name, r.Pool)
+		}
+	}
 }
 
 // Traffic-class validation caps (ADR-0047): the closed label set is

@@ -17,6 +17,7 @@ func init() {
 		ruleCacheNoNegTTL,
 		ruleCacheWarmNearFull,
 		ruleCacheStayinAliveOff,
+		ruleCacheStayinAliveNoHealthSignal,
 		ruleCacheVaryExplosion,
 		ruleAnomalyBypassFlood,
 		ruleUpstreamUnhealthyTarget,
@@ -304,6 +305,47 @@ func ruleCacheStayinAliveOff(data InsightData) *Insight {
 		Title:    fmt.Sprintf("Route %s has StayinAlive=false", triggered[0]),
 		Detail:   fmt.Sprintf("%d route(s) with StayinAlive off — origin receives revalidation traffic", len(triggered)),
 		Evidence: "StayinAlive == false",
+		Routes:   truncateRoutes(triggered),
+		Action:   "/dashboard/config",
+	}
+}
+
+// ruleCacheStayinAliveNoHealthSignal fires for a stayin_alive route whose
+// origin pool has no ejection-capable health signal (no passive
+// consecutive_5xx, no active probe). Without one the pool never ejects,
+// so ADR-0051's reaper grace gate can never engage and stale serving
+// during an outage is capped at TTL+SWR+SIE instead of indefinitely
+// (issue #933; mirrors the config validation warning).
+func ruleCacheStayinAliveNoHealthSignal(data InsightData) *Insight {
+	if data.Config == nil {
+		return nil
+	}
+	poolHasSignal := make(map[string]bool, len(data.Config.UpstreamPools))
+	for _, p := range data.Config.UpstreamPools {
+		poolHasSignal[p.Name] = p.Health.Passive.Consecutive5xx > 0 || p.Health.Active.Path != ""
+	}
+	var triggered []string
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		if !isCacheEnabled(r) || !r.Cache.StayinAlive || r.Pool == "" || r.Static.Root != "" {
+			continue
+		}
+		if has, ok := poolHasSignal[r.Pool]; !ok || !has {
+			triggered = append(triggered, r.Name)
+		}
+	}
+	if len(triggered) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-stayinalive-no-health-signal",
+		Severity: SeverityMed,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Route %s: stayin_alive without a pool health signal", triggered[0]),
+		Detail: fmt.Sprintf("%d stayin_alive route(s) on pools with no health.passive.consecutive_5xx and no active probe — "+
+			"during an origin outage the TTL reaper still collects expired entries, capping stale serving at TTL+SWR+SIE (ADR-0051)",
+			len(triggered)),
+		Evidence: "StayinAlive == true && Consecutive5xx == 0 && Active.Path == \"\"",
 		Routes:   truncateRoutes(triggered),
 		Action:   "/dashboard/config",
 	}

@@ -46,10 +46,14 @@ func newConfigValidateCmd() *cobra.Command {
 			"It reports errors but does not start the daemon.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := config.Load(args[0]); err != nil {
+			cfg, err := config.Load(args[0])
+			if err != nil {
 				return fmt.Errorf("validation failed: %w", err)
 			}
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), "config is valid")
+			for _, w := range cfg.Warnings {
+				_, _ = fmt.Fprintf(cmd.OutOrStderr(), "warning: %s\n", w)
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), "config is valid")
 			return err
 		},
 	}

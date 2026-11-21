@@ -9,6 +9,7 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	brotli "github.com/molecule-man/go-brrr"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -408,4 +409,32 @@ func (fc *fillCompressor) finalizeTeeFill(
 	}
 	releaseCompressor(fc.sc)
 	fc.sc = nil
+}
+
+// stampAEDependentVary adds "Accept-Encoding" to the response's Vary
+// list on both the stored header map (resMap — so effectiveVary computes
+// the bucketed variant key) and the client-facing fasthttp header (dst —
+// so downstream caches and browsers vary too). Idempotent: a field list
+// already containing accept-encoding (case-insensitive) is left alone.
+// Called on cacheable fills of compression-enabled routes, before the
+// variant key is computed (ADR-0075; RFC 9111 §4.1, RFC 9110 §12.5.5).
+func stampAEDependentVary(resMap *header.Map, dst *fasthttp.ResponseHeader) {
+	const field = "accept-encoding"
+	joined := resMap.GetAll(header.Vary)
+	if joined != "" {
+		for f := range strings.SplitSeq(joined, ",") {
+			if strings.EqualFold(strings.TrimSpace(f), field) {
+				// Already varies; make sure the client sees it too
+				// (origin may have sent it, which CopyToFastHTTP
+				// already copied to dst).
+				return
+			}
+		}
+		resMap.Set(header.Vary, joined+", Accept-Encoding")
+	} else {
+		resMap.Set(header.Vary, "Accept-Encoding")
+	}
+	if dst != nil {
+		dst.SetCanonical(header.S2b(header.Vary), header.S2b("Accept-Encoding"))
+	}
 }

@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func compressionBaseConfig(cc CompressionConfig) Config {
@@ -134,4 +136,24 @@ func TestValidate_Compression_DeadOnDisabledRoute(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "compression") {
 		t.Fatalf("expected compression dead-config error on disabled route, got %v", err)
 	}
+}
+
+// TestValidateCompression_VerbatimEncodingConflict pins the rejection of
+// compression.enabled + key.verbatim_encoding (ADR-0075: the compression
+// block buckets AE into the variant key; verbatim would key the raw value).
+func TestValidateCompression_VerbatimEncodingConflict(t *testing.T) {
+	t.Parallel()
+	cfg := `routes:
+  - match: { path_prefix: /x/ }
+    pool: origin
+    cache:
+      compression:
+        enabled: true
+        content_types: [text/html]
+      key:
+        verbatim_encoding: true
+`
+	_, err := Parse([]byte(cfg))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "verbatim_encoding")
 }

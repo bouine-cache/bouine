@@ -85,3 +85,45 @@ func TestStrong_CompressionGzipBucket(t *testing.T) {
 	require.Equal(t, "HIT", resp.Header.Get("X-Cache"))
 	require.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
 }
+
+// TestStrong_CompressionIdentityBucketGetsOwnVariant pins ADR-0075's
+// Vary synthesis end to end: on a compression-enabled route whose origin
+// sends NO Vary, a br-capable client stores the br variant and an
+// identity client gets its own identity variant (MISS, no
+// Content-Encoding) — never the br bytes.
+func TestStrong_CompressionIdentityBucketGetsOwnVariant(t *testing.T) {
+	s := driver.BootCluster(t, driver.ClusterOptions{Mode: "strong", CompressionRoute: true})
+
+	path := "/compressed/html?x=vary"
+	br := s.GetWithHostAndHeaders(t, 0, path, driver.CrossNodeHost, map[string]string{
+		"Accept-Encoding": "gzip, deflate, br",
+	})
+	require.Equal(t, "MISS", br.Header.Get("X-Cache"))
+	require.Equal(t, "br", br.Header.Get("Content-Encoding"))
+	require.Equal(t, "Accept-Encoding", br.Header.Get("Vary"),
+		"compression-enabled fill must advertise Vary: Accept-Encoding")
+
+	// Same node, identity client: own variant, own fill, identity bytes.
+	before := s.OriginRequests()
+	id := s.GetWithHostAndHeaders(t, 0, path, driver.CrossNodeHost, nil)
+	require.Equal(t, "MISS", id.Header.Get("X-Cache"),
+		"identity bucket must not hit the br variant")
+	require.Equal(t, "", id.Header.Get("Content-Encoding"),
+		"identity client must not receive encoded bytes")
+	require.Equal(t, before+1, s.OriginRequests(), "identity variant needs its own origin fill")
+	require.Contains(t, string(id.Body), "Lorem ipsum")
+
+	// And the identity variant now HITs without Content-Encoding.
+	id2 := s.GetWithHostAndHeaders(t, 0, path, driver.CrossNodeHost, nil)
+	require.Equal(t, "HIT", id2.Header.Get("X-Cache"))
+	require.Equal(t, "", id2.Header.Get("Content-Encoding"))
+	require.Equal(t, id.Body, id2.Body)
+
+	// The br variant is untouched by the identity fill.
+	br2 := s.GetWithHostAndHeaders(t, 0, path, driver.CrossNodeHost, map[string]string{
+		"Accept-Encoding": "br, gzip",
+	})
+	require.Equal(t, "HIT", br2.Header.Get("X-Cache"))
+	require.Equal(t, "br", br2.Header.Get("Content-Encoding"))
+	require.Equal(t, br.Body, br2.Body)
+}

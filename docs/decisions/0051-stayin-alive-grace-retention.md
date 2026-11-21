@@ -156,6 +156,25 @@ schedule — hygiene is fully preserved.
 - `docs/runbook/54-origin-ejection.md` (health configuration),
   `docs/plans/stayin-alive-grace-retention.md` (implementation plan).
 
+## Amendment: capacity eviction prefers non-graced victims, bounded (#947)
+
+The original "capacity eviction (SIEVE, warm budget) is never gated"
+clause is refined for the hot tier: in a shard with no warm-backed
+entries (hot-only deployments, or entries whose warm write failed),
+SIEVE capacity eviction now skips `KeepGrace` victims up to
+`maxEvictSkips` (4) probes per eviction call, re-inserting them with
+visited=true via the same pooled-entry re-insert the backed-hunt uses.
+Non-graced entries are evicted first under pressure. The skip budget is
+bounded, so a fully-graced shard under pressure still evicts via plain
+SIEVE — bounded resources always win, unchanged. Shards with backed
+entries are untouched (backed-first demotion is already lossless there,
+and graced fills are eagerly warm-backed per P5). Worst case per victim
+is unchanged: `maxEvictSkips × maxSweepProbes` pointer chases. Skips
+are counted in `api.Stats.GraceEvictSkips` and exported as
+`bouine_hot_store_grace_evict_skips_total`. Pinned by
+`TestEvictPreferNonGraced_Ordering` / `_Fallback` /
+`_NoGracedIsPlainSIEVE`.
+
 ## Amendment: success-windowed passive 5xx counting (#839)
 
 The passive-ejection signal this ADR keys grace retention on changed

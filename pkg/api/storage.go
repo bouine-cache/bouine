@@ -444,4 +444,9 @@ type Stats struct {
 	// an expired KeepGrace entry because the MayReap gate withheld it
 	// (origin pool unable to refill) since boot.
 	ReaperGraceHolds int64 `json:"reaper_grace_holds"`
+	// GraceEvictSkips is the number of times SIEVE capacity eviction
+	// skipped a KeepGrace (stayin_alive) victim in favor of a
+	// non-graced one (issue #947), since boot. Bounded by
+	// maxEvictSkips per eviction.
+	GraceEvictSkips int64 `json:"grace_evict_skips"`
 }

@@ -37,19 +37,24 @@ const (
 )
 
 // streamCompressor is a pooled, re-usable streaming compressor for one
-// content coding. The wrapped encoder writes into out (a bytes.Buffer the
-// caller owns); the fillCompressor drains out to the client and store
-// sinks after each write/flush. Encoders are NOT safe for concurrent use,
-// so all calls on a streamCompressor happen on the single fill goroutine.
+// content coding. The encoder writes into two sinks: out (a small scratch
+// buffer the compressor drains from) and, on drain, buf (the store
+// buffer). They MUST be distinct buffers: the encoder's huffman writer
+// holds a reference to out across Write/Flush/Close, and draining does
+// buf.Write(out.Bytes()) followed by out.Reset() — if buf == out, Reset
+// truncates the store copy to zero. Encoders are NOT safe for concurrent
+// use, so all calls on a streamCompressor happen on the single fill
+// goroutine.
 type streamCompressor struct {
 	// gz, zs, br hold the active encoder; exactly one is non-nil.
-	gz  *gzip.Writer
-	zs  *zstd.Encoder
-	br  *brotli.Writer
-	out *bytes.Buffer // compressed bytes accumulate here
-	// dst is where the encoder writes; it is set at acquire time and
-	// must never be touched concurrently with Write/Flush/Close.
-	dst    io.Writer
+	gz *gzip.Writer
+	zs *zstd.Encoder
+	br *brotli.Writer
+	// out is the encoder's output scratch buffer; drained into buf.
+	out *bytes.Buffer
+	// buf is the store buffer receiving the drained compressed bytes.
+	// Set at acquire time together with out; never aliased with out.
+	buf    *bytes.Buffer
 	coding string
 }
 
@@ -60,8 +65,10 @@ var (
 )
 
 // acquireCompressor returns a reset compressor for coding ("gzip",
-// "zstd" or "br") writing into out, or nil for an unknown coding.
-func acquireCompressor(coding string, out *bytes.Buffer) *streamCompressor {
+// "zstd" or "br") writing into out, or nil for an unknown coding. out is
+// the encoder's scratch sink; storeBuf receives the drained bytes and
+// must NOT be the same buffer as out.
+func acquireCompressor(coding string, out, storeBuf *bytes.Buffer) *streamCompressor {
 	var pool *sync.Pool
 	switch coding {
 	case "gzip":
@@ -75,8 +82,9 @@ func acquireCompressor(coding string, out *bytes.Buffer) *streamCompressor {
 	}
 	sc := pool.Get().(*streamCompressor)
 	sc.out = out
-	sc.dst = out
+	sc.buf = storeBuf
 	out.Reset()
+	storeBuf.Reset()
 	switch coding {
 	case "gzip":
 		if sc.gz == nil {
@@ -122,6 +130,7 @@ func acquireCompressor(coding string, out *bytes.Buffer) *streamCompressor {
 // finish; release does not flush remaining input.
 func releaseCompressor(sc *streamCompressor) {
 	sc.out = nil
+	sc.buf = nil
 	switch sc.coding {
 	case "gzip":
 		gzipCompressorPool.Put(sc)
@@ -177,8 +186,8 @@ func (sc *streamCompressor) close() error {
 // expands the input (incompressible body — the caller keeps the identity
 // bytes). Used by the buffered fill path and by tests.
 func compressBytes(coding string, src []byte) (dst []byte, ok bool) {
-	var buf bytes.Buffer
-	sc := acquireCompressor(coding, &buf)
+	var out, store bytes.Buffer
+	sc := acquireCompressor(coding, &out, &store)
 	if sc == nil {
 		return nil, false
 	}
@@ -190,13 +199,16 @@ func compressBytes(coding string, src []byte) (dst []byte, ok bool) {
 		releaseCompressor(sc)
 		return nil, false
 	}
-	out := buf.Bytes()
+	// The encoder wrote straight into out; copy out into dst (store is
+	// unused on this one-shot path — both sinks exist because the pooled
+	// encoder always has the pair, and drain is what fills store).
+	res := out.Bytes()
 	releaseCompressor(sc)
-	if len(out) >= len(src) {
+	if len(res) >= len(src) {
 		return nil, false
 	}
-	cp := make([]byte, len(out))
-	copy(cp, out)
+	cp := make([]byte, len(res))
+	copy(cp, res)
 	return cp, true
 }
 
@@ -298,8 +310,13 @@ func (p *compressionPolicy) allowsContentType(contentType string) bool {
 // body incomplete); the client has already received valid compressed
 // bytes, only the cache write is skipped.
 type fillCompressor struct {
-	sc         *streamCompressor
-	buf        *bytes.Buffer
+	sc *streamCompressor
+	// buf is the store buffer receiving the drained compressed bytes.
+	buf *bytes.Buffer
+	// out is the encoder's scratch buffer (sc.out == out, kept here so
+	// the tee can return it to the pool without reaching through sc
+	// after releaseCompressor nils sc.out).
+	out        *bytes.Buffer
 	sinceFlush int
 	rawSeen    int64
 	skipStore  bool
@@ -327,7 +344,8 @@ func (fc *fillCompressor) writeChunk(w io.Writer, p []byte) error {
 }
 
 // drain copies whatever the encoder has emitted into sc.out to w and
-// buf, then resets sc.out.
+// buf, then resets sc.out. w may be a *bufio.Writer whose own buffer has
+// not been flushed yet; the bytes still reach the client in order.
 func (fc *fillCompressor) drain(w io.Writer) error {
 	out := fc.sc.out
 	if out.Len() == 0 {
@@ -337,7 +355,9 @@ func (fc *fillCompressor) drain(w io.Writer) error {
 	if _, err := w.Write(chunk); err != nil {
 		return err
 	}
-	fc.buf.Write(chunk)
+	if _, err := fc.buf.Write(chunk); err != nil {
+		return err
+	}
 	out.Reset()
 	return nil
 }
@@ -363,7 +383,7 @@ func (fc *fillCompressor) finish(w io.Writer) (int, error) {
 // encoder is released back to its pool either way.
 func (fc *fillCompressor) finalizeTeeFill(
 	w io.Writer,
-	resMap header.Map,
+	resMap *header.Map,
 	bodyComplete, cacheExceeded bool,
 	totalBytes int64,
 	minSize, maxSize int64,

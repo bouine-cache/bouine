@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -108,8 +110,8 @@ func TestCompressBytes_UnknownCoding(t *testing.T) {
 func TestAcquireReleaseCompressor_PoolReuse(t *testing.T) {
 	t.Parallel()
 	for _, coding := range []string{"gzip", "zstd", "br"} {
-		var buf bytes.Buffer
-		sc := acquireCompressor(coding, &buf)
+		var buf, store bytes.Buffer
+		sc := acquireCompressor(coding, &buf, &store)
 		require.NotNil(t, sc)
 		require.NoError(t, sc.write([]byte("hello ")))
 		require.NoError(t, sc.write([]byte("world")))
@@ -118,10 +120,11 @@ func TestAcquireReleaseCompressor_PoolReuse(t *testing.T) {
 		releaseCompressor(sc)
 		// Second acquisition must produce a clean compressor bound to a
 		// fresh buffer.
-		var buf2 bytes.Buffer
-		sc2 := acquireCompressor(coding, &buf2)
+		var buf2, store2 bytes.Buffer
+		sc2 := acquireCompressor(coding, &buf2, &store2)
 		require.NotNil(t, sc2)
 		require.Zero(t, buf2.Len(), "Reset must clear the output buffer")
+		require.Zero(t, store2.Len(), "Reset must clear the store buffer")
 		releaseCompressor(sc2)
 	}
 }
@@ -137,11 +140,10 @@ func TestFillCompressor_StreamingChunksMatchOneShot(t *testing.T) {
 
 			var store bytes.Buffer
 			var client bytes.Buffer
-			out := streamBufPool.Get().(*bytes.Buffer)
-			defer streamBufPool.Put(out)
-			sc := acquireCompressor(coding, out)
+			var out bytes.Buffer
+			sc := acquireCompressor(coding, &out, &store)
 			require.NotNil(t, sc)
-			fc := &fillCompressor{sc: sc, buf: &store}
+			fc := &fillCompressor{sc: sc, buf: &store, out: &out}
 			chunk := make([]byte, 32*1024)
 			for off := 0; off < len(body); off += len(chunk) {
 				end := off + len(chunk)
@@ -412,4 +414,121 @@ func TestFillCompression_EncodingsAllowList(t *testing.T) {
 	// compression for that fill.
 	require.Equal(t, "", respHeader(ctx, header.ContentEncoding))
 	require.Equal(t, body, respBody(ctx))
+}
+
+// runTeeCompress drives teeStreamToClientCompress directly with an active
+// fill compressor (the streaming fill path), mirroring runTee but with
+// fc != nil. Returns the handler, the flight verdict, and the key.
+func runTeeCompress(t *testing.T, w *bufio.Writer, body io.Reader, coding string) (*Handler, *inflightStream, api.Key) {
+	t.Helper()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   func(*fasthttp.RequestCtx) {},
+		FastClient: &testFastClient{handler: func(*fasthttp.RequestCtx) {}},
+		Store:      store,
+		Compression: CompressionSpec{
+			Enabled:      true,
+			ContentTypes: []string{"text/html"},
+		},
+	})
+	key := BuildKeyFromURL("http://example.com/tee-compress", nil)
+
+	rh := &fasthttp.ResponseHeader{}
+	rh.Set(header.CacheControl, "max-age=60")
+	rh.Set(header.ContentType, "text/html; charset=utf-8")
+	sf := &streamFetchResult{
+		StatusCode: 200,
+		Header:     fromFastHTTPHeader(rh),
+	}
+	inflight := newInflightStream()
+	buf := streamBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	ri := requestInfoFromCtx(testCtxWithHeader("GET", "http://example.com/tee-compress", header.AcceptEncoding, coding))
+	resMap := headerMap(header.CacheControl, "max-age=60", header.ContentType, "text/html; charset=utf-8")
+	var storeBuf, outBuf bytes.Buffer
+	sc := acquireCompressor(coding, &outBuf, &storeBuf)
+	require.NotNil(t, sc)
+	fc := &fillCompressor{sc: sc, buf: &storeBuf, out: &outBuf}
+	h.teeStreamToClientCompress(w, body, buf, sf, inflight, key, key, ri, resMap, nil, fc)
+	_ = w.Flush()
+	return h, inflight, key
+}
+
+// TestTeeStreamCompress_StoresCompressedVariant drives the STREAMING fill
+// path (fc != nil) end to end: the stored object must carry the compressed
+// bytes (not an empty body), Content-Encoding, and a matching
+// Content-Length, and a byte-handoff follower must receive the same
+// compressed bytes with the same headers.
+func TestTeeStreamCompress_StoresCompressedVariant(t *testing.T) {
+	t.Parallel()
+	body := compressibleBody(300 * 1024) // > compressFlushEvery: exercises sync-flush
+
+	var client bytes.Buffer
+	w := bufio.NewWriter(&client)
+	h, inflight, key := runTeeCompress(t, w, bytes.NewReader(body), "gzip")
+
+	require.NoError(t, inflight.res.Err, "clean-EOF compressed fill is shareable")
+	// Follower verdict pairs the compressed body with the stamped headers.
+	require.Equal(t, "gzip", inflight.res.Header.Get(header.ContentEncoding),
+		"published verdict must carry Content-Encoding")
+	require.Equal(t, client.Bytes(), inflight.res.Body,
+		"published body must equal what the leader streamed to its client")
+	require.Equal(t, body, decompressGzip(t, inflight.res.Body))
+
+	// Stored object: compressed body, CE header, corrected CL.
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.NotNil(t, obj, "compressed fill must be stored")
+	require.Equal(t, "gzip", obj.Header.Get(header.ContentEncoding))
+	require.Equal(t, strconv.Itoa(len(client.Bytes())), obj.Header.Get(header.ContentLength),
+		"stored Content-Length must equal the compressed size, not 0")
+	require.Equal(t, client.Bytes(), obj.Body, "stored body must be the compressed bytes")
+	require.Equal(t, body, decompressGzip(t, obj.Body))
+}
+
+// TestTeeStreamCompress_OverMaxSizeNotStored: a body over max_size streams
+// compressed to the client but is not stored (skipStore path).
+func TestTeeStreamCompress_OverMaxSizeNotStored(t *testing.T) {
+	t.Parallel()
+	body := compressibleBody(600 * 1024)
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:   func(*fasthttp.RequestCtx) {},
+		FastClient: &testFastClient{handler: func(*fasthttp.RequestCtx) {}},
+		Store:      store,
+		Compression: CompressionSpec{
+			Enabled:      true,
+			ContentTypes: []string{"text/html"},
+			MaxSize:      512 * 1024,
+		},
+	})
+	key := BuildKeyFromURL("http://example.com/tee-oversize", nil)
+	rh := &fasthttp.ResponseHeader{}
+	rh.Set(header.CacheControl, "max-age=60")
+	rh.Set(header.ContentType, "text/html")
+	sf := &streamFetchResult{StatusCode: 200, Header: fromFastHTTPHeader(rh)}
+	inflight := newInflightStream()
+	buf := streamBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	ri := requestInfoFromCtx(testCtxWithHeader("GET", "http://example.com/tee-oversize", header.AcceptEncoding, "gzip"))
+	resMap := headerMap(header.CacheControl, "max-age=60", header.ContentType, "text/html")
+	var storeBuf, outBuf bytes.Buffer
+	sc := acquireCompressor("gzip", &outBuf, &storeBuf)
+	require.NotNil(t, sc)
+	fc := &fillCompressor{sc: sc, buf: &storeBuf, out: &outBuf}
+	var client bytes.Buffer
+	w := bufio.NewWriter(&client)
+	h.teeStreamToClientCompress(w, bytes.NewReader(body), buf, sf, inflight, key, key, ri, resMap, nil, fc)
+	_ = w.Flush()
+
+	require.True(t, fc.skipStore, "over-max_size fill must skip the store")
+	require.ErrorIs(t, inflight.res.Err, ErrStreamUnshareable,
+		"skipStore fill publishes unshareable: followers' headers were never rewritten")
+	obj, _, err := h.store.Get(t.Context(), key)
+	require.NoError(t, err)
+	require.Nil(t, obj, "nothing may be stored for an over-max_size compressed fill")
+	require.Equal(t, body, decompressGzip(t, client.Bytes()),
+		"the filling client still receives valid compressed bytes")
 }

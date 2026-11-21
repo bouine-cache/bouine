@@ -1134,6 +1134,12 @@ func (h *Handler) streamMissTee(
 
 	finalStoreKey := storeKey
 	bodyStream := sf.resp.BodyStream()
+	// buf is the pooled tee buffer. When fill compression is active the
+	// store bytes live in the compressor's own buffer (fc.buf) instead —
+	// the compressed copy is the only buffered one, the raw body never
+	// sits next to it — so the tee is pointed at fc.buf and buf stays
+	// empty for the pool return. teeStreamToClientCompress receives buf
+	// and switches it to fc.buf on its fc != nil branch.
 	buf := streamBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 
@@ -1178,10 +1184,16 @@ func (h *Handler) maybeStartFillCompression(dst *fasthttp.ResponseHeader, sf *st
 	if bucket == "identity" || !p.allowsCoding(bucket) {
 		return nil
 	}
+	// The encoder writes into a small scratch buffer (out, pooled); the
+	// drained compressed bytes accumulate in the store buffer (storeBuf,
+	// also pooled). The two must be distinct: drain does
+	// storeBuf.Write(out.Bytes()) then out.Reset().
 	out := streamBufPool.Get().(*bytes.Buffer)
-	sc := acquireCompressor(bucket, out)
+	storeBuf := streamBufPool.Get().(*bytes.Buffer)
+	sc := acquireCompressor(bucket, out, storeBuf)
 	if sc == nil {
 		streamBufPool.Put(out)
+		streamBufPool.Put(storeBuf)
 		return nil
 	}
 	dst.SetCanonical(header.S2b(header.ContentEncoding), header.S2b(bucket))
@@ -1189,7 +1201,7 @@ func (h *Handler) maybeStartFillCompression(dst *fasthttp.ResponseHeader, sf *st
 	// body now streams through SetBodyStreamWriter, whose compressed
 	// length is unknown up front.
 	dst.SetContentLength(-1)
-	return &fillCompressor{sc: sc, buf: out}
+	return &fillCompressor{sc: sc, buf: storeBuf, out: out}
 }
 
 // teeStreamToClient reads from the origin body stream, writes to both
@@ -1240,6 +1252,16 @@ func (h *Handler) teeStreamToClientCompress(
 	ri RequestInfo, resMap header.Map, fillTTL *time.Duration,
 	fc *fillCompressor,
 ) {
+	// poolBuf is the pooled tee buffer the caller acquired; buf is the
+	// working store buffer. When fill compression is active the store
+	// bytes are the compressor's output accumulated in fc.buf — the
+	// compressed copy is the only buffered one, the raw body never sits
+	// next to it — so buf aliases fc.buf and poolBuf stays empty and is
+	// the one returned to the pool at the end.
+	poolBuf := buf
+	if fc != nil {
+		buf = fc.buf
+	}
 	var totalBytes int64
 	cacheExceeded := false
 	// bodyComplete reports whether the origin body was read to a clean
@@ -1285,7 +1307,14 @@ func (h *Handler) teeStreamToClientCompress(
 					cacheExceeded = true
 				}
 				if !cacheExceeded {
+					// The store buffer (buf == fc.buf here) holds
+					// COMPRESSED bytes, so the cap accounting tracks
+					// the actual buffer growth, not the raw chunk size.
 					cacheExceeded = h.shouldStopBuffering(buf, 0, totalBytes, bufCap)
+					if !cacheExceeded && buf.Len() > lastReported {
+						h.streamingBufferBytes.Add(int64(buf.Len() - lastReported))
+						lastReported = buf.Len()
+					}
 				}
 			} else {
 				_, wErr := w.Write(chunk[:n])
@@ -1322,7 +1351,13 @@ func (h *Handler) teeStreamToClientCompress(
 	// clean body; when skipped, the client has already received valid
 	// compressed bytes but nothing is stored.
 	if fc != nil {
-		fc.finalizeTeeFill(w, resMap, bodyComplete, cacheExceeded, totalBytes, h.compression.minSize, h.compression.maxSize)
+		fc.finalizeTeeFill(w, &resMap, bodyComplete, cacheExceeded, totalBytes, h.compression.minSize, h.compression.maxSize)
+		// Account the compressed tail drained by finish() into the
+		// global streaming-bytes counter (buf already aliases fc.buf).
+		if buf.Len() > lastReported {
+			h.streamingBufferBytes.Add(int64(buf.Len() - lastReported))
+			lastReported = buf.Len()
+		}
 	}
 
 	// Copy the tee buffer into an exact-size slice. Stealing the buffer's
@@ -1341,9 +1376,15 @@ func (h *Handler) teeStreamToClientCompress(
 	// into that pooled response — raced with the pool release. Convert
 	// to an owned header.Map before publishing so followers never touch
 	// the pooled object. The conversion cost is miss-path only.
+	//
+	// When compression ran, finalizeTeeFill already stamped
+	// Content-Encoding (and dropped Content-Length) on resMap, so the
+	// published verdict pairs the compressed body with the matching
+	// headers — a byte-handoff follower then serves exactly what the
+	// leader streamed.
 	res := fetchResult{
 		StatusCode: sf.StatusCode,
-		Header:     fromHeaderMap(sf.Header.ToMap()),
+		Header:     fromHeaderMap(resMap),
 		Body:       bodyCopy,
 		Delay:      sf.Delay,
 		bodyOwned:  true,
@@ -1375,9 +1416,23 @@ func (h *Handler) teeStreamToClientCompress(
 
 	h.settleTeeFill(inflight, res, storeKey, primaryKey, ri, resMap, fillTTL, bodyComplete, cacheExceeded, totalBytes)
 
-	if buf.Cap() <= maxStreamBufRetain {
-		buf.Reset()
-		streamBufPool.Put(buf)
+	// Return the pooled tee buffer. When compression ran, buf aliases
+	// fc.buf (the store buffer) — that one and the encoder's scratch
+	// buffer (fc.out) go back to the pool here; poolBuf is the pooled tee
+	// buffer the caller acquired, which stayed empty on the compressed
+	// path and is the one returned when fc == nil.
+	if fc != nil {
+		if fc.buf != nil && fc.buf.Cap() <= maxStreamBufRetain {
+			fc.buf.Reset()
+			streamBufPool.Put(fc.buf)
+		}
+		if fc.out != nil && fc.out.Cap() <= maxStreamBufRetain {
+			fc.out.Reset()
+			streamBufPool.Put(fc.out)
+		}
+	} else if poolBuf != nil && poolBuf.Cap() <= maxStreamBufRetain {
+		poolBuf.Reset()
+		streamBufPool.Put(poolBuf)
 	}
 }
 

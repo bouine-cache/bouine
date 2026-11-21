@@ -26,6 +26,14 @@ the curated, human-readable summary.
   Presence is tracked through YAML decode (`RouteCache.UnmarshalYAML`),
   and strict known-fields checking on `routes[*].cache` is preserved.
 
+### Changed
+
+- The Info-level "stayin-alive: serving stale" logs are now sampled per
+  route (first event, then 1-in-1024 via a single atomic counter, zero
+  allocations on the serve path, #935). Stale-serve volume remains fully
+  observable through `X-Cache: STALE` access logs and the
+  `cache_result="STALE"` metric.
+
 ### Fixed
 
 - Background refreshes (`refresh_before_expiry`) now carry the triggering

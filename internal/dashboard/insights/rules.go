@@ -18,6 +18,8 @@ func init() {
 		ruleCacheWarmNearFull,
 		ruleCacheStayinAliveOff,
 		ruleCacheStayinAliveNoHealthSignal,
+		ruleCacheGraceHoldsStaleEjection,
+		ruleCacheGraceHoldsNoEjection,
 		ruleCacheVaryExplosion,
 		ruleAnomalyBypassFlood,
 		ruleUpstreamUnhealthyTarget,
@@ -349,6 +351,94 @@ func ruleCacheStayinAliveNoHealthSignal(data InsightData) *Insight {
 		Routes:   truncateRoutes(triggered),
 		Action:   "/dashboard/config",
 	}
+}
+
+// ruleCacheGraceHoldsStaleEjection fires when the TTL reaper has held
+// expired stayin_alive (KeepGrace) entries across passes (grace-hold
+// delta > 0) while every target of every stayin_alive route's pool
+// reports healthy (issue #937): the holds mean a stale ejection is
+// keeping the gate closed — restore the target (active probe or
+// MarkHealthy) and the next reaper pass collects the withheld entries.
+func ruleCacheGraceHoldsStaleEjection(data InsightData) *Insight {
+	holds := data.StoreStats.ReaperGraceHolds - data.PrevStoreStats.ReaperGraceHolds
+	if holds <= 0 || data.Config == nil {
+		return nil
+	}
+	stayinPools := stayinAlivePools(data.Config)
+	if len(stayinPools) == 0 {
+		return nil
+	}
+	// All targets of all stayin_alive pools healthy?
+	allHealthy := true
+	for pool := range stayinPools {
+		for _, t := range data.PoolHealth[pool] {
+			if !t.Healthy {
+				allHealthy = false
+			}
+		}
+	}
+	if !allHealthy {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-grace-holds-stale-ejection",
+		Severity: SeverityHigh,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Reaper held %d expired stayin_alive entries while all pools report healthy", holds),
+		Detail:   "Grace holds with no ejected target mean a stale ejection is pinning retention — restore the target (active probe or MarkHealthy) and the next reaper pass collects the withheld entries (runbook 54)",
+		Evidence: fmt.Sprintf("reaper_grace_holds_delta: %d, all stayin_alive pools healthy", holds),
+		Action:   "/dashboard/upstream",
+	}
+}
+
+// ruleCacheGraceHoldsNoEjection fires when the reaper is holding expired
+// stayin_alive entries but no target of the stayin_alive pools is
+// currently ejected (issue #937): retention is engaging without an
+// outage signal, which points at pool health configuration (missing
+// passive consecutive_5xx / active probe, see #933) or an eject_for
+// restore window that already elapsed while the origin is still down.
+func ruleCacheGraceHoldsNoEjection(data InsightData) *Insight {
+	holds := data.StoreStats.ReaperGraceHolds - data.PrevStoreStats.ReaperGraceHolds
+	if holds <= 0 || data.Config == nil {
+		return nil
+	}
+	stayinPools := stayinAlivePools(data.Config)
+	if len(stayinPools) == 0 {
+		return nil
+	}
+	anyEjected := false
+	for pool := range stayinPools {
+		for _, t := range data.PoolHealth[pool] {
+			if !t.Healthy {
+				anyEjected = true
+			}
+		}
+	}
+	if anyEjected {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-grace-holds-no-ejection",
+		Severity: SeverityMed,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Reaper held %d expired stayin_alive entries with no ejected target", holds),
+		Detail:   "Grace retention is holding entries while no stayin_alive pool target is ejected — check pool health config (health.passive.consecutive_5xx, health.active) and eject_for restore windows (runbook 54, #933)",
+		Evidence: fmt.Sprintf("reaper_grace_holds_delta: %d, ejected targets: none", holds),
+		Action:   "/dashboard/config",
+	}
+}
+
+// stayinAlivePools returns the set of pool names referenced by at least
+// one cache-enabled stayin_alive route (issue #937).
+func stayinAlivePools(cfg *config.Config) map[string]struct{} {
+	out := map[string]struct{}{}
+	for i := range cfg.Routes {
+		r := &cfg.Routes[i]
+		if r.Cache.StayinAlive && isCacheEnabled(r) && r.Pool != "" && r.Static.Root == "" {
+			out[r.Pool] = struct{}{}
+		}
+	}
+	return out
 }
 
 func ruleCacheVaryExplosion(data InsightData) *Insight {

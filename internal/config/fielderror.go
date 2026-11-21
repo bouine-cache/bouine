@@ -25,13 +25,21 @@ func (e *FieldError) Error() string {
 // one Parse reports every invalid field at once instead of forcing
 // operators through fix-one-restart loops. Zero value is ready to use.
 type errCollector struct {
-	errs []*FieldError
+	errs     []*FieldError
+	warnings []*FieldError
 }
 
 // addf records a failure for the field at path, formatting the message
 // like fmt.Errorf.
 func (ec *errCollector) addf(path, format string, args ...any) {
 	ec.errs = append(ec.errs, &FieldError{Path: path, Message: fmt.Sprintf(format, args...)})
+}
+
+// warnf records a non-fatal advisory for the field at path (config is
+// valid but almost certainly not what the operator intended). Warnings
+// surface via Config.Warnings and never fail validation.
+func (ec *errCollector) warnf(path, format string, args ...any) {
+	ec.warnings = append(ec.warnings, &FieldError{Path: path, Message: fmt.Sprintf(format, args...)})
 }
 
 // err returns nil, the single FieldError, or errors.Join of all
@@ -49,6 +57,15 @@ func (ec *errCollector) err() error {
 		}
 		return errors.Join(errs...)
 	}
+}
+
+// warningList returns the collected advisory warnings, or nil when
+// there are none.
+func (ec *errCollector) warningList() []*FieldError {
+	if len(ec.warnings) == 0 {
+		return nil
+	}
+	return ec.warnings
 }
 
 // unwrapAll flattens a (possibly joined) error tree into its leaves.

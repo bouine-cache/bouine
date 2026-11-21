@@ -10,6 +10,17 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- Config validation now emits non-fatal warnings (`Config.Warnings`,
+  surfaced by `bouine serve`, `bouine config validate`, and config reload
+  logs): a `stayin_alive` route whose origin pool has neither
+  `health.passive.consecutive_5xx` nor an active health check gets a
+  warning, because without an ejection signal the ADR-0051 reaper grace
+  gate can never engage and stale serving during an outage is capped at
+  TTL+SWR+SIE instead of indefinitely. The dashboard raises the matching
+  `cache-stayinalive-no-health-signal` insight (#933).
+
 ### Fixed
 
 - Background refreshes (`refresh_before_expiry`) now carry the triggering

@@ -41,6 +41,9 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			for _, w := range cfg.Warnings {
+				logger.Warn("config advisory", "path", w.Path, "message", w.Message)
+			}
 
 			return newEngine(cfg, configPath, logger).run(ctx)
 		},

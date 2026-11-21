@@ -10,6 +10,14 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+
+- `route_defaults.cache.stayin_alive` is now a real mergeable default
+  (#934): routes that do not set `stayin_alive` themselves inherit the
+  default; a route key that is present (true or false) always wins.
+  Presence is tracked through YAML decode (`RouteCache.UnmarshalYAML`),
+  and strict known-fields checking on `routes[*].cache` is preserved.
+
 ### Fixed
 
 - Background refreshes (`refresh_before_expiry`) now carry the triggering

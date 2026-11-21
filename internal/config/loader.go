@@ -788,6 +788,7 @@ func (c *Config) mergeRouteDefaults() {
 	c.mergeBypassOnUserAgentDefaults()
 	c.mergeDownstreamFreshnessDefaults()
 	c.mergeCookieValuesDefaults()
+	c.mergeStayinAliveDefaults()
 }
 
 // mergeForwardedDefaults folds route_defaults.request.forwarded into
@@ -903,6 +904,54 @@ func (c *Config) mergeBypassOnUserAgentDefaults() {
 func bypassOnUserAgentValid(patterns []string) bool {
 	var ec errCollector
 	return validateBypassOnUserAgent(&ec, "", patterns)
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for RouteCache: it decodes
+// through a re-encoder so strict KnownFields checking still applies
+// (value.Decode into a shadow type bypasses the decoder's known-fields
+// gate), and records whether stayin_alive was explicitly present, so
+// the route_defaults merge can tell "unset" from "explicitly false"
+// for that knob (issue #934).
+func (rc *RouteCache) UnmarshalYAML(value *yaml.Node) error {
+	var buf strings.Builder
+	if err := yaml.NewEncoder(&buf).Encode(value); err != nil {
+		return err
+	}
+	type routeCacheFields RouteCache
+	var raw routeCacheFields
+	dec := yaml.NewDecoder(strings.NewReader(buf.String()))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	*rc = RouteCache(raw)
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "stayin_alive" {
+				rc.stayinAliveSet = true
+			}
+		}
+	}
+	return nil
+}
+
+// mergeStayinAliveDefaults folds route_defaults.cache.stayin_alive into
+// every route that did not set the key itself (issue #934): a default of
+// true turns emergency stale mode on for unset routes, while a route
+// that wrote `stayin_alive: false` (tracked by stayinAliveSet) keeps its
+// explicit opt-out. Idempotent: a route that inherited the default is
+// marked set on the first pass so a second Validate does not re-merge.
+func (c *Config) mergeStayinAliveDefaults() {
+	if !c.RouteDefaults.Cache.StayinAlive {
+		return
+	}
+	for i := range c.Routes {
+		rc := &c.Routes[i].Cache
+		if !rc.stayinAliveSet {
+			rc.StayinAlive = true
+			rc.stayinAliveSet = true
+		}
+	}
 }
 
 // mergeCookieValuesDefaults folds route_defaults.cache.key.cookie_values

@@ -35,6 +35,9 @@ func (e *engine) reloadFn(rs *runState, reloads *prometheus.CounterVec) func(con
 			reloads.WithLabelValues("rejected").Inc()
 			return admin.ConfigReloadResult{Path: path}, fmt.Errorf("reload %s: %w", path, err)
 		}
+		for _, w := range newCfg.Warnings {
+			e.logger.Warn("config advisory after reload", "path", w.Path, "message", w.Message)
+		}
 
 		res := e.applyReload(rs, newCfg)
 		res.Path = path

@@ -65,6 +65,11 @@ type Config struct {
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
+
+	// Warnings holds non-fatal advisories produced by Validate (config
+	// is valid but likely not what the operator intended). Not serialized:
+	// recomputed on every Load/Parse. Populated only by Validate.
+	Warnings []*FieldError `yaml:"-" json:"-"`
 }
 
 // MetricsConfig configures data-plane metric axes that need

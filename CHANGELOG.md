@@ -32,6 +32,12 @@ the curated, human-readable summary.
   recovers, and is reaped on schedule when the pool has no health
   signal (#936). `HotStore.ReapForTest` drives a synchronous reaper
   pass for this.
+- Two dashboard insights turn the runbook-54 grace-hold procedures into
+  automatic signals (#937): `cache-grace-holds-stale-ejection` (grace
+  holds while every stayin_alive pool target is healthy — a stale
+  ejection) and `cache-grace-holds-no-ejection` (grace holds with no
+  ejected target — missing health signal or elapsed `eject_for` while
+  the origin is still down).
 
 ### Changed
 

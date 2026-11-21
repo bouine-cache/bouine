@@ -58,6 +58,11 @@ the curated, human-readable summary.
   compressed in streaming chunks; the cache-hit path is unchanged
   (allocs/op == 0, existing gate budgets untouched). Never compresses
   client-state, authorized, SSE, or disallowed content-type responses.
+  Cacheable fills on compression-enabled routes are stamped
+  `Vary: Accept-Encoding` (even when the origin sends no Vary), so each
+  AE bucket gets its own variant and identity clients never receive
+  encoded bytes. `compression.enabled` + `key.verbatim_encoding: true`
+  is rejected by validation.
 - `cache.enabled: false` is now honored on proxied (pool) routes
   (ADR-0074): the route becomes a pure reverse proxy — every safe-method
   request takes the BYPASS path decided once at boot (no store lookup,

@@ -383,7 +383,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 // concurrently buffering for cache storage. Handles singleflight: the
 // leader streams, followers wait for the buffered result.
 //
-//nolint:gocyclo // 16: SSE/unshareable + upstream-fallback cacheability branches mirror the FastClient paths; splitting them would hide the symmetry
+//nolint:gocyclo,funlen // 16 branches / 51 statements: SSE/unshareable + upstream-fallback cacheability branches mirror the FastClient paths; splitting them would hide the symmetry
 func (h *Handler) streamMiss(
 	ctx *fasthttp.RequestCtx,
 	primaryKey api.Key,
@@ -467,6 +467,18 @@ func (h *Handler) streamMiss(
 	} else {
 		resMap = sf.Header.ToMap()
 		cacheable = h.isResponseCacheable(sf, ri, resMap)
+	}
+
+	// Fill-path edge compression (ADR-0075) implies the stored object
+	// varies by Accept-Encoding — bouine produces one variant per AE
+	// bucket even when the origin never sent Vary. Stamp the Vary on the
+	// store map and the client response HERE, before streamMissTee /
+	// streamMissBuffered compute the variant key, so identity-bucket
+	// clients resolve to their own variant instead of the compressed one
+	// (RFC 9111 §4.1; nginx gzip_vary parity). Only on cacheable fills:
+	// an uncacheable response is never keyed at all.
+	if h.compression != nil && cacheable {
+		stampAEDependentVary(&resMap, dst)
 	}
 
 	// Downstream freshness sync (ADR-0063): the fill cap must be

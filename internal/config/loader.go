@@ -1256,6 +1256,12 @@ func validateRouteCache(ec *errCollector, path string, rc *RouteCache) {
 	validateCookieKeyingConflicts(ec, path, *rc)
 	validateRefreshConfig(ec, path, *rc)
 	validateCompression(ec, path+".compression", rc.Compression)
+	// compression implies Vary: Accept-Encoding via the AE bucket (ADR-0075);
+	// verbatim_encoding keys the raw AE spelling instead, which would
+	// re-fragment the variant space the compression block exists to share.
+	if rc.Compression.Enabled && rc.Key.VerbatimEncoding {
+		ec.addf(path+".key.verbatim_encoding", "conflicts with compression.enabled: compression buckets Accept-Encoding into the variant key, verbatim_encoding keys the raw value — pick one")
+	}
 }
 
 // maxCompressionSize hard-caps cache.compression.max_size at 1 MiB:

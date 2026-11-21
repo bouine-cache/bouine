@@ -3825,6 +3825,18 @@ func (h *Handler) writeAndMaybeStore(
 		fillTTL = &ttl
 	}
 
+	// Fill-path edge compression (ADR-0075) implies the response now
+	// varies by Accept-Encoding — bouine produces a different stored
+	// variant per AE bucket even when the origin never sent Vary.
+	// Stamp the Vary BEFORE effectiveVary (below) reads it and BEFORE
+	// the client response is finalized, so the store key is the variant
+	// key and downstream caches vary too (RFC 9111 §4.1, §7.1.4;
+	// nginx gzip_vary parity). Identity-bucket fills then get their own
+	// variant instead of the compressed one.
+	if h.compression != nil && parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
+		stampAEDependentVary(&resMap, dst)
+	}
+
 	if parsed.isCacheableWithDefault(h.fp.neg, h.fp.defaultTTL) {
 		if h.skipStoreReason(resMap, len(res.Body)) != "" {
 			return

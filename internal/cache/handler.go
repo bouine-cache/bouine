@@ -449,6 +449,9 @@ type Handler struct {
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
 	stayinAlive          bool
+	// stayinLog samples the Info-level "stayin-alive: serving stale"
+	// logs (issue #935): one atomic counter, first event plus 1-in-N.
+	stayinLog stayinLogSampler
 	// syncCDC mirrors routes.*.cache.downstream_freshness (ADR-0063):
 	// when true, client-facing serves carry a synthesized
 	// CDN-Cache-Control (RFC 9213) capping downstream freshness at
@@ -3235,17 +3238,21 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 			// refill: schedule the bounded background re-warm.
 			h.triggerShedRefill(ri, lookupKey)
 		} else {
-			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
-				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
-				"error", res.Err, "key", lookupKey)
+			if h.stayinLog.shouldLog() {
+				h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
+					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+					"error", res.Err, "key", lookupKey)
+			}
 		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
 	if res.StatusCode >= 500 {
-		h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
-			"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
-			"status", res.StatusCode, "key", lookupKey)
+		if h.stayinLog.shouldLog() {
+			h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
+				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+				"status", res.StatusCode, "key", lookupKey)
+		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
@@ -3316,14 +3323,16 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// errors regardless of an explicit SIE window (stale-close,
 	// stale-warning-stored), matching Trafficserver and squid.
 	if h.stayinAlive && (res.Err != nil || res.StatusCode >= 500) {
-		if res.Err != nil {
-			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
-				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
-				"error", res.Err, "key", stale.Key)
-		} else {
-			h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
-				"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
-				"status", res.StatusCode, "key", stale.Key)
+		if h.stayinLog.shouldLog() {
+			if res.Err != nil {
+				h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
+					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+					"error", res.Err, "key", stale.Key)
+			} else {
+				h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
+					"upstream_pool", h.logUpstreamPool(), "route", h.routeName,
+					"status", res.StatusCode, "key", stale.Key)
+			}
 		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return

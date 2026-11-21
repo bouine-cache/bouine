@@ -20,6 +20,11 @@ the curated, human-readable summary.
   gate can never engage and stale serving during an outage is capped at
   TTL+SWR+SIE instead of indefinitely. The dashboard raises the matching
   `cache-stayinalive-no-health-signal` insight (#933).
+- `route_defaults.cache.stayin_alive` is now a real mergeable default
+  (#934): routes that do not set `stayin_alive` themselves inherit the
+  default; a route key that is present (true or false) always wins.
+  Presence is tracked through YAML decode (`RouteCache.UnmarshalYAML`),
+  and strict known-fields checking on `routes[*].cache` is preserved.
 
 ### Fixed
 

@@ -752,10 +752,9 @@ func (p *Pool) fastHandler(conc5xx int) fasthttp.RequestHandler {
 		if p.preserveHost {
 			req.UseHostHeader = true
 		}
-		//nolint:staticcheck // deprecated but functional
-		ctx.Request.Header.VisitAll(func(k, v []byte) {
+		for k, v := range ctx.Request.Header.All() {
 			req.Header.AddBytesKV(k, v)
-		})
+		}
 		if len(ctx.PostBody()) > 0 {
 			req.SetBodyRaw(ctx.PostBody())
 		}
@@ -798,10 +797,9 @@ func (p *Pool) fastHandler(conc5xx int) fasthttp.RequestHandler {
 
 		// Copy response headers and body to the client.
 		dst := &ctx.Response.Header
-		//nolint:staticcheck // VisitAll deprecated but functional
-		resp.Header.VisitAll(func(k, v []byte) {
+		for k, v := range resp.Header.All() {
 			dst.AddBytesKV(k, v)
-		})
+		}
 		ctx.SetStatusCode(statusCode)
 		if string(ctx.Method()) != "HEAD" {
 			_, _ = ctx.Write(resp.Body())

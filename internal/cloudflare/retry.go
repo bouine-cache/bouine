@@ -23,6 +23,9 @@ const (
 	// the propagator goroutine for ~31 years. The cap prevents this DoS
 	// while still honouring legitimate rate-limit backoff.
 	maxRetryAfter = 60 * time.Second
+	// float53 is 2^53: masking a uint64 to 53 bits and dividing yields a
+	// uniform float in [0, 1) without mnd (magic-number) noise.
+	float53 = 1 << 53
 )
 
 // httpTimeFormat is the HTTP-date format used in Retry-After headers,
@@ -111,8 +114,7 @@ func cryptoFloat64() float64 {
 	if _, err := rand.Read(b[:]); err != nil {
 		return 0.5
 	}
-	//nolint:mnd
-	return float64(binary.LittleEndian.Uint64(b[:])&((1<<53)-1)) / (1 << 53)
+	return float64(binary.LittleEndian.Uint64(b[:])&(float53-1)) / float53
 }
 
 // parseRetryAfterValue parses a Retry-After header value (either

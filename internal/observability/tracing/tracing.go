@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel"
@@ -27,6 +28,9 @@ import (
 )
 
 const tracerName = "bouine"
+
+// shutdownTimeout bounds the tracer provider flush on process exit.
+const shutdownTimeout = 5 * time.Second
 
 // Span re-exports otel's trace.Span so L3 code can hold and end spans
 // without importing go.opentelemetry.io directly (depguard).
@@ -282,9 +286,14 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 		propagation.Baggage{},
 	))
 
-	return func() { //nolint:contextcheck
-		_ = tp.Shutdown(context.Background())
-	}, nil
+	// Shutdown flushes the batcher on process exit, past the lifetime of the
+	// init ctx; use a fresh context with an explicit deadline.
+	shutdown := func() { //nolint:contextcheck // daemon-lifetime shutdown, init ctx must not be captured
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		_ = tp.Shutdown(shutdownCtx)
+	}
+	return shutdown, nil
 }
 
 // TracingConfig holds the OTel export configuration loaded from YAML.

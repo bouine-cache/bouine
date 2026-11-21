@@ -1056,7 +1056,7 @@ func (r *ring) digest() api.RingDigest {
 	for _, n := range r.nodes {
 		b := [8]byte{
 			byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32), //nolint:gosec // byte truncation intentional for hash input
-			byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n), //nolint:gosec
+			byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n), //nolint:gosec // byte truncation intentional for hash input
 		}
 		_, _ = h.Write(b[:])
 	}

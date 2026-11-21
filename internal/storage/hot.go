@@ -813,6 +813,12 @@ func (h *HotStore) reapExpired(now time.Time) {
 	}
 }
 
+// ReapForTest drives one reaper pass synchronously. It exists so wiring
+// tests (handler + store + pool health gate, issue #936) can exercise the
+// grace gate without waiting out the 30 s reaper interval; production
+// code uses the reaperLoop ticker only.
+func (h *HotStore) ReapForTest(now time.Time) { h.reapExpired(now) }
+
 func (h *HotStore) reapShard(idx int, now time.Time) {
 	s := &h.shards[idx]
 	var logs []evictionLog

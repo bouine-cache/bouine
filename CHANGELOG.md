@@ -25,6 +25,13 @@ the curated, human-readable summary.
   default; a route key that is present (true or false) always wins.
   Presence is tracked through YAML decode (`RouteCache.UnmarshalYAML`),
   and strict known-fields checking on `routes[*].cache` is preserved.
+- End-to-end test wiring the stayin_alive layers together (handler +
+  hot store grace gate + real origin pool passive health): an entry
+  aged past `TTL+SWR+SIE` survives the reaper while the pool has no
+  healthy target and still serves stale, is collected once the pool
+  recovers, and is reaped on schedule when the pool has no health
+  signal (#936). `HotStore.ReapForTest` drives a synchronous reaper
+  pass for this.
 
 ### Changed
 

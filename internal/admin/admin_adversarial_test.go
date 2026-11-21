@@ -531,3 +531,36 @@ func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	require.Equal(t, fasthttp.StatusBadRequest, code, "body: %s", respBody)
 	require.Equal(t, int64(0), purgeCalls.Load(), "no entries must be purged when the batch contains a null")
 }
+
+func TestRefresh_SurrogateKey_Adversarial(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:              "secret",
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn:          func(_ api.Key) error { return nil },
+		RefreshSurrogateFn: func(string) (int, error) { return 0, nil },
+	})
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"refresh/surrogate_truncated", `{"surrogate_key":"abc`},
+		{"refresh/surrogate_both", `{"url":"https://a.com/","surrogate_key":"x"}`},
+		{"refresh/surrogate_regex_like", `{"surrogate_key":"^/api/.*$"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, _ := postWithToken(t, s, "/v1/refresh", tc.body)
+			// truncated JSON and both-fields are 400; regex-like tokens are
+			// accepted as opaque literals only if they pass token rules
+			// (no whitespace/comma) — "^/api/.*$" contains none, so it is a
+			// valid opaque token by design (exact match only).
+			if tc.name == "refresh/surrogate_regex_like" {
+				require.Contains(t, []int{fasthttp.StatusOK, fasthttp.StatusBadRequest}, code)
+			} else {
+				require.Equal(t, fasthttp.StatusBadRequest, code)
+			}
+		})
+	}
+}

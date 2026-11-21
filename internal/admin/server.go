@@ -81,9 +81,18 @@ type Config struct {
 	PeerKeysFindHandler fasthttp.RequestHandler
 	DrainFn             func()
 	RefreshFn           func(key api.Key) error
-	ConditionsFn        func() []Condition
-	PeerBanHandler      fasthttp.RequestHandler
-	PeerRefreshHandler  fasthttp.RequestHandler
+	// RefreshSurrogateFn soft-purges every local object carrying the
+	// given surrogate key and returns how many keys were refreshed.
+	// Serves POST /v1/refresh with {"surrogate_key": ...}. nil leaves
+	// the surrogate form of the route answering 404, same as an unwired
+	// url-mode RefreshFn.
+	RefreshSurrogateFn func(surrogateKey string) (int, error)
+	ConditionsFn       func() []Condition
+	PeerBanHandler     fasthttp.RequestHandler
+	PeerRefreshHandler fasthttp.RequestHandler
+	// PeerRefreshSurrogateHandler serves POST /v1/peer/refresh/surrogate:
+	// the cluster fan-out of a surrogate-key refresh. nil unmounts it.
+	PeerRefreshSurrogateHandler fasthttp.RequestHandler
 	// PeerPurgeBatchHandler serves POST /v1/peer/purge/batch (ADR-0044).
 	PeerPurgeBatchHandler fasthttp.RequestHandler
 	// PeerRefreshBatchHandler serves POST /v1/peer/refresh/batch (ADR-0044).
@@ -102,12 +111,15 @@ type Config struct {
 	CFStatusFn            func() CloudflareStatus
 	DashboardHandler      fasthttp.RequestHandler
 	OnRefreshed           func(ctx context.Context, url string)
-	OnBanned              func(ctx context.Context, expr api.BanExpr)
-	PeerFetchHandler      fasthttp.RequestHandler
-	CFPropagateFn         func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler    fasthttp.RequestHandler
-	OnPurged              func(ctx context.Context, url string)
-	FaviconHandler        fasthttp.RequestHandler
+	// OnRefreshSurrogate is the Cloudflare-propagation hook for a
+	// surrogate-key refresh (PurgeByTags). nil disables it.
+	OnRefreshSurrogate func(ctx context.Context, surrogateKey string)
+	OnBanned           func(ctx context.Context, expr api.BanExpr)
+	PeerFetchHandler   fasthttp.RequestHandler
+	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler fasthttp.RequestHandler
+	OnPurged           func(ctx context.Context, url string)
+	FaviconHandler     fasthttp.RequestHandler
 	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
 	// the ops history shown on the dashboard invalidation page. nil
 	// disables history recording. Set to OpsLogRing.Record by the engine.
@@ -460,6 +472,10 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 		return servePeer(ctx, peerBan)
 	case "/v1/peer/refresh":
 		return servePeer(ctx, peerRefresh)
+	case "/v1/peer/refresh/surrogate":
+		// Lives on Config directly, following the batch-route precedent:
+		// the positional buildPeerHandlers returns predate it.
+		return servePeer(ctx, s.cfg.PeerRefreshSurrogateHandler)
 	case "/v1/peer/refresh/batch":
 		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/fetch":
@@ -804,15 +820,49 @@ func (s *Server) ban(ctx *fasthttp.RequestCtx) {
 	writeJSON(ctx, fasthttp.StatusOK, map[string]any{"status": "banned", "count": count})
 }
 
+// maxSurrogateKeyLen caps an admin-supplied surrogate key. Tokens come
+// from Surrogate-Key/Cache-Tag header parsing, which is bounded by the
+// 8 KiB per-header limit, but a forged admin request must not be able
+// to send an unbounded string that every peer then re-scans stores
+// against; 256 bytes matches realistic tag cardinality and keeps the
+// gossip frame far below the UDP budget.
+const maxSurrogateKeyLen = 256
+
+// validSurrogateKey reports whether sk is a well-formed opaque surrogate
+// token: non-empty, length-capped, and free of whitespace, commas, and
+// control bytes. Surrogate keys are exact match tokens, never patterns
+// (same rule as BanExpr.SurrogateKey, internal/storage/bans.go).
+func validSurrogateKey(sk string) bool {
+	if sk == "" || len(sk) > maxSurrogateKeyLen {
+		return false
+	}
+	for i := 0; i < len(sk); i++ {
+		c := sk[i]
+		if c <= ' ' || c == ',' || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) refresh(ctx *fasthttp.RequestCtx) {
 	var req struct {
-		URL string `json:"url"`
+		URL          string `json:"url"`
+		SurrogateKey string `json:"surrogate_key"`
 	}
 	if !decodeJSON(ctx, &req) {
 		return
 	}
+	if req.URL != "" && req.SurrogateKey != "" {
+		ctx.Error("bad request: url and surrogate_key are mutually exclusive", fasthttp.StatusBadRequest)
+		return
+	}
+	if req.SurrogateKey != "" {
+		s.refreshSurrogate(ctx, req.SurrogateKey)
+		return
+	}
 	if req.URL == "" {
-		ctx.Error("bad request: url field is required", fasthttp.StatusBadRequest)
+		ctx.Error("bad request: url or surrogate_key field is required", fasthttp.StatusBadRequest)
 		return
 	}
 	key := cache.BuildKeyFromURL(req.URL, nil)
@@ -826,6 +876,36 @@ func (s *Server) refresh(ctx *fasthttp.RequestCtx) {
 		s.cfg.OnRefreshed(context.Background(), req.URL)
 	}
 	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// refreshSurrogate handles POST /v1/refresh {"surrogate_key": ...}: it
+// soft-purges every local object carrying the tag. The count in the
+// response is local only; each peer reports its own count when the
+// event fans out.
+func (s *Server) refreshSurrogate(ctx *fasthttp.RequestCtx, sk string) {
+	if !validSurrogateKey(sk) {
+		ctx.Error("bad request: invalid surrogate_key (max 256 bytes, no whitespace/commas)", fasthttp.StatusBadRequest)
+		return
+	}
+	if s.cfg.RefreshSurrogateFn == nil {
+		ctx.Error("not found", fasthttp.StatusNotFound)
+		return
+	}
+	count, err := s.cfg.RefreshSurrogateFn(sk)
+	if err != nil {
+		s.recordOp("refresh", "surrogate:"+sk, err.Error())
+		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	res := "ok"
+	if count > 0 {
+		res = fmt.Sprintf("ok, %d refreshed", count)
+	}
+	s.recordOp("refresh", "surrogate:"+sk, res)
+	if s.cfg.OnRefreshSurrogate != nil {
+		s.cfg.OnRefreshSurrogate(context.Background(), sk)
+	}
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{"status": "refreshed", "count": count})
 }
 
 // recordOp appends an invalidation outcome to the ops history shown on
@@ -926,7 +1006,8 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/metrics": true, "/version": true, "/v1/cluster/peers": true,
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
 		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
-		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
+		"/v1/peer/refresh/batch": true, "/v1/peer/refresh/surrogate": true,
+		"/v1/peer/metrics":    true,
 		"/v1/peer/config/hot": true,
 		"/v1/peer/keys/find":  true,
 	}

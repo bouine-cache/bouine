@@ -391,7 +391,12 @@ func (rs *runState) wireGossipInvalidator() {
 			return err
 		},
 		RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
-			return rs.softPurgeKey(ctx, evt.Key)
+			_, err := rs.softPurgeKey(ctx, evt.Key)
+			return err
+		},
+		RefreshSurrogateFn: func(ctx context.Context, evt api.RefreshSurrogateEvent) error {
+			_, err := rs.softPurgeSurrogate(ctx, evt.SurrogateKey)
+			return err
 		},
 	})
 }
@@ -792,14 +797,45 @@ func (rs *runState) dataPlanePurgeBroadcast() func(key api.Key) {
 // handlers, triggering background revalidation via stale-while-revalidate
 // instead of hard-deleting it. This is the correct "refresh" / "soft
 // purge" semantic: the object stays servable while a conditional fetch
-// refreshes it in the background.
-func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
+// refreshes it in the background. It reports whether any handler still
+// held the key (SoftPurge's owned flag).
+func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) (bool, error) {
+	owned := false
 	for _, h := range rs.handlers {
-		if _, err := h.SoftPurge(ctx, key); err != nil {
-			return err
+		o, err := h.SoftPurge(ctx, key)
+		if err != nil {
+			return owned, err
+		}
+		owned = owned || o
+	}
+	return owned, nil
+}
+
+// maxSurrogateRefreshKeys caps how many keys one surrogate refresh
+// resolves per call. The admin API returns count = min(matches, cap),
+// which is honest about being a lower bound when the cap binds; the
+// admin/peer layer still refreshes exactly the returned set. 100k keys
+// covers any realistic tag while bounding the per-call work and memory.
+const maxSurrogateRefreshKeys = 100 << 10
+
+// softPurgeSurrogate resolves a surrogate key against the local store
+// and soft-purges every matching key up to maxSurrogateRefreshKeys
+// (plus its Vary variants via SoftPurge). It returns how many distinct
+// primary keys were refreshed (the response count = refreshed, a lower
+// bound when the cap binds). Admin path only: never on the hit path.
+func (rs *runState) softPurgeSurrogate(ctx context.Context, surrogateKey string) (int, error) {
+	keys := rs.store.KeysBySurrogate(ctx, surrogateKey, maxSurrogateRefreshKeys)
+	refreshed := 0
+	for _, key := range keys {
+		owned, err := rs.softPurgeKey(ctx, key)
+		if err != nil {
+			return refreshed, err
+		}
+		if owned {
+			refreshed++
 		}
 	}
-	return nil
+	return refreshed, nil
 }
 
 // purgeKeysBatch purges every key locally, then fans the whole batch
@@ -853,7 +889,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
 			key := cache.BuildKeyFromURL(urlStr, policyForURL(rs, urlStr))
-			if err := rs.softPurgeKey(dCtx, key); err != nil {
+			if _, err := rs.softPurgeKey(dCtx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -934,7 +970,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return n, nil
 		},
 		RefreshFn: func(key api.Key) error {
-			if err := rs.softPurgeKey(ctx, key); err != nil {
+			if _, err := rs.softPurgeKey(ctx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -942,18 +978,30 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			}
 			return nil
 		},
-		PeerPurgeHandler:        e.peerPurgeApply(rs, ctx),
-		PeerBanHandler:          e.peerBanApply(rs, ctx),
-		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
-		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
-		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
-		PeerHotSetHandler:       e.peerHotSetApply(rs),
-		PeerKeysFindHandler:     cluster.NewPeerKeysFindHandler(rs.store.Probe),
-		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
-		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
-		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
-		DashboardHandler:        dashMux,
-		FaviconHandler:          webdash.FaviconHandler(),
+		RefreshSurrogateFn: func(sk string) (int, error) {
+			n, err := rs.softPurgeSurrogate(ctx, sk)
+			if err != nil {
+				return n, err
+			}
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastRefreshSurrogate(ctx, sk)
+			}
+			return n, nil
+		},
+		OnRefreshSurrogate:          rs.cfProp.PropagateForRefreshSurrogate,
+		PeerPurgeHandler:            e.peerPurgeApply(rs, ctx),
+		PeerBanHandler:              e.peerBanApply(rs, ctx),
+		PeerRefreshHandler:          e.peerRefreshApply(rs, ctx),
+		PeerRefreshSurrogateHandler: e.peerRefreshSurrogateApply(rs, ctx),
+		PeerPurgeBatchHandler:       e.peerPurgeBatchApply(rs, ctx),
+		PeerRefreshBatchHandler:     e.peerRefreshBatchApply(rs, ctx),
+		PeerHotSetHandler:           e.peerHotSetApply(rs),
+		PeerKeysFindHandler:         cluster.NewPeerKeysFindHandler(rs.store.Probe),
+		PeerFetchHandler:            cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
+		PeerPutHandler:              e.buildPeerPutHandler(rs).Handle,
+		PeerMetricsHandler:          dashboard.PeerMetricsHandler(rs.rings),
+		DashboardHandler:            dashMux,
+		FaviconHandler:              webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
@@ -1010,7 +1058,8 @@ func (e *engine) peerRefreshApply(rs *runState, ctx context.Context) fasthttp.Re
 		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
 			return nil
 		}
-		return rs.softPurgeKey(ctx, evt.Key)
+		_, err := rs.softPurgeKey(ctx, evt.Key)
+		return err
 	})
 }
 
@@ -1032,7 +1081,21 @@ func (e *engine) peerRefreshBatchApply(rs *runState, ctx context.Context) fastht
 		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
 			return nil
 		}
-		return rs.softPurgeKey(ctx, evt.Key)
+		_, err := rs.softPurgeKey(ctx, evt.Key)
+		return err
+	})
+}
+
+// peerRefreshSurrogateApply returns the peer surrogate-key refresh
+// applier (deduped; see peerPurgeApply). The peer resolves the tag
+// against its own store, so it refreshes only what it holds.
+func (e *engine) peerRefreshSurrogateApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerRefreshSurrogateHandler(func(evt api.RefreshSurrogateEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		_, err := rs.softPurgeSurrogate(ctx, evt.SurrogateKey)
+		return err
 	})
 }
 

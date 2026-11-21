@@ -225,18 +225,23 @@ paths:
   /v1/refresh:
     post:
       tags: [Cache Invalidation]
-      summary: Soft-purge a URL (mark stale, revalidate on next request)
+      summary: Soft-purge a URL or surrogate key (mark stale, revalidate on next request)
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [url]
+              description: Exactly one of url or surrogate_key must be set.
               properties:
                 url:
                   type: string
                   example: https://example.com/page
+                surrogate_key:
+                  type: string
+                  maxLength: 256
+                  description: Exact surrogate key (Surrogate-Key / Cache-Tag value); soft-purges every cached object carrying it. Never a pattern.
+                  example: product-42
       responses:
         '200':
           description: Refreshed
@@ -248,6 +253,16 @@ paths:
                   status:
                     type: string
                     example: refreshed
+                  count:
+                    type: integer
+                    description: Number of locally stored keys soft-purged (surrogate_key mode only).
+                    example: 3
+        '400':
+          description: Missing/invalid field (one of url/surrogate_key required; key must be a non-empty opaque token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           description: Internal error
           content:

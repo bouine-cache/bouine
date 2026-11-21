@@ -183,6 +183,26 @@ curl -X POST http://127.0.0.1:9000/v1/refresh \
   -d '{"url":"https://example.com/products/123"}'
 ```
 
+### Refresh by surrogate key
+
+Soft-purge every cached object carrying a tag (Surrogate-Key / Cache-Tag
+/ X-Cache-Tags). The key is an exact opaque token (max 256 bytes, no
+whitespace or commas), never a pattern. The response reports how many
+local keys were refreshed; in a cluster each peer refreshes its own
+copy (one fan-out event per peer, tag resolved locally).
+
+```bash
+bouine refresh --surrogate-key product-42 \
+  --server 127.0.0.1:9000 \
+  --token "${BOUINE_ADMIN_TOKEN}"
+
+curl -X POST http://127.0.0.1:9000/v1/refresh \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${BOUINE_ADMIN_TOKEN}" \
+  -d '{"surrogate_key":"product-42"}'
+# => {"status":"refreshed","count":3}
+```
+
 ### When to use refresh vs purge
 
 | Scenario                          | Use        |

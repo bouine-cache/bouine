@@ -3981,6 +3981,77 @@ func TestDoBackgroundRefresh_BadURL(t *testing.T) {
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
 
+// TestDoBackgroundRefresh_ReplaysClientHostAndTLS is the unit half of
+// the 2026-11-19 production incident fix: the registry entry's url
+// is origin-form ("/path?query" — requestInfoFromCtx stores RequestURI),
+// so the replayed fetch cannot recover host/scheme from the URL. It must
+// carry the entry's captured client host and TLS flag instead — before the
+// fix, Host was empty (the pool dial's absolute-URI rewrite then refilled
+// it from the POOL TARGET, bypassing preserve_host) and TLS was always
+// false (x-forwarded-proto advertised http for https clients).
+func TestDoBackgroundRefresh_ReplaysClientHostAndTLS(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	defer h.Close(context.Background())
+
+	var mu sync.Mutex
+	seen := map[string]string{}
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen["Host"] = string(ctx.Host())
+		seen[header.XForwardedProto] = string(ctx.Request.Header.Peek(header.XForwardedProto))
+		seen[header.XForwardedHost] = string(ctx.Request.Header.Peek(header.XForwardedHost))
+		// Conditional fetch (If-None-Match carries the stored ETag):
+		// answer 304 so the object refreshes in place, the same shape
+		// testRefreshHandler's upstream serves.
+		if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return
+		}
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
+	h.upstream = upstream
+	h.fastClient = &testFastClient{handler: upstream}
+	// x-forwarded injection on the replayed fetch reads ri.TLS / ri host.
+	h.forwarded = ForwardedPolicy{Proto: true, Host: true, Via: true, MaxAppend: 5}
+
+	// Register with the production shape requestInfoFromCtx stores for a
+	// live request: origin-form URI, client Host, connection TLS flag.
+	key := testkey.Key(7)
+	h.refreshRegistry.Register(key, RequestInfo{
+		Method: "GET",
+		URI:    "/test",
+		Host:   "www.example.com",
+		Path:   "/test",
+		TLS:    true,
+		Header: header.NewMap(0),
+	}, "", 0, nil)
+
+	h.doBackgroundRefresh(context.Background(), key, &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}, 0)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "www.example.com", seen["Host"],
+		"the background refresh must present the triggering client's Host, not the empty parsed-URL host")
+	assert.Equal(t, "https", seen[header.XForwardedProto],
+		"the background refresh must advertise the triggering client's TLS flag")
+	assert.Equal(t, "www.example.com", seen[header.XForwardedHost],
+		"the background refresh must advertise the triggering client's Host")
+}
+
 func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)

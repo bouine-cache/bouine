@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -762,6 +763,53 @@ func (t *TieredStore) Keys() []api.Key {
 		}
 		seen[k] = struct{}{}
 		out = append(out, k)
+	}
+	return out
+}
+
+// KeysBySurrogate returns up to maxKeys keys (hot + warm) whose stored
+// object carries the given surrogate key. The hot tier is resolved via
+// the side-effect-free HotStore path (index read or scan); warm-only
+// keys come from the warm index, decoded via Peek (no promotion, no
+// ban-list eviction — unlike Get, a banned warm object still counts
+// here because a refresh targets stored objects regardless of their
+// current ban status). Duplicates between tiers are removed via the
+// hot set; ctx cancellation aborts the warm scan.
+func (t *TieredStore) KeysBySurrogate(ctx context.Context, surrogateKey string, maxKeys int) []api.Key {
+	if maxKeys <= 0 {
+		return nil
+	}
+	hotKeys := t.hot.KeysBySurrogate(ctx, surrogateKey, maxKeys)
+	if t.warm == nil || len(hotKeys) >= maxKeys {
+		return hotKeys
+	}
+	hotSet := make(map[api.Key]struct{}, len(hotKeys))
+	for _, k := range hotKeys {
+		hotSet[k] = struct{}{}
+	}
+	out := make([]api.Key, 0, maxKeys)
+	out = append(out, hotKeys...)
+	for _, wk := range t.warm.Keys() {
+		if len(out) >= maxKeys {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		if _, ok := hotSet[wk]; ok {
+			continue
+		}
+		body, err := t.warm.Peek(wk)
+		if err != nil || body == nil {
+			continue
+		}
+		obj, decErr := decodeObject(body)
+		if decErr != nil {
+			continue
+		}
+		if slices.Contains(obj.SurrogateKeys, surrogateKey) {
+			out = append(out, wk)
+		}
 	}
 	return out
 }

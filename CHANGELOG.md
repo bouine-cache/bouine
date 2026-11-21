@@ -10,8 +10,46 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+
+- Background refreshes (`refresh_before_expiry`) now carry the triggering
+  client's Host header and TLS flag (da5ad016). The refresh registry stored
+  only the origin-form URL, so the replayed fetch presented an empty Host and
+  the pool dial's absolute-URI rewrite made fasthttp refill it from the pool
+  target, silently bypassing `connect.preserve_host` on every background
+  refresh, and advertising `x-forwarded-proto: http` for HTTPS clients
+  (2026-11-19 production incident: an origin that derives its behaviour from
+  the request Host header received the internal pool hostname instead and
+  returned 500s to clients).
+- fasthttp bumped from v1.78.0 to v1.79.0, pulling the transitive
+  klauspost/compress v1.20.3 → v1.20.4 update (96be62f3).
+
+### Changed
+
+- Go toolchain bumped from 1.27.3 to 1.27.4 (`go.mod`, `GO_VERSION` in
+  ci/nightly/release workflows, `GO_VERSION_STAMP` in the prek hook
+  config). 1.27.4 fixes GO-2026-6859 (CVE-2026-97054), an HTTP/1 server
+  crash from an unsynchronized `Connection: close` set by
+  `MaxBytesReader` racing a handler-set header; `govulncheck` now
+  reports zero findings.
+
 ### Added
 
+- `POST /v1/refresh` now also accepts `{"surrogate_key": "..."}` to
+  soft-purge every cached object carrying a surrogate tag
+  (Surrogate-Key / Cache-Tag / X-Cache-Tags), returning
+  `{"status":"refreshed","count":N}`. In a cluster the tag fans out as a
+  single event per peer (`/v1/peer/refresh/surrogate`, new gossip frame
+  kind) and each peer refreshes only what it holds; Cloudflare
+  propagation issues a PurgeByTags when `propagate.refresh` is on. The
+  URL form is unchanged. `count` is the number of locally stored keys
+  actually soft-purged (keys evicted between resolution and purge are
+  not counted); it is a lower bound when the per-call cap binds.
+  `bouine refresh --surrogate-key <tag>` and
+  `Client.RefreshSurrogate` are the CLI/SDK entry points. The hot-tier
+  surrogate reverse index tombstones any tag exceeding 64k keys and
+  serves it by scan instead, so a runaway tag cannot make refreshes
+  silently partial.
 - Opt-in per-route fill-path edge compression (`cache.compression`,
   ADR-0075): on a cacheable miss whose origin response is identity-encoded
   and eligible, bouine compresses the body (gzip/zstd/br, latency-tuned
@@ -33,6 +71,19 @@ the curated, human-readable summary.
 
 ### Fixed
 
+- Background refreshes (`refresh_before_expiry`) now carry the
+  triggering client's Host header and TLS flag. The refresh registry
+  stored only the origin-form URL, so the replayed fetch presented an
+  empty Host and the pool dial's absolute-URI rewrite made fasthttp
+  refill it from the pool target — silently bypassing
+  `connect.preserve_host` on every background refresh, and advertising
+  `x-forwarded-proto: http` for HTTPS clients (2026-11-19 production
+  incident: an origin that derives its behaviour from the request Host
+  header received the internal pool hostname instead and returned 500s
+  to clients; the config change that exposed the bug was reverted
+  pending this fix).
+  Default (non-preserve-host) pools keep sending the pool target,
+  byte-for-byte what the equivalent foreground fetch sends.
 - Active health probes no longer reuse pooled keep-alive connections:
   each probe now sends `Connection: close` and dials fresh. A probe
   connection is idle for a full `health.active.interval` between probes,

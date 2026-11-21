@@ -87,6 +87,33 @@ func newSeqTracker() *seqTracker {
 	}
 }
 
+// peek reports whether (issuer, seq) was already recorded, without
+// recording it. Used on paths that may drop an event after checking:
+// the seq must be recorded only once the event is actually accepted
+// for apply, otherwise a dropped event is deduped forever and a
+// redelivery is silently swallowed.
+func (t *seqTracker) peek(issuer string, seq uint64) bool {
+	if issuer == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	w, ok := t.wins[issuer]
+	if !ok {
+		return false
+	}
+	if now := t.now(); now.Sub(t.lastSeen[issuer]) > seqTrackerTTL {
+		return false
+	}
+	if seq > w.high {
+		return false
+	}
+	if w.high-seq >= seqDedupWindow {
+		return true
+	}
+	return w.has(seq)
+}
+
 // seen reports whether (issuer, seq) was already applied and records
 // it otherwise. Returns true when the event is a duplicate.
 func (t *seqTracker) seen(issuer string, seq uint64) bool {

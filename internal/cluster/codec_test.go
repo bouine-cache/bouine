@@ -300,3 +300,39 @@ func TestPeerInfoMeta_RejectsOversizedString(t *testing.T) {
 	_, err := EncodePeerInfoMeta(info)
 	require.ErrorIs(t, err, errStringTooLong)
 }
+
+func TestEncodeDecodeRefreshSurrogate_RoundTrip(t *testing.T) {
+	t.Parallel()
+	evt := api.RefreshSurrogateEvent{
+		SurrogateKey: "product-42",
+		Issuer:       "node-a",
+		IssuedAt:     time.Unix(0, 987654321),
+		Seq:          7,
+	}
+	buf, err := EncodeRefreshSurrogateGossip(evt)
+	require.NoError(t, err, "encode gossip")
+	require.Equal(t, msgTypeRefreshSurrogate, GossipMsgType(buf), "gossip msgType")
+
+	got, err := DecodeRefreshSurrogateGossip(buf)
+	require.NoError(t, err, "decode gossip")
+	got.IssuedAt = got.IssuedAt.UTC()
+	evt.IssuedAt = evt.IssuedAt.UTC()
+	require.Equal(t, evt, got)
+
+	hbuf, err := EncodeRefreshSurrogateHTTP(evt)
+	require.NoError(t, err, "encode http")
+	got2, err := DecodeRefreshSurrogateHTTP(hbuf)
+	require.NoError(t, err, "decode http")
+	got2.IssuedAt = got2.IssuedAt.UTC()
+	require.Equal(t, evt, got2)
+}
+
+func TestDecodeRefreshSurrogate_WrongType(t *testing.T) {
+	t.Parallel()
+	// A refresh frame must not decode as a surrogate refresh.
+	ref := api.RefreshEvent{Key: testkey.Key(3), Issuer: "n", IssuedAt: time.Unix(0, 5), Seq: 1}
+	buf, err := EncodeRefreshGossip(ref)
+	require.NoError(t, err)
+	_, err = DecodeRefreshSurrogateGossip(buf)
+	require.Error(t, err)
+}

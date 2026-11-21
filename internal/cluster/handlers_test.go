@@ -176,3 +176,21 @@ func TestPeerRefreshHandler_FnError(t *testing.T) {
 
 	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
+
+func TestPeerRefreshSurrogateHandler_RejectsBadTag(t *testing.T) {
+	t.Parallel()
+	called := false
+	h := NewPeerRefreshSurrogateHandler(func(api.RefreshSurrogateEvent) error {
+		called = true
+		return nil
+	})
+	for _, sk := range []string{"", "a b", "a,b", string(make([]byte, 300))} {
+		body, err := EncodeRefreshSurrogateHTTP(api.RefreshSurrogateEvent{SurrogateKey: sk, Issuer: "n", Seq: 1})
+		require.NoError(t, err)
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetBody(body)
+		h(ctx)
+		require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode(), "tag %q", sk)
+		require.False(t, called)
+	}
+}

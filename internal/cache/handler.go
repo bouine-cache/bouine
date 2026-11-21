@@ -1491,12 +1491,26 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 
+	// Replay the captured client identity, NOT the parsed URL: entry.url
+	// is origin-form ("/path?query" — requestInfoFromCtx stores
+	// RequestURI), so u.Host and u.Scheme are always empty here. Deriving
+	// Host/TLS from the parse left the outbound Host empty, and the pool
+	// dial's absolute-form URI rewrite then made fasthttp refill Host from
+	// the POOL TARGET — silently bypassing preserve_host on every
+	// background refresh (2026-11-19 production incident: an origin
+	// keying its behaviour off the Host header received the internal
+	// pool hostname and 500'd). entry.host/entry.tls are the triggering
+	// request's own
+	// pair, so the refresh carries byte-for-byte the Host a foreground
+	// fetch of the same key would send: preserved on preserve_host pools
+	// (UseHostHeader), overwritten with the pool target on default pools.
+	// u is still parsed for Path below.
 	ri := RequestInfo{
 		Method: entry.method,
 		URI:    entry.url,
-		Host:   u.Host,
+		Host:   entry.host,
 		Path:   u.Path,
-		TLS:    u.Scheme == "https",
+		TLS:    entry.tls,
 		Header: entry.header.Clone(),
 	}
 	req := fasthttp.AcquireRequest()

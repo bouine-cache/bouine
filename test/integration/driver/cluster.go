@@ -79,6 +79,9 @@ type ClusterStack struct {
 	// preserveHost retains the pool's connect.preserve_host setting so
 	// RestartNode rebuilds the same config BootCluster originally wrote.
 	preserveHost bool
+	// refresh retains the Refresh option so RestartNode rebuilds the
+	// same config BootCluster originally wrote.
+	refresh RefreshOptions
 	// warmEnabled retains the WarmTier option so RestartNode rebuilds
 	// the same config BootCluster originally wrote (warm_dir and the
 	// per-node warm directory persist across restarts under configDir).
@@ -105,6 +108,14 @@ func (s *ClusterStack) OriginHost() string {
 	return s.origin.addr
 }
 
+// OriginHosts returns the Host headers the shared origin has received
+// for path, in arrival order — the foreground fill first, then any
+// background refresh fetches. Tests use it to assert which Host each
+// origin-bound fetch carried (preserve_host pools, refresh replays).
+func (s *ClusterStack) OriginHosts(path string) []string {
+	return s.originCtl.HostsFor(path)
+}
+
 // ClusterOptions configures BootCluster.
 type ClusterOptions struct {
 	Mode          string
@@ -118,6 +129,18 @@ type ClusterOptions struct {
 	// every node, so integration tests can cover the origin-bound Host
 	// header behaviour (the origin echoes its Host on /host-echo).
 	PreserveHost bool
+	// Refresh, when Enabled, turns on cache.refresh_before_expiry on
+	// the default route of every node, so integration tests can drive a
+	// full background-refresh cycle (fill registers the entry, the
+	// scheduler fires the conditional fetch at TTL - margin) within
+	// test time. The knobs land on the same route. Set TTL to the
+	// desired object lifetime: it renders cache.ttl_override, which is
+	// also the margin basis (applyRefreshConfig), so the margin lands
+	// inside the object's actual TTL instead of scheduling in the past
+	// — with the default 60s ttl_default and a 6s origin TTL, a 50%
+	// margin would otherwise fire the fetch instantly on a hot loop.
+	// Keep TTL above the cache layer's 5s minRefreshTTL floor.
+	Refresh RefreshOptions
 	// MaxVariants, when > 0, sets cache.max_variants on the default
 	// route of every node — the Vary DoS cap (RFC 9110 §12.5.5). Tests
 	// that spray more variants than this exercise the cap's storage
@@ -142,6 +165,18 @@ type ClusterOptions struct {
 	// docs/plans/edge-compression.md): identity-encoded HTML fills under
 	// this prefix are stored compressed in the negotiated AE bucket.
 	CompressionRoute bool
+}
+
+// RefreshOptions configures refresh-before-expiry on the default route
+// when ClusterOptions.Refresh is Enabled. Zero values keep the driver
+// defaults: TTL 6s (above the 5s minRefreshTTL floor), margin 50% of TTL
+// (validation caps it at 50), no popularity gate on the post-refresh
+// re-schedule.
+type RefreshOptions struct {
+	Enabled       bool
+	TTL           time.Duration // cache.ttl_override on the default route; also the RefreshMargin basis
+	MarginPercent int           // cache.refresh_margin_percent; 0 = driver default 50
+	MinHits       int           // cache.refresh_min_hits; 0 = omit
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -223,6 +258,9 @@ type nodeConfigParams struct {
 	tls         *TLSOptions // nil when TLS is not configured
 	// preserveHost renders connect.preserve_host on the origin pool.
 	preserveHost bool
+	// refresh renders the refresh-before-expiry knobs on the default
+	// route when Enabled (zero value = omit, engine defaults apply).
+	refresh RefreshOptions
 	// maxVariants renders cache.max_variants on the default route when
 	// > 0 (0 = omit, engine default applies).
 	maxVariants int
@@ -281,6 +319,21 @@ func buildNodeConfig(p nodeConfigParams) string {
         replace: /$1
 `
 	}
+	refreshLines := ""
+	if p.refresh.Enabled {
+		ttl := p.refresh.TTL
+		if ttl <= 0 {
+			ttl = 6 * time.Second
+		}
+		margin := p.refresh.MarginPercent
+		if margin == 0 {
+			margin = 50
+		}
+		refreshLines = fmt.Sprintf("      ttl_override: %s\n      refresh_before_expiry: true\n      refresh_margin_percent: %d\n", ttl, margin)
+		if p.refresh.MinHits > 0 {
+			refreshLines += fmt.Sprintf("      refresh_min_hits: %d\n", p.refresh.MinHits)
+		}
+	}
 	fmt.Fprintf(&b, `  admin: "127.0.0.1:%d"
   cluster: "127.0.0.1:%d"
 admin:
@@ -322,9 +375,9 @@ routes:
     pool: origin
     cache:
       ttl_default: 60s
-%s`,
+%s%s`,
 		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), warmLine, p.name, p.mode, p.seedList,
-		p.originAddr, p.preserveHost, cookieValuesLine, compressionLine, maxVariantsLine)
+		p.originAddr, p.preserveHost, cookieValuesLine, compressionLine, refreshLines, maxVariantsLine)
 
 	if p.tls != nil {
 		minVer := p.tls.MinVersion
@@ -394,6 +447,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		hotMaxBytes: opts.HotMaxBytes,
 	}
 	s.preserveHost = opts.PreserveHost
+	s.refresh = opts.Refresh
 	s.warmEnabled = opts.WarmTier
 	s.maxVariants = opts.MaxVariants
 	s.cookieValuesRoute = opts.CookieValuesRoute
@@ -419,6 +473,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			hotMaxBytes:       opts.HotMaxBytes,
 			tls:               tlsOpts,
 			preserveHost:      opts.PreserveHost,
+			refresh:           opts.Refresh,
 			maxVariants:       opts.MaxVariants,
 			warmDir:           s.warmDirFor(name),
 			cookieValuesRoute: opts.CookieValuesRoute,
@@ -629,6 +684,7 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		hotMaxBytes:       s.hotMaxBytes,
 		tls:               tlsOpts,
 		preserveHost:      s.preserveHost,
+		refresh:           s.refresh,
 		maxVariants:       s.maxVariants,
 		warmDir:           s.warmDirFor(name),
 		cookieValuesRoute: s.cookieValuesRoute,
@@ -959,6 +1015,38 @@ func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) 
 	if resp.StatusCode() >= 300 {
 		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode(), string(resp.Body()))
 	}
+}
+
+// AdminPost is adminPost without the fatal-on-error check; it returns the
+// status code and body so tests can assert on them.
+func (s *ClusterStack) AdminPost(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	return s.adminPostWithCode(t, n, path, body)
+}
+
+// AdminPostWithCode is the non-fatal admin POST variant used by validation
+// tests.
+func (s *ClusterStack) AdminPostWithCode(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	return s.adminPostWithCode(t, n, path, body)
+}
+
+func (s *ClusterStack) adminPostWithCode(t *testing.T, n int, path string, body []byte) (int, []byte) {
+	t.Helper()
+	url := s.Nodes[n].AdminAddr + path
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("POST")
+	req.SetBody(body)
+	req.Header.SetContentType("application/json")
+	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return resp.StatusCode(), append([]byte(nil), resp.Body()...)
 }
 
 // Peers returns the cluster peers from node n's admin API.

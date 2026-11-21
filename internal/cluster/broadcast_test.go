@@ -525,3 +525,34 @@ func TestBroadcastRefresh_NotCancelledByParentContext(t *testing.T) {
 	b.Close()
 	require.Equal(t, int32(1), hits.Load(), "refresh broadcast must not be cancelled by parent context")
 }
+
+func TestBroadcaster_BroadcastRefreshSurrogate(t *testing.T) {
+	t.Parallel()
+	var received []api.RefreshSurrogateEvent
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Path()) != "/v1/peer/refresh/surrogate" {
+			t.Errorf("unexpected path: %s", string(ctx.Path()))
+		}
+		evt, err := DecodeRefreshSurrogateHTTP(ctx.PostBody())
+		if err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		received = append(received, evt)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Addr,
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastRefreshSurrogate(context.Background(), "product-42")
+	b.Close()
+
+	require.Len(t, received, 1)
+	assert.Equal(t, "product-42", received[0].SurrogateKey)
+	assert.Equal(t, "node-0", received[0].Issuer)
+}

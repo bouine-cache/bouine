@@ -13,12 +13,21 @@ import (
 // Only Vary-relevant request headers are stored (the headers listed
 // in the response's Vary header, plus Accept-Encoding for content
 // negotiation). This reduces per-entry memory from ~1.3 KB (all
-// headers) to ~200–450 B (0–3 headers).
+// headers) to ~200–450 B (0–3 headers); the host/tls pair adds ~30 B.
 type refreshEntry struct {
-	url           string     // compact: "https://host/path?query"
-	method        string     // GET or HEAD
+	url    string // compact origin-form target: "/path?query" (requestInfoFromCtx stores RequestURI, never absolute)
+	method string // GET or HEAD
+	// host and tls replay the triggering client's request identity on
+	// the background refresh: url alone is origin-form, so the fetch
+	// cannot recover scheme or host from it. host is the client Host
+	// header — preserve_host pools must keep presenting it to the
+	// origin (the pool dial rewrites the URI to the pool target, and
+	// fasthttp only spares an EMPTY Host from that rewrite);
+	// tls keeps x-forwarded-proto truthful (applyForwardedInfo).
+	host          string
 	header        header.Map // snapshot of Vary-relevant request headers only
 	persistCycles int        // remaining grace refresh cycles when the popularity gate would block
+	tls           bool       // triggering request arrived over TLS
 }
 
 // refreshRegistry maps cache keys to the request info needed to
@@ -40,7 +49,10 @@ func newRefreshRegistry() *refreshRegistry {
 // Register stores request info for key. Only Vary-relevant headers
 // (from the response's Vary header, plus Accept-Encoding) are kept.
 // The header map is cloned — storing a reference to r.Header would
-// race with the HTTP server's request pooling.
+// race with the HTTP server's request pooling. The client's host and
+// TLS flag are captured alongside them so the background refresh can
+// replay the request identity the origin-bound fetch must carry
+// (preserve_host pools, x-forwarded-proto).
 //
 // On cookie-keyed routes (issues #768, #870 — presence or values) the
 // Cookie header is saved too: doBackgroundRefresh replays the saved
@@ -95,6 +107,8 @@ func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader strin
 		url:           ri.GetURI(),
 		method:        ri.GetMethod(),
 		header:        saved,
+		host:          ri.GetHost(),
+		tls:           ri.TLS,
 		persistCycles: persistCycles,
 	}
 	r.mu.Unlock()

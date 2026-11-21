@@ -515,3 +515,29 @@ func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
 	s.Handler()(ctx)
 	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "route should not be mounted when PeerRefreshHandler is nil")
 }
+
+func TestPeerRefreshSurrogateHandler_RouteMounted(t *testing.T) {
+	t.Parallel()
+	var called bool
+	s := New(Config{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerRefreshSurrogateHandler: func(ctx *fasthttp.RequestCtx) {
+			called = true
+			ctx.SetStatusCode(fasthttp.StatusOK)
+		},
+	})
+	ctx := testCtx("POST", "/v1/peer/refresh/surrogate")
+	s.Handler()(ctx)
+	assert.True(t, called, "PeerRefreshSurrogateHandler should be mounted at POST /v1/peer/refresh/surrogate")
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+}
+
+func TestPeerRefreshSurrogateHandler_NotMountedWhenNil(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	ctx := testCtx("POST", "/v1/peer/refresh/surrogate")
+	s.Handler()(ctx)
+	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "route should not be mounted when PeerRefreshSurrogateHandler is nil")
+}

@@ -5,26 +5,31 @@ import (
 	"strings"
 )
 
-// ShadowedRoutes returns the boot-time shadow-detection findings: one
-// message per registered route that an earlier route fully shadows, so
-// it can never be selected (declaration order is precedence, identical
-// to the traffic-class detector in trafficclass.go — ADR-0047 pattern,
-// applied to routes by issue #772). Detection runs once per AddRoute
-// call; the returned slice is nil or non-empty, never empty-non-nil.
-// Boot proceeds regardless: the caller surfaces the findings, it does
-// not fail on them.
+// ShadowedRoutes returns the current table's shadow-detection
+// findings: one message per registered route that an earlier route
+// fully shadows, so it can never be selected (declaration order is
+// precedence, identical to the traffic-class detector in
+// trafficclass.go — ADR-0047 pattern, applied to routes by issue
+// #772). Detection runs once per AddRoute call; the findings live in
+// the immutable table snapshot, so they are recomputed on every config
+// reload swap (issue #951). The returned slice is nil or non-empty,
+// never empty-non-nil. Boot proceeds regardless: the caller surfaces
+// the findings, it does not fail on them.
 func (rt *Router) ShadowedRoutes() []string {
-	return rt.shadows
+	if t := rt.table.Load(); t != nil {
+		return t.shadows
+	}
+	return nil
 }
 
-// shadowedByEarlier walks the routes registered before e and reports
-// the first one that fully covers e's match predicate. Every dimension
-// (host, path, methods) must be covered: a request e matches is then
-// always matched by the earlier route too, so under first-match
-// precedence e is dead config.
-func (rt *Router) shadowedByEarlier(e *routeEntry) (string, bool) {
-	for i := range rt.routes {
-		earlier := &rt.routes[i]
+// shadowedByEarlier walks the routes registered before e in table and
+// reports the first one that fully covers e's match predicate. Every
+// dimension (host, path, methods) must be covered: a request e matches
+// is then always matched by the earlier route too, so under
+// first-match precedence e is dead config.
+func shadowedByEarlier(table *routeTable, e *routeEntry) (string, bool) {
+	for i := range table.routes {
+		earlier := &table.routes[i]
 		if routeShadowsRoute(earlier, e) {
 			return fmt.Sprintf(
 				"route %q can never match: fully shadowed by earlier route %q (declaration order is precedence)",

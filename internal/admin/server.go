@@ -102,6 +102,12 @@ type Config struct {
 	// never re-broadcasts (loop-safe by construction). nil (cluster
 	// disabled) leaves the route unmounted.
 	PeerHotSetHandler fasthttp.RequestHandler
+	// PeerConfigReloadHandler serves POST /v1/peer/config/reload: the
+	// cluster fan-out of a config reload (issue #951 phase 2). Authed
+	// with the admin bearer token exactly like /v1/peer/config/hot;
+	// applies locally and never re-broadcasts (loop-free). nil leaves
+	// the route unmounted.
+	PeerConfigReloadHandler fasthttp.RequestHandler
 	// ClusterDisabledReason, when set, explains why PeersFn is nil on
 	// a daemon that looks clustered from the outside: GET
 	// /v1/cluster/peers then returns 503 with this message instead of
@@ -486,6 +492,8 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 		return servePeer(ctx, peerMetrics)
 	case "/v1/peer/config/hot":
 		return servePeer(ctx, peerHotSet)
+	case "/v1/peer/config/reload":
+		return servePeer(ctx, s.cfg.PeerConfigReloadHandler)
 	case "/v1/peer/keys/find":
 		// Reads Config directly, following the batch-route precedent:
 		// the positional buildPeerHandlers returns predate these.
@@ -1007,9 +1015,10 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
 		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
 		"/v1/peer/refresh/batch": true, "/v1/peer/refresh/surrogate": true,
-		"/v1/peer/metrics":    true,
-		"/v1/peer/config/hot": true,
-		"/v1/peer/keys/find":  true,
+		"/v1/peer/metrics":       true,
+		"/v1/peer/config/hot":    true,
+		"/v1/peer/config/reload": true,
+		"/v1/peer/keys/find":     true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {

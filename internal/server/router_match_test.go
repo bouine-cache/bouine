@@ -161,7 +161,7 @@ func TestRouter_AddRouteSpec_InvalidRegexRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "bad")
 	assert.Contains(t, err.Error(), "match.path")
 	// The failed route is not registered: nothing matches it.
-	assert.Empty(t, rt.routes)
+	assert.Empty(t, rt.routesForTest())
 }
 
 func TestRouter_RouteLabelAuto_ExtendedPredicates(t *testing.T) {
@@ -169,8 +169,8 @@ func TestRouter_RouteLabelAuto_ExtendedPredicates(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
 	addSpec(t, rt, RouteSpec{Host: "*.staging.example.com", Label: "", Handler: ok200("s")})
 	addSpec(t, rt, RouteSpec{Path: `^/l/.*$`, Label: "", Handler: ok200("l")})
-	assert.Equal(t, "*.staging.example.com:", rt.routes[0].label)
-	assert.Equal(t, `^/l/.*$`, rt.routes[1].label)
+	assert.Equal(t, "*.staging.example.com:", rt.routesForTest()[0].label)
+	assert.Equal(t, `^/l/.*$`, rt.routesForTest()[1].label)
 }
 
 func TestRouter_ShadowedRoutes_CatchAllFirst(t *testing.T) {

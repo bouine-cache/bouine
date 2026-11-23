@@ -14,9 +14,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/admin"
+	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/storage"
 )
 
@@ -48,16 +50,28 @@ func reloadFixture(t *testing.T, bootYAML string) (*engine, *runState, string) {
 		require.NoError(t, perr)
 		rs.pools[pool.Name] = p
 	}
+	// Phase 2 (issue #951): the fixture needs a snapshot and a router
+	// so applyConfigReload can swap them.
+	tb := server.NewTableBuilder()
+	rs.router = server.NewRouter(server.RouterConfig{})
+	rs.router.Freeze()
+	rs.snapshot.Store(&configSnapshot{
+		cfg:             cfg,
+		gen:             1,
+		pools:           rs.pools,
+		routes:          tb.Table(),
+		handlersByRoute: map[string]*cache.Handler{},
+	})
 	return e, rs, dir
 }
 
-// writeReloadFile writes config YAML next to the fixture and returns
-// its path.
-func writeReloadFile(t *testing.T, dir, body string) string {
+// writeReloadFile writes config YAML next to the fixture (kept for
+// tests that still need a side file even though reload only reads the
+// boot path).
+func writeReloadFile(t *testing.T, dir, body string) {
 	t.Helper()
 	path := filepath.Join(dir, "new.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	return path
 }
 
 func fixtureBanTTL(t *testing.T, rs *runState) time.Duration {
@@ -98,7 +112,7 @@ func TestReloadFn_DisabledByDefault(t *testing.T) {
 func TestReloadFn_AppliesKnobsAndReportsColdFields(t *testing.T) {
 	t.Parallel()
 	e, rs, dir := reloadFixture(t, reloadBootYAML)
-	newFile := writeReloadFile(t, dir, `listen:
+	writeReloadFile(t, dir, `listen:
   http: 127.0.0.1:18081
 cluster:
   ban_ttl: 90m
@@ -110,7 +124,20 @@ experimental:
   config_reload: true
 `)
 
-	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: newFile})
+	bootPath := filepath.Join(dir, "boot.yaml")
+	require.NoError(t, os.WriteFile(bootPath, []byte(`listen:
+  http: 127.0.0.1:18081
+cluster:
+  ban_ttl: 90m
+url_ring_sample_rate: 100
+upstream_pools:
+  - name: api
+    targets: ["127.0.0.1:19999"]
+experimental:
+  config_reload: true
+`), 0o600))
+
+	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.NoError(t, err)
 
 	require.Len(t, res.Applied, 2, "applied: %v", res.Applied)
@@ -141,9 +168,12 @@ experimental:
 func TestReloadFn_ParseFailureLeavesEverythingUntouched(t *testing.T) {
 	t.Parallel()
 	e, rs, dir := reloadFixture(t, reloadBootYAML)
-	badFile := writeReloadFile(t, dir, "listen:\n  http: 127.0.0.1:18081\ncluster:\n  ban_ttl: 90m\nnot_a_key: 1\n")
+	writeReloadFile(t, dir, "listen:\n  http: 127.0.0.1:18081\ncluster:\n  ban_ttl: 90m\nnot_a_key: 1\n")
 
-	_, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: badFile})
+	bootPath := filepath.Join(dir, "boot.yaml")
+	require.NoError(t, os.WriteFile(bootPath, []byte("listen:\n  http: 127.0.0.1:18081\ncluster:\n  ban_ttl: 90m\nnot_a_key: 1\n"), 0o600))
+
+	_, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not_a_key", "the load error surfaces")
 
@@ -164,8 +194,8 @@ func TestReloadFn_RevertsRuntimeDrift(t *testing.T) {
 	e, rs, dir := reloadFixture(t, reloadBootYAML)
 	rs.rings.URL.SetSampleRate(100) // runtime drift
 
-	sameFile := writeReloadFile(t, dir, reloadBootYAML)
-	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: sameFile})
+	writeReloadFile(t, dir, reloadBootYAML)
+	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.NoError(t, err)
 
 	require.Len(t, res.Applied, 1)
@@ -178,7 +208,7 @@ func TestReloadFn_RevertsRuntimeDrift(t *testing.T) {
 func TestReloadFn_EjectForReaperlessPoolNeedsRestart(t *testing.T) {
 	t.Parallel()
 	e, rs, dir := reloadFixture(t, reloadBootYAML)
-	newFile := writeReloadFile(t, dir, `listen:
+	writeReloadFile(t, dir, `listen:
   http: 127.0.0.1:18080
 cluster:
   ban_ttl: 90m
@@ -192,7 +222,22 @@ experimental:
   config_reload: true
 `)
 
-	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: newFile})
+	bootPath := filepath.Join(dir, "boot.yaml")
+	require.NoError(t, os.WriteFile(bootPath, []byte(`listen:
+  http: 127.0.0.1:18080
+cluster:
+  ban_ttl: 90m
+upstream_pools:
+  - name: api
+    targets: ["127.0.0.1:19999"]
+    health:
+      passive:
+        eject_for: 5m
+experimental:
+  config_reload: true
+`), 0o600))
+
+	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.NoError(t, err)
 
 	assert.Len(t, res.Applied, 1, "the hot subset still applies: %v", res.Applied)
@@ -222,7 +267,7 @@ experimental:
   config_reload: true
 `
 	e, rs, dir := reloadFixture(t, boot)
-	newFile := writeReloadFile(t, dir, `listen:
+	writeReloadFile(t, dir, `listen:
   http: 127.0.0.1:18080
 upstream_pools:
   - name: api
@@ -231,16 +276,27 @@ experimental:
   config_reload: true
 `)
 
-	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: newFile})
+	bootPath := filepath.Join(dir, "boot.yaml")
+	require.NoError(t, os.WriteFile(bootPath, []byte(`listen:
+  http: 127.0.0.1:18080
+upstream_pools:
+  - name: api
+    targets: ["127.0.0.1:19999"]
+experimental:
+  config_reload: true
+`), 0o600))
+
+	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.NoError(t, err)
 
+	// Phase 2 (issue #951): pool removal is hot — the pool registry
+	// swaps, the removed pool is Closed, and no needs_restart row is
+	// produced for it.
 	joined := strings.Join(res.NeedsRestart, "\n")
-	assert.Contains(t, joined, "upstream_pools", "pool removal is cold-only: %v", res.NeedsRestart)
-
-	// The removed pool keeps running untouched: no knob applies zeros
-	// to it.
-	assert.Equal(t, 0, rs.pools["www"].Consecutive5xx())
-	assert.Equal(t, time.Duration(0), rs.pools["www"].EjectFor())
+	assert.NotContains(t, joined, "upstream_pools", "pool removal is hot in phase 2: %v", res.NeedsRestart)
+	snap := rs.snapshot.Load()
+	assert.NotContains(t, snap.pools, "www", "removed pool leaves the registry")
+	assert.Contains(t, snap.pools, "api")
 }
 
 func TestReloadFn_DefaultPathIsEngineConfigPath(t *testing.T) {
@@ -267,9 +323,9 @@ experimental:
 func TestReloadFn_NoopReportsUnchanged(t *testing.T) {
 	t.Parallel()
 	e, rs, dir := reloadFixture(t, reloadBootYAML)
-	sameFile := writeReloadFile(t, dir, reloadBootYAML)
+	writeReloadFile(t, dir, reloadBootYAML)
 
-	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{Path: sameFile})
+	res, err := e.reloadFn(rs, testReloadCounter())(t.Context(), admin.ConfigReloadRequest{})
 	require.NoError(t, err)
 	assert.Empty(t, res.Applied)
 	assert.Empty(t, res.NeedsRestart)

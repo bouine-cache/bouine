@@ -274,11 +274,11 @@ func TestConfigReloadTextOutput(t *testing.T) {
 	assert.Empty(t, body()["path"], "no --file means an empty path (daemon default)")
 }
 
-func TestConfigReloadFileFlag(t *testing.T) {
-	server, body := reloadStub(t)
+func TestConfigReloadFileFlagDeprecated(t *testing.T) {
+	server, _ := reloadStub(t)
 	_, _, err := run(t, "config", "reload", "--server", server, "--file", "/tmp/new.yaml")
-	require.NoError(t, err)
-	assert.Equal(t, "/tmp/new.yaml", body()["path"])
+	require.Error(t, err, "--file is deprecated (issue #951 decision 5): only the boot file reloads")
+	assert.Contains(t, err.Error(), "deprecated")
 }
 
 func TestConfigReloadJSONOutput(t *testing.T) {

@@ -31,7 +31,7 @@ func (e *engine) statusFn(rs *runState, dash *dashboard.Handler) func(ctx contex
 }
 
 func (e *engine) statusNode(rs *runState) admin.StatusNode {
-	return admin.StatusNode{
+	node := admin.StatusNode{
 		Name:      rs.rings.NodeName,
 		Version:   buildinfo.Version,
 		Commit:    buildinfo.Commit,
@@ -39,6 +39,10 @@ func (e *engine) statusNode(rs *runState) admin.StatusNode {
 		UptimeSec: int64(time.Since(e.startTime).Seconds()),
 		Ready:     rs.seq.IsReady(),
 	}
+	if snap := rs.snapshot.Load(); snap != nil {
+		node.ConfigGen = snap.gen
+	}
+	return node
 }
 
 func (e *engine) statusCache(rs *runState) admin.StatusCache {

@@ -580,7 +580,7 @@ type ConnectPolicy struct {
 // directory.
 //
 // config grouping (match, request, response, static, cache) rather
-// than size order; the route table is cold, the padding is irrelevant.
+// than size order; the padding is irrelevant (routes swap hot under config reload, issue #951).
 //
 //nolint:govet // fieldalignment: fields follow the operator-facing
 type Route struct {
@@ -614,7 +614,7 @@ type StaticConfig struct {
 }
 
 // RouteMatch is the predicate for selecting a route. Fields follow the
-// operator-facing config-file order; the route table is cold, the
+// operator-facing config-file order; the
 // padding is irrelevant.
 type RouteMatch struct {
 	Host       string `yaml:"host,omitempty" json:"host,omitempty"`
@@ -1035,6 +1035,15 @@ type RouteKey struct {
 	// the cache key. The parameters are still forwarded to the upstream.
 	// This prevents tracking/analytics params (utm_source, fbclid, etc.)
 	// from fragmenting the cache.
+	//
+	// Cluster hazard (issue #951 decision 7): this field alters the
+	// PRIMARY key, which drives consistent-hash ring ownership — a
+	// worse hazard class than the variant-key fields. The value must be
+	// identical across all cluster nodes serving the route: a node with
+	// a different set stores and resolves the same logical URL under
+	// different keys, and the ring then splits ownership (silent miss
+	// storms, no wrong body). The config-reload key-form gate refuses
+	// to apply a change unless every live peer acks.
 	StripQueryParams []string `yaml:"strip_query_params,omitempty" json:"strip_query_params,omitempty"`
 	// ExcludeHeaders removes the listed request header names from the
 	// Vary-based variant key. The headers are still forwarded to the
@@ -1042,6 +1051,13 @@ type RouteKey struct {
 	// only the key computation skips them. Use this to prevent
 	// per-request headers (X-Request-ID, X-Trace-ID) from fragmenting
 	// the cache when the origin includes them in Vary.
+	//
+	// Cluster hazard (issue #951 decision 7): like include_headers,
+	// this alters the key form, and the value must be identical across
+	// all cluster nodes serving the route (ring ownership / variant
+	// resolution diverge otherwise; peer gates fail safe — miss, never
+	// a wrong body). The config-reload key-form gate refuses to apply
+	// a change unless every live peer acks.
 	ExcludeHeaders []string `yaml:"exclude_headers,omitempty" json:"exclude_headers,omitempty"`
 	// IncludeHeaders adds the listed request header names to the
 	// Vary-based variant key, exactly as if the origin had listed
@@ -1133,20 +1149,26 @@ type RouteKey struct {
 	// these query parameters; all others are excluded. Mutually
 	// exclusive with strip_query_params and strip_query_prefix.
 	// Equivalent to Varnish qs.keep().
+	// Cluster hazard: primary-key field, same warning as
+	// strip_query_params (issue #951 decision 7).
 	KeepQueryParams []string `yaml:"keep_query_params,omitempty" json:"keep_query_params,omitempty"`
 	// StripQueryPrefix strips query params whose names start with any of
 	// these prefixes. Covers "strip all utm_* / fb_* / _ga" without
 	// enumerating every variant. Capped at 16 entries in validation.
+	// Cluster hazard: primary-key field, same warning as
+	// strip_query_params (issue #951 decision 7).
 	StripQueryPrefix []string `yaml:"strip_query_prefix,omitempty" json:"strip_query_prefix,omitempty"`
 	// StripEmptyParams removes query params with empty values
 	// (?foo=&bar=1 -> ?bar=1). Does NOT apply to params in
 	// keep_query_params (allowlisted params are always kept, even
-	// with empty values).
+	// with empty values). Cluster hazard: primary-key field, same
+	// warning as strip_query_params (issue #951 decision 7).
 	StripEmptyParams bool `yaml:"strip_empty_params,omitempty" json:"strip_empty_params,omitempty"`
 	// DedupQueryParams keeps only the first value for duplicate query
 	// params (?a=2&a=1 -> ?a=2). "First" is first in request order
 	// (matches Varnish qs.unique()). Values are NOT sorted when dedup
-	// is enabled.
+	// is enabled. Cluster hazard: primary-key field, same warning as
+	// strip_query_params (issue #951 decision 7).
 	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
 	// VerbatimEncoding selects how the Accept-Encoding request header
 	// participates in the cache key (docs/architecture.md §3.3).

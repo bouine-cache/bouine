@@ -418,6 +418,155 @@ func (b *Broadcaster) BroadcastHotSet(ctx context.Context, key, value string) in
 	return int(acknowledged.Load())
 }
 
+// ConfigReloadPeerResult is one peer's answer to a config-reload
+// fan-out: its name and the ack status ("applied", "current",
+// "stale_config") or the transport error that prevented an answer.
+type ConfigReloadPeerResult struct {
+	Err    error
+	Peer   string
+	Status string
+}
+
+// BroadcastConfigReload fans a config reload (gen + resolved-config
+// hash) out to every live peer, synchronously collecting each peer's
+// ack — the BroadcastPurge-style pattern, NOT BroadcastHotSet's
+// fire-and-forget goroutines, because the key-form gate requires every
+// live peer to ack before the change is reported applied_all
+// (issue #951 decision 7). Strong mode only. The peer route applies
+// locally and never re-broadcasts, so this cannot loop. The fan-out
+// context is detached from the caller's so a reload issued during
+// shutdown still reaches peers, bounded per peer by broadcastTimeout.
+func (b *Broadcaster) BroadcastConfigReload(ctx context.Context, gen uint64, configSHA256 string) []ConfigReloadPeerResult {
+	if b.mode != config.ClusterModeStrong {
+		return nil
+	}
+	evt := api.ConfigReloadEvent{
+		Gen:          gen,
+		ConfigSHA256: configSHA256,
+		Issuer:       b.cluster.cfg.NodeName,
+		IssuedAt:     time.Now(),
+		Seq:          b.seq.Add(1),
+	}
+	body, err := EncodeConfigReloadHTTP(evt)
+	if err != nil {
+		b.metrics.IncBroadcastFailure("config_reload", "marshal")
+		b.logger.Error("config reload broadcast encode failed", "error", err)
+		return nil
+	}
+	fanoutCtx := context.WithoutCancel(ctx)
+
+	peers := b.cluster.Members()
+	results := make([]ConfigReloadPeerResult, 0, len(peers))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		if p.Name == b.cluster.cfg.NodeName {
+			continue
+		}
+		wg.Add(1)
+		go func(peer api.PeerInfo) { //nolint:contextcheck // fanoutCtx is a detached context created in this scope
+			defer wg.Done()
+			defer func() {
+				if v := recover(); v != nil {
+					b.logger.Error("config reload broadcast panicked", "peer", peer.Name, "panic", v)
+					mu.Lock()
+					results = append(results, ConfigReloadPeerResult{Peer: peer.Name, Err: fmt.Errorf("panic: %v", v)})
+					mu.Unlock()
+				}
+			}()
+			ack, aErr := b.postConfigReloadAck(fanoutCtx, peer.AdminAddr, body)
+			mu.Lock()
+			if aErr != nil {
+				b.metrics.IncBroadcastFailure("config_reload", broadcastFailureReason(aErr))
+				results = append(results, ConfigReloadPeerResult{Peer: peer.Name, Err: aErr})
+			} else {
+				b.metrics.IncHTTPInvalidation("config_reload")
+				results = append(results, ConfigReloadPeerResult{Peer: peer.Name, Status: ack.Status})
+			}
+			mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	b.logger.Info("config reload broadcast to peers",
+		"gen", gen,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"peers", countPeers(peers)-1,
+		"results", len(results),
+	)
+	return results
+}
+
+// PushConfigReloadToPeer sends one (gen, hash) catch-up push to a
+// single peer — used by the NotifyJoin rejoin path (issue #951
+// decision 13) so a peer that missed the original fan-out converges.
+func (b *Broadcaster) PushConfigReloadToPeer(ctx context.Context, peer api.PeerInfo, gen uint64, configSHA256 string) (api.ConfigReloadAck, error) {
+	if b.mode != config.ClusterModeStrong {
+		return api.ConfigReloadAck{}, fmt.Errorf("config reload push: not strong mode")
+	}
+	evt := api.ConfigReloadEvent{
+		Gen:          gen,
+		ConfigSHA256: configSHA256,
+		Issuer:       b.cluster.cfg.NodeName,
+		IssuedAt:     time.Now(),
+		Seq:          b.seq.Add(1),
+	}
+	body, err := EncodeConfigReloadHTTP(evt)
+	if err != nil {
+		return api.ConfigReloadAck{}, err
+	}
+	fanoutCtx := context.WithoutCancel(ctx)
+	return b.postConfigReloadAck(fanoutCtx, peer.AdminAddr, body)
+}
+
+// postConfigReloadAck posts one reload frame and decodes the peer's
+// ack, unlike postBinary which only checks the status code.
+func (b *Broadcaster) postConfigReloadAck(ctx context.Context, addr string, body []byte) (api.ConfigReloadAck, error) {
+	ctx, cancel := context.WithTimeout(ctx, broadcastTimeout)
+	defer cancel()
+
+	scheme := "http"
+	if b.fetcher != nil && b.fetcher.useTLS {
+		scheme = "https"
+	}
+	uri := scheme + "://" + addr + "/v1/peer/config/reload"
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.SetRequestURI(uri)
+	req.SetBodyRaw(body)
+	req.Header.Set(header.ContentType, "application/json")
+	if b.token != "" {
+		req.Header.Set(header.Authorization, "Bearer "+b.token)
+	}
+
+	if err := b.client.Do(ctx, req, resp); err != nil {
+		return api.ConfigReloadAck{}, fmt.Errorf("broadcast %s%s: %w", addr, "/v1/peer/config/reload", err)
+	}
+	code := resp.StatusCode()
+	respBody := append([]byte(nil), resp.Body()...)
+	if code == fasthttp.StatusBadRequest {
+		// stale_config is reported as a 400 with the status in the body
+		// so the initiator can distinguish it from a malformed frame.
+		if ack, decErr := DecodeConfigReloadAck(respBody); decErr == nil && ack.Status == "stale_config" {
+			return ack, nil
+		}
+		return api.ConfigReloadAck{}, fmt.Errorf("broadcast %s: status %d", addr, code)
+	}
+	if code >= 400 {
+		return api.ConfigReloadAck{}, fmt.Errorf("broadcast %s: status %d", addr, code)
+	}
+	ack, err := DecodeConfigReloadAck(respBody)
+	if err != nil {
+		return api.ConfigReloadAck{}, fmt.Errorf("broadcast %s: bad ack: %w", addr, err)
+	}
+	return ack, nil
+}
+
 // flushPurgeBatch delivers one batch of purge events: a single batch
 // frame posted to each live peer (strong mode) plus one gossip batch
 // frame. Encoding happens once and the body is shared across peers.

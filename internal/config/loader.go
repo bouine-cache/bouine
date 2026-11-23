@@ -186,8 +186,24 @@ func (c *Config) Validate() error {
 
 	c.validateRouteDefaults(ec)
 	c.mergeRouteDefaults()
+	// Route identity must be unique (issue #951 decision 12):
+	// name-keyed reload diffing needs one identity per route, and the
+	// derived name feeds the route Prometheus label, so a collision
+	// also silently merges metrics. Identity = the (possibly
+	// auto-derived) name PLUS the full match predicate, so two routes
+	// that derive the same display name but match differently are still
+	// distinct — mirroring routeIdentity in cmd/bouine/cmd.
+	routeIdent := make(map[string]int, len(c.Routes))
 	for i := range c.Routes {
 		c.validateRoute(ec, i, seen)
+		r := &c.Routes[i]
+		identity := r.Name + "|" + r.Match.Host + "|" + r.Match.PathLabel() + "|" + fmt.Sprintf("%v", r.Match.Methods)
+		if j, dup := routeIdent[identity]; dup {
+			ec.addf(fmt.Sprintf("routes[%d].name", i),
+				"route identity %q is a duplicate (routes[%d] has the same identity); rename one or change its match predicate — colliding identities merge Prometheus route labels and break name-keyed config reloads", identity, j)
+		} else {
+			routeIdent[identity] = i
+		}
 	}
 	c.validateStayinAliveHealthSignal(ec)
 

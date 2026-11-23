@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,11 @@ import (
 )
 
 type engine struct {
+	// hotCfg is the config the hot-knob registry reports file values
+	// from; see the field doc below. Pointer-bearing fields lead the
+	// struct so the GC scan prefix stays minimal (fieldalignment).
+	hotCfg atomic.Pointer[config.Config]
+
 	startTime  time.Time
 	logger     observability.Logger
 	cfg        *config.Config
@@ -54,8 +60,14 @@ type engine struct {
 	// reloaded config (issue #817) so drift reporting answers against
 	// the last-loaded file. The boot truth in cfg never changes —
 	// cold fields always describe what is actually running.
-	hotCfg atomic.Pointer[config.Config]
+	//
 }
+
+// hotCfg doc moved above the struct: it is the config the hot-knob
+// registry reports file values from (boot config at startup, swapped
+// to each successfully reloaded config, issue #817). Phase 2 (#951)
+// folds the last-applied config into runState.snapshot.cfg, which new
+// code must read instead.
 
 func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engine {
 	e := &engine{
@@ -79,15 +91,15 @@ const joinRetryInterval = 2 * time.Second
 
 // runState bundles subsystem references created during engine startup.
 // Passed to startAdmin and buildDashboard instead of 10+ positional args.
+//
+//nolint:govet // fieldalignment: admin-plane wiring struct, not on any hot path
 type runState struct {
-	store        storage.Store
-	pools        map[string]*origin.Pool
-	dpMetrics    *observability.DataPlaneMetrics
-	rings        *observability.Rings
-	headerRing   *observability.OriginHeaderRing
-	snapshotPath string
-	token        string
-	handlers     []*cache.Handler // all cache.Handler instances; per-route knobs filtered via accessor methods
+	store      storage.Store
+	pools      map[string]*origin.Pool
+	dpMetrics  *observability.DataPlaneMetrics
+	rings      *observability.Rings
+	headerRing *observability.OriginHeaderRing
+	handlers   []*cache.Handler // all cache.Handler instances; per-route knobs filtered via accessor methods
 
 	// fastPathHandlers holds one FastPathHandler per cache-enabled
 	// route (proxied and cached-static), built from that route's
@@ -115,10 +127,35 @@ type runState struct {
 	peersFn        func() []api.PeerInfo
 	clusterMetrics *cluster.Metrics
 
+	// snapshot is the atomic hot-swappable routes+pools snapshot
+	// (issue #951 phase 2), published at boot by buildRouter and
+	// swapped by config reload. The route table inside it is what the
+	// router serves from. hotCfg is folded into snapshot.cfg.
+	snapshot atomic.Pointer[configSnapshot]
+	// originMetrics is the origin metrics registry built at boot, kept
+	// so reload-built pools share the same collectors.
+	originMetrics *origin.Metrics
+	// reloadG is the supervised group for pool probe/reaper goroutines
+	// started by a reload swap (decision 11); boot pools' goroutines
+	// live on the run() group.
+	reloadG *supervised.Group
+	// handlersByRoute maps route identity -> live *cache.Handler,
+	// used by the reload diff for handler reuse (handlerMu guards it).
+	handlersByRoute map[string]*cache.Handler
+	// swappedHandlers is the draining set of handlers Closed at swap;
+	// engine shutdown joins them (decision 10). swappedMu guards it.
+	swappedHandlers []*cache.Handler
+
 	// hotSets is the hot-config audit counter
 	// (bouine_config_hot_sets_total), created once at startup so the
 	// admin surface and the peer fan-out route share one registration.
 	hotSets *prometheus.CounterVec
+
+	// reloads is the config-reload audit counter
+	// (bouine_config_reloads_total), created once at startup so the
+	// admin reload endpoint and the peer fan-out route share one
+	// registration.
+	reloads *prometheus.CounterVec
 
 	warmMetrics    *warm.Metrics
 	walMetrics     *wal.Metrics
@@ -128,6 +165,29 @@ type runState struct {
 	cfCancel  context.CancelFunc
 	seq       *shutdown.Sequencer
 	listeners []*server.Listener
+
+	swappedMu    sync.Mutex
+	handlerMu    sync.Mutex
+	snapshotPath string
+	token        string
+}
+
+// drainSwapped records a handler Closed at reload-swap so engine
+// shutdown joins it (decision 10: swapped-out handlers must stay in a
+// draining set that shutdown also joins).
+func (rs *runState) drainSwapped(h *cache.Handler) {
+	rs.swappedMu.Lock()
+	rs.swappedHandlers = append(rs.swappedHandlers, h)
+	rs.swappedMu.Unlock()
+}
+
+// swappedOut returns the current draining set (shutdown join).
+func (rs *runState) swappedOut() []*cache.Handler {
+	rs.swappedMu.Lock()
+	defer rs.swappedMu.Unlock()
+	out := make([]*cache.Handler, len(rs.swappedHandlers))
+	copy(out, rs.swappedHandlers)
+	return out
 }
 
 // invalidationOps provides shared purge/ban/refresh closures used by
@@ -232,6 +292,7 @@ func (e *engine) run(ctx context.Context) error {
 	updateStartupMetrics(seq, rs.startupMetrics)
 
 	handler := e.buildDataPlane(rs)
+	e.publishBootSnapshot(rs)  // phase 2 snapshot (issue #951)
 	rs.wireGossipInvalidator() // after buildDataPlane: the callbacks iterate rs.handlers, which buildRouter appends
 
 	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
@@ -239,6 +300,7 @@ func (e *engine) run(ctx context.Context) error {
 	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
 	e.startEjectReapers(g, rs.pools)                                 // eject_for window reapers (no-op pools without the knob)
+	e.wireRejoinCatchup(ctx, rs)                                     // rejoin catch-up push (issue #951 decision 13)
 	e.startClusterJoin(g, rs)                                        // gossip join with retry against seed peers
 	e.registerShutdownSteps(g, rs)                                   // ordered drain: readiness, store flush, cluster leave
 
@@ -280,6 +342,11 @@ func (e *engine) run(ctx context.Context) error {
 		}()
 	}
 
+	// Pool probe/reaper goroutines started by reload swaps live on
+	// rs.reloadG; wait for them too so they don't outlive the engine
+	// (issue #951 decision 11). Their context derives from the run
+	// context, so they stop when g.Wait() returns below.
+	go func() { _ = rs.reloadG.Wait() }()
 	return g.Wait()
 }
 
@@ -360,6 +427,8 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
 		hotSets:        e.hotSetsMetric(),
+		reloads:        e.reloadMetrics(),
+		reloadG:        supervised.NewGroup(ctx, e.logger),
 		warmMetrics:    warmMetrics,
 		walMetrics:     walMetrics,
 		startupMetrics: startupMetrics,
@@ -948,7 +1017,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			hotKnobs := e.hotKnobList(rs)
 			return hotKnobs
 		}, rs.hotSets, e.hotBroadcastFn(rs)),
-		ReloadFn: e.reloadFn(rs, e.reloadMetrics()),
+		ReloadFn: e.reloadFn(rs, rs.reloads),
 		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
@@ -1009,6 +1078,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerPurgeBatchHandler:       e.peerPurgeBatchApply(rs, ctx),
 		PeerRefreshBatchHandler:     e.peerRefreshBatchApply(rs, ctx),
 		PeerHotSetHandler:           e.peerHotSetApply(rs),
+		PeerConfigReloadHandler:     e.peerConfigReloadApply(ctx, rs, rs.reloads),
 		PeerKeysFindHandler:         cluster.NewPeerKeysFindHandler(rs.store.Probe),
 		PeerFetchHandler:            cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
 		PeerPutHandler:              e.buildPeerPutHandler(rs).Handle,
@@ -1581,6 +1651,12 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 				}
 				wg.Go(func() error { return h.Close(ctx) })
 			}
+			// Swapped-out handlers (config reload Close-at-swap, issue
+			// #951 decision 10) are already Closed; join them here so
+			// shutdown waits for their in-flight refreshes too.
+			for _, h := range rs.swappedOut() {
+				wg.Go(func() error { return h.Close(ctx) })
+			}
 			return wg.Wait()
 		})
 	}
@@ -1627,4 +1703,115 @@ func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster, joinTime
 		case <-ticker.C:
 		}
 	}
+}
+
+// trackHandler records a route identity -> handler pair for the
+// snapshot's handler reuse map (issue #951 phase 2).
+func (rs *runState) trackHandler(identity string, h *cache.Handler) {
+	rs.handlerMu.Lock()
+	if rs.handlersByRoute == nil {
+		rs.handlersByRoute = map[string]*cache.Handler{}
+	}
+	rs.handlersByRoute[identity] = h
+	rs.handlerMu.Unlock()
+}
+
+// lastHandler returns the most recently appended rs.handlers entry
+// (helper for static-route rebuild tracking).
+func lastHandler(rs *runState) *cache.Handler {
+	if len(rs.handlers) == 0 {
+		return nil
+	}
+	return rs.handlers[len(rs.handlers)-1]
+}
+
+// startPoolGoroutines starts active-probe and eject-reaper goroutines
+// for pools ADDED by a reload swap, under the reload supervised group
+// (decision 11). Pools present at boot already have theirs on the run
+// group; their health.active.* settings stay cold.
+func (e *engine) startPoolGoroutines(rs *runState, newCfg *config.Config, newPools map[string]*origin.Pool, oldPools map[string]*origin.Pool) {
+	if rs.reloadG == nil {
+		return
+	}
+	for _, pc := range newCfg.UpstreamPools {
+		if _, existed := oldPools[pc.Name]; existed {
+			continue
+		}
+		p := newPools[pc.Name]
+		if p == nil {
+			continue
+		}
+		if pc.Health.Active.Path != "" {
+			hc := origin.NewActiveHealthChecker(p, origin.ActiveHealthConfig{
+				Path:               pc.Health.Active.Path,
+				Method:             pc.Health.Active.Method,
+				Interval:           pc.Health.Active.Interval,
+				Timeout:            pc.Health.Active.Timeout,
+				HealthyThreshold:   pc.Health.Active.HealthyThreshold,
+				UnhealthyThreshold: pc.Health.Active.UnhealthyThreshold,
+				ExpectedCodes:      pc.Health.Active.ExpectedStatusCodes,
+			}, e.logger)
+			rs.reloadG.Go("health-"+pc.Name, hc.Run)
+		}
+		if reaper := origin.NewEjectReaper(p); reaper != nil {
+			rs.reloadG.Go("eject-reaper-"+pc.Name, reaper.Run)
+		}
+	}
+}
+
+// peerConfigReloadApply returns the POST /v1/peer/config/reload
+// applier (issue #951 phase 2): a (gen, resolvedHash) fan-out from a
+// peer. This node re-reads and resolves its own boot file and applies
+// only if gen > localGen AND its resolved hash matches; a mismatch
+// replies stale_config. Never re-broadcasts, so the fan-out cannot
+// loop (decision 9).
+func (e *engine) peerConfigReloadApply(ctx context.Context, rs *runState, reloads *prometheus.CounterVec) fasthttp.RequestHandler {
+	return cluster.NewPeerConfigReloadHandler(func(evt api.ConfigReloadEvent) (api.ConfigReloadAck, error) {
+		//nolint:contextcheck // peer applier runs on the admin handler goroutine; reload is bounded by the swap, not the request ctx
+		local := rs.snapshot.Load()
+		if local == nil {
+			return api.ConfigReloadAck{Status: "error", Gen: 0}, fmt.Errorf("no snapshot")
+		}
+		if evt.Gen <= local.gen {
+			return api.ConfigReloadAck{Status: "current", Gen: local.gen}, nil
+		}
+		newCfg, err := config.Load(e.configPath)
+		if err != nil {
+			return api.ConfigReloadAck{Status: "error", Gen: local.gen}, err
+		}
+		if resolvedConfigSHA256(newCfg) != evt.ConfigSHA256 {
+			return api.ConfigReloadAck{Status: "stale_config", Gen: local.gen}, cluster.ErrStaleConfig
+		}
+		res, gen, _ := e.applyConfigReload(ctx, rs, newCfg, reloads)
+		_ = res
+		return api.ConfigReloadAck{Status: "applied", Gen: gen}, nil
+	})
+}
+
+// wireRejoinCatchup registers the NotifyJoin rejoin catch-up (issue
+// #951 decision 13): when a peer joins (or rejoins after a partition),
+// a live member pushes the current (gen, resolvedHash) to it over the
+// same /v1/peer/config/reload endpoint; the joiner applies only if its
+// resolved hash matches, otherwise it reports stale_config. The
+// residual convergence alarm is the generation-skew alert on
+// StatusNode.ConfigGen.
+func (e *engine) wireRejoinCatchup(ctx context.Context, rs *runState) {
+	if rs.clusterNode == nil || rs.broadcaster == nil {
+		return
+	}
+	rs.clusterNode.SetOnPeerJoined(func(peer api.PeerInfo) {
+		snap := rs.snapshot.Load()
+		if snap == nil {
+			return
+		}
+		go func() {
+			//nolint:contextcheck // detached: the push must survive the memberlist event goroutine
+			ack, err := rs.broadcaster.PushConfigReloadToPeer(ctx, peer, snap.gen, resolvedConfigSHA256(snap.cfg))
+			if err != nil {
+				e.logger.Warn("rejoin catch-up push failed", "peer", peer.Name, "error", err)
+				return
+			}
+			e.logger.Info("rejoin catch-up pushed", "peer", peer.Name, "gen", snap.gen, "ack", ack.Status)
+		}()
+	})
 }

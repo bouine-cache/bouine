@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -174,4 +175,49 @@ func NewPeerPurgeBatchHandler(fn func(api.PurgeEvent) error) fasthttp.RequestHan
 // POST /v1/peer/refresh/batch (ADR-0044).
 func NewPeerRefreshBatchHandler(fn func(api.RefreshEvent) error) fasthttp.RequestHandler {
 	return newPeerInvalidationBatchHandler(DecodeRefreshBatchHTTP, fn, "refreshed")
+}
+
+// ErrStaleConfig is returned by a peer reload applier when its own
+// resolved config hash differs from the fan-out event's — ${VAR} env
+// divergence or a different boot file (issue #951 decision 8). The
+// handler maps it to 400 with a stale_config ack so the initiator can
+// tell it apart from a malformed frame.
+var ErrStaleConfig = fmt.Errorf("stale_config")
+
+// NewPeerConfigReloadHandler returns a fasthttp.RequestHandler that
+// decodes ConfigReloadEvent JSON frames and delegates to fn, writing
+// the fn-returned ack as the response body. Mounted at POST
+// /v1/peer/config/reload: the receiving node applies locally and never
+// re-broadcasts (loop-free, decision 9). A fn error of ErrStaleConfig
+// answers 400 with {"status":"stale_config"}; any other error answers
+// 500.
+func NewPeerConfigReloadHandler(fn func(api.ConfigReloadEvent) (api.ConfigReloadAck, error)) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > maxPeerInvalidationBody {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		evt, err := DecodeConfigReloadHTTP(body)
+		if err != nil {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		ack, err := fn(evt)
+		if err != nil {
+			if errors.Is(err, ErrStaleConfig) {
+				ctx.Response.Header.Set(header.ContentType, "application/json")
+				ctx.SetStatusCode(fasthttp.StatusBadRequest)
+				ack.Status = "stale_config"
+				_ = json.NewEncoder(ctx).Encode(ack)
+				return
+			}
+			writePeerError(ctx, err)
+			return
+		}
+		ctx.Response.Header.Set(header.ContentType, "application/json")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		b, _ := EncodeConfigReloadAck(ack)
+		_, _ = ctx.Write(b)
+	}
 }

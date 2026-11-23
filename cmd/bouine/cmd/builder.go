@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -916,4 +917,196 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 // or 0 if hedging is not configured.
 func buildHedgeTimeout(pc config.UpstreamPool) time.Duration {
 	return pc.Connect.HedgeTimeout
+}
+
+// buildRouteHandlerForReload builds the handler + fast-path pair for
+// one route during a config reload swap (issue #951 phase 2). It is
+// the same wiring buildRouter does per route, factored so a swap can
+// rebuild only changed routes against the new pool registry. A nil
+// handler return means the route is skipped (static root failure,
+// unknown pool — both log-and-skip like boot).
+func (e *engine) buildRouteHandlerForReload(rs *runState, rc config.Route, pools map[string]*origin.Pool) (fasthttp.RequestHandler, api.FastPathHandler, error) {
+	if rc.Static.Root != "" {
+		var handler fasthttp.RequestHandler
+		var fp *cache.FastPathHandler
+		// static root stays cold (path-traversal boundary); a changed
+		// static root therefore never reaches here with a differing
+		// root, but index/max_file_size ride along hot.
+		e.buildStaticRouteInto(rc, rs, &handler, &fp)
+		if handler == nil {
+			return nil, nil, fmt.Errorf("static route %q init failed", rc.Name)
+		}
+		if h := lastHandler(rs); h != nil {
+			rs.trackHandler(routeIdentity(rc), h)
+		}
+		return handler, fp, nil
+	}
+	p := pools[rc.Pool]
+	if p == nil {
+		return nil, nil, fmt.Errorf("unknown pool %q", rc.Pool)
+	}
+	if rc.Cache.Disabled() {
+		handler := e.buildDisabledPoolRouteHandler(rs, rc, p)
+		return handler, nil, nil
+	}
+	cfg := e.routeHandlerConfig(rs, rc, p)
+	cached := cache.NewHandler(cfg)
+	rs.trackHandler(routeIdentity(rc), cached)
+	return cached.ServeRequest, cache.NewFastPathHandler(cached), nil
+}
+
+// routeHandlerConfig assembles the cache.HandlerConfig for one pool
+// route — the shared body of the boot proxied-route block and the
+// reload rebuild (issue #951 phase 2).
+func (e *engine) routeHandlerConfig(rs *runState, rc config.Route, p *origin.Pool) cache.HandlerConfig {
+	cfg := cache.HandlerConfig{
+		Upstream:                p.FastHandler(0),
+		FastClient:              p.FastClient(),
+		StripPrefix:             rc.Request.StripPrefix,
+		PathRewrite:             buildPathRewrite(rc),
+		RequestHeaderSet:        rc.Request.HeaderSet,
+		RequestHeaderRemove:     rc.Request.HeaderRemove,
+		Forwarded:               buildForwardedPolicy(rc),
+		ResponseHeaderSet:       rc.Response.HeaderSet,
+		ResponseHeaderRemove:    rc.Response.HeaderRemove,
+		Store:                   rs.store,
+		Logger:                  e.logger,
+		Negative:                rc.Cache.NegativeTTL.Policy(),
+		JitterPercent:           rc.Cache.JitterPercent,
+		StayinAlive:             rc.Cache.StayinAlive,
+		LogCacheKeys:            true,
+		DefaultTTL:              rc.Cache.TTLDefault,
+		OverrideTTL:             rc.Cache.TTLOverride,
+		DownstreamFreshness:     string(rc.Cache.DownstreamFreshness),
+		DefaultSWR:              rc.Cache.StaleWhileRevalidate,
+		SWROverride:             rc.Cache.SWROverride,
+		DefaultSIE:              rc.Cache.StaleIfError,
+		AllowSetCookie:          rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+		BypassOnCookie:          rc.Cache.BypassOnCookie != nil && *rc.Cache.BypassOnCookie,
+		BypassOnUserAgent:       rc.Cache.BypassOnUserAgent,
+		BypassOnCookieNames:     rc.Cache.BypassOnCookieNames,
+		MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
+		MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
+		MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
+		FetchTimeout:            resolveRouteFetchTimeout(rc, p),
+		MaxVariants:             rc.Cache.MaxVariants,
+		FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
+		MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+		Policy:                  buildKeyPolicy(rc.Cache.Key),
+		VaryCapHits:             rs.dpMetrics.VaryCapHits,
+		StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
+		StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
+		FetchShed:               rs.dpMetrics.FetchShedTotal,
+		RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+		FillBypass:              rs.dpMetrics.FillBypassTotal,
+		VaryDrift:               rs.dpMetrics.VaryDriftTotal,
+		RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
+		RouteName:               rc.Name,
+		PoolName:                rc.Pool,
+		RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
+	}
+	applyRefreshConfig(&cfg, rc.Cache)
+	applyClusterClosures(&cfg, e, rs)
+	cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
+	return cfg
+}
+
+// buildDisabledPoolRouteHandler is the cache-disabled pool-route
+// wiring as a single handler (reload rebuild path).
+func (e *engine) buildDisabledPoolRouteHandler(rs *runState, rc config.Route, p *origin.Pool) fasthttp.RequestHandler {
+	cfg := cache.HandlerConfig{
+		Upstream:                p.FastHandler(0),
+		FastClient:              p.FastClient(),
+		StripPrefix:             rc.Request.StripPrefix,
+		PathRewrite:             buildPathRewrite(rc),
+		RequestHeaderSet:        rc.Request.HeaderSet,
+		RequestHeaderRemove:     rc.Request.HeaderRemove,
+		Forwarded:               buildForwardedPolicy(rc),
+		ResponseHeaderSet:       rc.Response.HeaderSet,
+		ResponseHeaderRemove:    rc.Response.HeaderRemove,
+		Store:                   rs.store,
+		Logger:                  e.logger,
+		MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
+		MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
+		FetchTimeout:            resolveRouteFetchTimeout(rc, p),
+		FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
+		MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+		FetchShed:               rs.dpMetrics.FetchShedTotal,
+		RouteName:               rc.Name,
+		PoolName:                rc.Pool,
+		Disabled:                true,
+	}
+	return cache.NewHandler(cfg).ServeRequest
+}
+
+// buildStaticRouteInto wires a static route into the given handler/fp
+// slots (reload rebuild path; static root stays cold).
+func (e *engine) buildStaticRouteInto(rc config.Route, rs *runState, handler *fasthttp.RequestHandler, fp **cache.FastPathHandler) {
+	sh, err := staticfile.New(staticfile.Config{
+		Root:       rc.Static.Root,
+		IndexFiles: rc.Static.Index,
+		MaxBytes:   rc.Static.MaxFileSize.Bytes(),
+		Logger:     e.logger,
+		RouteLabel: rc.Name,
+	})
+	if err != nil {
+		e.logger.Error("static route init failed, skipping", "route", rc.Name, "error", err)
+		return
+	}
+	var h fasthttp.RequestHandler = sh.ServeRequest
+	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
+	if !cacheEnabled {
+		if rc.Request.StripPrefix != "" {
+			h = stripPrefixFastHTTP(rc.Request.StripPrefix, h)
+		}
+		if rw := buildPathRewrite(rc); rw != nil {
+			h = pathRewriteFastHTTP(rw, h)
+		}
+		h = wrapStaticRewrites(rc, h)
+		*handler = h
+		return
+	}
+	cfg := cache.HandlerConfig{
+		Upstream:                h,
+		StripPrefix:             rc.Request.StripPrefix,
+		PathRewrite:             buildPathRewrite(rc),
+		RequestHeaderSet:        rc.Request.HeaderSet,
+		RequestHeaderRemove:     rc.Request.HeaderRemove,
+		ResponseHeaderSet:       rc.Response.HeaderSet,
+		ResponseHeaderRemove:    rc.Response.HeaderRemove,
+		Store:                   rs.store,
+		Logger:                  e.logger,
+		Negative:                rc.Cache.NegativeTTL.Policy(),
+		JitterPercent:           rc.Cache.JitterPercent,
+		StayinAlive:             rc.Cache.StayinAlive,
+		LogCacheKeys:            true,
+		DefaultTTL:              rc.Cache.TTLDefault,
+		OverrideTTL:             rc.Cache.TTLOverride,
+		DownstreamFreshness:     string(rc.Cache.DownstreamFreshness),
+		DefaultSWR:              rc.Cache.StaleWhileRevalidate,
+		SWROverride:             rc.Cache.SWROverride,
+		DefaultSIE:              rc.Cache.StaleIfError,
+		MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
+		MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
+		MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
+		FetchTimeout:            rc.Cache.FetchTimeout,
+		MaxVariants:             rc.Cache.MaxVariants,
+		FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
+		MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
+		Policy:                  buildKeyPolicy(rc.Cache.Key),
+		VaryCapHits:             rs.dpMetrics.VaryCapHits,
+		StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
+		StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
+		FetchShed:               rs.dpMetrics.FetchShedTotal,
+		RewarmFill:              rs.dpMetrics.RewarmFillTotal,
+		FillBypass:              rs.dpMetrics.FillBypassTotal,
+		VaryDrift:               rs.dpMetrics.VaryDriftTotal,
+	}
+	applyRefreshConfig(&cfg, rc.Cache)
+	applyClusterClosures(&cfg, e, rs)
+	cfg.PurgeBroadcast = rs.dataPlanePurgeBroadcast()
+	cached := cache.NewHandler(cfg)
+	rs.trackHandler(routeIdentity(rc), cached)
+	*handler = cached.ServeRequest
+	*fp = cache.NewFastPathHandler(cached)
 }

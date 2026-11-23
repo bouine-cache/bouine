@@ -12,6 +12,34 @@ the curated, human-readable summary.
 
 ### Added
 
+- Hot config reload phase 2 (behind `experimental.config_reload`,
+  default off): the route table and upstream pool targets now swap
+  live, in one atomic snapshot, behind a single atomic pointer on the
+  engine — the data plane does one atomic load per request and the hit
+  path stays zero-allocation. Pool target lists swap under the pool
+  lock with unchanged addresses keeping their health state; pools added
+  by a reload start their probe/reaper goroutines at swap and removed
+  pools are closed; changed routes get rebuilt handlers (closed at
+  swap, unchanged routes keep theirs). In a strong-mode cluster the
+  reload fans out to every live peer (`POST /v1/peer/config/reload`,
+  admin token) with a generation counter plus the SHA-256 of the
+  resolved config and collects per-peer acks; cache-key-form changes
+  are gated on every live peer acking (`applied_all` vs
+  `applied_local_only`), `${VAR}` divergence between peers is reported
+  as `stale_config`, and rejoining peers are caught up via a push on
+  join, with a `config_gen` status field for a generation-skew alert
+  (#951, ADR-0075). `POST /v1/config/reload` and `bouine config reload`
+  now only reload the daemon's boot config file: a differing `path` /
+  `--file` is rejected with 400 (#951 decision 5).
+
+### Changed
+
+- **Migration note:** `config.Validate` now requires a unique
+  effective route identity (explicit `name`, else derived name plus
+  full match predicate). Configs with colliding derived route names,
+  which previously merged silently into one Prometheus `route` label,
+  now fail validation — rename one of the routes (#951 decision 12).
+
 - Config validation now emits non-fatal warnings (`Config.Warnings`,
   surfaced by `bouine serve`, `bouine config validate`, and config reload
   logs): a `stayin_alive` route whose origin pool has neither

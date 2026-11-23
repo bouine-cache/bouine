@@ -345,6 +345,8 @@ storage:
   mode: %s
   join: %s
   hop_limit: 2
+experimental:
+  config_reload: true
 upstream_pools:
   - name: origin
     targets: [%q]
@@ -969,6 +971,35 @@ func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 	s.adminPost(t, n, "/v1/ban", body)
 }
 
+// ConfigReload sends POST /v1/config/reload to node n and returns the
+// decoded result (issue #951 phase 2 integration surface).
+func (s *ClusterStack) ConfigReload(t *testing.T, n int) map[string]any {
+	t.Helper()
+	body := []byte(`{}`)
+	code, raw := s.adminPostWithCode(t, n, "/v1/config/reload", body)
+	if code != 200 {
+		t.Fatalf("config reload on node %d: status %d body %s", n, code, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode reload result: %v (body %s)", err, raw)
+	}
+	return out
+}
+
+// EditNodeConfig rewrites node n's boot config file in place (the
+// operator workflow behind config reload, issue #951 decision 5).
+func (s *ClusterStack) EditNodeConfig(t *testing.T, n int, mutate func(string) string) {
+	t.Helper()
+	raw, err := os.ReadFile(s.Nodes[n].cfgPath)
+	if err != nil {
+		t.Fatalf("read node config: %v", err)
+	}
+	if err := os.WriteFile(s.Nodes[n].cfgPath, []byte(mutate(string(raw))), 0o600); err != nil {
+		t.Fatalf("write node config: %v", err)
+	}
+}
+
 // PeerPurge sends a local-only purge to node n via /v1/peer/purge.
 // Unlike Purge, this does not broadcast to other peers.
 func (s *ClusterStack) PeerPurge(t *testing.T, n int, evt api.PurgeEvent) {
@@ -1223,4 +1254,22 @@ func (s *ClusterStack) PurgeBatch(t *testing.T, n int, urls []string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string][]string{"urls": urls})
 	s.adminPost(t, n, "/v1/purge/batch", body)
+}
+
+// AdminGet performs an authenticated GET against node n's admin API
+// and returns (status code, body).
+func (s *ClusterStack) AdminGet(t *testing.T, n int, path string) (int, []byte) {
+	t.Helper()
+	url := s.Nodes[n].AdminAddr + path
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("GET")
+	req.Header.Set("Authorization", "Bearer "+IntegrationToken)
+	if err := fasthttp.Do(req, resp); err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp.StatusCode(), append([]byte(nil), resp.Body()...)
 }

@@ -159,6 +159,11 @@ type Cluster struct {
 	// with SetOnPeerRetired under -race in the integration suite
 	// (addPeer read the zero value while the engine wrote it).
 	onPeerUnretired atomic.Pointer[func(addr string)]
+	// onPeerJoined, when set, receives the full PeerInfo of a newly
+	// joined peer after addPeer (issue #951 decision 13: the rejoin
+	// catch-up pushes the current (gen, resolvedHash) to the joiner).
+	// Stored atomically for the same reason as onPeerUnretired.
+	onPeerJoined atomic.Pointer[func(api.PeerInfo)]
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue []gossipBroadcast
@@ -931,7 +936,16 @@ func (c *Cluster) NotifyJoin(n *memberlist.Node) {
 	}
 	c.addPeer(n.Name, info)
 	c.logger.Info("cluster peer joined", "name", n.Name, "addr", info.Addr)
+	if fn := c.onPeerJoined.Load(); fn != nil && n.Name != c.cfg.NodeName {
+		(*fn)(info)
+	}
 }
+
+// SetOnPeerJoined registers a callback invoked with the PeerInfo of
+// every newly joined peer (issue #951 decision 13: rejoin catch-up).
+// Called before Join; the callback runs on memberlist's event
+// goroutine, so it must not block.
+func (c *Cluster) SetOnPeerJoined(fn func(api.PeerInfo)) { c.onPeerJoined.Store(&fn) }
 
 // NotifyLeave is called when a node leaves or fails. The local node
 // is never removed from its own ring — memberlist calls NotifyLeave

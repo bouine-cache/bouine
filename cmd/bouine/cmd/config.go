@@ -203,25 +203,30 @@ func newConfigReloadCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "reload [--file <path>]",
 		Short: "Apply a config file to the running daemon without a restart",
-		Long: "reload re-parses and validates a config file, applies its hot-config " +
-			"knob values to the running daemon, and reports everything that needs a " +
-			"restart. A parse or validation failure changes nothing. Requires the " +
-			"daemon to run with experimental.config_reload. Rollback is operational: " +
-			"reload the previous (git-tracked) file.",
+		Long: "reload re-parses and validates the daemon's boot config file, applies " +
+			"its hot-config values (knobs, routes, pool targets) to the running daemon, " +
+			"and reports everything that needs a restart. A parse or validation failure " +
+			"changes nothing. Requires the daemon to run with experimental.config_reload. " +
+			"Only the boot file can be reloaded: --file is deprecated and rejected when " +
+			"it differs from the daemon's startup path (issue #951 decision 5). " +
+			"Rollback is operational: reload the previous (git-tracked) file.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			file, err := cmd.Flags().GetString(flagFile)
 			if err != nil {
 				return err
 			}
-			res, err := adminClient(cmd).ConfigReload(cmd.Context(), file)
+			if file != "" {
+				return fmt.Errorf("--%s is deprecated: the daemon only reloads its own boot config file; edit that file in place and run 'bouine config reload' (issue #951 decision 5)", flagFile)
+			}
+			res, err := adminClient(cmd).ConfigReload(cmd.Context(), "")
 			if err != nil {
 				return err
 			}
 			return printResult(cmd, renderConfigReload(res), res)
 		},
 	}
-	c.Flags().String(flagFile, "", "config file to reload (default: the daemon's startup file)")
+	c.Flags().String(flagFile, "", "DEPRECATED (issue #951 decision 5): only the daemon's boot config file can be reloaded; a non-empty value is rejected")
 	return c
 }
 

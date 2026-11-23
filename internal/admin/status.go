@@ -29,6 +29,10 @@ type StatusNode struct {
 	// here (drain marks the node not-ready), so `bouine status` is
 	// the fastest way to see a mid-drain pod.
 	Ready bool `json:"ready"`
+	// ConfigGen is the monotonically increasing config generation
+	// (boot = 1, each applied reload increments; issue #951). Compare
+	// across peers for the generation-skew convergence alarm.
+	ConfigGen uint64 `json:"config_gen,omitempty"`
 }
 
 // StatusCache holds the node-local cache counters since boot. Tier

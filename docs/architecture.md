@@ -740,7 +740,15 @@ off, issue #817) applies a whole config file the same way: re-parse
 and validate (failure changes nothing), apply the hot subset, report
 applied / unchanged / `needs_restart` loudly. Rollback is
 operational — reload the previous file. The route table and pool
-target swap are phase 2 and land under the same flag. `get` shows each knob's live value and source (`file`,
+target swap are phase 2 and land under the same flag, with cluster
+fan-out: one atomic snapshot swap (routes + pool registry behind a
+single `atomic.Pointer`; one atomic load per request on the hit path),
+synchronous per-peer acks over `POST /v1/peer/config/reload` keyed on
+a generation counter plus the SHA-256 of the resolved config, a
+key-form gate that refuses cache-key changes unless every live peer
+acks (`applied_all` vs `applied_local_only`), rejoin catch-up via
+`NotifyJoin`, and a `config_gen` status field with a generation-skew
+alert (ADR-0075). `get` shows each knob's live value and source (`file`,
 `default`, or `runtime`); `set` applies a validated point mutation
 and prints the not-persisted warning — runtime overrides are
 deliberately ephemeral (pods are cattle), so `diff` shows what is

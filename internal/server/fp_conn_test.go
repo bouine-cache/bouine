@@ -104,9 +104,9 @@ func TestRouter_RouteLabelAuto(t *testing.T) {
 	rt.AddRoute("", "", "", "", nil, ok200("catchall"), nil)
 
 	// Labels should be auto-generated.
-	assert.Equal(t, "api.example.com:/v1", rt.routes[0].label)
-	assert.Equal(t, "/static", rt.routes[1].label)
-	assert.Equal(t, "_catch-all", rt.routes[2].label)
+	assert.Equal(t, "api.example.com:/v1", rt.routesForTest()[0].label)
+	assert.Equal(t, "/static", rt.routesForTest()[1].label)
+	assert.Equal(t, "_catch-all", rt.routesForTest()[2].label)
 }
 
 func TestRouter_MetricsIncrement(t *testing.T) {

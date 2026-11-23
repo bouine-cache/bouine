@@ -73,6 +73,9 @@ type Pool struct {
 }
 
 // Target is a single upstream endpoint.
+//
+// Unstable fields Addr accessor for reload merge: the addr string is
+// the reuse key when a config reload swaps a pool's target list.
 type Target struct {
 	url     *url.URL
 	metrics *Metrics
@@ -674,10 +677,16 @@ func newTarget(addr string) (*Target, error) {
 // sick pods are already out of Endpoints, so sending traffic to the
 // ejected target is strictly better than an instant 502, and a truly
 // dead origin still fails the fetch and records passive errors.
+//
+// The RLock is held across the element read, not just len(p.targets):
+// SetTargets swaps the slice header under mu.Lock during config reload
+// (issue #951), and reading p.targets[idx] unlocked would race that
+// swap. The whole scan stays under one RLock so the slice the loop
+// indexes is the same one len was taken from.
 func (p *Pool) pick() *Target {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	n := uint64(len(p.targets))
-	p.mu.RUnlock()
 	if n == 0 {
 		return nil
 	}
@@ -695,6 +704,64 @@ func (p *Pool) pick() *Target {
 		"pool", p.Name,
 		"target", t.addr)
 	return t
+}
+
+// TargetAddrs returns the current target addresses in order (the
+// reuse keys for a SetTargets merge).
+func (p *Pool) TargetAddrs() []string {
+	targets := p.targetsRef()
+	out := make([]string, len(targets))
+	for i, t := range targets {
+		out[i] = t.addr
+	}
+	return out
+}
+
+// TargetByAddr returns the *Target for addr, or nil.
+func (p *Pool) TargetByAddr(addr string) *Target {
+	targets := p.targetsRef()
+	for _, t := range targets {
+		if t.addr == addr {
+			return t
+		}
+	}
+	return nil
+}
+
+// NewTargetForReload builds a fresh healthy target for a config-reload
+// pool target swap (issue #951): the engine merges by addr, reusing
+// existing *Target objects for unchanged addresses so eject/error
+// state survives the swap.
+func NewTargetForReload(addr string, metrics *Metrics) (*Target, error) {
+	t, err := newTarget(addr)
+	if err != nil {
+		return nil, err
+	}
+	t.metrics = metrics
+	return t, nil
+}
+
+// SetTargets atomically replaces the pool's target list (config reload
+// phase 2, issue #951). The new slice is assigned as a whole under
+// mu.Lock — the previous backing array is never mutated, so readers
+// that copied the slice header under RLock (HasHealthyTarget, the
+// eject reaper) stay safe. Unchanged addresses keep their existing
+// *Target objects (matched by addr), preserving per-target ejected
+// and error state; new addresses get fresh, healthy targets.
+// Callers pass metrics on every new Target (see NewPool).
+func (p *Pool) SetTargets(newTargets []*Target) {
+	p.mu.Lock()
+	p.targets = newTargets
+	p.mu.Unlock()
+}
+
+// targetsRef returns the current target slice header under RLock for
+// readers that iterate outside pick (status, health, reaper): the
+// returned slice must not be retained across a SetTargets call.
+func (p *Pool) targetsRef() []*Target {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.targets
 }
 
 // FastHandler returns a fasthttp.RequestHandler that reverse-proxies
@@ -1070,11 +1137,18 @@ func (c *PoolFastClient) doHedgedFetch(
 // healthy — i.e. whether a miss could be refilled from this pool. It is
 // the health signal the stayin_alive grace gate keys on (ADR-0051):
 // while false, expired KeepGrace entries are withheld from the TTL
-// reaper. Single atomic load — anyHealthy is maintained on every health
-// transition (issue #939) — so it is safe to call per held entry from
-// inside the reaper's shard lock.
+// reaper. Iterates the current target slice (targetsRef) rather than
+// reading the anyHealthy cache so the answer stays correct across a
+// SetTargets swap; the per-target healthy flag is an atomic load, so it
+// is safe to call per held entry from inside the reaper's shard lock.
 func (p *Pool) HasHealthyTarget() bool {
-	return p.anyHealthy.Load()
+	targets := p.targetsRef()
+	for _, t := range targets {
+		if t.healthy.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // Healthy returns the list of currently healthy target addresses.
@@ -1215,10 +1289,8 @@ func (r *EjectReaper) reap() {
 		return
 	}
 	now := time.Now()
-	p.mu.RLock()
-	targets := make([]*Target, len(p.targets))
-	copy(targets, p.targets)
-	p.mu.RUnlock()
+	targets := p.targetsRef()
+	targets = append([]*Target(nil), targets...)
 	for _, t := range targets {
 		if t.healthy.Load() {
 			continue

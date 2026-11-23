@@ -148,6 +148,47 @@ type HotSetEvent struct {
 	Seq uint64 `json:"seq"`
 }
 
+// ConfigReloadEvent is fanned out when a node applies a config reload
+// (issue #951, phase 2): the payload is a generation counter plus the
+// SHA-256 of the RESOLVED config (canonical marshal of *config.Config
+// after Load+Validate), never the file bytes — config.Load interpolates
+// ${VAR} from each daemon's own environment, so identical mounted files
+// can resolve differently across peers and only the resolved hash
+// detects that divergence. The receiving peer re-reads its own boot
+// path, resolves it, and applies only if gen is newer than its local
+// generation AND its resolved hash matches; a mismatch replies
+// stale_config so the initiator reports the peer as not converged. The
+// peer endpoint never re-broadcasts, so the fan-out cannot loop.
+//
+// Unstable: phase 2 of #817.
+type ConfigReloadEvent struct {
+	// IssuedAt is the wall-clock time of the reload.
+	IssuedAt time.Time `json:"issued_at"`
+	// ConfigSHA256 is the hex SHA-256 of the canonical marshal of the
+	// resolved *config.Config on the issuing node.
+	ConfigSHA256 string `json:"config_sha256"`
+	// Issuer is the node name that originated the reload.
+	Issuer string `json:"issuer"`
+	// Gen is the initiator's monotonically increasing config
+	// generation (boot = 1, each applied reload increments).
+	Gen uint64 `json:"gen"`
+	// Seq is the monotonic sequence number from the issuer.
+	Seq uint64 `json:"seq"`
+}
+
+// ConfigReloadAck is the POST /v1/peer/config/reload response body: a
+// peer reports applied, already-current (its generation is not older
+// than gen), or stale_config (its resolved config hash differs from
+// the event's, i.e. ${VAR} divergence or a different file).
+//
+// Unstable: phase 2 of #817.
+type ConfigReloadAck struct {
+	// Status is "applied", "current", or "stale_config".
+	Status string `json:"status"`
+	// Gen is the peer's config generation after handling the event.
+	Gen uint64 `json:"gen"`
+}
+
 // PeerFetchRequest is the HTTP request body for a peer cache lookup.
 //
 // Stable.

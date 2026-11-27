@@ -203,7 +203,7 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 		cfg:  Config{Addr: addr, ReadyFn: readyFn, ConditionsFn: conditionsFn, DrainFn: drainFn, Logger: logger},
 		addr: addr,
 	}
-	handler := s.minimalHandler()
+	handler := stripProxyPrefix(s.minimalHandler())
 	sh := &swapHandler{}
 	sh.Store(handler)
 	s.swap = sh
@@ -227,6 +227,31 @@ func (s *Server) SwapHandler(h fasthttp.RequestHandler) {
 	}
 }
 
+// viaProxyKey tags requests that arrived through the Kubernetes
+// API-server services/proxy subresource (path prefix /proxy), so
+// proxied traffic is distinguishable from direct connections.
+const viaProxyKey = "bouine.admin.via_proxy"
+
+// stripProxyPrefix wraps the admin handler so requests arriving through
+// the Kubernetes API-server services/proxy subresource route identically
+// to direct ones: the API server forwards the path after .../proxy/, and
+// this strips one leading "/proxy" segment (or "/proxy/" an empty rest).
+// Without the prefix the wrapper is a no-op, so direct traffic is
+// unaffected. Applies to both the full and the minimal (boot) handler.
+func stripProxyPrefix(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		p := ctx.Path()
+		if rest, ok := strings.CutPrefix(string(p), "/proxy"); ok && (rest == "" || rest[0] == '/') {
+			ctx.URI().SetPath(rest)
+			if rest == "" {
+				ctx.URI().SetPath("/")
+			}
+			ctx.SetUserValue(viaProxyKey, true)
+		}
+		next(ctx)
+	}
+}
+
 // New constructs the admin server.
 func New(cfg Config) *Server {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
@@ -234,7 +259,7 @@ func New(cfg Config) *Server {
 		cfg.Addr = ":9000"
 	}
 	s := &Server{cfg: cfg, addr: cfg.Addr}
-	handler := s.fullHandler()
+	handler := stripProxyPrefix(s.fullHandler())
 	s.inner = &fasthttp.Server{
 		Handler:               handler,
 		ReadTimeout:           5 * time.Second,

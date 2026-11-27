@@ -222,6 +222,60 @@ further). Purge forces a full miss.
 
 ---
 
+## Several deployments (named remotes and selectors)
+
+Operators running more than one bouine deployment (per region, per tenant,
+blue/green, edge in front of a shield) name them once in a user-scoped file
+and address them by name or label (issue #953, ADR-0076):
+
+```yaml
+# ~/.config/bouine/remotes.yaml
+current-remote: edge
+remotes:
+  - name: edge
+    server: kube://cache/bouine-admin:9000   # via API-server services/proxy
+    token-env: BOUINE_TOKEN_EDGE
+    labels: {tier: edge, region: eu}
+  - name: shield
+    server: 10.0.0.8:9000                     # direct, or https://
+    token-file: ~/.config/bouine/shield.token  # must be 0600
+    labels: {tier: shield, region: eu}
+```
+
+```bash
+bouine remote                       # list
+bouine remote use edge              # set current-remote
+bouine ban path_regex=^/api -l tier=edge        # fan out, one line per remote
+bouine ban path_regex=^/api -l tier=edge --dry-run   # plan only, exit 0
+bouine ban path_regex=^/api --remote shield      # single named remote
+```
+
+Rules that matter operationally:
+
+- `--selector` matches ANDed `k=v` pairs; zero matches is an error; there is
+  no `--all`. Fan-out is sequential in file order and a failed remote does
+  not abort the run: every remote prints a line, errors also go to stderr,
+  and the exit code is 1 if any remote failed.
+- An ambient `--token`/`$BOUINE_TOKEN` is never used for named remotes; each
+  remote uses its own `token-env`/`token-file`. Sharing one token value
+  across remotes prints a warning.
+- Plaintext writes to non-loopback `http://` remotes are refused unless the
+  remote sets `allow-insecure: true` (loopback = literal `127.0.0.0/8`,
+  `::1`).
+- `kube://<ns>/<svc>:<port>` remotes go through the API-server
+  `services/proxy` subresource: grant `services/proxy` on the admin Service
+  via the chart's `adminProxy.rbac` values, and allow the API-server egress
+  CIDRs on the admin port via `networkPolicy.adminApiServerCIDRs` when the
+  NetworkPolicy is enabled (on clusters with NATed API-server egress, use
+  the node CIDR or disable just the admin-port rule). Daemons older than
+  the proxy-strip version are rejected with a clear error after a
+  `GET /version` probe.
+- `status`, `explain`, `keys`, `config`, `cluster` stay single-remote: they
+  report one node's local state and multi-target aggregation is a separate
+  design.
+
+---
+
 ## Monitoring invalidation
 
 | Metric                                | Description                          |

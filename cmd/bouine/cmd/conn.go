@@ -39,6 +39,10 @@ func addGlobalFlags(root *cobra.Command) {
 	p.String(flagServer, defaultServer, "admin server address")
 	p.String(flagToken, "", "admin bearer token (prefer "+envToken+")")
 	p.String(flagFormat, formatText, "output format: "+formatText+" or "+formatJSON)
+	p.String(flagRemotesFile, "", "path to the remotes file (default $BOUINE_REMOTES_FILE or ~/.config/bouine/remotes.yaml)")
+	p.String(flagRemote, "", "named remote from the remotes file")
+	p.StringP(flagSelector, "l", "", "select remotes by labels (k=v, comma-separated, ANDed)")
+	p.Bool(flagDryRun, false, "print the resolved plan without sending anything")
 }
 
 // lookupFlag finds a flag anywhere in the command's flag surface:

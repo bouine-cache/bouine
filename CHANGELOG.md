@@ -12,6 +12,18 @@ the curated, human-readable summary.
 
 ### Added
 
+- CLI named remotes and multi-target fan-out (issue #953, ADR-0076):
+  a user-scoped remotes file (`--remotes-file`, `$BOUINE_REMOTES_FILE`,
+  `~/.config/bouine/remotes.yaml`) names deployments with per-remote
+  credentials (`token-env` / 0600 `token-file`) and labels;
+  `purge`/`ban`/`refresh` accept `--remote NAME` or `-l/--selector k=v,...`
+  and fan out sequentially with per-remote results and a truthful exit
+  code; `--dry-run` prints the plan; `bouine remote [use|delete]` manages
+  the file. Remotes may use `kube://<ns>/<svc>:<port>` to reach the admin
+  API through the Kubernetes API-server `services/proxy` subresource
+  (ADR-0077) instead of `kubectl port-forward`; the daemon strips one
+  leading `/proxy` path segment on the admin listener.
+
 - Hot config reload phase 2 (behind `experimental.config_reload`,
   default off): the route table and upstream pool targets now swap
   live, in one atomic snapshot, behind a single atomic pointer on the

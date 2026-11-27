@@ -291,6 +291,30 @@ Caveats:
 - Do not expose the admin port via Ingress/LoadBalancer: token-only
   auth is too thin for a public listener.
 
+**Without port-forward (API-server proxy).** When the chart is installed
+with `adminProxy.rbac.create: true`, operators listed in
+`adminProxy.rbac.subjects` can reach the admin API through the Kubernetes
+API server's `services/proxy` subresource — no tunnel to manage:
+
+```yaml
+# ~/.config/bouine/remotes.yaml
+remotes:
+  - name: prod
+    server: kube://cache/bouine-admin:9000
+    token-env: BOUINE_TOKEN_PROD
+    labels: {tier: edge}
+```
+
+```bash
+bouine ban path_regex=^/api -l tier=edge --dry-run   # then for real
+```
+
+The API-server hop is TLS and audited per user identity; the bouine bearer
+token is still required end-to-end. When `networkPolicy.enabled: true`, set
+`networkPolicy.adminApiServerCIDRs` to the API server's egress CIDRs
+(`helm values` comment has the fallback for NATed managed clusters).
+See ADR-0076/ADR-0077 and `docs/runbook/20-purge-ban.md`.
+
 ### Verifying release signatures
 
 All releases are cryptographically signed using [cosign](https://github.com/sigstore/cosign)

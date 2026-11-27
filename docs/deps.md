@@ -21,6 +21,7 @@ aren't `slog`-compatible, HTTP servers other than
 | Module                                          | License    | Used by                  | Reason |
 |-------------------------------------------------|------------|--------------------------|--------|
 | `github.com/spf13/cobra`                        | Apache-2.0 | `cmd/bouine`             | CLI framework chosen in `docs/architecture.md`. |
+| `k8s.io/client-go` (+ `k8s.io/api`, `k8s.io/apimachinery`) | Apache-2.0 | `cmd/bouine` CLI only | Kubeconfig loading + API-server services/proxy transport for `kube://` remotes (ADR-0077, issue #953). Never imported by `internal/*` or `pkg/*`. |
 | `github.com/spf13/pflag`                        | BSD-3      | (transitive)             | Cobra dependency. |
 | `github.com/hashicorp/memberlist`               | MPL-2.0    | `internal/cluster`       | Gossip membership (ADR-0007). Pre-approved `AGENTS.md §5`. |
 | `github.com/hashicorp/go-msgpack/v2`            | MIT        | (transitive)             | memberlist serialisation. |

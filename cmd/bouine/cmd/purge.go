@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 func newPurgeCmd() *cobra.Command {
@@ -15,11 +16,13 @@ func newPurgeCmd() *cobra.Command {
 		Short: "Purge a URL from the cache",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := adminClient(cmd).Purge(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			return printResult(cmd, res.Status, res)
+			return runInvalidation(cmd, "purge "+args[0], func(c *bouineapi.Client) (closureResult, error) {
+				res, err := c.Purge(cmd.Context(), args[0])
+				if err != nil {
+					return closureResult{}, err
+				}
+				return closureResult{text: res.Status, payload: res}, nil
+			})
 		},
 	}
 	return c
@@ -50,11 +53,13 @@ func newBanCmd() *cobra.Command {
 					return fmt.Errorf("unknown predicate key %q", k)
 				}
 			}
-			res, err := adminClient(cmd).Ban(cmd.Context(), expr)
-			if err != nil {
-				return err
-			}
-			return printResult(cmd, fmt.Sprintf("%s (count: %d)", res.Status, res.Count), res)
+			return runInvalidation(cmd, "ban "+strings.Join(args, " "), func(c *bouineapi.Client) (closureResult, error) {
+				res, err := c.Ban(cmd.Context(), expr)
+				if err != nil {
+					return closureResult{}, err
+				}
+				return closureResult{text: fmt.Sprintf("%s (count: %d)", res.Status, res.Count), payload: res}, nil
+			})
 		},
 	}
 	return c
@@ -70,24 +75,33 @@ func newRefreshCmd() *cobra.Command {
 			"Exactly one of the positional URL or --surrogate-key must be given.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if surrogateKey != "" {
-				if len(args) > 0 {
+			plan := "refresh " + surrogateKey
+			if surrogateKey == "" {
+				if len(args) != 1 {
+					return fmt.Errorf("provide a URL or --surrogate-key")
+				}
+				plan = "refresh " + args[0]
+				if len(args) > 0 && surrogateKey != "" {
 					return fmt.Errorf("url and --surrogate-key are mutually exclusive")
 				}
-				res, err := adminClient(cmd).RefreshSurrogate(cmd.Context(), surrogateKey)
-				if err != nil {
-					return err
+			}
+			return runInvalidation(cmd, plan, func(c *bouineapi.Client) (closureResult, error) {
+				var (
+					res closureResult
+					err error
+				)
+				if surrogateKey != "" {
+					r, e := c.RefreshSurrogate(cmd.Context(), surrogateKey)
+					res, err = closureResult{text: fmt.Sprintf("%s (count: %d)", r.Status, r.Count), payload: r}, e
+				} else {
+					r, e := c.Refresh(cmd.Context(), args[0])
+					res, err = closureResult{text: r.Status, payload: r}, e
 				}
-				return printResult(cmd, fmt.Sprintf("%s (count: %d)", res.Status, res.Count), res)
-			}
-			if len(args) != 1 {
-				return fmt.Errorf("provide a URL or --surrogate-key")
-			}
-			res, err := adminClient(cmd).Refresh(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			return printResult(cmd, res.Status, res)
+				if err != nil {
+					return closureResult{}, err
+				}
+				return res, nil
+			})
 		},
 	}
 	c.Flags().StringVar(&surrogateKey, "surrogate-key", "", "soft-purge every object carrying this surrogate key")

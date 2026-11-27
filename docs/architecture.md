@@ -700,8 +700,7 @@ bouine purge <url>
 bouine ban <predicate>            # e.g. host=example.com path~^/foo
 bouine refresh <url>
 bouine cluster peers
-bouine cluster join <addr>
-bouine stats
+bouine explain <url>              # structured cache-decision tree (#814)
 bouine config get [key]           # live hot-config knobs, with source
 bouine config set <key> <value>   # [--dry-run] runtime change
 bouine config diff [<a.yaml> <b.yaml>]
@@ -711,10 +710,21 @@ bouine config schema
 bouine keys find <url>            # [--peer] key + local state, no storage scan
 bouine keys top [--limit N]        # [--class miss|stale|revalidated|bypass]
 bouine keys recent [--limit N]     # latest-active URL prefixes
-bouine bench [--profile canonical]
-bouine cachecheck <url>
+bouine remote                     # list named remotes (issue #953)
+bouine remote use <name>          # set current-remote
+bouine remote delete <name>
 bouine version
 ```
+
+Global flags beyond `--server`/`--token`/`--format` (issue #953, ADR-0076):
+`--remotes-file`, `--remote NAME`, `-l/--selector k=v,...`, `--dry-run`.
+Invalidations (`purge`/`ban`/`refresh`) fan out over matching remotes,
+sequentially in file order, printing one `name<TAB>result` line per remote
+(bare JSON array with `--format json`) and exiting 1 if any remote failed.
+A remote's `server` may be `kube://<namespace>/<admin-svc>:<port>`, reached
+through the Kubernetes API-server `services/proxy` subresource (ADR-0077);
+the admin server strips one leading `/proxy` path segment so proxied
+requests route identically to direct ones.
 
 `bouine status` fetches `GET /v1/status`: node, cache (hit ratio,
 tier fill), origins (per-target health with last-change), cluster

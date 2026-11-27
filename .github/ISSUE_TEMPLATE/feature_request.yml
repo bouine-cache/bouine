@@ -53,7 +53,7 @@ body:
         - Phase 6 — dashboard UX
         - Phase 7 — simplification
         - Phase 8 — AI / dashboard
-        - Post-v1.0 (see §18)
+        - Post-v1.0 (see ROADMAP.md)
         - Not sure
     validations:
       required: true

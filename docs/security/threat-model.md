@@ -106,7 +106,7 @@ bouine follows these secure design principles (Saltzer and Schroeder,
 | **Least privilege** | The container runs as `nonroot:nonroot` with dropped Linux capabilities. CI workflows use minimal GitHub Actions permissions (`contents: read` by default). The admin token is scoped to admin operations only — it cannot modify data-plane traffic or bypass cache logic. Cluster mTLS uses a separate CA from the data-plane TLS certs. |
 | **Economy of mechanism** | One HTTP stack (`net/http`) for both data and admin planes (ADR-0006), reducing the attack surface. A single config file in declarative YAML — no imperative scripting, no VCL eval. No web framework; `net/http.ServeMux` pattern routing only. |
 | **Defense in depth** | HTTP smuggling defenses (reject ambiguous framing) + header hygiene (strip hop-by-hop) + private response protection (never cache `Authorization`/`Set-Cookie`) + path traversal prevention (hashed storage keys) + resource limits (connection caps, body size limits, bounded queues). Each layer defends independently. |
-| **Separation of privilege** | Admin port and data port are separate listeners on separate ports. Cluster mTLS CA is separate from data-plane TLS CA. Admin tokens are stored in env vars or files, never in CLI flags or config files. |
+| **Separation of privilege** | Admin port and data port are separate listeners on separate ports. Cluster mTLS CA is separate from data-plane TLS CA. Admin tokens are documented as env vars or 0600 files; the `--token` flag exists but is discouraged (it lands in shell history), and remotes files never embed literal tokens. |
 | **Psychological acceptability** | Security defaults are documented in the Helm chart values and the hardening checklist in `SECURITY.md`. Operators are not required to understand TLS internals — secure defaults are on, and insecure options require explicit opt-in with visible config flags. |
 
 ---
@@ -141,7 +141,7 @@ risk after controls.
 |-----|--------|--------|-----------|--------|----------|----------|
 | T01 | Peer impersonation: rogue pod joins cluster | S | C5,C7 | A2,A11 | ✓ mTLS on cluster listener (TB4), separate CA from data plane, SPIFFE-style SAN check on incoming peer conns. | Low |
 | T02 | Origin impersonation: MITM presents wrong cert | S | C4 | A1,A3,A12 | ✓ TLS verify enabled by default (no `InsecureSkipVerify` outside an explicit per-pool `tls.insecure: true` test flag, refused in production builds). Optional SPKI pinning per pool. | Low |
-| T03 | Client impersonation against admin API | S | C1,C2 | A6 | ✓ Bearer token (constant-time compare) or mTLS. Rejects insecure HTTP for write methods. Admin port never exposed externally in default Helm chart. | Low |
+| T03 | Client impersonation against admin API | S | C1,C2 | A6 | ✓ Bearer token (constant-time compare) in `authMiddleware`; no transport check server-side today (claim corrected 2026-11, issue #953) — the CLI refuses plaintext writes to non-loopback remotes, and operators reach remote admin planes via the API-server services/proxy (TLS to the API server) or a tunnel. Admin port never exposed externally in default Helm chart (ClusterIP only). | Low |
 | T04 | Forged `X-Forwarded-For` / `Forwarded` | S | C1,C2 | A8 | ✓ Client-supplied `X-Forwarded-*` is untrusted input everywhere: bouine never parses or acts on it. The per-route opt-in `request.forwarded` (issue #769) only *appends* the address of bouine's immediate peer (the edge connection) to the chain on origin-bound requests — existing entries are carried verbatim, never rewritten, never trusted — and sets `X-Forwarded-Proto` / `X-Forwarded-Host` from what bouine itself received. Chains are capped at `max_append` entries (default 5) and the 8 KiB per-header budget (T37); injected headers never join the cache key or the stored request headers (T06); background fetches append no client address (no live peer to attribute). A route without the block forwards client-supplied identity headers verbatim and adds nothing. | Low |
 
 ### Tampering
@@ -169,6 +169,7 @@ risk after controls.
 |-----|--------|--------|-----------|--------|----------|----------|
 | T18 | Operator denies issuing a destructive purge | R | C6 | A3,A8 | ✓ Admin API logs every write action with: token-ID hash, source IP, full predicate, count of affected objects, monotonic seq. Logs are append-only to stdout (operator forwards to SIEM). | Medium |
 | T19 | Origin denies serving a poisoning response | R | C3 | A8 | ✓ Cache stores the origin's `Date` + receive-time + response hash for every miss; ban evidence trail can reproduce the headers we received. | Medium |
+| T20 | API-server services/proxy abuse reaching the admin API (issue #953) | T | C6 | A3,A6 | ✓ Chart renders a Role granting `services/proxy` only on `resourceNames: [<release>-admin]` with verbs get/create, default-off; every proxied request is API-server-audited per user identity and still requires the bouine bearer token end-to-end; NetworkPolicy allows the admin port from `networkPolicy.adminApiServerCIDRs` only. | Low |
 
 ### Information disclosure
 
@@ -206,7 +207,7 @@ risk after controls.
 
 | ID  | Threat | STRIDE | Attackers | Assets | Controls | Residual |
 |-----|--------|--------|-----------|--------|----------|----------|
-| T41 | Admin token theft → cluster-wide purge | E | C1,C8 | A3,A6 | ✓ Tokens short-lived (operator policy); rotation supported by reading from file; admin write endpoints (purge/ban/refresh) check token equality in constant time. Cobra never accepts a token via flag (env var / file only). | Medium |
+| T41 | Admin token theft → cluster-wide purge | E | C1,C8 | A3,A6 | ✓ Tokens short-lived (operator policy); rotation supported by reading from file; admin write endpoints (purge/ban/refresh) check token equality in constant time. The CLI does accept `--token`, but the env var / 0600-file are the documented paths (claim corrected 2026-11, issue #953); fan-out remotes always use per-remote `token-env`/`token-file`, never the ambient token. | Medium |
 | T42 | VCL shim escape to host code | E | C6 (malicious VCL) | process | ✓ Shim is a translator to the native config tree; no embedded interpreter, no eval; no inline-C support (out of scope in `docs/architecture.md §1.2`). | Low |
 | T43 | Path traversal in storage layout | E | C1,C2 | A10 | ✓ Disk paths derived from `xxhash64(key)` hex, never from user input. Static analysis bans `os.Open` with user input. | Low |
 | T44 | Supply-chain code injection via dependency | E | C8 | process | ✓ Dependency allow-list (`docs/deps.md`), `govulncheck` in CI, signed container images (cosign), SBOM (syft), Dependabot reviews. | Medium |

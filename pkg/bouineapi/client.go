@@ -20,6 +20,17 @@ const defaultClientTimeout = 10 * time.Second
 // and embedded in the returned error.
 const maxErrorBody = 4096
 
+// RoundTripper performs one admin API request against a transport
+// other than the default direct-HTTP one (e.g. the Kubernetes
+// API-server services/proxy subresource, issue #953). It exists so
+// the CLI can swap transports without the SDK taking a dependency on
+// kubeconfig handling.
+//
+// Stable.
+type RoundTripper interface {
+	Do(ctx context.Context, method, path string, body []byte, bearerToken string) (status int, respBody []byte, err error)
+}
+
 // Client is the bouine admin API client.
 //
 // Stable.
@@ -27,6 +38,9 @@ type Client struct {
 	// HTTPClient is the underlying fasthttp client. If nil, a default
 	// client with a 10s timeout is used.
 	HTTPClient *fasthttp.Client
+	// Transport, when non-nil, replaces the default fasthttp exchange.
+	// BaseURL is then only informational.
+	Transport RoundTripper
 	// BaseURL is the admin server base URL (e.g. "http://127.0.0.1:9000").
 	BaseURL string
 	// Token is the optional bearer token for admin authentication.
@@ -34,10 +48,14 @@ type Client struct {
 }
 
 // New creates a Client with the given base URL. The returned client
-// uses a fresh *fasthttp.Client with a 10s read timeout.
+// uses a fresh *fasthttp.Client with a 10s read timeout. A bare
+// host:port (no scheme) is normalized to http://.
 func New(baseURL string) *Client {
+	if !strings.Contains(baseURL, "://") {
+		baseURL = "http://" + baseURL
+	}
 	return &Client{
-		BaseURL: baseURL,
+		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		HTTPClient: &fasthttp.Client{
 			ReadTimeout:  defaultClientTimeout,
 			WriteTimeout: defaultClientTimeout,
@@ -230,6 +248,9 @@ func (c *Client) exchange(ctx context.Context, method, path string, body []byte,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if c.Transport != nil {
+		return c.exchangeViaTransport(ctx, method, path, body, out)
+	}
 	done := make(chan exchangeResult, 1)
 	go func() {
 		req := fasthttp.AcquireRequest()
@@ -277,6 +298,24 @@ func (c *Client) exchange(ctx context.Context, method, path string, body []byte,
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// exchangeViaTransport handles one request through a custom RoundTripper
+// (e.g. the kube-apiserver proxy) with the same status/error semantics
+// as the default fasthttp path.
+func (c *Client) exchangeViaTransport(ctx context.Context, method, path string, body []byte, out any) error {
+	status, respBody, err := c.Transport.Do(ctx, method, path, body, c.Token)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("bouineapi: %s %s: status %d: %s",
+			method, path, status, sanitizeErrorBody(respBody))
+	}
+	if out != nil && len(respBody) > 0 {
+		return jsonv2.Unmarshal(respBody, out)
+	}
+	return nil
 }
 
 func (c *Client) setAuth(req *fasthttp.Request) {

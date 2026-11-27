@@ -1,0 +1,35 @@
+{{- if .Values.adminProxy.rbac.create }}
+{{- /* Operator access through the Kubernetes API-server services/proxy
+     subresource (issue #953). Scoped to the admin Service by
+     resourceNames and to get/create verbs, so the grant cannot be used
+     to proxy other Services. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "bouine.fullname" . }}-admin-proxy
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+    {{- with .Values.adminProxy.rbac.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- include "bouine.annotations" (list . .Values.adminProxy.rbac.annotations) | nindent 2 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["{{ include "bouine.adminServiceName" . }}"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "bouine.fullname" . }}-admin-proxy
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+  {{- include "bouine.annotations" (list . .Values.adminProxy.rbac.annotations) | nindent 2 }}
+subjects:
+  {{- toYaml .Values.adminProxy.rbac.subjects | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "bouine.fullname" . }}-admin-proxy
+{{- end }}

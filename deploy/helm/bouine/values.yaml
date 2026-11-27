@@ -189,6 +189,20 @@ adminService:
   annotations: {}
   labels: {}
 
+# Operator CLI access through the Kubernetes API-server services/proxy
+# subresource (issue #953), as an alternative to kubectl port-forward.
+# When enabled, the chart renders a Role/RoleBinding granting
+# services/proxy on the admin Service only.
+adminProxy:
+  rbac:
+    create: false
+    # subjects bound to the admin-proxy Role, e.g.
+    # - kind: User
+    #   name: alice
+    #   apiGroup: rbac.authorization.k8s.io
+    subjects: []
+    annotations: {}
+
 headlessService:
   # Headless service for gossip peer discovery.
   clusterPort: 8443
@@ -431,6 +445,11 @@ ingress:
 networkPolicy:
   enabled: false
   annotations: {}
+  # CIDRs of the Kubernetes API server's egress, so proxied admin requests
+  # (services/proxy, issue #953) are not dropped when the policy is on.
+  # On managed clusters where the API server egress is NATed and unstable,
+  # use the node CIDR instead, or disable just the admin-port rule.
+  adminApiServerCIDRs: []
 
 serviceMonitor:
   enabled: false

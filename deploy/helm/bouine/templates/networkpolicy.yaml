@@ -33,9 +33,14 @@ spec:
           protocol: TCP
       {{- end }}
     {{- if $adminPort }}
-    # Admin port: allow from same namespace only.
+    # Admin port: allow from same namespace, plus the API-server egress
+    # CIDRs when configured (services/proxy access, issue #953).
     - from:
         - podSelector: {}
+        {{- range .Values.networkPolicy.adminApiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
       ports:
         - port: {{ $adminPort }}
           protocol: TCP
